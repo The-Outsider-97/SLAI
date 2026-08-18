@@ -1,0 +1,660 @@
+schema_version: "1.0"
+
+registry:
+  name: "SLAI Academic Source Registry"
+  purpose: >-
+    Curated primary-source literature for knowledge integrity checks, research
+    grounding, architecture review, evaluation design, and safety analysis.
+  scope:
+    - "foundation models and efficient adaptation"
+    - "reasoning, retrieval, tool use, and autonomous agents"
+    - "evaluation, trustworthiness, governance, and dataset documentation"
+    - "computer vision, multimodal learning, reinforcement learning, and robotics"
+  maintained_by: "SLAI project maintainers"
+  last_reviewed: "2026-08-19"
+  review_interval_days: 180
+  review_due: "2027-02-15"
+  publication_window_policy: >-
+    Entries are selected to remain within the KnowledgeMonitor five-year source
+    age window at the last-reviewed date. Foundational works outside that window
+    should be maintained in a separately governed historical registry.
+  evidence_policy:
+    canonical_source_required: true
+    persistent_identifier_preferred: true
+    primary_source_only: true
+    peer_review_not_implied: true
+    abstract_is_not_full_evidence: true
+    independent_replication_preferred_for_high_stakes_claims: true
+  interpretation_note: >-
+    Inclusion establishes provenance and relevance; it does not establish that
+    every claim in a source is correct, reproduced, or suitable for deployment.
+
+domains:
+  - "arxiv.org"
+
+papers:
+  - title: "GPT-4 Technical Report"
+    source: "https://arxiv.org/abs/2303.08774"
+    published: "2023-03-15"
+    doi: "10.48550/arXiv.2303.08774"
+    metadata:
+      citation_key: "achiam2023gpt4"
+      authors: "OpenAI et al."
+      evidence_type: "technical report"
+      primary_topics: ["foundation models", "multimodality", "evaluation", "alignment"]
+      relevance: "Documents reported GPT-4 capabilities, limitations, evaluation, and safety methodology."
+      limitations: "Provides limited disclosure of training data, model size, architecture, and compute."
+      access: "open abstract and manuscript"
+      peer_review_status: "not asserted by this registry"
+      canonical_identifier: "arXiv:2303.08774"
+      reviewed_on: "2026-08-19"
+
+  - title: "Llama 2: Open Foundation and Fine-Tuned Chat Models"
+    source: "https://arxiv.org/abs/2307.09288"
+    published: "2023-07-18"
+    doi: "10.48550/arXiv.2307.09288"
+    metadata:
+      citation_key: "touvron2023llama2"
+      authors: "Touvron et al."
+      evidence_type: "technical report"
+      primary_topics: ["foundation models", "instruction tuning", "RLHF", "safety evaluation"]
+      relevance: "Describes the Llama 2 model family and its supervised and preference-based post-training."
+      limitations: "Reported results and release conditions are specific to the documented model family."
+      access: "open manuscript"
+      peer_review_status: "not asserted by this registry"
+      canonical_identifier: "arXiv:2307.09288"
+      reviewed_on: "2026-08-19"
+
+  - title: "The Llama 3 Herd of Models"
+    source: "https://arxiv.org/abs/2407.21783"
+    published: "2024-07-31"
+    doi: "10.48550/arXiv.2407.21783"
+    metadata:
+      citation_key: "grattafiori2024llama3"
+      authors: "Grattafiori et al."
+      evidence_type: "technical report"
+      primary_topics: ["foundation models", "multilinguality", "tool use", "safety"]
+      relevance: "Provides architecture, data, scaling, post-training, evaluation, and safety details for Llama 3."
+      limitations: "Some described multimodal components were developmental at publication time."
+      access: "open manuscript"
+      peer_review_status: "not asserted by this registry"
+      canonical_identifier: "arXiv:2407.21783"
+      reviewed_on: "2026-08-19"
+
+  - title: "Gemini: A Family of Highly Capable Multimodal Models"
+    source: "https://arxiv.org/abs/2312.11805"
+    published: "2023-12-19"
+    doi: "10.48550/arXiv.2312.11805"
+    metadata:
+      citation_key: "geminiteam2023gemini"
+      authors: "Gemini Team et al."
+      evidence_type: "technical report"
+      primary_topics: ["multimodality", "foundation models", "reasoning", "evaluation"]
+      relevance: "Documents a natively multimodal model family and cross-modal evaluations."
+      limitations: "Reproducibility is constrained by incomplete model and training-data disclosure."
+      access: "open manuscript"
+      peer_review_status: "not asserted by this registry"
+      canonical_identifier: "arXiv:2312.11805"
+      reviewed_on: "2026-08-19"
+
+  - title: "PaLM: Scaling Language Modeling with Pathways"
+    source: "https://arxiv.org/abs/2204.02311"
+    published: "2022-04-05"
+    doi: "10.48550/arXiv.2204.02311"
+    metadata:
+      citation_key: "chowdhery2022palm"
+      authors: "Chowdhery et al."
+      evidence_type: "research paper"
+      primary_topics: ["scaling", "language models", "few-shot learning", "distributed training"]
+      relevance: "Provides evidence on large-model scaling and the Pathways training system."
+      limitations: "Large-scale results are expensive to reproduce independently."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2204.02311"
+      reviewed_on: "2026-08-19"
+
+  - title: "Training Compute-Optimal Large Language Models"
+    source: "https://arxiv.org/abs/2203.15556"
+    published: "2022-03-29"
+    doi: "10.48550/arXiv.2203.15556"
+    metadata:
+      citation_key: "hoffmann2022chinchilla"
+      authors: "Hoffmann et al."
+      evidence_type: "research paper"
+      primary_topics: ["scaling laws", "compute optimality", "data scaling"]
+      relevance: "Empirically studies the allocation of compute between parameter count and training tokens."
+      limitations: "Scaling conclusions depend on the studied architecture, data mixture, and optimization regime."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2203.15556"
+      reviewed_on: "2026-08-19"
+
+  - title: "Training Language Models to Follow Instructions with Human Feedback"
+    source: "https://arxiv.org/abs/2203.02155"
+    published: "2022-03-04"
+    doi: "10.48550/arXiv.2203.02155"
+    metadata:
+      citation_key: "ouyang2022instructgpt"
+      authors: "Ouyang et al."
+      evidence_type: "research paper"
+      primary_topics: ["instruction following", "RLHF", "preference modeling", "alignment"]
+      relevance: "Describes supervised fine-tuning, reward modeling, and reinforcement learning from human feedback."
+      limitations: "Human-preference results depend on annotator selection, task distribution, and evaluation design."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2203.02155"
+      reviewed_on: "2026-08-19"
+
+  - title: "Constitutional AI: Harmlessness from AI Feedback"
+    source: "https://arxiv.org/abs/2212.08073"
+    published: "2022-12-15"
+    doi: "10.48550/arXiv.2212.08073"
+    metadata:
+      citation_key: "bai2022constitutional"
+      authors: "Bai et al."
+      evidence_type: "research report"
+      primary_topics: ["alignment", "AI feedback", "harmlessness", "preference learning"]
+      relevance: "Introduces constitutional supervision and reinforcement learning from AI feedback."
+      limitations: "Constitution choice and evaluator-model behavior remain normative and model-dependent."
+      access: "open manuscript"
+      peer_review_status: "not asserted by this registry"
+      canonical_identifier: "arXiv:2212.08073"
+      reviewed_on: "2026-08-19"
+
+  - title: "Direct Preference Optimization: Your Language Model is Secretly a Reward Model"
+    source: "https://arxiv.org/abs/2305.18290"
+    published: "2023-05-29"
+    doi: "10.48550/arXiv.2305.18290"
+    metadata:
+      citation_key: "rafailov2023dpo"
+      authors: "Rafailov et al."
+      evidence_type: "research paper"
+      primary_topics: ["preference optimization", "alignment", "post-training"]
+      relevance: "Derives a direct objective for learning from preferences without an explicit reward-model training loop."
+      limitations: "Performance depends on preference-data quality, reference policy, and distribution coverage."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2305.18290"
+      reviewed_on: "2026-08-19"
+
+  - title: "QLoRA: Efficient Finetuning of Quantized LLMs"
+    source: "https://arxiv.org/abs/2305.14314"
+    published: "2023-05-23"
+    doi: "10.48550/arXiv.2305.14314"
+    metadata:
+      citation_key: "dettmers2023qlora"
+      authors: "Dettmers et al."
+      evidence_type: "research paper"
+      primary_topics: ["parameter-efficient fine-tuning", "quantization", "memory efficiency"]
+      relevance: "Presents quantized backpropagation techniques for memory-efficient model adaptation."
+      limitations: "Accuracy and throughput trade-offs vary by hardware, quantizer, model, and task."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2305.14314"
+      reviewed_on: "2026-08-19"
+
+  - title: "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness"
+    source: "https://arxiv.org/abs/2205.14135"
+    published: "2022-05-27"
+    doi: "10.48550/arXiv.2205.14135"
+    metadata:
+      citation_key: "dao2022flashattention"
+      authors: "Dao et al."
+      evidence_type: "research paper"
+      primary_topics: ["attention", "GPU kernels", "IO complexity", "efficiency"]
+      relevance: "Shows how IO-aware exact attention reduces memory traffic and improves practical performance."
+      limitations: "Benefits depend on supported hardware, sequence shapes, precision, and kernel implementation."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2205.14135"
+      reviewed_on: "2026-08-19"
+
+  - title: "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
+    source: "https://arxiv.org/abs/2312.00752"
+    published: "2023-12-01"
+    doi: "10.48550/arXiv.2312.00752"
+    metadata:
+      citation_key: "gu2023mamba"
+      authors: "Gu and Dao"
+      evidence_type: "research paper"
+      primary_topics: ["state-space models", "sequence modeling", "linear-time inference"]
+      relevance: "Introduces input-dependent selective state spaces as an alternative sequence-modeling architecture."
+      limitations: "Comparisons depend on implementation maturity, training setup, and workload characteristics."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2312.00752"
+      reviewed_on: "2026-08-19"
+
+  - title: "Chain-of-Thought Prompting Elicits Reasoning in Large Language Models"
+    source: "https://arxiv.org/abs/2201.11903"
+    published: "2022-01-28"
+    doi: "10.48550/arXiv.2201.11903"
+    metadata:
+      citation_key: "wei2022chainofthought"
+      authors: "Wei et al."
+      evidence_type: "research paper"
+      primary_topics: ["reasoning", "prompting", "few-shot learning"]
+      relevance: "Studies intermediate natural-language reasoning traces for complex tasks."
+      limitations: "Generated rationales need not be faithful explanations of the model's internal computation."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2201.11903"
+      reviewed_on: "2026-08-19"
+
+  - title: "Self-Consistency Improves Chain of Thought Reasoning in Language Models"
+    source: "https://arxiv.org/abs/2203.11171"
+    published: "2022-03-21"
+    doi: "10.48550/arXiv.2203.11171"
+    metadata:
+      citation_key: "wang2022selfconsistency"
+      authors: "Wang et al."
+      evidence_type: "research paper"
+      primary_topics: ["reasoning", "sampling", "aggregation"]
+      relevance: "Evaluates sampling multiple reasoning paths and aggregating answers."
+      limitations: "Improved accuracy incurs additional inference cost and can preserve systematic errors."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2203.11171"
+      reviewed_on: "2026-08-19"
+
+  - title: "Tree of Thoughts: Deliberate Problem Solving with Large Language Models"
+    source: "https://arxiv.org/abs/2305.10601"
+    published: "2023-05-17"
+    doi: "10.48550/arXiv.2305.10601"
+    metadata:
+      citation_key: "yao2023treeofthoughts"
+      authors: "Yao et al."
+      evidence_type: "research paper"
+      primary_topics: ["search", "reasoning", "planning", "deliberation"]
+      relevance: "Frames language-model reasoning as explicit search over intermediate thought candidates."
+      limitations: "Search quality depends on proposal and evaluation prompts and can require substantial compute."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2305.10601"
+      reviewed_on: "2026-08-19"
+
+  - title: "ReAct: Synergizing Reasoning and Acting in Language Models"
+    source: "https://arxiv.org/abs/2210.03629"
+    published: "2022-10-06"
+    doi: "10.48550/arXiv.2210.03629"
+    metadata:
+      citation_key: "yao2022react"
+      authors: "Yao et al."
+      evidence_type: "research paper"
+      primary_topics: ["agents", "reasoning", "tool use", "interactive decision-making"]
+      relevance: "Interleaves reasoning traces with environment actions for knowledge and interactive tasks."
+      limitations: "Tool reliability, prompt sensitivity, and environment feedback strongly affect outcomes."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2210.03629"
+      reviewed_on: "2026-08-19"
+
+  - title: "Toolformer: Language Models Can Teach Themselves to Use Tools"
+    source: "https://arxiv.org/abs/2302.04761"
+    published: "2023-02-09"
+    doi: "10.48550/arXiv.2302.04761"
+    metadata:
+      citation_key: "schick2023toolformer"
+      authors: "Schick et al."
+      evidence_type: "research paper"
+      primary_topics: ["tool use", "self-supervision", "API integration"]
+      relevance: "Studies self-supervised annotation and learning of external tool calls."
+      limitations: "The demonstrated tool set and data-generation assumptions limit direct generalization."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2302.04761"
+      reviewed_on: "2026-08-19"
+
+  - title: "Reflexion: Language Agents with Verbal Reinforcement Learning"
+    source: "https://arxiv.org/abs/2303.11366"
+    published: "2023-03-20"
+    doi: "10.48550/arXiv.2303.11366"
+    metadata:
+      citation_key: "shinn2023reflexion"
+      authors: "Shinn et al."
+      evidence_type: "research paper"
+      primary_topics: ["agents", "reflection", "memory", "reinforcement learning"]
+      relevance: "Explores episodic verbal feedback and reflective memory for agent improvement."
+      limitations: "Reflection quality depends on the base model and evaluator and may reinforce incorrect diagnoses."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2303.11366"
+      reviewed_on: "2026-08-19"
+
+  - title: "AgentBench: Evaluating LLMs as Agents"
+    source: "https://arxiv.org/abs/2308.03688"
+    published: "2023-08-07"
+    doi: "10.48550/arXiv.2308.03688"
+    metadata:
+      citation_key: "liu2023agentbench"
+      authors: "Liu et al."
+      evidence_type: "benchmark paper"
+      primary_topics: ["agents", "benchmarking", "interactive environments"]
+      relevance: "Provides a multi-environment framework for evaluating language models as agents."
+      limitations: "Benchmark tasks are proxies and do not establish general real-world autonomy or safety."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2308.03688"
+      reviewed_on: "2026-08-19"
+
+  - title: "SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering"
+    source: "https://arxiv.org/abs/2405.15793"
+    published: "2024-05-24"
+    doi: "10.48550/arXiv.2405.15793"
+    metadata:
+      citation_key: "yang2024sweagent"
+      authors: "Yang et al."
+      evidence_type: "research paper"
+      primary_topics: ["software agents", "agent-computer interfaces", "repository repair"]
+      relevance: "Studies interface design for language-model agents operating on software repositories."
+      limitations: "Results depend on benchmark construction, repository state, tools, and model versions."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2405.15793"
+      reviewed_on: "2026-08-19"
+
+  - title: "Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection"
+    source: "https://arxiv.org/abs/2310.11511"
+    published: "2023-10-17"
+    doi: "10.48550/arXiv.2310.11511"
+    metadata:
+      citation_key: "asai2023selfrag"
+      authors: "Asai et al."
+      evidence_type: "research paper"
+      primary_topics: ["retrieval-augmented generation", "self-critique", "factuality"]
+      relevance: "Integrates adaptive retrieval and critique tokens into generation."
+      limitations: "Retrieval quality and critique calibration remain dependent on corpus and training distribution."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2310.11511"
+      reviewed_on: "2026-08-19"
+
+  - title: "Retrieval-Augmented Generation for Large Language Models: A Survey"
+    source: "https://arxiv.org/abs/2312.10997"
+    published: "2023-12-18"
+    doi: "10.48550/arXiv.2312.10997"
+    metadata:
+      citation_key: "gao2023ragsurvey"
+      authors: "Gao et al."
+      evidence_type: "survey"
+      primary_topics: ["retrieval-augmented generation", "survey", "evaluation"]
+      relevance: "Organizes RAG architectures, retrieval methods, augmentation stages, and evaluation approaches."
+      limitations: "Survey coverage reflects the literature and terminology available at its publication date."
+      access: "open manuscript"
+      peer_review_status: "not asserted by this registry"
+      canonical_identifier: "arXiv:2312.10997"
+      reviewed_on: "2026-08-19"
+
+  - title: "Holistic Evaluation of Language Models"
+    source: "https://arxiv.org/abs/2211.09110"
+    published: "2022-11-16"
+    doi: "10.48550/arXiv.2211.09110"
+    metadata:
+      citation_key: "liang2022helm"
+      authors: "Liang et al."
+      evidence_type: "evaluation framework paper"
+      primary_topics: ["evaluation", "transparency", "robustness", "efficiency"]
+      relevance: "Defines a multi-scenario, multi-metric framework for transparent language-model evaluation."
+      limitations: "Coverage is necessarily incomplete and results depend on model access and prompt configuration."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2211.09110"
+      reviewed_on: "2026-08-19"
+
+  - title: "DecodingTrust: A Comprehensive Assessment of Trustworthiness in GPT Models"
+    source: "https://arxiv.org/abs/2306.11698"
+    published: "2023-06-20"
+    doi: "10.48550/arXiv.2306.11698"
+    metadata:
+      citation_key: "wang2023decodingtrust"
+      authors: "Wang et al."
+      evidence_type: "benchmark paper"
+      primary_topics: ["trustworthiness", "privacy", "robustness", "fairness", "safety"]
+      relevance: "Evaluates multiple trustworthiness dimensions using adversarial and diagnostic tests."
+      limitations: "Findings are model-version and benchmark dependent and require periodic re-evaluation."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2306.11698"
+      reviewed_on: "2026-08-19"
+
+  - title: "Red Teaming Language Models with Language Models"
+    source: "https://arxiv.org/abs/2202.03286"
+    published: "2022-02-07"
+    doi: "10.48550/arXiv.2202.03286"
+    metadata:
+      citation_key: "perez2022redteaming"
+      authors: "Perez et al."
+      evidence_type: "research paper"
+      primary_topics: ["red teaming", "safety evaluation", "adversarial testing"]
+      relevance: "Uses language models to generate and discover harmful-behavior test cases at scale."
+      limitations: "Automated red teaming inherits blind spots and biases from the generator and classifier models."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2202.03286"
+      reviewed_on: "2026-08-19"
+
+  - title: "Taxonomy of Risks Posed by Language Models"
+    source: "https://arxiv.org/abs/2112.04359"
+    published: "2021-12-08"
+    doi: "10.48550/arXiv.2112.04359"
+    metadata:
+      citation_key: "weidinger2021taxonomy"
+      authors: "Weidinger et al."
+      evidence_type: "taxonomy and review"
+      primary_topics: ["risk taxonomy", "responsible AI", "language models"]
+      relevance: "Systematizes categories and pathways of harm associated with language-model deployment."
+      limitations: "Risk categories are not exhaustive and should be updated as systems and contexts evolve."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2112.04359"
+      reviewed_on: "2026-08-19"
+
+  - title: "Data Cards: Purposeful and Transparent Dataset Documentation for Responsible AI"
+    source: "https://arxiv.org/abs/2204.01075"
+    published: "2022-04-04"
+    doi: "10.48550/arXiv.2204.01075"
+    metadata:
+      citation_key: "pushkarna2022datacards"
+      authors: "Pushkarna et al."
+      evidence_type: "research and practice paper"
+      primary_topics: ["dataset documentation", "governance", "responsible AI"]
+      relevance: "Provides a structured approach to dataset transparency across producer and consumer needs."
+      limitations: "Documentation quality depends on organizational incentives, evidence, and maintenance."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2204.01075"
+      reviewed_on: "2026-08-19"
+
+  - title: "High-Resolution Image Synthesis with Latent Diffusion Models"
+    source: "https://arxiv.org/abs/2112.10752"
+    published: "2021-12-20"
+    doi: "10.48550/arXiv.2112.10752"
+    metadata:
+      citation_key: "rombach2021latentdiffusion"
+      authors: "Rombach et al."
+      evidence_type: "research paper"
+      primary_topics: ["diffusion models", "image synthesis", "representation learning"]
+      relevance: "Introduces diffusion in a learned latent space to reduce image-generation compute."
+      limitations: "Generation quality and harms depend on training data, conditioning, filtering, and deployment controls."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2112.10752"
+      reviewed_on: "2026-08-19"
+
+  - title: "Segment Anything"
+    source: "https://arxiv.org/abs/2304.02643"
+    published: "2023-04-05"
+    doi: "10.48550/arXiv.2304.02643"
+    metadata:
+      citation_key: "kirillov2023segmentanything"
+      authors: "Kirillov et al."
+      evidence_type: "research paper"
+      primary_topics: ["computer vision", "segmentation", "promptable models", "datasets"]
+      relevance: "Presents a promptable segmentation model and large-scale segmentation data engine."
+      limitations: "Performance varies by domain and does not remove the need for domain-specific validation."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2304.02643"
+      reviewed_on: "2026-08-19"
+
+  - title: "DINOv2: Learning Robust Visual Features without Supervision"
+    source: "https://arxiv.org/abs/2304.07193"
+    published: "2023-04-14"
+    doi: "10.48550/arXiv.2304.07193"
+    metadata:
+      citation_key: "oquab2023dinov2"
+      authors: "Oquab et al."
+      evidence_type: "research paper"
+      primary_topics: ["self-supervised learning", "computer vision", "foundation models"]
+      relevance: "Studies general-purpose visual features learned from curated unlabeled image data."
+      limitations: "Data curation, compute scale, and domain shift affect transfer and reproducibility."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2304.07193"
+      reviewed_on: "2026-08-19"
+
+  - title: "Flamingo: a Visual Language Model for Few-Shot Learning"
+    source: "https://arxiv.org/abs/2204.14198"
+    published: "2022-04-29"
+    doi: "10.48550/arXiv.2204.14198"
+    metadata:
+      citation_key: "alayrac2022flamingo"
+      authors: "Alayrac et al."
+      evidence_type: "research paper"
+      primary_topics: ["vision-language models", "few-shot learning", "multimodality"]
+      relevance: "Examines interleaved visual-language conditioning and few-shot multimodal transfer."
+      limitations: "Closed training data and model access constrain independent reproduction."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2204.14198"
+      reviewed_on: "2026-08-19"
+
+  - title: "Visual Instruction Tuning"
+    source: "https://arxiv.org/abs/2304.08485"
+    published: "2023-04-17"
+    doi: "10.48550/arXiv.2304.08485"
+    metadata:
+      citation_key: "liu2023llava"
+      authors: "Liu et al."
+      evidence_type: "research paper"
+      primary_topics: ["vision-language models", "instruction tuning", "multimodality"]
+      relevance: "Studies instruction tuning for general-purpose visual-language assistance."
+      limitations: "Synthetic instruction data and evaluator models can introduce correlated biases."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2304.08485"
+      reviewed_on: "2026-08-19"
+
+  - title: "Mastering Diverse Domains through World Models"
+    source: "https://arxiv.org/abs/2301.04104"
+    published: "2023-01-10"
+    doi: "10.48550/arXiv.2301.04104"
+    metadata:
+      citation_key: "hafner2023dreamerv3"
+      authors: "Hafner et al."
+      evidence_type: "research paper"
+      primary_topics: ["reinforcement learning", "world models", "generalization"]
+      relevance: "Presents a world-model agent evaluated across heterogeneous control domains."
+      limitations: "Benchmark breadth does not establish safe transfer to unmodeled real-world environments."
+      access: "open manuscript"
+      peer_review_status: "verify the version and publication venue used for citation"
+      canonical_identifier: "arXiv:2301.04104"
+      reviewed_on: "2026-08-19"
+
+  - title: "A Generalist Agent"
+    source: "https://arxiv.org/abs/2205.06175"
+    published: "2022-05-12"
+    doi: "10.48550/arXiv.2205.06175"
+    metadata:
+      citation_key: "reed2022gato"
+      authors: "Reed et al."
+      evidence_type: "research report"
+      primary_topics: ["generalist agents", "multimodality", "control", "sequence modeling"]
+      relevance: "Demonstrates a single sequence model trained across text, vision, and control tasks."
+      limitations: "Task coverage and tokenization do not establish open-ended autonomy or universal transfer."
+      access: "open manuscript"
+      peer_review_status: "not asserted by this registry"
+      canonical_identifier: "arXiv:2205.06175"
+      reviewed_on: "2026-08-19"
+
+  - title: "RT-1: Robotics Transformer for Real-World Control at Scale"
+    source: "https://arxiv.org/abs/2212.06817"
+    published: "2022-12-13"
+    doi: "10.48550/arXiv.2212.06817"
+    metadata:
+      citation_key: "brohan2022rt1"
+      authors: "Brohan et al."
+      evidence_type: "robotics research paper"
+      primary_topics: ["robot learning", "transformers", "real-world control"]
+      relevance: "Studies scalable multi-task behavioral cloning on real robotic data."
+      limitations: "Results are embodiment, data-distribution, and laboratory dependent."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2212.06817"
+      reviewed_on: "2026-08-19"
+
+  - title: "PaLM-E: An Embodied Multimodal Language Model"
+    source: "https://arxiv.org/abs/2303.03378"
+    published: "2023-03-06"
+    doi: "10.48550/arXiv.2303.03378"
+    metadata:
+      citation_key: "driess2023palme"
+      authors: "Driess et al."
+      evidence_type: "robotics and multimodal research paper"
+      primary_topics: ["embodied AI", "multimodality", "robotics", "language models"]
+      relevance: "Grounds multimodal language modeling in continuous sensor and robotic task inputs."
+      limitations: "Model scale, proprietary components, and embodiment-specific data constrain reproducibility."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2303.03378"
+      reviewed_on: "2026-08-19"
+
+  - title: "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control"
+    source: "https://arxiv.org/abs/2307.15818"
+    published: "2023-07-28"
+    doi: "10.48550/arXiv.2307.15818"
+    metadata:
+      citation_key: "brohan2023rt2"
+      authors: "Brohan et al."
+      evidence_type: "robotics research paper"
+      primary_topics: ["vision-language-action models", "robotics", "transfer learning"]
+      relevance: "Studies co-training web-scale vision-language data with robot trajectories."
+      limitations: "Reported transfer does not remove embodiment constraints or real-world safety requirements."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2307.15818"
+      reviewed_on: "2026-08-19"
+
+  - title: "Open X-Embodiment: Robotic Learning Datasets and RT-X Models"
+    source: "https://arxiv.org/abs/2310.08864"
+    published: "2023-10-13"
+    doi: "10.48550/arXiv.2310.08864"
+    metadata:
+      citation_key: "openxembodiment2023"
+      authors: "Open X-Embodiment Collaboration et al."
+      evidence_type: "dataset and robotics research paper"
+      primary_topics: ["robot datasets", "cross-embodiment learning", "robot policies"]
+      relevance: "Documents aggregation and normalization of heterogeneous robot datasets and RT-X experiments."
+      limitations: "Component datasets have different embodiments, collection protocols, biases, and licenses."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2310.08864"
+      reviewed_on: "2026-08-19"
+
+  - title: "Octo: An Open-Source Generalist Robot Policy"
+    source: "https://arxiv.org/abs/2405.12213"
+    published: "2024-05-20"
+    doi: "10.48550/arXiv.2405.12213"
+    metadata:
+      citation_key: "octomodelteam2024octo"
+      authors: "Octo Model Team et al."
+      evidence_type: "robotics research paper"
+      primary_topics: ["generalist robot policies", "open models", "fine-tuning"]
+      relevance: "Presents an open generalist policy trained on heterogeneous robot data and adapted downstream."
+      limitations: "Cross-robot performance still requires embodiment-aware adaptation and safety validation."
+      access: "open manuscript"
+      peer_review_status: "verify against the cited publication venue before relying on venue status"
+      canonical_identifier: "arXiv:2405.12213"
+      reviewed_on: "2026-08-19"
+
+datasets: []
