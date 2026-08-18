@@ -750,37 +750,56 @@ class ExecutionMemory:
             self.checkpoint_store[self._TAG_INDEX_KEY] = tag_index
             return True
 
-    def prune_checkpoints(
-        self,
-        max_entries: Optional[int] = None,
-        max_age: Optional[int] = None,
-    ) -> Dict[str, int]:
-        """Prune checkpoints by age and/or total count."""
+    def prune_checkpoints(self, max_entries: Optional[int] = None, max_age: Optional[int] = None) -> Dict[str, int]:
         with self.lock:
             self._ensure_open()
             max_entries = max_entries or self.max_checkpoints
             deleted = 0
             now = time.time()
-
-            checkpoint_ids = [
-                k for k in self.checkpoint_store.keys() if isinstance(k, str) and k.startswith("chk_")
-            ]
-            checkpoint_ids.sort(
-                key=lambda cid: self.checkpoint_store[cid].get("created", 0), reverse=True
-            )
-
+    
+            # Collect checkpoint IDs safely
+            checkpoint_ids = []
+            for key in list(self.checkpoint_store.keys()):
+                if not isinstance(key, str) or not key.startswith("chk_"):
+                    continue
+                checkpoint_ids.append(key)
+    
+            # Sort safely – skip corrupted entries
+            valid_checkpoints = []
+            for cid in checkpoint_ids:
+                try:
+                    entry = self.checkpoint_store[cid]
+                    created = entry.get("created", 0)
+                    valid_checkpoints.append((cid, created))
+                except Exception as exc:
+                    logger.warning("Corrupt checkpoint %s removed during prune: %s", cid, exc)
+                    try:
+                        del self.checkpoint_store[cid]
+                    except Exception:
+                        pass
+                    deleted += 1
+    
+            # Sort by created (newest first)
+            valid_checkpoints.sort(key=lambda pair: pair[1], reverse=True)
+    
+            # Apply max_age pruning
             if max_age is not None:
-                for cid in list(checkpoint_ids):
-                    if (now - self.checkpoint_store[cid].get("created", now)) > max_age:
-                        if self.delete_checkpoint(cid):
-                            deleted += 1
-                        checkpoint_ids.remove(cid)
-
-            if len(checkpoint_ids) > max_entries:
-                for cid in checkpoint_ids[max_entries:]:
+                to_remove = []
+                for cid, created in valid_checkpoints:
+                    if (now - created) > max_age:
+                        to_remove.append(cid)
+                for cid in to_remove:
                     if self.delete_checkpoint(cid):
                         deleted += 1
-
+                # Rebuild valid list after deletion
+                valid_checkpoints = [pair for pair in valid_checkpoints if pair[0] not in to_remove]
+    
+            # Apply max_entries pruning
+            if len(valid_checkpoints) > max_entries:
+                for cid, _ in valid_checkpoints[max_entries:]:
+                    if self.delete_checkpoint(cid):
+                        deleted += 1
+    
             return {"deleted": deleted, "remaining": len(self.find_checkpoints())}
 
     # ------------------------------------------------------------------
