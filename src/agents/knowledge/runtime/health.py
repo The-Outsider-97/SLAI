@@ -12,10 +12,10 @@ from enum import Enum
 
 from ..utils.knowledge_errors import RuntimeHealthError
 from ..utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Runtime Health")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class HealthStatus(Enum):
@@ -216,7 +216,7 @@ class RTHealth:
 
     def _check_rule_engine(self) -> ComponentHealth:
         try:
-            from ..utils.rule_engine import RuleEngine
+            from ..modules.rule_engine import RuleEngine
             # In production, check if rule engine has loaded rules and no excessive failures
             return ComponentHealth(
                 component="rule_engine",

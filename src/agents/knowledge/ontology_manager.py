@@ -1,21 +1,24 @@
+"""Manage ontology triples across SQLite storage and an RDF graph."""
+
 import json
 import re
 import sqlite3
 import threading
 import time
+
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import quote, unquote
-
 from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF, RDFS
 
-from src.agents.knowledge.utils.knowledge_errors import OntologyError
-from src.agents.knowledge.utils.config_loader import get_config_section, load_global_config
-from logs.logger import PrettyPrinter, get_logger
+from .utils.knowledge_errors import OntologyError
+from .utils.config_loader import get_config_section, load_global_config
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Ontology Manager")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class OntologyManager:
@@ -310,6 +313,7 @@ class OntologyManager:
                 details=f"Versioning failed: {exc}",
                 exc=exc,
             )
+            return ""
 
     def _raise_ontology_error(
         self,

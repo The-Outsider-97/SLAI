@@ -1,3 +1,7 @@
+"""
+Manage and execute structured actions with governance, logging, and memory integration. 
+"""
+
 import hashlib
 import json
 import os
@@ -13,17 +17,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from src.agents.knowledge.knowledge_memory import KnowledgeMemory
-from src.agents.knowledge.utils.config_loader import get_config_section, load_global_config
-from src.agents.knowledge.utils.knowledge_errors import (GovernanceViolation, ActionExecutionError,
-                                                         InvalidDocumentError, KnowledgeError,
-                                                         MemoryUpdateError, Severity,)
-from logs.logger import PrettyPrinter, get_logger
+from .knowledge_memory import KnowledgeMemory
+from .utils.config_loader import get_config_section, load_global_config
+from .utils.knowledge_errors import *
+from .utils.knowledge_helpers import *
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Perform Action")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
-ACTION_PATTERN = re.compile(r"action:(\w+):(.+)", re.IGNORECASE)
 _JSON_CONTENT_TYPE_PATTERN = re.compile(r"(?:^|/|\+)(json)$", re.IGNORECASE)
 _SHELL_META_PATTERN = re.compile(r"[;&|><`$]")
 
@@ -86,7 +88,7 @@ class PerformAction:
         self,
         external_api_handler: Optional[Callable[[str, str], Any]] = None,
         action_db: Optional[ActionDatabase] = None,
-        knowledge_memory: Optional[KnowledgeMemory] = None,
+        knowledge_memory = None,
     ):
         self.config = load_global_config()
         self.enabled = bool(self.config.get("enabled", True))
@@ -238,17 +240,37 @@ class PerformAction:
                         result_container.append(result)
 
     def _extract_actions(self, doc: Dict[str, Any]) -> List[Tuple[str, str]]:
-        """Extract structured actions from a document payload."""
+        """
+        Extract structured action directives from a document's text.
+    
+        Expects a document dictionary with a 'text' key containing a string.
+        Directives are matched using the pattern "action:TYPE:PAYLOAD" anywhere in the text.
+        All directives are returned in encounter order.
+    
+        Args:
+            doc: Document dict, typically from a knowledge source.
+    
+        Returns:
+            List of (action_type, payload) tuples. Empty list if no directives found.
+    
+        Raises:
+            InvalidDocumentError: If the document is not a dict or the 'text' field is not a string.
+        """
         if not isinstance(doc, dict):
             raise InvalidDocumentError(doc, "Action documents must be dictionaries")
-
+    
         text = doc.get("text", "")
         if text is None:
             return []
+    
         if not isinstance(text, str):
             raise InvalidDocumentError(doc, "Document text must be a string")
-
-        return [(match.group(1).lower(), match.group(2).strip()) for match in ACTION_PATTERN.finditer(text)]
+    
+        directives = find_action_directives(text)
+        if directives and len(directives) > 0:
+            logger.debug("Extracted %d action directive(s) from document", len(directives))
+    
+        return directives
 
     def _execute_action(self, action_type: str, payload: str) -> Dict[str, Any]:
         """Validate, execute, retry, and persist one action."""

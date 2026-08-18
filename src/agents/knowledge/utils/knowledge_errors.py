@@ -408,6 +408,38 @@ class EmbeddingError(KnowledgeError):
             remediation="Verify embedding model availability and input data format",
         )
 
+# -----------------------------------------------------------------------------
+# Public API – all symbols intended for external use
+# -----------------------------------------------------------------------------
+__all__ = [
+    # Enums
+    "Severity",
+    "KnowledgeErrorType",
+
+    # Base exception
+    "KnowledgeError",
+
+    # Concrete exceptions
+    "ActionExecutionError",
+    "RuleTimeoutError",
+    "RuntimeHealthError",
+    "MetricsCollectionError",
+    "ThresholdViolationError",
+    "ComponentDegradationWarning",
+    "RetrievalError",
+    "OntologyError",
+    "BiasDetectionError",
+    "GovernanceViolation",
+    "CacheError",
+    "MemoryUpdateError",
+    "InvalidDocumentError",
+    "EmbeddingError",
+
+    # Global hooks
+    "set_audit_pipeline",
+    "set_metrics_counter",
+]
+
 
 if __name__ == "__main__":
     # Optional: Configure audit pipeline and metrics counter at startup.

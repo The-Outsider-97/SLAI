@@ -1,26 +1,31 @@
+
 import json
 import math
 import os
 import threading
 import time
+import hashlib
 import numpy as np
 
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from src.agents.knowledge.utils.config_loader import get_config_section, load_global_config
-from logs.logger import PrettyPrinter, get_logger
+from .utils.config_loader import get_config_section, load_global_config
+from .utils.knowledge_helpers import *
+from .utils.knowledge_errors import *
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Memory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class KnowledgeMemory:
     """
     Local memory container for knowledge-centric agents.
     Focuses on agent-local, context-aware, relevance-weighted memory entries.
+    Production‑ready with thread safety, query caching, and detailed metrics.
     """
 
     _embedding_model_cache: Dict[str, Any] = {}
@@ -48,12 +53,29 @@ class KnowledgeMemory:
         self.log_inference_events = self.memory_config.get("log_inference_events", False)
         self.persist_file = self.memory_config.get("persist_file")
 
+        # Query cache TTL (seconds) – default 5 minutes
+        self.query_cache_ttl = self.memory_config.get("query_cache_ttl", 300)
+        self.enable_query_cache = self.memory_config.get("enable_query_cache", True)
+
         # Initialize mutable state before any autoload or persistence activity.
         self._store: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self._store_lock = threading.RLock()                 # Protects all store operations
+
+        # Query result cache: key -> (timestamp, result)
+        self._query_cache: OrderedDict[str, Tuple[float, Any]] = OrderedDict()
+        self._cache_lock = threading.RLock()
+
         self.vectorizer = TfidfVectorizer()
-        self.relevance_weights = self._normalize_relevance_weights(
-            self.memory_config.get("relevance_weights")
-        )
+        self.relevance_weights = self._normalize_relevance_weights(self.memory_config.get("relevance_weights"))
+
+        # Metrics
+        self._metrics: Dict[str, Any]  = {
+            "queries_total": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "expired_removed_total": 0,
+            "store_evictions_total": 0,
+        }
 
         if self.autoload_on_startup and self.persist_file:
             try:
@@ -62,30 +84,38 @@ class KnowledgeMemory:
             except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
                 logger.warning(f"Autoload failed from {self.persist_file}: {exc}")
 
-        logger.info(
-            "Knowledge Memory initialized with vectorizer=%s, relevance_mode=%s, embedding_model=%s",
-            self.vectorizer,
-            self.relevance_mode,
-            self.embedding_model,
-        )
+        logger.info("Knowledge Memory initialized with vectorizer=%s, relevance_mode=%s, embedding_model=%s",
+                    self.vectorizer, self.relevance_mode, self.embedding_model)
 
-    def update(
-        self,
-        key: str,
-        value: Any,
-        metadata: Optional[dict] = None,
-        context: Optional[dict] = None,
-        ttl: Optional[int] = None,
-    ):
+    # ----------------------------------------------------------------------
+    # Public API – thread‑safe
+    # ----------------------------------------------------------------------
+    def update(self, key: str, value: Any, metadata: Optional[dict] = None,
+               context: Optional[dict] = None, ttl: Optional[int] = None):
         """
         Store or update a local memory entry.
+
+        Raises:
+            MemoryUpdateError: If the key is invalid or storage fails.
         """
+        if not key or not isinstance(key, str):
+            raise MemoryUpdateError(key=str(key), value=value, error_details="Key must be a non‑empty string")
+
         if self.log_context_updates and context:
             logger.info(f"Context update for key='{key}': {context}")
 
-        if self.log_inference_events and "inferred" in (metadata or {}):
+        incoming_metadata = metadata or {}
+
+        if self.log_inference_events and (
+            incoming_metadata.get("type") == "inferred_fact"
+            or incoming_metadata.get("inferred") is True
+        ):
             logger.info(
-                f"Inference event stored: key='{key}', inferred={metadata.get('inferred')}"
+                "Inference event stored: key='%s', "
+                "confidence=%s, sector=%s",
+                key,
+                incoming_metadata.get("confidence"),
+                incoming_metadata.get("sector"),
             )
 
         timestamp = time.time()
@@ -95,36 +125,65 @@ class KnowledgeMemory:
             "expiry_time": timestamp + ttl if ttl is not None else None,
         }
         relevance = self._calculate_relevance(value, context, value_meta=base_metadata) if context else 1.0
-        enriched_metadata = {
-            **base_metadata,
-            "relevance": relevance,
-        }
-
+        enriched_metadata = {**base_metadata, "relevance": relevance}
         if metadata:
             enriched_metadata.update(metadata)
 
-        if key not in self._store and len(self._store) >= self.max_entries:
-            oldest_key = min(
-                self._store.items(),
-                key=lambda kv: self._extract_timestamp(kv[1].get("metadata")),
-            )[0]
-            self._store.pop(oldest_key, None)
+        with self._store_lock:
+            # Evict oldest if at capacity
+            if key not in self._store and len(self._store) >= self.max_entries:
+                oldest_key = min(
+                    self._store.items(),
+                    key=lambda kv: self._extract_timestamp(kv[1].get("metadata")),
+                )[0]
+                self._store.pop(oldest_key, None)
+                self._metrics["store_evictions_total"] += 1
 
-        self._store[key] = {"value": value, "metadata": enriched_metadata}
+            self._store[key] = {"value": value, "metadata": enriched_metadata}
+
+        # Invalidate query cache – any update may change recall results
+        self._invalidate_query_cache()
 
     def save(self, path: str):
+        """
+        Persist memory to a JSON file.
+
+        Raises:
+            OSError: If the file cannot be written.
+        """
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as file_handle:
-            json.dump(dict(self._store), file_handle, default=str, ensure_ascii=False, indent=2)
+        with self._store_lock:
+            data = dict(self._store)
+        try:
+            with open(path, "w", encoding="utf-8") as file_handle:
+                json.dump(data, file_handle, default=str, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            logger.error(f"Failed to save memory to {path}: {exc}")
+            raise
 
     def load(self, path: str):
+        """
+        Load memory from a JSON file.
+
+        Raises:
+            InvalidDocumentError: If the file format is invalid.
+            OSError: If the file cannot be read.
+        """
         if not os.path.exists(path):
+            logger.warning(f"Memory file {path} does not exist; skipping load.")
             return
 
-        with open(path, "r", encoding="utf-8") as file_handle:
-            raw = json.load(file_handle)
+        try:
+            with open(path, "r", encoding="utf-8") as file_handle:
+                raw = json.load(file_handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error(f"Failed to load memory from {path}: {exc}")
+            raise InvalidDocumentError(
+                document=path,
+                reason=f"Invalid JSON or file error: {exc}"
+            ) from exc
 
         loaded_store: Dict[str, Dict[str, Any]] = defaultdict(dict)
 
@@ -148,80 +207,158 @@ class KnowledgeMemory:
                     "metadata": entry.get("metadata", {}),
                 }
         else:
-            raise ValueError(f"Unexpected data type in {path}: {type(raw)}")
+            raise InvalidDocumentError(
+                document=path,
+                reason=f"Unexpected data type: {type(raw)}"
+            )
 
-        self._store = loaded_store
+        with self._store_lock:
+            self._store = loaded_store
+        self._invalidate_query_cache()
+        logger.info(f"Loaded {len(loaded_store)} entries from {path}")
 
     def add_all(self, entries: List[dict]):
         """
         Bulk add knowledge entries, usually rules, into memory.
-        Each entry should have a unique 'id' and at least a 'name' or 'description'.
+        Each entry should have a unique 'id' or 'name'.
+
+        Raises:
+            MemoryUpdateError: If an entry lacks an identifier.
         """
         for entry in entries:
             key = entry.get("id") or entry.get("name")
             if not key:
-                logger.warning(f"Skipping entry without ID or name: {entry}")
-                continue
+                raise MemoryUpdateError(
+                    key="unknown",
+                    value=entry,
+                    error_details="Entry missing 'id' or 'name'"
+                )
             self.update(key=key, value=entry, metadata={"type": "system_rule"})
 
-    def recall(
-        self,
-        key: Optional[str] = None,
-        filters: Optional[dict] = None,
-        sort_by: Optional[str] = None,
-        top_k: Optional[int] = None,
-    ) -> List:
+    def recall(self, key: Optional[str] = None, filters: Optional[dict] = None,
+               sort_by: Optional[str] = None, top_k: Optional[int] = None, use_cache: bool = True,) -> List:
         """
         Retrieve entries by key, filters, and relevance.
+
+        Args:
+            key: Specific key to retrieve.
+            filters: Dict of metadata filters (exact or callable).
+            sort_by: Metadata key to sort by (descending).
+            top_k: Limit number of results.
+            use_cache: If True, use query result cache.
+
+        Raises:
+            RetrievalError: If the retrieval fails due to invalid filters.
         """
+        self._metrics["queries_total"] += 1
+
+        # Build cache key
+        cache_key = None
+        if use_cache and self.enable_query_cache:
+            # Deterministic key based on parameters
+            key_part = key or "all"
+            filters_part = safe_json_dumps(filters) if filters else "none"
+            sort_part = sort_by or "none"
+            top_part = str(top_k or "all")
+            cache_key = f"recall_{key_part}_{filters_part}_{sort_part}_{top_part}"
+            cache_key = hashlib.sha256(cache_key.encode()).hexdigest()[:16]
+
+        # Check cache
+        if cache_key:
+            with self._cache_lock:
+                if cache_key in self._query_cache:
+                    timestamp, cached_result = self._query_cache[cache_key]
+                    if (time.time() - timestamp) < self.query_cache_ttl:
+                        # Move to end (LRU)
+                        self._query_cache.move_to_end(cache_key)
+                        self._metrics["cache_hits"] += 1
+                        if self.log_retrieval_hits:
+                            logger.debug(f"Query cache hit for key {cache_key}")
+                        return cached_result
+                    else:
+                        # Expired – remove
+                        self._query_cache.pop(cache_key, None)
+                else:
+                    self._metrics["cache_misses"] += 1
+
+        # Perform actual recall
         now = time.time()
         entries = []
 
-        if key:
-            item = self._store.get(key)
-            if item and not self._is_expired(item, now):
-                entries.append((item["value"], item["metadata"]))
-        else:
-            for entry in self._store.values():
-                if not self._is_expired(entry, now):
-                    entries.append((entry["value"], entry["metadata"]))
+        with self._store_lock:
+            if key:
+                item = self._store.get(key)
+                if item and not self._is_expired(item, now):
+                    entries.append((item["value"], item["metadata"]))
+            else:
+                for entry in self._store.values():
+                    if not self._is_expired(entry, now):
+                        entries.append((entry["value"], entry["metadata"]))
 
+        # Filter
         if filters:
-            entries = [entry for entry in entries if self._apply_filters(entry[1], filters)]
+            try:
+                entries = [entry for entry in entries if self._apply_filters(entry[1], filters)]
+            except Exception as exc:
+                raise RetrievalError(
+                    query=str(filters),
+                    reason=f"Filter application failed: {exc}",
+                    retrieval_mode="filtered"
+                ) from exc
 
+        # Sort
         if sort_by:
             entries.sort(key=lambda entry: entry[1].get(sort_by, 0), reverse=True)
 
+        # Slice
+        result = entries[:top_k] if top_k else entries
+
+        # Cache result (if caching enabled)
+        if cache_key and self.enable_query_cache:
+            with self._cache_lock:
+                # Evict oldest if cache exceeds size
+                if len(self._query_cache) >= self.cache_size:
+                    self._query_cache.popitem(last=False)  # LRU eviction
+                self._query_cache[cache_key] = (time.time(), result)
+                self._query_cache.move_to_end(cache_key)
+
         if self.log_retrieval_hits:
             logger.info(
-                f"Retrieved {len(entries)} entries for key='{key}' filters={filters} top_k={top_k}"
+                f"Retrieved {len(result)} entries for key='{key}' filters={filters} top_k={top_k}"
             )
 
-        return entries[:top_k] if top_k else entries
+        return result
 
     def delete(self, key: str):
-        if key in self._store:
-            del self._store[key]
+        with self._store_lock:
+            if key in self._store:
+                del self._store[key]
+                self._invalidate_query_cache()
 
     def clear(self):
-        self._store.clear()
+        with self._store_lock:
+            self._store.clear()
+        self._invalidate_query_cache()
 
     def keys(self):
-        return list(self._store.keys())
+        with self._store_lock:
+            return list(self._store.keys())
 
     def get_statistics(self):
         now = time.time()
-        total_entries = len(self._store)
+        total_entries = 0
         expired_entries = 0
         relevance_values: List[float] = []
 
-        for entry in self._store.values():
-            metadata = entry.get("metadata", {})
-            relevance = metadata.get("relevance")
-            if isinstance(relevance, (int, float, np.floating)):
-                relevance_values.append(float(relevance))
-            if self._is_expired(entry, now):
-                expired_entries += 1
+        with self._store_lock:
+            total_entries = len(self._store)
+            for entry in self._store.values():
+                metadata = entry.get("metadata", {})
+                relevance = metadata.get("relevance")
+                if isinstance(relevance, (int, float, np.floating)):
+                    relevance_values.append(float(relevance))
+                if self._is_expired(entry, now):
+                    expired_entries += 1
 
         avg_relevance = float(np.mean(relevance_values)) if relevance_values else 0.0
 
@@ -230,15 +367,72 @@ class KnowledgeMemory:
             "active_entries": total_entries - expired_entries,
             "avg_relevance": avg_relevance,
             "expired": expired_entries,
+            "query_cache_size": len(self._query_cache),
+            "metrics": self._metrics.copy(),
         }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return detailed performance metrics."""
+        with self._store_lock:
+            total = len(self._store)
+        with self._cache_lock:
+            cache_size = len(self._query_cache)
+        metrics = self._metrics.copy()
+        metrics["store_size"] = total
+        metrics["cache_size"] = cache_size
+        if metrics["queries_total"] > 0:
+            metrics["hit_rate"] = metrics["cache_hits"] / metrics["queries_total"]
+        else:
+            metrics["hit_rate"] = 0.0
+        return metrics
+
+    def cleanup_expired(self) -> int:
+        """
+        Remove all expired entries from the store.
+
+        Returns:
+            Number of removed entries.
+        """
+        now = time.time()
+        removed = 0
+        with self._store_lock:
+            expired_keys = [
+                key for key, entry in self._store.items()
+                if self._is_expired(entry, now)
+            ]
+            for key in expired_keys:
+                del self._store[key]
+                removed += 1
+            self._metrics["expired_removed_total"] += removed
+        if removed:
+            self._invalidate_query_cache()
+            logger.info(f"Removed {removed} expired entries.")
+        return removed
 
     def search_values(self, keyword: str) -> List:
         keyword_lower = keyword.lower()
-        return [
-            (key, value)
-            for key, value in self._store.items()
-            if keyword_lower in str(value.get("value", "")).lower()
-        ]
+        with self._store_lock:
+            return [
+                (key, value)
+                for key, value in self._store.items()
+                if keyword_lower in str(value.get("value", "")).lower()
+            ]
+
+    def shutdown(self):
+        try:
+            if self.persist_file:
+                self.save(self.persist_file)
+                logger.info("Memory saved on shutdown.")
+        except OSError as exc:
+            logger.warning(f"Failed to save memory on shutdown: {exc}")
+
+    # ----------------------------------------------------------------------
+    # Internal helpers
+    # ----------------------------------------------------------------------
+    def _invalidate_query_cache(self):
+        """Clear the query cache (called after mutations)."""
+        with self._cache_lock:
+            self._query_cache.clear()
 
     def _is_expired(self, entry: dict, now: float) -> bool:
         expiry = entry.get("metadata", {}).get("expiry_time")
@@ -271,9 +465,7 @@ class KnowledgeMemory:
 
         return True
 
-    def _calculate_relevance(
-        self, value: Any, context: dict, value_meta: Optional[dict] = None
-    ) -> float:
+    def _calculate_relevance(self, value: Any, context: dict, value_meta: Optional[dict] = None) -> float:
         """Comprehensive relevance scoring with multiple dimensions."""
         val_str = str(value)
         ctx_str = self._context_to_text(context)
@@ -306,7 +498,9 @@ class KnowledgeMemory:
 
         return float(min(max(total_score, 0.0), 1.0))
 
-    # Helper methods ---------------------------------------------------
+    # ----------------------------------------------------------------------
+    # Helper methods (unchanged from original, with minor fixes)
+    # ----------------------------------------------------------------------
     def _normalize_relevance_weights(
         self, weights: Optional[Dict[str, float]]
     ) -> Dict[str, float]:
@@ -332,7 +526,6 @@ class KnowledgeMemory:
         return {key: value / total for key, value in merged.items()}
 
     def _context_to_text(self, context: dict) -> str:
-        """Extract meaningful text from context."""
         if isinstance(context, dict):
             return " ".join(f"{key}={value}" for key, value in context.items())
         return str(context)
@@ -389,7 +582,6 @@ class KnowledgeMemory:
         return 0.0
 
     def _cosine_sim(self, a: np.ndarray, b: np.ndarray) -> float:
-        """Compute cosine similarity between two vectors."""
         a_norm = np.linalg.norm(a)
         b_norm = np.linalg.norm(b)
         if a_norm == 0.0 or b_norm == 0.0:
@@ -397,37 +589,32 @@ class KnowledgeMemory:
         return float(np.dot(a, b) / (a_norm * b_norm))
 
     def _fallback_semantic(self, text1: str, text2: str) -> float:
-        """TF-IDF/SequenceMatcher fallback when embeddings are unavailable."""
         if not text1 or not text2:
             return 0.0
-
         try:
             tfidf = self.vectorizer.fit_transform([text1, text2])
-            return float((tfidf * tfidf.T).A[0, 1])
+            similarity = (tfidf * tfidf.transpose()).A[0, 1] # type: ignore
+            return float(similarity)
         except ValueError as exc:
             logger.debug(f"TF-IDF semantic fallback unavailable; using sequence matcher: {exc}")
             return float(SequenceMatcher(None, text1, text2).ratio())
 
     def _contextual_term_score(self, value: str, context: str) -> float:
-        """Weighted term importance using TF-IDF-ranked context terms."""
         if not value or not context:
             return 0.0
-
         try:
             vectorizer = TfidfVectorizer(max_features=10)
             tfidf = vectorizer.fit_transform([context, value])
             feature_names = vectorizer.get_feature_names_out()
             if len(feature_names) == 0:
                 return 0.0
-
-            context_vector = tfidf[0].toarray().ravel()
+            context_vector = tfidf.getrow(0).toarray().ravel()
             ranked_indexes = context_vector.argsort()[::-1]
             important_terms = [
-                feature_names[index] for index in ranked_indexes if context_vector[index] > 0
+                str(feature_names[index]) for index in ranked_indexes if context_vector[index] > 0
             ]
             if not important_terms:
                 return 0.0
-
             value_counts = Counter(value.lower().split())
             total = sum(value_counts.get(term, 0) for term in important_terms)
             return float(total / len(important_terms))
@@ -436,7 +623,6 @@ class KnowledgeMemory:
             return 0.0
 
     def _temporal_relevance(self, value_meta: dict, context_meta: dict) -> float:
-        """Time-based decay using context timestamp."""
         ctx_time = context_meta.get("timestamp", time.time())
         val_time = value_meta.get("timestamp", ctx_time)
         time_diff = abs(ctx_time - val_time)
@@ -448,8 +634,6 @@ class KnowledgeMemory:
         return float(math.exp(-time_diff * math.log(2) / half_life_seconds))
 
     def _structural_similarity(self, dict1: dict, dict2: dict) -> float:
-        """Recursive structural similarity for nested dicts."""
-
         def compare(a, b):
             if isinstance(a, dict) and isinstance(b, dict):
                 keys = set(a.keys()) | set(b.keys())
@@ -470,17 +654,48 @@ class KnowledgeMemory:
         timestamp = metadata.get("timestamp")
         return float(timestamp) if isinstance(timestamp, (int, float)) else float("inf")
 
-    def shutdown(self):
-        try:
-            if self.persist_file:
-                self.save(self.persist_file)
-                logger.info("Memory saved on shutdown.")
-        except OSError as exc:
-            logger.warning(f"Failed to save memory on shutdown: {exc}")
-
 
 if __name__ == "__main__":
-    print("\n=== Knowledge Synchronizer Test ===")
+    print("\n=== Knowledge Memory Test ===\n")
     memory = KnowledgeMemory()
-    printer.status("Initial sync:", memory)
-    print("\n=== Synchronization Test Completed ===\n")
+
+    # 1. Update & recall
+    memory.update("key1", "value1", metadata={"type": "test"}, ttl=2)
+    memory.update("key2", {"nested": "data"}, metadata={"type": "test", "score": 0.9})
+    print("Recall all:", memory.recall())
+    print("Recall key1:", memory.recall(key="key1"))
+
+    # 2. Filters & sorting
+    filtered = memory.recall(filters={"type": "test"}, sort_by="score", top_k=1)
+    print("Filtered + sorted:", filtered)
+
+    # 3. Query cache (call twice to see hit)
+    res1 = memory.recall(filters={"type": "test"})
+    res2 = memory.recall(filters={"type": "test"})  # should hit cache
+    print("Cache hit? (metrics):", memory.get_metrics()["cache_hits"])
+
+    # 4. Expiry cleanup
+    time.sleep(2.1)
+    removed = memory.cleanup_expired()
+    print(f"Removed {removed} expired entries")
+
+    # 5. Delete & clear
+    memory.delete("key1")
+    memory.clear()
+    print("After clear, entries:", len(memory.keys()))
+
+    # 6. Save/load (temp file)
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        tmp_path = f.name
+    memory.update("persist", "data")
+    memory.save(tmp_path)
+    new_memory = KnowledgeMemory()
+    new_memory.autoload_on_startup = False  # avoid auto-load
+    new_memory.load(tmp_path)
+    print("Loaded entry:", new_memory.recall(key="persist"))
+    os.unlink(tmp_path)
+
+    # 7. Metrics
+    print("Final metrics:", memory.get_metrics())
+    print("\n=== Test Completed ===\n")
