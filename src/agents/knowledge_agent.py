@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import yaml
-
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 """
 Knowledge Agent for SLAI (Scalable Learning Autonomous Intelligence).
@@ -18,6 +16,7 @@ Production-oriented knowledge retrieval and management agent with:
 import hashlib
 import json
 import math
+import yaml
 import os
 import re
 import threading
@@ -31,15 +30,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Callabl
 
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .base_agent import BaseAgent
-from .knowledge.utils.knowledge_errors import (
-    BiasDetectionError,
-    EmbeddingError,
-    GovernanceViolation,
-    InvalidDocumentError,
-    MemoryUpdateError,
-    OntologyError,
-    RetrievalError,
-)
+from .knowledge.utils.knowledge_errors import *
+from .knowledge.utils.knowledge_helpers import *
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Agent")
@@ -209,7 +201,7 @@ class KnowledgeAgent(BaseAgent):
         return OntologyManager()
 
     def _create_rule_engine(self):
-        from .knowledge.utils.rule_engine import RuleEngine 
+        from .knowledge.modules.rule_engine import RuleEngine 
 
         return RuleEngine()
 
@@ -715,7 +707,7 @@ class KnowledgeAgent(BaseAgent):
         results = []
         for doc in self.knowledge_agent:
             doc_vector = self._dict_to_numpy(self.doc_tf_idf_vectors.get(doc["doc_id"], {}))
-            similarity = cosine_sim(query_vector, doc_vector)
+            similarity = cosine_sim(query_vector.tolist(), doc_vector.tolist())
             if similarity >= self.similarity_threshold:
                 results.append((float(similarity), doc))
         return sorted(results, key=lambda item: item[0], reverse=True)
@@ -740,7 +732,7 @@ class KnowledgeAgent(BaseAgent):
             doc = self.doc_index.get(doc_id)
             if doc is None:
                 continue
-            similarity = cosine_sim(query_embedding, doc_embedding)
+            similarity = cosine_sim(query_embedding.tolist(), doc_embedding.tolist())
             if similarity >= self.similarity_threshold:
                 results.append((float(similarity), doc))
         return sorted(results, key=lambda item: item[0], reverse=True)
@@ -834,21 +826,14 @@ class KnowledgeAgent(BaseAgent):
         all_terms = sorted(set(vec_a.keys()) | set(vec_b.keys()))
         if not all_terms:
             return 0.0
-        a = np.asarray([vec_a.get(term, 0.0) for term in all_terms], dtype=float)
-        b = np.asarray([vec_b.get(term, 0.0) for term in all_terms], dtype=float)
+        a = [vec_a.get(term, 0.0) for term in all_terms]
+        b = [vec_b.get(term, 0.0) for term in all_terms]
         return cosine_sim(a, b)
 
     # ------------------------------------------------------------------
     # Knowledge memory integration
     # ------------------------------------------------------------------
-    def update_memory(
-        self,
-        key: str,
-        value: Any,
-        metadata: dict = None,
-        context: dict = None,
-        ttl: int = None,
-    ):
+    def update_memory(self, key: str, value: Any, metadata: Optional[dict] = None, context: Optional[dict] = None, ttl: Optional[int] = None ):
         try:
             self.knowledge_memory.update(key=key, value=value, metadata=metadata, context=context, ttl=ttl)
             recalled = self.knowledge_memory.recall(key=key)
@@ -867,13 +852,7 @@ class KnowledgeAgent(BaseAgent):
             logger.error("Memory update failed: %s", exc, exc_info=True)
             raise error from exc
 
-    def recall_memory(
-        self,
-        key: str = None,
-        filters: dict = None,
-        sort_by: str = None,
-        top_k: int = None,
-    ) -> list:
+    def recall_memory(self, key: Optional[str] = None, filters: Optional[dict] = None, sort_by: Optional[str] = None, top_k: Optional[int] = None) -> list:
         return self.knowledge_memory.recall(key=key, filters=filters, sort_by=sort_by, top_k=top_k)
 
     def _apply_filters(self, metadata: dict, filters: dict) -> bool:
@@ -1149,7 +1128,11 @@ class KnowledgeAgent(BaseAgent):
                 try:
                     emb_value = self.sbert_model.encode(value_text, show_progress_bar=False)
                     emb_context = self.sbert_model.encode(str(context_query), show_progress_bar=False)
-                    score = cosine_sim(emb_value, emb_context)
+                    val_list = emb_value.tolist() if hasattr(emb_value, 'tolist') else list(emb_value)
+                    ctx_list = emb_context.tolist() if hasattr(emb_context, 'tolist') else list(emb_context)
+                    val_list = [float(v) for v in val_list]
+                    ctx_list = [float(v) for v in ctx_list]
+                    score = cosine_sim(val_list, ctx_list)
                 except Exception as exc:
                     logger.warning("SBERT relevance calculation failed: %s", exc)
 
