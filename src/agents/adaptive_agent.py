@@ -35,15 +35,16 @@ from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Callable
 from collections import defaultdict, deque
 
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, RuntimeLifecycle
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .adaptive import PolicyManager, LearningParameterTuner, ImitationLearningWorker, MetaLearningWorker, SkillWorker
 from .adaptive.utils.adaptive_errors import *
+from .adaptive.utils.adaptive_helpers import *
 from .learning.slaienv import SLAIEnv
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Adaptive Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 @dataclass
 class EpisodeSummary:
@@ -91,19 +92,13 @@ class AdaptiveAgent(BaseAgent):
     - end-to-end test block covering initialization, task execution, learning, routing, and recovery
     """
 
-    STATE_VERSION = "2.0.0"
+    STATE_VERSION = "2.2.0"
     DEFAULT_RECOVERY_TTL = int(timedelta(days=7).total_seconds())
     DEFAULT_STATE_TTL = int(timedelta(days=30).total_seconds())
     RESERVED_GLOBAL_SKILL_ID = 1_000_000
 
-    def __init__(
-        self,
-        shared_memory: Any,
-        agent_factory: Any,
-        config: Optional[Mapping[str, Any]] = None,
-        args: Sequence[Any] = (),
-        kwargs: Optional[Mapping[str, Any]] = None,
-    ) -> None:
+    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None,
+                 args: Sequence[Any] = (), kwargs: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
 
         self.global_config = load_global_config()
@@ -231,6 +226,7 @@ class AdaptiveAgent(BaseAgent):
         ensure_positive(self.shared_memory_state_ttl, "shared_memory_state_ttl", component="adaptive_agent")
         ensure_positive(self.shared_memory_recovery_ttl, "shared_memory_recovery_ttl", component="adaptive_agent")
         ensure_positive(self.shared_memory_report_ttl, "shared_memory_report_ttl", component="adaptive_agent")
+        ensure_positive(self.global_rl_skill_id, "global_rl_skill_id", component="adaptive_agent")
         ensure_non_empty(self.default_task_type, "default_task_type", component="adaptive_agent")
         ensure_instance(self.skills_config, Mapping, "skills", component="adaptive_agent")
         ensure_instance(self.handlers_config, Mapping, "handlers", component="adaptive_agent")
@@ -350,14 +346,14 @@ class AdaptiveAgent(BaseAgent):
             merged_meta.setdefault("name", f"skill_{skill_idx}")
             merged_meta.setdefault("state_dim", self.state_dim)
             merged_meta.setdefault("action_dim", self.num_actions)
-            worker = SkillWorker.create_worker(skill_idx, merged_meta)
+            worker = SkillWorker(skill_id=skill_idx, skill_metadata=merged_meta)
             skills[skill_idx] = worker
             logger.debug("Initialized skill %s with metadata=%s", skill_idx, merged_meta)
         return skills
 
     def _create_fallback_skill(self) -> Dict[int, SkillWorker]:
         fallback_skill_id = self._allocate_valid_skill_id(preferred=1, minimum=1)
-        fallback = SkillWorker.create_worker(
+        fallback = SkillWorker(
             fallback_skill_id,
             {
                 "name": "fallback_navigation",
@@ -374,16 +370,9 @@ class AdaptiveAgent(BaseAgent):
             include_global_engine=False,
         )
 
-        if hasattr(SkillWorker, "unregister_worker"):
-            try:
-                if getattr(self, "global_rl_skill_id", None) is not None:
-                    SkillWorker.unregister_worker(int(self.global_rl_skill_id))
-            except (TypeError, ValueError):
-                pass
-
         self.global_rl_skill_id = int(engine_skill_id)
 
-        return SkillWorker.create_worker(
+        return SkillWorker(
             skill_id=self.global_rl_skill_id,
             skill_metadata={
                 "name": "global_rl_engine",
@@ -396,12 +385,15 @@ class AdaptiveAgent(BaseAgent):
         if self.use_global_rl_engine and getattr(self.rl_engine, "actor_critic", None) is not None:
             actor_critic = self.rl_engine.actor_critic
             if hasattr(actor_critic, "actor"):
+                assert actor_critic is not None
                 return actor_critic.actor
+            assert actor_critic is not None
             return actor_critic
 
         first_skill = next(iter(self.skills.values()))
         ensure_not_none(getattr(first_skill, "actor_critic", None), "first_skill.actor_critic", component="adaptive_agent")
         actor_critic = first_skill.actor_critic
+        assert actor_critic is not None
         return actor_critic.actor if hasattr(actor_critic, "actor") else actor_critic
 
     def _resolve_imitation_state_dim(self) -> int:
@@ -425,11 +417,9 @@ class AdaptiveAgent(BaseAgent):
         return int(self.state_dim)
 
     def _connect_imitation_learning(self) -> None:
-        for worker in self.skills.values():
+        for worker in self._iter_unique_workers():
             if hasattr(worker, "attach_imitation_learning"):
                 worker.attach_imitation_learning(self.imitation_worker)
-        if hasattr(self.rl_engine, "attach_imitation_learning"):
-            self.rl_engine.attach_imitation_learning(self.imitation_worker)
 
     def _connect_meta_learning(self) -> None:
         if hasattr(self.meta_learning, "register_skill_workers"):
@@ -437,7 +427,7 @@ class AdaptiveAgent(BaseAgent):
         else:
             self.meta_learning.skill_worker_registry = dict(self.skills)
 
-        for worker in self.skills.values():
+        for worker in self._iter_unique_workers():
             if hasattr(worker, "attach_meta_learning"):
                 worker.attach_meta_learning(self.meta_learning)
 
@@ -627,6 +617,15 @@ class AdaptiveAgent(BaseAgent):
 
     def _prepare_task_context(self, task_payload: Mapping[str, Any]) -> None:
         context = dict(task_payload.get("context", {}))
+        context_setter = getattr(self.env, "set_task_context", None)
+        
+        if callable(context_setter):
+            try:
+                context_setter(context)
+            except Exception as exc:
+                logger.warning("Environment task-context injection failed: %s", exc, exc_info=True)
+        elif context_setter is not None:
+            logger.warning("Environment %s exposes a non-callable set_task_context attribute.", type(self.env).__name__)
         if hasattr(self.env, "set_task_context"):
             try:
                 self.env.set_task_context(context)
@@ -635,13 +634,17 @@ class AdaptiveAgent(BaseAgent):
 
         if hasattr(self.policy_manager, "set_task_goal"):
             try:
-                self.policy_manager.set_task_goal(task_payload.get("goal"))
+                goal = task_payload.get("goal")
+                if isinstance(goal, str):
+                    self.policy_manager.set_task_goal(goal)
             except Exception as exc:
                 logger.warning("PolicyManager set_task_goal failed: %s", exc)
 
         if hasattr(self.policy_manager, "set_task_type"):
             try:
-                self.policy_manager.set_task_type(task_payload.get("type"))
+                task_type = task_payload.get("type")
+                if isinstance(task_type, str):
+                    self.policy_manager.set_task_type(task_type)
             except Exception as exc:
                 logger.warning("PolicyManager set_task_type failed: %s", exc)
 
@@ -1084,10 +1087,21 @@ class AdaptiveAgent(BaseAgent):
 
         if self.task_embedding_strategy == "hash_bow":
             for token in tokens:
-                idx = hash(token) % self.state_dim
+                token_hash = stable_context_hash(
+                    {"token": token},
+                    component="adaptive_agent",
+                )
+                idx = int(token_hash[:16], 16) % self.state_dim
                 vector[idx] += 1.0
         else:
-            rng = np.random.default_rng(abs(hash(task_description)) % (2**32))
+            projection_hash = stable_context_hash(
+                {
+                    "task_description": str(task_description),
+                    "random_seed": self.random_seed,
+                },
+                component="adaptive_agent",
+            )
+            rng = np.random.default_rng(int(projection_hash[:16], 16) % (2**32))
             vector = rng.normal(loc=0.0, scale=1.0, size=self.state_dim).astype(np.float32)
 
         norm = np.linalg.norm(vector)
@@ -1187,8 +1201,9 @@ class AdaptiveAgent(BaseAgent):
     def _recover_full_reset(self) -> bool:
         try:
             for worker in self._iter_unique_workers():
-                if hasattr(worker, "reset"):
-                    worker.reset()
+                reset = getattr(worker, "reset", None)
+                if callable(reset):
+                    reset()
             self.tuner.reset()
             self.policy_manager = PolicyManager()
             self.policy_manager.initialize_skills(self.skills)
@@ -1343,7 +1358,7 @@ class AdaptiveAgent(BaseAgent):
                 component="adaptive_agent",
                 details={"reward": value},
             ) from exc
-        if not np.isfinite(reward):
+        if not is_finite_number(reward):
             raise InvalidValueError(
                 "Reward must be finite.",
                 component="adaptive_agent",
@@ -1540,6 +1555,57 @@ class AdaptiveAgent(BaseAgent):
         self.last_checkpoint_path = str(checkpoint_path)
         return self
 
+    def get_health_report(self) -> Dict[str, Any]:
+        report = self.runtime_status()
+        report["subsystems"] = {
+            "initialized": self.is_initialized(),
+            "policy_manager": self.policy_manager is not None,
+            "parameter_tuner": self.tuner is not None,
+            "meta_learning": self.meta_learning is not None,
+            "imitation_learning": self.imitation_worker is not None,
+            "environment": self.env is not None,
+        }
+        report["skills"] = {
+            "count": len(self.skills),
+            "ids": sorted(int(skill_id) for skill_id in self.skills),
+            "global_rl_skill_id": self.global_rl_skill_id,
+        }
+        report["resilience"] = {
+            "fail_operational": self.supports_fail_operational(),
+            "redundant_safety_channels": self.has_redundant_safety_channels(),
+        }
+        return report
+
+    def shutdown(self) -> None:
+        """Persist adaptive state and consolidate policy memory once."""
+        lifecycle = self._runtime_status.lifecycle
+        if lifecycle in {RuntimeLifecycle.STOPPING, RuntimeLifecycle.STOPPED}:
+            return
+        self._transition_runtime_lifecycle(RuntimeLifecycle.STOPPING)
+        self.operational_state = "stopping"
+
+        if self.auto_save_state:
+            self._run_optional_runtime_operation(
+                "persistence",
+                "adaptive_agent.save_state",
+                self._save_agent_state,
+            )
+            self._run_optional_runtime_operation(
+                "persistence",
+                "adaptive_agent.save_recovery_history",
+                self._save_recovery_history,
+            )
+
+        if hasattr(self.policy_manager, "consolidate_memory"):
+            self._run_optional_runtime_operation(
+                "persistence",
+                "adaptive_agent.consolidate_policy_memory",
+                self.policy_manager.consolidate_memory,
+            )
+
+        self.operational_state = "stopped"
+        self._transition_runtime_lifecycle(RuntimeLifecycle.STOPPED)
+
     def retrain(self) -> Dict[str, Any]:
         learn_result = self._learn()
         return {
@@ -1548,23 +1614,18 @@ class AdaptiveAgent(BaseAgent):
             "learn_result": learn_result,
         }
 
-    def log_evaluation_result(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+    def log_evaluation_result(self, metrics: Mapping[str, Any]) -> None:
         super().log_evaluation_result(metrics)
-        return metrics
 
 
 if __name__ == "__main__":
     print("\n=== Running Adaptive Agent ===\n")
     printer.status("TEST", "Adaptive Agent initialized", "info")
-
-    class _TestAgentFactory:
-        def create(self, module: str, shared_memory: Any = None, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-            return {"module": module, "status": "created"}
-
-    from src.agents.collaborative.shared_memory import SharedMemory
+    from .collaborative.shared_memory import SharedMemory
+    from .agent_factory import AgentFactory
 
     shared_memory = SharedMemory()
-    agent_factory = _TestAgentFactory()
+    agent_factory = AgentFactory()
     agent = AdaptiveAgent(shared_memory=shared_memory, agent_factory=agent_factory)
 
     printer.status("TEST", f"Initialized with skills={list(agent.skills.keys())}", "success")
