@@ -23,7 +23,7 @@ class ActionSelector:
     Production‑ready action selector that chooses the best action from a list
     based on configurable strategies: priority, random, contextual, utility, hybrid.
     """
-    def __init__(self, context: Optional[Dict[str, Any]] = None):
+    def __init__(self, context: Optional[Dict[str, Any]] = None, memory=None):
         self.context = context or {}
         self.config = load_global_config()
         self.selector_config = get_config_section("action_selector")
