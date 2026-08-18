@@ -21,8 +21,8 @@ from .perform_action import PerformAction
 from .utils.knowledge_errors import *
 from .utils.knowledge_helpers import *
 from .modules.rule_engine import RuleEngine
-from .modules.interfaces import *
-from .modules.inference_result import *
+from .modules.interfaces import *  # type: ignore
+from .modules.inference_result import InferenceResult, InferenceTrace
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("KnowledgeOrchestrator")
@@ -33,14 +33,18 @@ class KnowledgeOrchestrator:
     """Production-oriented orchestrator for knowledge subsystem components."""
 
     def __init__(self, agent: Optional[Any] = None,
-                 memory: Optional[MemoryStore] = None,
-                 cache: Optional[CacheStore] = None,
-                 rule_engine: Optional[RuleService] = None,
-                 governor: Optional[ComplianceService] = None,
-                 synchronizer: Optional[SyncService] = None,
-                 monitor: Optional[MonitorService] = None,
-                 action_executor: Optional[ActionExecutor] = None,
-                 lazy_start: bool = True,) -> None:
+                memory: Optional[MemoryStore] = None,
+                cache: Optional[CacheStore] = None,
+                rule_engine: Optional[RuleService] = None,
+                governor: Optional[ComplianceService] = None,
+                synchronizer: Optional[SyncService] = None,
+                monitor: Optional[MonitorService] = None,
+                action_executor: Optional[ActionExecutor] = None,
+                lazy_start: bool = True,
+                create_governor= None,
+                manage_memory=None,
+                manage_synchronizer=None,
+                manage_monitor=None,) -> None:
         self.agent = agent
 
         # Dependency injection with practical defaults
