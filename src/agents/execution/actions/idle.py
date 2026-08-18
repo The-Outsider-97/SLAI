@@ -5,10 +5,10 @@ from typing import Dict, Any, Optional
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.execution_error import SoftInterrupt
 from ..actions.base_action import BaseAction, ActionStatus
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Idle Action")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class IdleAction(BaseAction):
     """

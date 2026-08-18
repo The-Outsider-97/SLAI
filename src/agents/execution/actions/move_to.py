@@ -7,10 +7,10 @@ from typing import Dict, Any, Tuple, List, Optional
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.execution_error import ActionFailureError, UnreachableTargetError, SoftInterrupt
 from ..actions.base_action import BaseAction, ActionStatus
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Move To Action")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class MoveToAction(BaseAction):
     """
@@ -96,6 +96,7 @@ class MoveToAction(BaseAction):
         # Stop movement
         self.set_movement_target(0.0)
         self.update_movement(0.0)
+        elapsed = time.time() - start_time
         logger.info(f"Reached destination in {elapsed:.1f}s, traveled {self.distance_traveled:.2f} units")
         return True
 
@@ -188,7 +189,7 @@ class MoveToAction(BaseAction):
             return math.hypot(a[0]-b[0], a[1]-b[1])
 
         directions = [(dx, dy) for dx in (-1,0,1) for dy in (-1,0,1) if dx != 0 or dy != 0]
-        open_set = [(0, start)]
+        open_set = [(0.0, start)]
         came_from = {}
         g_score = {start: 0.0}
         f_score = {start: heuristic(start, goal)}

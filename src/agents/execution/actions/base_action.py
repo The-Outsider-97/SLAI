@@ -3,9 +3,7 @@ import time
 import math
 
 from enum import Enum, auto
-from typing import (
-    Dict, Any, Optional, List, Set, Tuple, TypeVar, Generic, Callable, Union
-)
+from typing import Dict, Any, Optional, List, Set, Tuple, TypeVar, Generic, Callable, Union
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from collections import deque
@@ -14,10 +12,10 @@ from ..utils.execution_error import (ExecutionError, SoftInterrupt, TimeoutError
                                         InvalidContextError, ActionFailureError, UnreachableTargetError,
                                         CorruptedContextStateError, ExecutionLoopLockError)
 from ..utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Base Action")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 ContextType = TypeVar('ContextType', bound=Dict[str, Any])
 
