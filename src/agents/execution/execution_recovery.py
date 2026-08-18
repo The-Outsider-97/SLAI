@@ -11,11 +11,12 @@ from .utils.execution_error import (ActionFailureError, CorruptedContextStateErr
                                     MissingActionHandlerError, StaleCheckpointError,
                                     TimeoutError as ExecutionTimeoutError,
                                     UnreachableTargetError)
+from .utils.execution_helpers import *
 from .execution_memory import ExecutionMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Execution Recovery")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class ExecutionRecovery:
     """
@@ -69,6 +70,11 @@ class ExecutionRecovery:
         }
 
         logger.info("Execution Recovery initialized")
+
+    @property
+    def recent_failures(self) -> List[Dict[str, Any]]:
+        """Return a copy of the recent failure history."""
+        return copy.deepcopy(self.failure_history[-self.max_history :])
 
     # ------------------------------------------------------------------
     # Public API

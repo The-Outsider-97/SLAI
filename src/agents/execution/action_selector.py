@@ -1,3 +1,5 @@
+from abc import abstractmethod
+from email.policy import default
 import math
 import time
 import random
@@ -6,11 +8,17 @@ from typing import Dict, List, Any, Callable, Optional, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.execution_error import InvalidContextError, ActionFailureError
-from src.agents.execution.execution_memory import ExecutionMemory
-from logs.logger import get_logger, PrettyPrinter
+from .utils.execution_helpers import *
+from .execution_memory import ExecutionMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Action Selector")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
+
+def get_action_selector(context: Optional[Dict[str, Any]] = None) -> "ActionSelector":
+    """Factory function to create an ActionSelector instance."""
+    return ActionSelector(context=context)
 
 class ActionSelector:
     """
@@ -52,6 +60,43 @@ class ActionSelector:
         self._restore_state()
 
         logger.info(f"ActionSelector initialized with strategy '{self.selection_strategy}'")
+
+    @property
+    def available_actions(self) -> List[str]:
+        """Return a list of registered action names."""
+        return list(self.action_registry.keys())
+
+    @property
+    def registered_utility_functions(self) -> List[str]:
+        """Return a list of registered utility function names."""
+        return list(self.utility_functions.keys())
+
+    @property
+    def current_strategy(self) -> str:
+        """Return the current selection strategy."""
+        return self.selection_strategy
+
+    @property
+    def current_weights(self) -> Dict[str, float]:
+        """Return the current strategy weights."""
+        return self.strategy_weights
+
+    @property
+    def current_context(self) -> Dict[str, Any]:
+        """Return the current context used for selection."""
+        return self.context
+
+    @property
+    def default_context(self) -> Dict[str, Any]:
+        """Return the default context for selection."""
+        return self.context
+
+    @default_context.setter
+    def default_context(self, ctx: Dict[str, Any]):
+        """Set a default context for selection if none is provided."""
+        self.context = ctx or {}
+        logger.debug(f"Default context set to: {self.context}")
+
 
     # ------------------------ Public API ------------------------------
     def select(self, actions: List[Dict], context: Optional[Dict] = None) -> Dict:
@@ -215,7 +260,7 @@ class ActionSelector:
         valid = []
         for action in actions:
             name = action.get("name")
-            if name in disallowed:
+            if not name or name in disallowed:
                 continue
             preconditions = self.action_registry.get(name, {}).get("preconditions", [])
             if not preconditions:

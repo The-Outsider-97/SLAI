@@ -7,12 +7,13 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.execution_error import (ActionFailureError, InvalidContextError,
                                                         InvalidTaskTransitionError, MissingActionHandlerError,
-                                                        UnreachableTargetError,)
+                                                        UnreachableTargetError)
+from .utils.execution_helpers import *
 from .execution_memory import ExecutionMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Execution Validator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class ExecutionValidator:
     VALIDATION_MODES = ["preflight", "continuous", "simulation"]

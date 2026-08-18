@@ -3,15 +3,16 @@ import random
 import time
 import json
 import hashlib
+
 from enum import Enum
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from src.agents.execution.utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from .config_loader import load_global_config, get_config_section
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Execution Error")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class ExecutionErrorType(Enum):
     TIMEOUT = "Task Execution Timeout"
@@ -59,7 +60,7 @@ class ExecutionError(Exception):
         self.remediation_guidance = remediation_guidance
         self.timestamp = time.time()
         self.error_id = self._generate_error_id()
-        
+
         # Generate forensic hash
         self.forensic_hash = self._generate_forensic_hash()
 
@@ -67,10 +68,10 @@ class ExecutionError(Exception):
         """Generates a unique ID for the error instance."""
         algorithm = self.error_id_hash_algorithm
         length = self.error_id_length
-        
+
         # Get hash function
-        hash_func = getattr(hashlib, algorithm, hashlib.sha256)
-        
+        hash_func = getattr(hashlib, algorithm or 'sha256', hashlib.sha256)
+
         # Generate hash
         return hash_func(
             f"{self.timestamp}{random.getrandbits(64)}".encode()
@@ -80,15 +81,15 @@ class ExecutionError(Exception):
         """Generate forensic hash with configurable algorithm and salt"""
         algorithm = self.forensic_hash_algorithm
         salt = self.forensic_hash_salt
-        
+
         # Get hash function
-        hash_func = getattr(hashlib, algorithm, hashlib.sha256)
-        
+        hash_func = getattr(hashlib, algorithm or 'sha256', hashlib.sha256)
+
         # Prepare data
         context_str = json.dumps(self.context, sort_keys=True, default=str)
         state_str = json.dumps(self.execution_agent_state, sort_keys=True, default=str)
         data = f"{salt}{self.timestamp}{self.error_id}{str(self)}{self.error_type.value}{self.severity}{context_str}{state_str}".encode()
-        
+
         return hash_func(data).hexdigest()
 
     def to_audit_format(self) -> Dict[str, Any]:
@@ -107,17 +108,17 @@ class ExecutionError(Exception):
     def generate_report(self) -> str:
         """Generate comprehensive security incident report"""
         report_format = self.report_format
-        
+
         if report_format == 'json':
             return json.dumps(self.to_audit_format(), indent=2)
-        
+
         # Default to markdown format
         audit_data = self.to_audit_format()
-        
+
         # Format timestamp
         dt = datetime.fromtimestamp(audit_data['timestamp'])
         formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
-        
+
         report = [
             "# Security Incident Report",
             f"**Generated**: {formatted_time}",
@@ -127,11 +128,11 @@ class ExecutionError(Exception):
             "---",
             f"**Message**: {audit_data['message']}",
         ]
-        
+
         # Include forensic hash if configured
         if self.config.get('include_forensic_hash', True):
             report.append(f"**Forensic Hash**: `{audit_data['forensic_hash']}`")
-        
+
         # Include context details if configured
         if self.config.get('include_context', True):
             context_str = json.dumps(audit_data['context'], indent=2)
@@ -317,3 +318,64 @@ class UnreachableTargetError(ExecutionError):
             },
             remediation_guidance="Re-evaluate pathfinding or replanning strategy. Consider alternate goal or movement strategy."
         )
+
+class CorruptedExecutionStateError(ExecutionError):
+    def __init__(self, corrupted_state: dict):
+        super().__init__(
+            ExecutionErrorType.INVALID_CONTEXT,
+            "Execution state appears corrupted or inconsistent.",
+            severity="critical",
+            context={
+                "corrupted_state": corrupted_state
+            },
+            remediation_guidance="Validate execution state lifecycle and access pattern. Consider restoring from a known good checkpoint."
+        )
+
+class ExecutionMemoryOverflowError(ExecutionError):
+    def __init__(self, memory_limit: int, current_usage: int):
+        super().__init__(
+            ExecutionErrorType.MEMORY_OVERFLOW,
+            f"Execution memory overflow: limit {memory_limit} bytes, current usage {current_usage} bytes.",
+            severity="critical",
+            context={
+                "memory_limit": memory_limit,
+                "current_usage": current_usage
+            },
+            remediation_guidance="Optimize memory usage or increase memory allocation. Consider purging stale data."
+        )
+
+class ExecutionTimeoutError(ExecutionError):
+    def __init__(self, task_name: str, timeout_duration: float):
+        super().__init__(
+            ExecutionErrorType.TIMEOUT,
+            f"Task '{task_name}' exceeded timeout duration of {timeout_duration} seconds.",
+            severity="high",
+            context={
+                "task_name": task_name,
+                "timeout_duration": timeout_duration
+            },
+            remediation_guidance="Review task execution time and optimize performance. Consider increasing timeout threshold if safe."
+        )
+
+
+__all__ = [
+    "ExecutionError",
+    "ExecutionErrorType",
+    "SoftInterrupt",
+    "TimeoutError",
+    "InvalidContextError",
+    "DeadlockError",
+    "ActionFailureError",
+    "CookieMismatchError",
+    "StaleCheckpointError",
+    "ActionInterruptionError",
+    "InvalidGridReferenceError",
+    "CorruptedContextStateError",
+    "ExecutionLoopLockError",
+    "MissingActionHandlerError",
+    "InvalidTaskTransitionError",
+    "UnreachableTargetError",
+    "CorruptedExecutionStateError",
+    "ExecutionMemoryOverflowError",
+    "ExecutionTimeoutError",
+]
