@@ -28,6 +28,13 @@ from .standards import LogDomain, default_log_path
 if TYPE_CHECKING:
     from monitoring.system_optimizer import SystemOptimizer # pyright: ignore[reportMissingImports]
 
+try:
+    import colorama
+    colorama.just_fix_windows_console()  # enables ANSI on Windows without changing stdout
+    _COLOR_SUPPORT = True
+except ImportError:
+    _COLOR_SUPPORT = sys.stdout.isatty() and (os.name != 'nt' or os.getenv('TERM') or os.getenv('ANSICON'))
+
 # ========== Status Tags ==========
 INIT       = "[INIT]"
 START      = "[START]"
@@ -684,7 +691,7 @@ class PrettyPrinter:
 
     @classmethod
     def _style(cls, text, *styles):
-        if not sys.stdout.isatty():
+        if not cls._use_colors():
             return text
         codes = []
         for style in styles:
@@ -693,6 +700,23 @@ class PrettyPrinter:
             elif style in COLOR_CODES:
                 codes.append(COLOR_CODES[style])
         return f"{''.join(codes)}{text}{STYLES['reset']}"
+    
+    @classmethod
+    def _use_colors(cls):
+        # Cache the decision to avoid repeated checks
+        if not hasattr(cls, "_color_enabled"):
+            if os.name == 'nt':
+                # Try to enable ANSI support if possible
+                try:
+                    import colorama
+                    colorama.just_fix_windows_console()
+                    cls._color_enabled = True
+                except ImportError:
+                    # Fallback: check environment or just disable
+                    cls._color_enabled = bool(os.getenv('TERM') or os.getenv('ANSICON') or os.getenv('WT_SESSION'))
+            else:
+                cls._color_enabled = sys.stdout.isatty()
+        return cls._color_enabled
 
     @classmethod
     def table(cls, headers, rows, title=None):
