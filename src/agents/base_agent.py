@@ -583,7 +583,7 @@ class BaseAgent(abc.ABC):
     def alternative_execute(self, task_data: Any, original_error: Optional[BaseException] = None) -> Any:
         if hasattr(self, "replan") and callable(getattr(self, "replan")) and self.current_goal:
             with contextlib.suppress(Exception):
-                new_plan = self.replan(self.current_goal)
+                new_plan = self.replan(self.current_goal)  # pyright: ignore[reportAttributeAccessIssue]
                 if new_plan:
                     return self.execute_plan(new_plan, goal=self.current_goal)
         sanitized_input = self.sanitize_input(task_data)
@@ -938,10 +938,13 @@ class BaseAgent(abc.ABC):
                 super().__init__()
                 self.input_dim = input_dim
                 self.output_dim = output_dim
+                assert nn is not None
+                assert torch is not None
                 self.weights = nn.Parameter(torch.randn(input_dim, output_dim) * torch.sqrt(torch.tensor(1.0 / input_dim)))
                 self.bias = nn.Parameter(torch.zeros(output_dim))
 
             def predict(self, state: Any) -> int:
+                assert torch is not None
                 state_vec = torch.tensor(state, dtype=torch.float32).flatten()
                 if state_vec.shape[0] != self.input_dim:
                     raise ValueError(f"Input dimension {state_vec.shape[0]} does not match {self.input_dim}.")
@@ -954,6 +957,7 @@ class BaseAgent(abc.ABC):
         if not _ensure_torch_imported():
             return {"status": "skipped", "reason": "torch_unavailable", "error": str(TORCH_IMPORT_ERROR)}
         projection = getattr(self, "projection", None)
+        assert torch is not None
         if projection is None or not isinstance(projection, torch.Tensor):
             return {"status": "skipped", "reason": "projection_tensor_missing"}
         rewards = torch.tensor(list(reward_scores), dtype=torch.float32, device=projection.device)
