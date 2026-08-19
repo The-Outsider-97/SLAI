@@ -32,6 +32,43 @@ load_global_config = _CONFIG.load
 get_config_section = _CONFIG.section
 
 
+@dataclass(frozen=True, slots=True)
+class RelativeP95Result:
+    name: str
+    baseline_p95_ms: float
+    current_p95_ms: float
+    improvement_percent: float
+    passed: bool
+
+
+def evaluate_relative_p95(
+    name: str,
+    *,
+    baseline_p95_ms: float,
+    current_p95_ms: float,
+    minimum_improvement_percent: float = 20.0,
+) -> RelativeP95Result:
+    if baseline_p95_ms <= 0:
+        raise BenchmarkConfigurationError(
+            f"{name}: baseline_p95_ms must be positive"
+        )
+    if not 0.0 < minimum_improvement_percent < 100.0:
+        raise BenchmarkConfigurationError(
+            "minimum_improvement_percent must be between 0 and 100"
+        )
+
+    improvement = (
+        (baseline_p95_ms - current_p95_ms) / baseline_p95_ms
+    ) * 100.0
+
+    return RelativeP95Result(
+        name=name,
+        baseline_p95_ms=baseline_p95_ms,
+        current_p95_ms=current_p95_ms,
+        improvement_percent=improvement,
+        passed=improvement >= minimum_improvement_percent,
+    )
+
 class BenchmarkConfigurationError(ValueError):
     """Raised when the configured benchmark contract is incomplete or invalid."""
 
