@@ -682,3 +682,16 @@ strategy_selector:
     max_sequence_items: 20
     max_string_chars: 500
     redaction_text: "[REDACTED]"
+
+recovery_state:
+  # Override allowed transitions if needed. Keys are from-states, values are list of to-states.
+  allowed_transitions:
+    received: [normalized, failed]
+    normalized: [assessed, failed]
+    assessed: [retrying, degraded, human_review, quarantined, failed]
+    retrying: [retrying, recovered, degraded, human_review, quarantined, failed]
+    degraded: [recovered, human_review, failed]
+    human_review: []
+    quarantined: []
+    recovered: []
+    failed: []
