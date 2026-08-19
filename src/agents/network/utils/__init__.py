@@ -43,6 +43,7 @@ __all__ = [
     "RetryExhaustedError",
     "FailoverExhaustedError",
     "DeliveryError",
+    "QueueBackpressureError",
     "DeliveryTimeoutError",
     "DeliveryExpiredError",
     "DeliveryStateError",
