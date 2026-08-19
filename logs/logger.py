@@ -20,16 +20,16 @@ else:
 import uuid
 from logging.handlers import RotatingFileHandler
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from .standards import LogDomain, default_log_path
 if TYPE_CHECKING:
-    from monitoring.system_optimizer import SystemOptimizer # pyright: ignore[reportMissingImports]
+    from ..monitoring.system_optimizer import SystemOptimizer
 
 try:
-    import colorama
+    import colorama # type: ignore
     colorama.just_fix_windows_console()  # enables ANSI on Windows without changing stdout
     _COLOR_SUPPORT = True
 except ImportError:
@@ -265,7 +265,7 @@ class LoggingSettings:
     console: bool = True
     file: bool = True
     queue: bool = True
-    log_path: Path = default_log_path(LogDomain.RUNTIME, "app.log")
+    log_path: Path = field(default_factory=lambda: default_log_path(LogDomain.RUNTIME, "app.log"))
     max_bytes: int = 1_000_000
     backup_count: int = 5
 
@@ -343,7 +343,6 @@ class QueueLogHandler(logging.Handler):
 
 def get_logger(name: str) -> logging.Logger:
     """Return a named logger without configuring global logging."""
-
     return logging.getLogger(name)
 
 
@@ -351,9 +350,15 @@ def configure_logging(settings: LoggingSettings | None = None, *, force: bool = 
     """Configure SLAI-owned root handlers explicitly and idempotently.
 
     Existing handlers owned by embedding applications, test runners, or other
-    libraries are preserved. ``force=True`` replaces only SLAI-managed
-    handlers.
+    libraries are preserved. ``force=True`` replaces only SLAI-managed handlers.
     """
+
+    def _initialize_console_support() -> None:
+        try:
+            import colorama
+        except ImportError:
+            return
+        colorama.just_fix_windows_console()
 
     global _logger_initialized, _atexit_registered
     settings = settings or LoggingSettings()
@@ -385,6 +390,7 @@ def configure_logging(settings: LoggingSettings | None = None, *, force: bool = 
             root_logger.addHandler(file_handler)
 
         if settings.console:
+            _initialize_console_support()
             console_handler = _mark_managed(logging.StreamHandler(sys.stdout))
             console_handler.setFormatter(ColorFormatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
             root_logger.addHandler(console_handler)
@@ -708,7 +714,7 @@ class PrettyPrinter:
             if os.name == 'nt':
                 # Try to enable ANSI support if possible
                 try:
-                    import colorama
+                    import colorama # type: ignore
                     colorama.just_fix_windows_console()
                     cls._color_enabled = True
                 except ImportError:
