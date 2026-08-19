@@ -22,7 +22,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Iterable, Mapping, MutableMapping, Optional
+from typing import Any, Dict, Generic, Iterable, Mapping, MutableMapping, Optional, TypeVar
 
 
 from .config_loader import get_config_section, load_global_config
@@ -30,6 +30,9 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 
 logger = get_logger("Reader Error")
 printer = PrettyPrinter()
+
+
+StageItem = TypeVar("StageItem")
 
 
 class ReaderErrorType(Enum):
