@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.0.0"
+__version__ = "2.2.0"
 
 import hashlib
 import json
@@ -107,6 +107,7 @@ class HandlerRecoveryAction(str, Enum):
     RETRY = "retry"
     DEGRADE = "degrade"
     ESCALATE = "escalate"
+    ROUTE_TO_HUMAN = "route_to_human"
     FAIL_FAST = "fail_fast"
     QUARANTINE = "quarantine"
 
