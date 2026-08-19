@@ -5,6 +5,7 @@ from .strategy_selector import *
 from .sla_policy import *
 from .escalation_manager import *
 from .failure_intelligence import *
+from .recovery_state import *
 
 __all__ = [
     "HandlerMemory",
@@ -34,6 +35,9 @@ __all__ = [
     "FailureHistoryStats",
     "FailureInsight",
     "FailureIntelligence",
+    # Recovery State
+    "RecoveryState",
+    "RecoveryStateMachine",
 ]
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
