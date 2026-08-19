@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Optional, Sequence, Set
+from typing import Any, Iterable, Optional, Sequence, Set
 
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Config Contract")
 printer = PrettyPrinter()
+
+
+_AGENT_VALIDATORS: dict[str, AgentConfigValidator] = {}
 
 
 @dataclass(frozen=True)
@@ -15,6 +19,54 @@ class ConfigValidationResult:
     errors: Sequence[str]
     warnings: Sequence[str]
 
+
+AgentConfigValidator = Callable[
+    [Mapping[str, Any]],
+    ConfigValidationResult,
+]
+
+
+def register_agent_config_validator(
+    agent_key: str,
+    validator: AgentConfigValidator,
+) -> None:
+    if agent_key in _AGENT_VALIDATORS:
+        raise ConfigContractError(
+            f"Duplicate config validator for {agent_key!r}"
+        )
+    _AGENT_VALIDATORS[agent_key] = validator
+
+
+def validate_all_agent_configs(
+    global_config: Mapping[str, Any],
+) -> None:
+    configured_agents = {
+        str(key)
+        for key, value in global_config.items()
+        if str(key).endswith("_agent") and isinstance(value, Mapping)
+    }
+
+    missing_validators = sorted(
+        configured_agents - set(_AGENT_VALIDATORS)
+    )
+    if missing_validators:
+        raise ConfigContractError(
+            "Missing startup config validators for: "
+            f"{missing_validators}"
+        )
+
+    errors: list[str] = []
+    for agent_key in sorted(configured_agents):
+        result = _AGENT_VALIDATORS[agent_key](
+            global_config[agent_key]
+        )
+        errors.extend(
+            f"{agent_key}: {message}"
+            for message in result.errors
+        )
+
+    if errors:
+        raise ConfigContractError("; ".join(errors))
 
 class ConfigContractError(ValueError):
     """Raised when an agent configuration violates the shared contract."""
