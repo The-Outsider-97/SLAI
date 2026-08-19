@@ -51,6 +51,37 @@ class _CacheEntry:
     loaded_monotonic: float
 
 
+class DuplicateConfigKeyError(ValueError):
+    """Raised when one YAML mapping declares the same key more than once."""
+
+
+class UniqueKeySafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    mapping = {}
+
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+
+        if key in mapping:
+            line = key_node.start_mark.line + 1
+            raise DuplicateConfigKeyError(
+                f"Duplicate configuration key {key!r} at line {line}"
+            )
+
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+
+    return mapping
+
+
+UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 class ConfigRepository:
     """Thread-safe, path-keyed YAML cache shared by all configuration facades."""
 
@@ -88,7 +119,7 @@ class ConfigRepository:
 
             if stale:
                 with resolved.open("r", encoding="utf-8") as stream:
-                    loaded = yaml.safe_load(stream) or {}
+                    loaded = yaml.load(stream, Loader=UniqueKeySafeLoader) or {}
                 if not isinstance(loaded, dict):
                     raise TypeError(
                         f"Config file {resolved} must contain a YAML mapping, "
