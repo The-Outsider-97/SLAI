@@ -48,6 +48,30 @@ class ControlLoopBusyError(AutonomousControlLoopError):
     """Raised when a caller attempts concurrent runs on one loop instance."""
 
 
+def _strict_bool(value: Any, *, field_name: str) -> bool:
+    """Parse a control-loop configuration boolean without truthiness coercion."""
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value in {0, 1}:
+            return bool(value)
+
+    raise ControlLoopConfigurationError(
+        f"{field_name} must be a boolean"
+    )
+
+
 class ControlLoopState(str, Enum):
     IDLE = "idle"
     RUNNING = "running"
@@ -72,6 +96,7 @@ class AutonomousLoopConfig:
     max_cycles: int = 3
     max_cycle_seconds: float = 45.0
     max_run_seconds: float = 120.0
+    min_action_confidence: float = 0.7
     require_safety_approval: bool = True
     require_explicit_execution_task: bool = True
     stop_on_stage_error: bool = True
@@ -80,23 +105,69 @@ class AutonomousLoopConfig:
     latest_state_key: str = "autonomy:control_loop:latest"
 
     @classmethod
-    def from_mapping(cls, payload: Optional[Mapping[str, Any]]) -> "AutonomousLoopConfig":
+    def from_mapping(
+        cls,
+        payload: Optional[Mapping[str, Any]],
+    ) -> "AutonomousLoopConfig":
         source = dict(payload or {})
+    
         try:
             config = cls(
-                enabled=bool(source.get("enabled", True)),
-                max_cycles=int(source.get("max_cycles", 3)),
-                max_cycle_seconds=float(source.get("max_cycle_seconds", 45.0)),
-                max_run_seconds=float(source.get("max_run_seconds", 120.0)),
-                require_safety_approval=bool(source.get("require_safety_approval", True)),
-                require_explicit_execution_task=bool(source.get("require_explicit_execution_task", True)),
-                stop_on_stage_error=bool(source.get("stop_on_stage_error", True)),
-                publish_events=bool(source.get("publish_events", True)),
+                enabled=_strict_bool(
+                    source.get("enabled", True),
+                    field_name="autonomous_control_loop.enabled",
+                ),
+                max_cycles=int(
+                    source.get("max_cycles", 3)
+                ),
+                max_cycle_seconds=float(
+                    source.get("max_cycle_seconds", 45.0)
+                ),
+                max_run_seconds=float(
+                    source.get("max_run_seconds", 120.0)
+                ),
+                min_action_confidence=float(
+                    source.get("min_action_confidence", 0.7)
+                ),
+                require_safety_approval=_strict_bool(
+                    source.get("require_safety_approval", True),
+                    field_name=(
+                        "autonomous_control_loop."
+                        "require_safety_approval"
+                    ),
+                ),
+                require_explicit_execution_task=_strict_bool(
+                    source.get("require_explicit_execution_task", True),
+                    field_name=(
+                        "autonomous_control_loop."
+                        "require_explicit_execution_task"
+                    ),
+                ),
+                stop_on_stage_error=_strict_bool(source.get("stop_on_stage_error", True),
+                                                field_name=(
+                                                    "autonomous_control_loop."
+                                                    "stop_on_stage_error"
+                                                    ),
+                ),
+                publish_events=_strict_bool(source.get("publish_events", True),
+                                            field_name=(
+                                                "autonomous_control_loop."
+                                                "publish_events"
+                                                ),
+                ),
                 event_channel=str(source.get("event_channel", "autonomy.events")).strip(),
-                latest_state_key=str(source.get("latest_state_key", "autonomy:control_loop:latest")).strip(),
-            )
+                latest_state_key=str(source.get(
+                    "latest_state_key",
+                    "autonomy:control_loop:latest",
+                    )).strip())
+        except ControlLoopConfigurationError:
+            raise
         except (TypeError, ValueError) as exc:
-            raise ControlLoopConfigurationError(f"Invalid autonomous_control_loop configuration: {exc}") from exc
+            raise ControlLoopConfigurationError(
+                "Invalid autonomous_control_loop "
+                f"configuration: {exc}"
+            ) from exc
+    
         config.validate()
         return config
 
@@ -108,6 +179,10 @@ class AutonomousLoopConfig:
         if self.max_run_seconds < self.max_cycle_seconds:
             raise ControlLoopConfigurationError(
                 "autonomous_control_loop.max_run_seconds must be greater than or equal to max_cycle_seconds"
+            )
+        if not 0.0 <= self.min_action_confidence <= 1.0:
+            raise ControlLoopConfigurationError(
+                "autonomous_control_loop.min_action_confidence must be between 0 and 1"
             )
         if not self.event_channel:
             raise ControlLoopConfigurationError("autonomous_control_loop.event_channel must be non-empty")
@@ -220,6 +295,13 @@ def _is_success(payload: Mapping[str, Any]) -> bool:
 class FactoryAutonomousStages:
     """Lazy adapters from the fixed loop stages to factory-managed agent facades."""
 
+    _STAGE_AGENT = {
+        "reason": "reasoning",
+        "plan": "planning",
+        "execute": "execution",
+        "evaluate": "evaluation",
+    }
+
     def __init__(self, factory: Any, shared_memory: Any, config: AutonomousLoopConfig) -> None:
         if factory is None or not callable(getattr(factory, "create", None)):
             raise ControlLoopConfigurationError("from_factory requires an AgentFactory-compatible create() method")
@@ -227,6 +309,7 @@ class FactoryAutonomousStages:
         self.shared_memory = shared_memory
         self.config = config
         self._agents: Dict[str, Any] = {}
+        self._last_failed_agent_name: Optional[str] = None
 
     def _agent(self, name: str) -> Any:
         if name not in self._agents:
@@ -249,13 +332,23 @@ class FactoryAutonomousStages:
             )
         return method(*args, **kwargs)
 
+    def _call_agent(self, agent_name: str, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        """Invoke one named agent and retain its identity on failure."""
+    
+        try:
+            agent = self._agent(agent_name)
+            return self._call(agent, method_name, *args, **kwargs)
+        except Exception:
+            self._last_failed_agent_name = agent_name
+            raise
+
     def reason(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         goal = self._goal(payload)
         objective = goal.get("objective") or goal.get("goal") or goal.get("name")
         if not objective:
             raise ControlLoopContractError("Autonomous goal requires objective, goal, or name")
-        result = self._call(
-            self._agent("reasoning"),
+        result = self._call_agent(
+            "reasoning",
             "perform_task",
             {
                 "task_type": "reason",
@@ -315,7 +408,7 @@ class FactoryAutonomousStages:
     def plan(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         goal = self._goal(payload)
         planning_task = self._planning_task(goal)
-        plan = self._call(self._agent("planning"), "generate_plan", planning_task)
+        plan = self._call_agent("planning", "generate_plan", planning_task)
         if not plan:
             return {"status": "failed", "plan": [], "reason": "planning_agent_returned_no_plan"}
         serialized = [_safe_value(item) for item in plan]
@@ -324,19 +417,56 @@ class FactoryAutonomousStages:
     def authorize(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         goal = self._goal(payload)
         plan_output = payload.get("plan", {})
+
+        reason_output = payload.get("reason", {})
+        if not isinstance(reason_output, Mapping):
+            raise ControlLoopContractError(
+                "reason stage output must be a mapping"
+            )
+        
+        confidence = reason_output.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+        ):
+            raise ControlLoopContractError(
+                "reason.confidence must be an explicit "
+                "calibrated number"
+            )
+        
+        if not 0.0 <= float(confidence) <= 1.0:
+            raise ControlLoopContractError(
+                "reason.confidence must be between 0 and 1"
+            )
+        
+        if float(confidence) < self.config.min_action_confidence:
+            return {
+                "status": "review_required",
+                "approved": False,
+                "decision": "review_required",
+                "reason": "action_confidence_below_threshold",
+                "confidence": float(confidence),
+                "required_confidence": (
+                    self.config.min_action_confidence
+                ),
+            }
+    
         safety_action = goal.get("safety_action")
         if safety_action is None:
             safety_action = {
                 "name": "execute_autonomous_task",
                 "goal_id": payload.get("goal_id"),
-                "plan": plan_output.get("plan", []) if isinstance(plan_output, Mapping) else [],
+                "plan": (
+                    plan_output.get("plan", [])
+                    if isinstance(plan_output, Mapping)
+                    else []
+                ),
             }
+    
         if not isinstance(safety_action, Mapping):
             raise ControlLoopContractError("goal.safety_action must be a mapping")
-        result = self._call(
-            self._agent("safety"),
-            "validate_action",
-            dict(safety_action),
+    
+        safety_result = self._call_agent("safety", "validate_action", dict(safety_action),
             {
                 "type": "autonomous_control_loop",
                 "run_id": payload.get("run_id"),
@@ -344,9 +474,61 @@ class FactoryAutonomousStages:
                 **dict(payload.get("context", {})),
             },
         )
-        if not isinstance(result, Mapping):
-            raise ControlLoopContractError("SafetyAgent.validate_action() must return a mapping")
-        return dict(result)
+    
+        if not isinstance(safety_result, Mapping):
+            raise ControlLoopContractError(
+                "SafetyAgent.validate_action() "
+                "must return a mapping"
+            )
+    
+        alignment_task = goal.get("alignment_task")
+        if not isinstance(alignment_task, Mapping):
+            raise ControlLoopContractError(
+                "goal.alignment_task must be a mapping "
+                "compatible with "
+                "AlignmentAgent.verify_alignment()"
+            )
+    
+        alignment_result = self._call_agent("alignment", "verify_alignment", dict(alignment_task))
+    
+        if not isinstance(alignment_result, Mapping):
+            raise ControlLoopContractError(
+                "AlignmentAgent.verify_alignment() "
+                "must return a mapping"
+            )
+    
+        raw_alignment_decision = alignment_result.get("decision")
+        if not isinstance(raw_alignment_decision, Mapping):
+            raise ControlLoopContractError(
+                "AlignmentAgent.verify_alignment() must "
+                "return a mapping-valued decision"
+            )
+    
+        alignment_decision = dict(raw_alignment_decision)
+        safety_approved = (safety_result.get("approved") is True)
+        alignment_approved = (
+            alignment_decision.get("approved") is True
+            and alignment_decision.get("requires_review")
+            is not True
+        )
+    
+        approved = safety_approved and alignment_approved
+        safety_decision = str(safety_result.get("decision", safety_result.get("overall_recommendation", ""))).strip().lower()
+    
+        if approved:
+            decision = "approved"
+        elif safety_decision in {"block", "blocked", "deny", "denied"}:
+            decision = "blocked"
+        else:
+            decision = "review_required"
+    
+        return {
+            "status": decision,
+            "approved": approved,
+            "decision": decision,
+            "safety": dict(safety_result),
+            "alignment": dict(alignment_result),
+        }
 
     def execute(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         goal = self._goal(payload)
@@ -375,7 +557,7 @@ class FactoryAutonomousStages:
                 "autonomous_run_id": payload.get("run_id"),
                 "autonomous_cycle": payload.get("cycle"),
             }
-        result = self._call(self._agent("execution"), "perform_task", task)
+        result = self._call_agent("execution", "perform_task", task)
         if not isinstance(result, Mapping):
             raise ControlLoopContractError("ExecutionAgent.perform_task() must return a mapping")
         return dict(result)
@@ -383,42 +565,86 @@ class FactoryAutonomousStages:
     def evaluate(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         goal = self._goal(payload)
         evaluation_params = goal.get("evaluation_params")
-        execution = payload.get("execute", {})
-        execution_succeeded = isinstance(execution, Mapping) and _is_success(execution) and not _is_failed(execution)
+    
         if evaluation_params is None:
             return {
-                "status": "passed" if execution_succeeded else "failed",
-                "completed": execution_succeeded,
-                "reason": "execution_contract_evaluation",
+                "status": "incomplete",
+                "completed": False,
+                "passed": False,
+                "reason": "evaluation_params_required",
             }
+    
         if not isinstance(evaluation_params, Mapping):
             raise ControlLoopContractError("goal.evaluation_params must be a mapping")
+    
+        execution = payload.get("execute", {})
+        execution_succeeded = (
+            isinstance(execution, Mapping)
+            and _is_success(execution)
+            and not _is_failed(execution)
+        )
+    
+        raw_stage_metrics = payload.get("stage_metrics", {})
+        if not isinstance(raw_stage_metrics, Mapping):
+            raise ControlLoopContractError("stage_metrics must remain a mapping")
+    
         params = dict(evaluation_params)
         params.setdefault("control_loop_execution", _safe_value(execution))
-        params.setdefault("agent_performance_metrics", dict(payload.get("stage_metrics", {})))
-        result = self._call(self._agent("evaluation"), "execute_validation_cycle", params)
+        params.setdefault("agent_performance_metrics", dict(raw_stage_metrics))
+    
+        result = self._call(
+            self._agent("evaluation"),
+            "execute_validation_cycle",
+            params,
+        )
+    
         if not isinstance(result, Mapping):
-            raise ControlLoopContractError("EvaluationAgent.execute_validation_cycle() must return a mapping")
+            raise ControlLoopContractError(
+                "EvaluationAgent.execute_validation_cycle() "
+                "must return a mapping"
+            )
+    
         normalized = dict(result)
-        normalized.setdefault("completed", execution_succeeded and not _is_failed(normalized))
+        normalized.setdefault("completed", execution_succeeded
+                              and not _is_failed(normalized))
+    
         return normalized
 
     def handle(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        result = self._call(
-            self._agent("handler"),
-            "perform_task",
-            {
-                "error": payload.get("error"),
-                "task_data": self._goal(payload),
-                "context": {
-                    "source": "autonomous_control_loop",
-                    "run_id": payload.get("run_id"),
-                    "cycle": payload.get("cycle"),
-                    "stage": payload.get("failed_stage"),
-                },
-            },
+        failed_stage = str(payload.get("failed_stage", "")).strip().lower()
+    
+        target_name = self._last_failed_agent_name
+        if target_name is None:
+            target_name = self._STAGE_AGENT.get(failed_stage)
+    
+        # Prevent stale failure identity from leaking into another cycle.
+        self._last_failed_agent_name = None
+    
+        target_agent = (
+            self._agent(target_name)
+            if target_name is not None
+            else None
         )
-        return dict(result) if isinstance(result, Mapping) else {"status": "unknown", "result": _safe_value(result)}
+    
+        result = self._call(self._agent("handler"), "perform_task",
+                            {
+                                "error": payload.get("error"),
+                                "target_agent": target_agent,
+                                "task_data": self._goal(payload),
+                                "context": {
+                                    "source": "autonomous_control_loop",
+                                    "run_id": payload.get("run_id"),
+                                    "cycle": payload.get("cycle"),
+                                    "stage": failed_stage,
+                                    "agent": target_name,
+                                },
+                            },
+                        )
+    
+        if not isinstance(result, Mapping):
+            raise ControlLoopContractError("HandlerAgent.perform_task() must return a mapping")
+    
+        return dict(result)
 
     def stage_mapping(self) -> Dict[str, StageCallable]:
         return {
