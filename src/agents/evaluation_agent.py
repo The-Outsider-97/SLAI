@@ -769,7 +769,11 @@ class EvaluationAgent(BaseAgent):
 
     def _init_hyperparam_tuner(self):
         """Initialize tuner with validation"""
-        return EvalTuner(model_type=None,
+        tuner_class = globals().get("EvalTuner")
+        if tuner_class is None:
+            logger.warning("EvalTuner is unavailable; hyperparameter tuning disabled")
+            return None
+        return tuner_class(model_type=None,
             evaluation_function=self.evaluate_hyperparameters
         )
 
