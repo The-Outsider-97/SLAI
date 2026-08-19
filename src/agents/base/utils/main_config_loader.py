@@ -1,32 +1,42 @@
-import yaml
 
 from pathlib import Path
-from threading import RLock
+from typing import Any, Mapping
 
-CONFIG_PATH = "base/configs/agents_config.yaml"
+from src.utils.configuration import bind_config # type: ignore
 
-_global_config = None
-_config_lock = RLock()
-_config_sections = {}
 
-def load_global_config():
-    global _global_config
-    if _global_config is not None:
-        return _global_config
-    with _config_lock:
-        if _global_config is None:
-            config_path = Path(__file__).parent.parent.parent / CONFIG_PATH
-            with open(config_path, "r", encoding="utf-8") as f:
-                _global_config = yaml.safe_load(f)
-            _global_config["__config_path__"] = str(config_path.resolve())
-    return _global_config
+_BINDING = bind_config(
+    Path(__file__).resolve().parent.parent
+    / "configs"
+    / "agents_config.yaml"
+)
 
-def get_config_section(section_name: str) -> dict:
-    cached = _config_sections.get(section_name)
-    if cached is not None:
-        return cached
-    config = load_global_config()
-    section = config.get(section_name, {})
-    with _config_lock:
-        _config_sections.setdefault(section_name, section)
-    return section
+
+def load_global_config(
+    *,
+    force_reload: bool = False,
+    cache_ttl: float = 60.0,
+) -> dict[str, Any]:
+    return _BINDING.load(
+        force_reload=force_reload,
+        cache_ttl=cache_ttl,
+    )
+
+
+def reload_config() -> dict[str, Any]:
+    return _BINDING.reload()
+
+
+def get_config_section(
+    section_name: str,
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _BINDING.section(section_name, config=config)
+
+
+def clear_config_cache() -> None:
+    _BINDING.clear()
+
+
+def config_cache_info() -> dict[str, Any]:
+    return _BINDING.cache_info()
