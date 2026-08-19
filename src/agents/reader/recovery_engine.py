@@ -34,6 +34,9 @@ logger = get_logger("Recovery Engine")
 printer = PrettyPrinter()
 
 
+CACHE_SCHEMA_VERSION = "recovery_result.semantic_flags.v1"
+
+
 @dataclass(frozen=True)
 class RecoveryDecision:
     """Decision made after low-level cleanup and before optional semantic pass."""
@@ -243,10 +246,14 @@ class RecoveryEngine:
 
     def _cache_key(self, parsed_doc: Mapping[str, Any]) -> str:
         doc = validate_parsed_document(parsed_doc)
+    
         return recovery_cache_key(
             str(doc.get("source", "unknown")),
             str(doc.get("content", "")),
-            policy=self._settings_snapshot(),
+            policy={
+                "schema_version": CACHE_SCHEMA_VERSION,
+                **self._settings_snapshot(),
+            },
         )
 
     def _get_cached(self, key: str) -> Optional[Dict[str, Any]]:
@@ -396,51 +403,61 @@ class RecoveryEngine:
             warnings=tuple(self._limited_warnings(warnings)),
         )
 
-    def _build_result(
-        self,
-        *,
-        source: str,
-        strategy: str,
-        original: str,
-        recovered: str,
-        confidence: float,
-        decision: RecoveryDecision,
-        semantic_result: Optional[Mapping[str, Any]],
-        cache_key: str,
-        timer: Optional[OperationTimer],
-        warnings: Iterable[str],
-    ) -> Dict[str, Any]:
-        used_semantic = strategy in {"semantic", "semantic_low_confidence", "unrecoverable"}
+    def _build_result(self, *, source: str, strategy: str, original: str, recovered: str, confidence: float,
+                      decision: RecoveryDecision, semantic_result: Optional[Mapping[str, Any]],
+                      cache_key: str, timer: Optional[OperationTimer], warnings: Iterable[str]) -> Dict[str, Any]:
+        # semantic_result is populated whenever SemanticRecovery was invoked,
+        # including rejected semantic results followed by low-level fallback.
+        semantic_attempted = semantic_result is not None
+        semantic_applied = strategy == "semantic"
+    
         profile = self._profile(
             source=source,
             original=original,
             recovered=recovered,
             decision=decision,
-            used_semantic=used_semantic,
+            used_semantic=semantic_attempted,
             semantic_result=semantic_result,
             cache_key=cache_key,
             warnings=warnings,
         )
+    
         metadata: Dict[str, Any] = {
             "source": source,
-            "used_semantic": used_semantic,
+    
+            # Backward-compatible field.
+            "used_semantic": semantic_attempted,
+    
+            # Unambiguous observability fields.
+            "semantic_attempted": semantic_attempted,
+            "semantic_applied": semantic_applied,
+    
             "decision": decision.to_dict(),
             "profile": profile.to_dict(),
             "settings": self._settings_snapshot(),
             "semantic": json_safe(semantic_result or {}),
             "cache_hit": False,
         }
+    
         preview = self._debug_preview(recovered)
         if preview is not None:
             metadata["debug_preview"] = preview
+    
         if timer is not None:
             metadata["timing"] = timer.stop().to_dict()
-
+    
         return {
-            "status": "ok" if strategy != "unrecoverable" else "unrecoverable",
+            "status": (
+                "ok"
+                if strategy != "unrecoverable"
+                else "unrecoverable"
+            ),
             "strategy": strategy,
             "content": recovered,
-            "confidence": round(clamp(float(confidence), 0.0, 1.0), 3),
+            "confidence": round(
+                clamp(float(confidence), 0.0, 1.0),
+                3,
+            ),
             "quality_before": round(decision.quality_before, 3),
             "quality_after": round(profile.quality_after, 3),
             "cached": False,
