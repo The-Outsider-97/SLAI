@@ -311,6 +311,30 @@ class QueueAdapter(BaseAdapter):
             "result": json_safe(publish_result),
         }
 
+    def _queue_pressure_ratio(self) -> float:
+        outstanding = len(self._receive_buffer) + len(self._inflight_receipts)
+        return min(1.0, outstanding / float(self.max_queued_inbound_messages))
+    
+    
+    def _adjust_prefetch_for_backpressure(self) -> int:
+        if not self.prefetch_backpressure_enabled:
+            return self.prefetch_count
+    
+        pressure = self._queue_pressure_ratio()
+    
+        if pressure >= self.prefetch_backpressure_high_watermark:
+            self.prefetch_count = max(
+                self.prefetch_backpressure_min,
+                self.prefetch_count - self.prefetch_backpressure_step,
+            )
+        elif pressure <= self.prefetch_backpressure_low_watermark:
+            self.prefetch_count = min(
+                self.prefetch_backpressure_max,
+                self.prefetch_count + self.prefetch_backpressure_step,
+            )
+    
+        return self.prefetch_count
+
     def _receive_impl(self, *, timeout_ms: int, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
         if self.receive_from_buffer and self._receive_buffer:
             if self.consume_buffered_messages_on_recv:
@@ -384,6 +408,24 @@ class QueueAdapter(BaseAdapter):
                 "queue_name": receipt.get("queue_name"),
                 "delivery_tag": receipt.get("delivery_tag"),
             }
+
+        if self.requeue_on_nack:
+            if len(self._receive_buffer) >= self.max_queued_inbound_messages:
+                raise QueueBackpressureError(
+                    "Inbound requeue buffer is full.",
+                    context={
+                        "operation": "nack_requeue",
+                        "channel": self.channel,
+                        "protocol": self.protocol,
+                        "endpoint": self.session.endpoint,
+                    },
+                    details={
+                        "buffered_messages": len(self._receive_buffer),
+                        "max_queued_inbound_messages": self.max_queued_inbound_messages,
+                        "prefetch_count": self.prefetch_count,
+                    },
+                )
+            self._receive_buffer.append(receipt)
 
         self._ensure_transport_present(operation="ack")
         assert self.transport is not None
