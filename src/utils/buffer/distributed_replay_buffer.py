@@ -430,6 +430,11 @@ class DistributedReplayBuffer:
             )
 
 
+__all__ = [
+    "DistributedReplayBuffer",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Distributed Replay Buffer ===\n")
     printer.status("TEST", "Distributed Replay Buffer initialized", "info")
@@ -459,7 +464,7 @@ if __name__ == "__main__":
         printer.status("STATS", f"Buffer stats: {stats}", "success")
 
         uniform_batch = buffer.sample(batch_size=16, strategy="uniform")
-        assert uniform_batch[0].shape[0] == 16
+        assert len(uniform_batch[0]) == 16
         printer.status("SAMPLE", "Uniform sampling passed", "success")
 
         prioritized_batch, prioritized_indices, importance_weights = buffer.sample( # type: ignore
@@ -473,11 +478,11 @@ if __name__ == "__main__":
         printer.status("SAMPLE", "Prioritized sampling passed", "success")
 
         reward_batch = buffer.sample(batch_size=16, strategy="reward")
-        assert reward_batch[0].shape[0] == 16
+        assert len(reward_batch[0]) == 16
         printer.status("SAMPLE", "Reward sampling passed", "success")
 
         agent_balanced_batch = buffer.sample(batch_size=16, strategy="agent_balanced")
-        assert agent_balanced_batch[0].shape[0] == 16
+        assert len(agent_balanced_batch[0]) == 16
         printer.status("SAMPLE", "Agent-balanced sampling passed", "success")
 
         health_report = buffer.generate_health_report()

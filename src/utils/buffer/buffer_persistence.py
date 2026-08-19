@@ -594,6 +594,13 @@ def distributed_replay_state(buffer: Any) -> Dict[str, Any]:
     }
 
 
+__all__ = [
+    "build_checkpoint_io",
+    "BufferCheckpointIO",
+    "build_checkpoint_io",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running  Buffer Persistence ===\n")
     printer.status("TEST", " Buffer Persistence initialized", "info")

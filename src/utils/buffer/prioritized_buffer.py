@@ -674,6 +674,11 @@ class PrioritizedReplayBuffer:
         self.load_state_dict(checkpoint.state)
 
 
+__all__ = [
+    "PrioritizedReplayBuffer",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running  Prioritized Buffer ===\n")
     printer.status("TEST", " Prioritized Buffer initialized", "info")

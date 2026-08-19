@@ -557,6 +557,12 @@ class BufferTelemetry:
             logger.warning("[%s] slow metric %s=%.6fs", self.component_name, metric_name, elapsed)
 
 
+__all__ = [
+    "FairnessMetrics",
+    "BufferTelemetry",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running  Buffer Telemetry ===\n")
     printer.status("TEST", " Buffer Telemetry initialized", "info")

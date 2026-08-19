@@ -548,6 +548,13 @@ class ReservoirReplayBuffer:
             self._add_stats(transition)
 
 
+__all__ = [
+    "TransitionBatch",
+    "ReservoirIngestReport",
+    "ReservoirReplayBuffer",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running  Reservoir Buffer ===\n")
     printer.status("TEST", " Reservoir Buffer initialized", "info")

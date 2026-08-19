@@ -371,6 +371,12 @@ class SegmentTreeFactory:
         return SegmentTreeFactory.from_config(user_config=user_config)["priority_trees"]
 
 
+__all__ = [
+    "SegmentTree",
+    "SegmentTreeFactory",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running  Segment Tree ===\n")
     printer.status("TEST", " Segment Tree initialized", "info")

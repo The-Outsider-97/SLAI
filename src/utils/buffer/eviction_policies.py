@@ -583,6 +583,18 @@ def _tie_break(indices: Sequence[int], candidates: Sequence[EvictionCandidate], 
     return min(indices)
 
 
+__all__ = [
+    "EvictionContext",
+    "EvictionPolicy",
+    "FIFOEviction",
+    "LIFOEviction",
+    "LargestEpisodeEviction",
+    "LeastSurpriseEviction",
+    "AgeRewardHybridEviction",
+    "build_eviction_policy",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running  Eviction Policy ===\n")
     printer.status("TEST", " Eviction Policy initialized", "info")
