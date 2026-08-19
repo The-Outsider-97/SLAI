@@ -45,6 +45,19 @@ benchmark_budgets:
         max_peak_memory_mb: 4.0
 
 
+autonomous_control_loop:
+  enabled: true
+  max_cycles: 3
+  max_cycle_seconds: 45.0
+  max_run_seconds: 120.0
+  require_safety_approval: true
+  require_explicit_execution_task: true
+  stop_on_stage_error: true
+  publish_events: true
+  event_channel: "autonomy.events"
+  latest_state_key: "autonomy:control_loop:latest"
+
+
 agent_factory:
     enabled: true
     auto_register_default_agents: true
