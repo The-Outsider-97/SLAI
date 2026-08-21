@@ -1090,11 +1090,24 @@ __all__ = [
 ]
 
 if __name__ == "__main__":
-    print("\n=== Running Checkpoint Manager Comprehensive Self-Test ===\n")
-    printer.status("TEST", "Starting Checkpoint Manager tests", "info")
-    sinks = []
+    print("\n=== Running Checkpoint Observability Comprehensive Self-Test ===\n")
+    printer.status("TEST", "Starting observability tests", "info")
 
-    telemetry = CheckpointTelemetry(sinks=sinks)
-    printer.status("MANAGER", f"created {telemetry} v{telemetry}", "success")
+    sink = InMemoryEventSink()
+    telemetry = CheckpointTelemetry(sinks=[sink])
+    event = CheckpointEvent(
+        kind=CheckpointEventKind.OPERATION_STARTED,
+        severity=EventSeverity.INFO,
+        message="test event",
+        operation="save",
+    )
+    telemetry.emit(event)
+    assert len(sink.snapshot()) == 1
+    # Metrics
+    metrics = CheckpointMetrics()
+    metrics.record(event)
+    snap = metrics.snapshot()
+    assert snap.total_events == 1
+    printer.status("EVENTS", "event emission and metrics work", "success")
 
-    print("\n=== All manager tests passed ===\n")
+    print("\n=== All observability tests passed ===\n")
