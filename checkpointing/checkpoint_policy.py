@@ -1010,6 +1010,7 @@ class CheckpointPolicy:
         if active.mode is SelectionMode.HIGHEST_STEP:
             evidence["step"] = selected.step
         if active.mode is SelectionMode.BEST_METRIC:
+            assert active.objective_direction is not None
             evidence.update(
                 {
                     "objective": active.objective_name,
