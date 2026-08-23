@@ -355,9 +355,9 @@ class MetaLearningWorker:
         candidates = self._generate_candidates()
         candidate_array = np.vstack([self._hyperparams_to_array(c) for c in candidates])
 
-        means, stds = self.bnn.predict(candidate_array, num_samples=self.prediction_samples)
-        means = np.asarray(means, dtype=np.float64).reshape(-1)
-        stds = np.asarray(stds, dtype=np.float64).reshape(-1)
+        distribution = self.bnn.predict_distribution(candidate_array, num_samples=self.prediction_samples)
+        means = np.asarray(distribution["mean"], dtype=np.float64).reshape(-1)
+        stds = np.asarray(distribution["epistemic_std"], dtype=np.float64).reshape(-1)
 
         y_reference = self._denormalize_targets(y, normalization) if self.normalize_targets else y
         means_reference = self._denormalize_targets(means, normalization) if self.normalize_targets else means
@@ -584,7 +584,6 @@ class MetaLearningWorker:
             validation_data=validation_data,
             early_stopping_patience=self.early_stopping_patience,
             min_delta=self.min_delta,
-            verbose=False,
         )
         self.last_training_summary = history
         return history
@@ -726,7 +725,7 @@ class MetaLearningWorker:
             "hyperparameter_space": self.hyperparameter_space,
             "last_training_summary": self.last_training_summary,
             "last_suggestion": self.last_suggestion,
-            "bnn_state": self.bnn.to_serializable_dict(include_history=True),
+            "bnn_state": self.bnn.state_dict(),
         }
 
     def import_state(self, state: Mapping[str, Any]) -> None:
@@ -740,22 +739,7 @@ class MetaLearningWorker:
 
         bnn_state = state.get("bnn_state")
         if isinstance(bnn_state, Mapping):
-            self.bnn = BayesianNeuralNetwork(
-                layer_sizes=bnn_state["layer_sizes"],
-                learning_rate=float(bnn_state.get("learning_rate", self.bnn.learning_rate)),
-                prior_mu=float(bnn_state.get("prior_mu", self.bnn.prior_mu)),
-                prior_logvar=float(bnn_state.get("prior_logvar", self.bnn.prior_logvar)),
-                random_state=bnn_state.get("random_state", self.random_state),
-                logvar_clip_range=tuple(bnn_state.get("logvar_clip_range", [-8.0, 4.0])),
-                gradient_clip_norm=bnn_state.get("gradient_clip_norm"),
-                weight_init_scale=float(bnn_state.get("weight_init_scale", 1.0)),
-                hidden_activation=str(bnn_state.get("hidden_activation", "relu")),
-                likelihood_std=float(bnn_state.get("likelihood_std", 1.0)),
-                min_variance=float(bnn_state.get("min_variance", 1e-6)),
-                stability_epsilon=float(bnn_state.get("stability_epsilon", 1e-8)),
-                leaky_relu_slope=float(bnn_state.get("leaky_relu_slope", 0.01)),
-            )
-            self.bnn._load_from_payload(bnn_state, validate_shapes=True)
+            self.bnn.load_state_dict(bnn_state)
 
     def save_checkpoint(self, path: str) -> Path:
         output_path = Path(path)
