@@ -1,0 +1,251 @@
+# SLAI v2.3 tuning configuration
+#
+# Search selects candidates, evaluators produce trial evidence, promotion is an
+# explicit policy decision, and tuning_artifacts persists immutable run data.
+
+schema_version: 2
+
+# Change this to BayesianNeuralNetwork when tuning the variational model.
+model_type: DenseNeuralNetwork
+
+tuning:
+  strategy: bayesian  # bayesian | grid
+  allow_generate: false
+
+  # Objective direction is always explicit. Search code never infers direction
+  # from a metric name.
+  objective:
+    name: rmse
+    direction: minimize
+    unit: null
+
+# ---------------------------------------------------------------------------
+# Search strategies
+# ---------------------------------------------------------------------------
+
+bayesian_search:
+  n_trials: 40
+  n_initial_points: 8
+  random_state: 42
+  candidate_pool_size: 1024
+  fail_fast: false
+
+  acquisition:
+    name: expected_improvement
+    exploration: 0.01
+
+  surrogate:
+    kernel: matern
+    matern_nu: 2.5
+    normalize_y: true
+    noise: 1.0e-6
+    optimizer_restarts: 2
+
+grid_search:
+  fail_fast: false
+
+  # null evaluates the complete Cartesian product. Set an integer only when an
+  # operational policy requires a hard cardinality limit.
+  max_combinations: null
+
+# ---------------------------------------------------------------------------
+# Supervised evaluation
+# ---------------------------------------------------------------------------
+
+supervised_evaluation:
+  objective:
+    name: rmse
+    direction: minimize
+
+  metrics:
+    - rmse
+    - mae
+    - r2
+
+  # Prespecify seeds before a study; do not select them from observed results.
+  seeds:
+    - 11
+    - 29
+    - 47
+
+  split_strategy: nested_k_fold  # holdout | nested_k_fold | time_series
+  validation_fraction: 0.15
+  n_splits: 5
+  shuffle: true
+
+  # Thresholds belong to an explicit SLAI policy and are not assumed here.
+  constraints: []
+
+# ---------------------------------------------------------------------------
+# Agent evaluation
+# ---------------------------------------------------------------------------
+
+agent_evaluation:
+  objective:
+    name: task_utility
+    direction: maximize
+
+  seeds:
+    - 11
+    - 29
+    - 47
+
+  state:
+    source: fresh  # fresh | checkpoint
+    checkpoint_id: null
+    cleanup: auto  # auto restores checkpoints and discards fresh candidates
+
+  calibration_bins: 10
+  require_calibration: true
+  fail_fast: true
+
+  # Add thresholds only after safety, latency, memory, stability, and
+  # calibration limits have been justified by policy or baseline evidence.
+  constraints: []
+
+# ---------------------------------------------------------------------------
+# Network defaults
+# ---------------------------------------------------------------------------
+
+bnn:
+  task_type: regression
+  learning_rate: 0.005
+  prior_mu: 0.0
+  prior_logvar: 0.0
+  posterior_rho_init: -3.0
+  likelihood_std: 1.0
+  hidden_activation: relu
+  leaky_relu_slope: 0.01
+  weight_init_scale: 0.75
+  gradient_clip_norm: 5.0
+  beta1: 0.9
+  beta2: 0.999
+  adam_epsilon: 1.0e-8
+  prediction_threshold: 0.5
+  stability_epsilon: 1.0e-8
+  random_state: 42
+
+  training:
+    epochs: 200
+    batch_size: 64
+    num_samples: 5
+    validation_num_samples: 20
+    shuffle: true
+    early_stopping_patience: 15
+    min_delta: 1.0e-4
+    restore_best_weights: true
+
+  prediction:
+    num_samples: 200
+    lower_quantile: 0.05
+    upper_quantile: 0.95
+
+dnn:
+  task_type: regression
+  learning_rate: 0.001
+  hidden_activation: relu
+  leaky_relu_slope: 0.01
+  weight_init_scale: 1.0
+  gradient_clip_norm: 5.0
+  l2_lambda: 1.0e-4
+  dropout_rate: 0.10
+  beta1: 0.9
+  beta2: 0.999
+  adam_epsilon: 1.0e-8
+  prediction_threshold: 0.5
+  stability_epsilon: 1.0e-8
+  random_state: 42
+
+  training:
+    epochs: 120
+    batch_size: 64
+    shuffle: true
+    early_stopping_patience: 12
+    min_delta: 1.0e-4
+    restore_best_weights: true
+
+# ---------------------------------------------------------------------------
+# Search spaces
+#
+# Explicit value sets make the same space valid for both grid and Bayesian
+# search. Bayesian optimization treats ordered numeric values as ordinal and
+# hidden-layer alternatives as categorical.
+# ---------------------------------------------------------------------------
+
+hyperparameters:
+  BayesianNeuralNetwork:
+    - name: hidden_layer_sizes
+      type: categorical
+      values:
+        - [64]
+        - [128]
+        - [128, 64]
+        - [256, 128]
+
+    - name: learning_rate
+      type: real
+      values: [0.0005, 0.001, 0.005]
+
+    - name: batch_size
+      type: integer
+      values: [32, 64]
+
+    - name: epochs
+      type: integer
+      values: [100, 200]
+
+    - name: num_samples
+      type: integer
+      values: [3, 5, 10]
+
+    - name: prior_logvar
+      type: real
+      values: [-2.0, -1.0, 0.0]
+
+    - name: likelihood_std
+      type: real
+      values: [0.5, 1.0, 1.5]
+
+  DenseNeuralNetwork:
+    - name: hidden_layer_sizes
+      type: categorical
+      values:
+        - [64]
+        - [128]
+        - [128, 64]
+        - [256, 128]
+
+    - name: learning_rate
+      type: real
+      values: [0.0005, 0.001, 0.003]
+
+    - name: batch_size
+      type: integer
+      values: [32, 64]
+
+    - name: epochs
+      type: integer
+      values: [80, 120]
+
+    - name: hidden_activation
+      type: categorical
+      values: [relu, tanh]
+
+    - name: dropout_rate
+      type: real
+      values: [0.0, 0.1]
+
+    - name: l2_lambda
+      type: real
+      values: [0.0, 0.0001, 0.001]
+
+# ---------------------------------------------------------------------------
+# Immutable run artifacts
+# ---------------------------------------------------------------------------
+
+tuning_artifacts:
+  output_dir: src/tuning/reports
+  write_summary: true
+  write_trials: true
+  write_config_snapshot: true
+  indent: 2
