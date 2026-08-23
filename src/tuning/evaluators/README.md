@@ -168,8 +168,10 @@ mean per seed, then reports population standard deviation and standard error
 over those seed means:
 
 $$
-\operatorname{SEM}_{\text{seed}}
+\[
+\mathrm{SEM}_{\text{seed}}
 = \frac{s_{\text{seed}}}{\sqrt{S}},
+\]
 $$
 
 where $S$ is the number of evaluated seeds.
