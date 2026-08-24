@@ -151,7 +151,7 @@ class AgentFactoryConfig:
         payload = normalize_payload(data)
         history_size = ensure_positive_int(int(payload.get("creation_history_size", 100)), "agent_factory.creation_history_size")
 
-        def _tuple_of_strings(key: str, default: Sequence[str] = ()) -> Tuple[str, ...]:
+        def _tuple_of_strings(key: str, default: Tuple[str, ...] = ()) -> Tuple[str, ...]:
             raw = payload.get(key, default)
             if raw in (None, ""):
                 return tuple()
