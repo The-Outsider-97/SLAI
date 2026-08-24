@@ -28,29 +28,26 @@ import uuid
 
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import RLock
-from typing import Any, Deque, Dict, Iterable, Mapping, MutableMapping, Optional, Sequence, Tuple, Type
+from typing import Any, Deque, Dict, Iterable, Mapping, MutableMapping, Optional, Sequence, Tuple, Type, cast
 
-from .base.utils.main_config_loader import get_config_section, load_global_config
-from .base_agent import BaseAgent
-from .factory.agent_meta_data import AgentMetaData, AgentRegistry
-from .factory.factory_cache import FactoryCache
-from .factory.factory_obs import FactoryObservability
-from .factory.metrics_adapter import MetricsAdapter
-from .factory.out_of_process_agent import OutOfProcessAgentProxy
+from .factory.agent_meta_data import *
+from .factory.factory_cache import *
+from .factory.factory_obs import *
+from .factory.metrics_adapter import *
+from .factory.out_of_process_agent import *
 from .factory.utils.factory_errors import *
 from .factory.utils.factory_helpers import *
-from .runtime_contracts import (
-    AgentRuntimeIdentity,
-    RuntimeContractViolation,
-    RuntimeLifecycle,
-    RuntimeStatus,
-    build_runtime_scope_id,
-)
+from .runtime_contracts import *
+from ..utils.configuration import bind_config
 from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Agent Factory")
 printer = PrettyPrinter()
+_AGENTS_CONFIG = bind_config(
+    Path(__file__).resolve().parent / "base" / "configs" / "agents_config.yaml"
+)
 
 
 @dataclass(slots=True)
@@ -218,7 +215,7 @@ class AgentFactory:
         "observability": {"module_path": "src.agents.observability_agent", "class_name": "ObservabilityAgent"},
         "perception": {"module_path": "src.agents.perception_agent", "class_name": "PerceptionAgent"},
         "planning": {"module_path": "src.agents.planning_agent", "class_name": "PlanningAgent"},
-        "privacy": {"module_path": "src.agents.privacy_agent",},
+        "privacy": {"module_path": "src.agents.privacy_agent", "class_name": "PrivacyAgent"},
         "qnn": {"module_path": "src.agents.qnn_agent", "class_name": "QNNAgent"},
         "quality": {"module_path": "src.agents.quality_agent", "class_name": "QualityAgent"},
         "reader": {"module_path": "src.agents.reader_agent", "class_name": "ReaderAgent"},
@@ -268,7 +265,7 @@ class AgentFactory:
     }
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
-        self.global_config = load_global_config()
+        self.global_config = _AGENTS_CONFIG.load()
         if not isinstance(self.global_config, MutableMapping):
             raise InvalidFactoryConfigurationError(
                 "agents_config.yaml must load into a mapping",
@@ -277,7 +274,9 @@ class AgentFactory:
                 operation="load_global_config",
             )
 
-        self.agent_factory_config: Dict[str, Any] = dict(get_config_section("agent_factory") or {})
+        self.agent_factory_config: Dict[str, Any] = dict(
+            _AGENTS_CONFIG.section("agent_factory", config=self.global_config) or {}
+        )
         if config:
             overrides = normalize_payload(config)
             nested_overrides = normalize_payload(overrides.get("agent_factory")) if isinstance(overrides.get("agent_factory"), Mapping) else overrides
@@ -528,9 +527,6 @@ class AgentFactory:
                 context={"candidates": list(normalized), "unavailable": dict(self.unavailable_agents)},
             )
 
-        # Reuse existing metrics adapter to preserve adaptation semantics and history.
-        self.run_adaptation_cycle(metrics, available)
-
         scored = sorted(((candidate, self._score_health_candidate(candidate, metrics)) for candidate in available), key=lambda item: item[1], reverse=True)
         selected, score = scored[0]
         self._record_event("agent.route.selected", {"selected": selected, "score": score, "candidates": available})
@@ -579,6 +575,7 @@ class AgentFactory:
             )
         with self._lock:
             previous: Optional[AgentMetaData] = None
+            original_lifecycle = metadata.lifecycle
             try:
                 previous = self.registry.get(metadata.name, version=metadata.version)
             except (AgentNotRegisteredError, AgentVersionUnavailableError):
@@ -598,14 +595,16 @@ class AgentFactory:
                 else:
                     registered = self.registry.register(metadata)
             except FactoryError:
+                metadata.lifecycle = original_lifecycle
                 raise
             except Exception as exc:
-                raise FactoryRegistryError.from_exception(
-                    exc,
+                metadata.lifecycle = original_lifecycle
+                raise FactoryRegistryError(
                     message=f"Failed to register agent '{getattr(metadata, 'name', 'unknown')}'",
                     component="agent_factory",
                     operation="register_agent",
                     context={"agent_name": getattr(metadata, "name", None)},
+                    cause=exc,
                 ) from exc
 
             if previous is not None and previous is not metadata:
@@ -651,11 +650,12 @@ class AgentFactory:
         imports succeed.
         """
         discovered: Dict[str, Dict[str, Any]] = {}
+        base_agent_cls = self._base_agent_class()
         package_names = tuple(packages or self.settings.discovery_packages)
         for package_name in package_names:
             package = importlib.import_module(package_name)
             for _, obj in inspect.getmembers(package):
-                if inspect.isclass(obj) and issubclass(obj, BaseAgent) and obj is not BaseAgent:
+                if inspect.isclass(obj) and issubclass(obj, base_agent_cls) and obj is not base_agent_cls:
                     name = obj.__name__.removesuffix("Agent").lower()
                     spec = {"module_path": obj.__module__, "class_name": obj.__name__, "version": self.settings.default_version}
                     metadata = AgentMetaData(**self._metadata_constructor_kwargs(spec, name))
@@ -667,6 +667,14 @@ class AgentFactory:
     # ------------------------------------------------------------------
     # Agent resolution and construction
     # ------------------------------------------------------------------
+    @staticmethod
+    def _base_agent_class() -> Type[Any]:
+        """Import BaseAgent only for operations that require subclass checks."""
+
+        from .base_agent import BaseAgent
+
+        return BaseAgent
+
     def normalize_agent_type(self, agent_type: str) -> str:
         name = validate_agent_name(agent_type, max_length=128)
         resolved = self._agent_aliases.get(name, name)
@@ -690,12 +698,12 @@ class AgentFactory:
                 cause=exc,
             ) from exc
         except Exception as exc:
-            raise AgentSelectionError.from_exception(
-                exc,
+            raise AgentSelectionError(
                 message=f"Failed to select agent metadata for '{normalized}'",
                 component="agent_factory",
                 operation="get_metadata",
                 context={"agent_type": normalized, "version": version},
+                cause=exc,
             ) from exc
         self._profile_hot_path("factory.metadata_lookup", started_ms, agent_type=normalized, version=version)
         return metadata
@@ -761,18 +769,25 @@ class AgentFactory:
                 context={"agent_type": agent_type, "definition_id": definition_id, "profile": profile},
             )
 
-    def _resolve_dependency_order(self, agent_type: str) -> Tuple[str, ...]:
+    def _resolve_dependency_order(
+        self,
+        agent_type: str,
+        *,
+        version: Optional[str] = None,
+    ) -> Tuple[str, ...]:
         try:
-            load_order = tuple(self.registry.resolve_dependency_tree(agent_type))
+            load_order = tuple(
+                self.registry.resolve_dependency_tree(agent_type, version=version)
+            )
         except FactoryError:
             raise
         except Exception as exc:
-            raise DependencyResolutionError.from_exception(
-                exc,
+            raise DependencyResolutionError(
                 message=f"Failed to resolve dependencies for '{agent_type}'",
                 component="agent_factory",
                 operation="resolve_dependency_order",
                 context={"agent_type": agent_type},
+                cause=exc,
             ) from exc
         return load_order
 
@@ -799,12 +814,12 @@ class AgentFactory:
                 cause=exc,
             ) from exc
         except ImportError as exc:
-            raise AgentModuleImportError.from_exception(
-                exc,
+            raise AgentModuleImportError(
                 message=f"Agent module import failed for '{module_path}'",
                 component="agent_factory",
                 operation="resolve_agent_class",
                 context={"module_path": module_path, "class_name": class_name},
+                cause=exc,
             ) from exc
         except AttributeError as exc:
             raise AgentClassResolutionError(
@@ -817,15 +832,15 @@ class AgentFactory:
         except Exception as exc:
             if self._is_native_dependency_failure(exc):
                 raise
-            raise FactoryResolutionError.from_exception(
-                exc,
+            raise FactoryResolutionError(
                 message=f"Failed to resolve agent class '{class_name}' from '{module_path}'",
                 component="agent_factory",
                 operation="resolve_agent_class",
                 context={"module_path": module_path, "class_name": class_name},
+                cause=exc,
             ) from exc
 
-        if self.settings.strict_base_agent_subclass and not issubclass(agent_cls, BaseAgent):
+        if self.settings.strict_base_agent_subclass and not issubclass(agent_cls, self._base_agent_class()):
             raise AgentClassResolutionError(
                 f"Agent class '{class_name}' must inherit BaseAgent",
                 component="agent_factory",
@@ -854,6 +869,35 @@ class AgentFactory:
         )
         self.degraded_count = getattr(self, "degraded_count", 0) + 1
         self._record_event("agent.oopa_fallback", {"agent_type": agent_type, "error": str(exc)})
+        return proxy
+
+    def _activate_oopa_fallback(
+        self,
+        agent_type: str,
+        metadata: AgentMetaData,
+        scope_id: str,
+        exc: BaseException,
+        started_ms: float,
+    ) -> OutOfProcessAgentProxy:
+        """Create and register a degraded stateless-isolation proxy."""
+
+        proxy = self._create_oopa_proxy(agent_type, metadata, exc)
+        record = self._store_instance(
+            metadata,
+            proxy,
+            scope_id,
+            lifecycle=RuntimeLifecycle.DEGRADED,
+            implementation="out_of_process_proxy",
+        )
+        record.status.mark_degraded("runtime", "out_of_process_fallback", exc)
+        self._record_creation(
+            agent_type,
+            "degraded",
+            started_ms,
+            metadata,
+            implementation="out_of_process_proxy",
+            error=str(exc),
+        )
         return proxy
 
     def _get_constructor_signature(self, agent_cls: Type[Any]) -> Dict[str, Any]:
@@ -894,6 +938,8 @@ class AgentFactory:
         shared_memory: Any,
         agent_config: Mapping[str, Any],
         kwargs: Mapping[str, Any],
+        *,
+        required_params: Sequence[str] = (),
     ) -> Dict[str, Any]:
         signature_meta = self._get_constructor_signature(agent_cls)
         constructor_params = signature_meta["params"]
@@ -918,6 +964,22 @@ class AgentFactory:
 
         if unsupported:
             logger.debug("Skipping unsupported constructor args for %s: %s", agent_type, unsupported)
+        missing_required = sorted(
+            parameter
+            for parameter in required_params
+            if parameter not in constructor_args or constructor_args[parameter] is None
+        )
+        if missing_required:
+            raise AgentConstructionError(
+                f"Required constructor parameters are missing for agent '{agent_type}'",
+                component="agent_factory",
+                operation="build_constructor_args",
+                context={
+                    "agent_type": agent_type,
+                    "missing_required_params": missing_required,
+                    "provided_params": sorted(constructor_args),
+                },
+            )
         return constructor_args
 
     def _verify_action_surface(self, agent_type: str, instance: Any) -> None:
@@ -1019,28 +1081,37 @@ class AgentFactory:
 
             try:
                 if self.settings.create_dependencies:
-                    for dependency in self._resolve_dependency_order(normalized)[:-1]:
+                    for dependency in self._resolve_dependency_order(
+                        normalized,
+                        version=str(metadata.version),
+                    )[:-1]:
                         self.create(dependency, shared_memory)
 
                 try:
                     agent_cls = self._resolve_agent_class(metadata)
                 except Exception as exc:
                     if self._should_use_oopa_fallback(normalized, exc):
-                        proxy = self._create_oopa_proxy(normalized, metadata, exc)
-                        record = self._store_instance(
-                            metadata,
-                            proxy,
-                            scope_id,
-                            lifecycle=RuntimeLifecycle.DEGRADED,
-                            implementation="out_of_process_proxy",
+                        return self._activate_oopa_fallback(
+                            normalized, metadata, scope_id, exc, started_ms
                         )
-                        record.status.mark_degraded("runtime", "out_of_process_fallback", exc)
-                        self._record_creation(normalized, "degraded", started_ms, metadata, implementation="out_of_process_proxy", error=str(exc))
-                        return proxy
                     raise
 
-                constructor_args = self._build_constructor_args(normalized, agent_cls, shared_memory, agent_config, kwargs)
-                instance = agent_cls(**constructor_args)
+                constructor_args = self._build_constructor_args(
+                    normalized,
+                    agent_cls,
+                    shared_memory,
+                    agent_config,
+                    kwargs,
+                    required_params=metadata.required_params,
+                )
+                try:
+                    instance = agent_cls(**constructor_args)
+                except Exception as exc:
+                    if self._should_use_oopa_fallback(normalized, exc):
+                        return self._activate_oopa_fallback(
+                            normalized, metadata, scope_id, exc, started_ms
+                        )
+                    raise
                 try:
                     self._verify_action_surface(normalized, instance)
                     record = self._store_instance(metadata, instance, scope_id)
@@ -1061,34 +1132,37 @@ class AgentFactory:
 
             except FactoryError as exc:
                 unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
-                self.unavailable_agents[unavailable_key] = exc.summary()
+                if not exc.retryable:
+                    self.unavailable_agents[unavailable_key] = exc.summary()
                 self._record_counter("create.failed")
                 self._record_creation(normalized, "error", started_ms, metadata, error=str(exc))
                 exc.log()
                 raise
             except TypeError as exc:
-                error = AgentConstructionError.from_exception(
-                    exc,
+                error = AgentConstructionError(
                     message=f"Constructor arguments failed for agent '{normalized}'",
                     component="agent_factory",
                     operation="create",
                     context={"agent_type": normalized, "class_name": metadata.class_name},
+                    cause=exc,
                 )
                 unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
-                self.unavailable_agents[unavailable_key] = error.summary()
+                if not error.retryable:
+                    self.unavailable_agents[unavailable_key] = error.summary()
                 self._record_counter("create.failed")
                 self._record_creation(normalized, "error", started_ms, metadata, error=str(error))
                 raise error from exc
             except Exception as exc:
-                error = AgentInitializationError.from_exception(
-                    exc,
+                error = AgentInitializationError(
                     message=f"Failed to initialize agent '{normalized}'",
                     component="agent_factory",
                     operation="create",
                     context={"agent_type": normalized, "module_path": metadata.module_path, "class_name": metadata.class_name},
+                    cause=exc,
                 )
                 unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
-                self.unavailable_agents[unavailable_key] = error.summary()
+                if not error.retryable:
+                    self.unavailable_agents[unavailable_key] = error.summary()
                 self._record_counter("create.failed")
                 self._record_creation(normalized, "error", started_ms, metadata, error=str(error))
                 raise error from exc
@@ -1193,30 +1267,50 @@ class AgentFactory:
             adapter = self._get_metrics_adapter()
             if hasattr(adapter, "process_metrics_result"):
                 result = adapter.process_metrics_result(dict(metrics), list(targets))
-                adjustments = dict(result.bounded_adjustments) if hasattr(result, "bounded_adjustments") else result
+                adjustments: Mapping[str, Any] = (
+                    dict(result.bounded_adjustments) if hasattr(result, "bounded_adjustments") else cast(Mapping[str, Any], result)
+                )
             else:
-                adjustments = adapter.process_metrics(dict(metrics), list(targets))
+                adjustments = cast(Mapping[str, Any], adapter.process_metrics(dict(metrics), list(targets)))
 
+            applied_updates: Dict[str, Any] = {}
             if hasattr(adapter, "update_factory_config"):
-                adapter.update_factory_config(self, adjustments) # type: ignore
+                applied_updates = adapter.update_factory_config(  # type: ignore
+                    self,
+                    adjustments,
+                    agent_types=targets,
+                )
 
             safe_adjustments = safe_serialize(adjustments, redact=True)
+            safe_updates = safe_serialize(applied_updates, redact=True)
             self._cache_set("adaptation:latest", safe_adjustments)
             self._record_counter("adaptation.succeeded")
             self._record_timing("adaptation.duration_ms", started_ms)
-            self._record_event("adaptation.completed", {"agent_types": targets, "adjustments": safe_adjustments})
-            return {"status": "ok", "agent_types": list(targets), "adjustments": safe_adjustments}
+            self._record_event(
+                "adaptation.completed",
+                {
+                    "agent_types": targets,
+                    "adjustments": safe_adjustments,
+                    "applied_updates": safe_updates,
+                },
+            )
+            return {
+                "status": "ok" if applied_updates else "no_op",
+                "agent_types": list(targets),
+                "adjustments": safe_adjustments,
+                "applied_updates": safe_updates,
+            }
         except FactoryError:
             self._record_counter("adaptation.failed")
             raise
         except Exception as exc:
             self._record_counter("adaptation.failed")
-            raise MetricsAdapterError.from_exception(
-                exc,
+            raise MetricsAdapterError(
                 message="AgentFactory adaptation cycle failed",
                 component="agent_factory",
                 operation="run_adaptation_cycle",
                 context={"agent_types": targets},
+                cause=exc,
             ) from exc
 
     def inspect_registered_agents(self, *, import_check: Optional[bool] = None, constructor_check: Optional[bool] = None) -> Dict[str, Dict[str, Any]]:
@@ -1244,7 +1338,7 @@ class AgentFactory:
             if import_check:
                 try:
                     cls = self._resolve_agent_class(metadata)
-                    if self.settings.strict_base_agent_subclass and not issubclass(cls, BaseAgent):
+                    if self.settings.strict_base_agent_subclass and not issubclass(cls, self._base_agent_class()):
                         info["status"] = "warning"
                         info["issues"].append("Class is not a BaseAgent subclass.")
                     if constructor_check:

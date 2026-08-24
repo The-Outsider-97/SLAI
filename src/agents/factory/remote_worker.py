@@ -6,7 +6,7 @@ import sys
 
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, TextIO, Tuple, Type
+from typing import Any, Dict, Mapping, Optional, TextIO, Tuple, Type
 
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.factory_errors import *
@@ -483,6 +483,17 @@ def main(raw_input: Optional[str] = None, stdout: TextIO = sys.stdout, stderr: T
         stderr.write(err_text)
     return exit_code
 
+
+__all__ = [
+    "DEFAULT_ALLOWED_METHODS",
+    "DEFAULT_ALLOWED_MODULE_PREFIXES",
+    "DEFAULT_CONSTRUCTOR_DEPENDENCIES",
+    "RemoteWorkerConfig",
+    "RemoteWorkerRequest",
+    "RemoteWorkerInvocation",
+    "RemoteWorker",
+    "main",
+]
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Public utility surface for the QNN agent subsystem."""
+"""Public utility surface for the Agent Factory subsystem."""
 
 from .factory_errors import *
 from .factory_helpers import *

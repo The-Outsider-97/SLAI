@@ -437,6 +437,15 @@ def reset_factory_observability() -> FactoryObservability:
         return _default_observability
 
 
+__all__ = [
+    "TimingStats",
+    "EventRecord",
+    "FactoryObservability",
+    "get_factory_observability",
+    "reset_factory_observability",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Factory Observability ===\n")
     printer.status("TEST", "Factory Observability initialized", "info")

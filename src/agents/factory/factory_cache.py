@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any, Dict, Generic, Hashable, Iterable, Iterator, Mapping, Optional, Tuple, TypeVar, cast
+from typing import Any, Dict, Generic, Hashable, Iterator, Mapping, Optional, Tuple, TypeVar, cast
 
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.factory_errors import *
@@ -232,8 +232,8 @@ class FactoryCache(Generic[K, V]):
         if self.record_stats:
             self._stats.misses += 1
 
-    def _compute_expiry(self, ttl_seconds: Optional[float]) -> Optional[float]:
-        ttl = self.default_ttl_seconds if ttl_seconds is None else ttl_seconds
+    def _compute_expiry(self, ttl_seconds: Any = _MISSING) -> Optional[float]:
+        ttl = self.default_ttl_seconds if ttl_seconds is _MISSING else ttl_seconds
         try:
             validated_ttl = validate_cache_ttl(ttl, field_name="ttl_seconds")
         except FactoryCacheError:
@@ -294,7 +294,7 @@ class FactoryCache(Generic[K, V]):
             self._stats.cleanups += 1
         return removed
 
-    def set(self, key: K, value: V, ttl_seconds: Optional[float] = None, *,
+    def set(self, key: K, value: V, ttl_seconds: Any = _MISSING, *,
             metadata: Optional[Mapping[str, Any]] = None) -> None:
         """Insert or update a cache value."""
         validated_key = validate_cache_key(key)
@@ -345,7 +345,7 @@ class FactoryCache(Generic[K, V]):
             self._record_hit()
             return entry.value
 
-    def get_or_set(self, key: K, factory: Any, ttl_seconds: Optional[float] = None, *,
+    def get_or_set(self, key: K, factory: Any, ttl_seconds: Any = _MISSING, *,
                    metadata: Optional[Mapping[str, Any]] = None) -> V:
         """Return cached value, or compute/store one through ``factory``.
 
@@ -362,7 +362,14 @@ class FactoryCache(Generic[K, V]):
 
     def peek(self, key: K, default: Optional[V] = None) -> Optional[V]:
         """Return a value without moving it to the LRU tail or incrementing hits."""
-        return self.get(key, default=default, touch=False)
+        validated_key = validate_cache_key(key)
+        with self._lock:
+            entry = self._store.get(validated_key)
+            if entry is None:
+                return default
+            if self._remove_expired_unlocked(validated_key, entry):
+                return default
+            return entry.value
 
     def pop(self, key: K, default: Optional[V] = None) -> Optional[V]:
         """Remove and return a value, or ``default`` when missing/expired."""
@@ -456,7 +463,7 @@ class FactoryCache(Generic[K, V]):
     def size(self) -> int:
         """Return the number of currently stored entries."""
         with self._lock:
-            self._maybe_cleanup_unlocked()
+            self._cleanup_expired_unlocked()
             return len(self._store)
 
     def is_empty(self) -> bool:
@@ -466,19 +473,19 @@ class FactoryCache(Generic[K, V]):
     def keys(self) -> Tuple[K, ...]:
         """Return non-expired keys in LRU order."""
         with self._lock:
-            self._maybe_cleanup_unlocked()
+            self._cleanup_expired_unlocked()
             return tuple(self._store.keys())
 
     def values(self) -> Tuple[V, ...]:
         """Return non-expired values in LRU order."""
         with self._lock:
-            self._maybe_cleanup_unlocked()
+            self._cleanup_expired_unlocked()
             return tuple(entry.value for entry in self._store.values())
 
     def items(self) -> Iterator[Tuple[K, V]]:
         """Yield non-expired ``(key, value)`` pairs in LRU order."""
         with self._lock:
-            self._maybe_cleanup_unlocked()
+            self._cleanup_expired_unlocked()
             snapshot = tuple((key, entry.value) for key, entry in self._store.items())
         yield from snapshot
 
@@ -496,7 +503,7 @@ class FactoryCache(Generic[K, V]):
     def stats(self) -> Dict[str, Any]:
         """Return validated runtime cache statistics."""
         with self._lock:
-            self._maybe_cleanup_unlocked()
+            self._cleanup_expired_unlocked()
             payload = self._stats.to_dict(size=len(self._store), max_size=self.max_size)
         try:
             validate_cache_stats(payload)
@@ -513,7 +520,7 @@ class FactoryCache(Generic[K, V]):
     def snapshot(self, *, include_values: bool = False, redact: bool = True) -> Dict[str, Any]:
         """Return a diagnostic snapshot for observability and tests."""
         with self._lock:
-            self._maybe_cleanup_unlocked()
+            self._cleanup_expired_unlocked()
             entries = {
                 safe_serialize(key, redact=redact): entry.to_metadata(include_value=include_values, redact=redact)
                 for key, entry in self._store.items()
@@ -547,6 +554,13 @@ class FactoryCache(Generic[K, V]):
             f"FactoryCache(name={self.name!r}, size={self.size()}, max_size={self.max_size}, "
             f"default_ttl_seconds={self.default_ttl_seconds!r})"
         )
+
+
+__all__ = [
+    "CacheEntry",
+    "CacheStats",
+    "FactoryCache",
+]
 
 
 if __name__ == "__main__":

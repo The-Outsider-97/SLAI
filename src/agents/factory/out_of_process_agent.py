@@ -7,7 +7,8 @@ import sys
 import time as time_module
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from threading import RLock
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.factory_errors import *
@@ -41,13 +42,15 @@ class OutOfProcessCallRecord:
 @dataclass(slots=True)
 class OutOfProcessAgentProxy:
     """
-    Runs agent calls in an isolated Python subprocess.
+    Runs each agent call in a fresh isolated Python subprocess.
 
     The proxy is intentionally part of the factory-isolation boundary: it does
     not own registry logic, routing decisions, learning loops, or governance
     policy. Its responsibility is to safely invoke an already-resolved agent
     implementation in a child Python process and return either the worker result
-    or a structured degraded result when isolation fails.
+    or a structured degraded result when isolation fails. The proxy is
+    deliberately stateless across calls and must not be treated as a persistent
+    remote-agent runtime.
     """
 
     agent_type: str
@@ -81,11 +84,19 @@ class OutOfProcessAgentProxy:
     failure_count: int = field(default=0, init=False)
     last_error: Optional[str] = field(default=None, init=False)
     last_duration_ms: Optional[float] = field(default=None, init=False)
+    last_returncode: Optional[int] = field(default=None, init=False)
     _history: list[OutOfProcessCallRecord] = field(default_factory=list, init=False, repr=False)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.config = load_global_config()
         self.oopa_config = get_config_section("oopa")
+        if not bool(self.oopa_config.get("enabled", True)):
+            raise InvalidFactoryConfigurationError(
+                "Out-of-process agent proxy is disabled by configuration",
+                component="out_of_process_agent",
+                operation="initialize",
+            )
 
         self.agent_type = validate_agent_name(self.agent_type, max_length=128)
         allowed_prefixes = self._configured_allowed_module_prefixes()
@@ -256,30 +267,38 @@ class OutOfProcessAgentProxy:
         """Invoke a worker method and always return a structured envelope."""
         started_ms = monotonic_ms()
         method_name = str(method)
-        self.invocation_count += 1
+        with self._lock:
+            self.invocation_count += 1
+            self.last_returncode = None
 
         try:
             payload = self._build_payload(method_name, args, kwargs)
             serialised_payload = self._serialise_payload(payload)
             response = self._run_with_retries(method_name, serialised_payload)
             duration_ms = monotonic_ms() - started_ms
-            self.last_duration_ms = duration_ms
-            self.success_count += 1
+            with self._lock:
+                self.last_duration_ms = duration_ms
+                self.last_error = None
+                self.last_returncode = 0
+                self.success_count += 1
             response = dict(response)
             response.setdefault("status", "ok")
             response.setdefault("agent", self.agent_type)
             response.setdefault("method", method_name)
             response.setdefault("duration_ms", duration_ms)
-            self._record(method_name, "ok", duration_ms, None, None)
+            self._record(method_name, "ok", duration_ms, 0, None)
             return response
 
         except FactoryError as exc:
             duration_ms = monotonic_ms() - started_ms
-            self.last_duration_ms = duration_ms
-            self.last_error = exc.message
-            self.degraded_count += 1
-            self.failure_count += 1
-            self._record(method_name, "degraded", duration_ms, None, exc.message)
+            returncode = self._error_returncode(exc)
+            with self._lock:
+                self.last_duration_ms = duration_ms
+                self.last_error = exc.message
+                self.last_returncode = returncode
+                self.degraded_count += 1
+                self.failure_count += 1
+            self._record(method_name, "degraded", duration_ms, returncode, exc.message)
             exc.log()
             return self._degraded_result(exc, method_name, duration_ms)
 
@@ -294,10 +313,12 @@ class OutOfProcessAgentProxy:
                 retryable=True,
             )
             duration_ms = monotonic_ms() - started_ms
-            self.last_duration_ms = duration_ms
-            self.last_error = wrapped.message
-            self.degraded_count += 1
-            self.failure_count += 1
+            with self._lock:
+                self.last_duration_ms = duration_ms
+                self.last_error = wrapped.message
+                self.last_returncode = None
+                self.degraded_count += 1
+                self.failure_count += 1
             self._record(method_name, "degraded", duration_ms, None, wrapped.message)
             wrapped.log()
             return self._degraded_result(wrapped, method_name, duration_ms)
@@ -362,9 +383,33 @@ class OutOfProcessAgentProxy:
 
         stdout = self._truncate_output(completed.stdout or "", self.max_stdout_chars)
         stderr = self._truncate_output(completed.stderr or "", self.max_stderr_chars)
-
         if completed.returncode != 0:
-            error_text = stderr or stdout or f"worker exited with code {completed.returncode}"
+            # The worker deliberately returns a structured error envelope with a
+            # non-zero exit status. Parse it before falling back to a transport
+            # error so its message, retryability, and diagnostics survive.
+            if stdout.strip():
+                parsed_response = self._parse_worker_output(
+                    method,
+                    stdout,
+                    stderr,
+                    attempt=attempt,
+                    returncode=completed.returncode,
+                )
+                raise SubprocessExecutionError(
+                    "Out-of-process worker returned success data with a non-zero exit code",
+                    context={
+                        "agent": self.agent_type,
+                        "method": method,
+                        "attempt": attempt,
+                        "returncode": completed.returncode,
+                        "response": parsed_response,
+                        "stderr": stderr if self.include_worker_stderr else None,
+                    },
+                    component="out_of_process_agent",
+                    operation=method,
+                    retryable=True,
+                )
+            error_text = stderr or f"worker exited with code {completed.returncode}"
             raise SubprocessExecutionError(
                 "Out-of-process worker returned a non-zero exit code",
                 context={
@@ -381,9 +426,23 @@ class OutOfProcessAgentProxy:
                 retryable=True,
             )
 
-        return self._parse_worker_output(method, stdout, stderr, attempt=attempt)
+        return self._parse_worker_output(
+            method,
+            stdout,
+            stderr,
+            attempt=attempt,
+            returncode=completed.returncode,
+        )
 
-    def _parse_worker_output(self, method: str, stdout: str, stderr: str, *, attempt: int) -> Dict[str, Any]:
+    def _parse_worker_output(
+        self,
+        method: str,
+        stdout: str,
+        stderr: str,
+        *,
+        attempt: int,
+        returncode: Optional[int] = None,
+    ) -> Dict[str, Any]:
         raw = stdout.strip()
         if not raw:
             response = {"status": "ok", "agent": self.agent_type, "result": None}
@@ -406,38 +465,56 @@ class OutOfProcessAgentProxy:
 
         response = dict(parsed)
         if "status" not in response:
+            if self.strict_worker_response:
+                validate_worker_response(response)
             # Backward-compatible normalization for workers that return a bare
             # object even though remote_worker normally emits a status envelope.
             response = {"status": "ok", "agent": self.agent_type, "result": response}
         elif response.get("status") == "ok" and "result" not in response:
             response["result"] = None
 
-        if self.strict_worker_response:
-            validate_worker_response(response)
-        else:
-            try:
-                validate_worker_response(response)
-            except RemoteWorkerResultError:
-                response = {"status": "ok", "agent": self.agent_type, "result": response}
+        # Once a payload declares itself to be an envelope, it must satisfy the
+        # envelope contract even in backward-compatible mode.
+        validate_worker_response(response)
 
         if response.get("status") in {"error", "degraded"}:
-            message = str(response.get("error") or response.get("message") or "Worker returned degraded response")
+            worker_error = response.get("error")
+            worker_error_payload = worker_error if isinstance(worker_error, Mapping) else {}
+            message = str(
+                response.get("message")
+                or worker_error_payload.get("message")
+                or worker_error
+                or "Worker returned degraded response"
+            )
+            retryable = response.get("retryable", worker_error_payload.get("retryable", False))
             raise RemoteWorkerInvocationError(
                 message,
+                code=str(
+                    response.get("code")
+                    or worker_error_payload.get("code")
+                    or RemoteWorkerInvocationError.default_code
+                ),
                 context={
                     "agent": self.agent_type,
                     "method": method,
                     "attempt": attempt,
+                    "returncode": returncode,
                     "response": response,
                     "stderr": stderr if self.include_worker_stderr else None,
                 },
+                details={"worker_code": response.get("code") or worker_error_payload.get("code")},
                 component="out_of_process_agent",
                 operation=method,
-                retryable=True,
+                retryable=bool(retryable),
             )
 
         response.setdefault("agent", self.agent_type)
         return response
+
+    @staticmethod
+    def _error_returncode(exc: FactoryError) -> Optional[int]:
+        raw = exc.context.get("returncode") if isinstance(exc.context, Mapping) else None
+        return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
 
     def _parse_json_from_noisy_stdout(self, raw: str) -> Mapping[str, Any]:
         for line in reversed(raw.splitlines()):
@@ -487,10 +564,11 @@ class OutOfProcessAgentProxy:
         )
 
     def _record(self, method: str, status: str, duration_ms: float, returncode: Optional[int], error: Optional[str] ) -> None:
-        self._history.append(OutOfProcessCallRecord(method=method, status=status, duration_ms=duration_ms,
-                                                    returncode=returncode, error=error))
-        if len(self._history) > self.max_history_size:
-            del self._history[: len(self._history) - self.max_history_size]
+        with self._lock:
+            self._history.append(OutOfProcessCallRecord(method=method, status=status, duration_ms=duration_ms,
+                                                        returncode=returncode, error=error))
+            if len(self._history) > self.max_history_size:
+                del self._history[: len(self._history) - self.max_history_size]
 
     # ------------------------------------------------------------------
     # Backward-compatible proxy methods
@@ -517,38 +595,65 @@ class OutOfProcessAgentProxy:
     def __getattr__(self, item: str):
         if item.startswith("__"):
             raise AttributeError(item)
+        allowed_methods = object.__getattribute__(self, "allowed_methods")
+        if allowed_methods and item not in allowed_methods:
+            raise AttributeError(item)
 
         def _call(*args: Any, **kwargs: Any) -> Any:
             return self._invoke(item, *args, **kwargs)
 
         return _call
 
+    def runtime_status(self) -> Dict[str, Any]:
+        """Return local proxy health without spawning a child process."""
+
+        health = self.health()
+        degraded = health["status"] != "ok"
+        return {
+            "status": "degraded" if degraded else "active",
+            "health": "degraded" if degraded else "healthy",
+            "implementation": self.implementation,
+            "stateless": True,
+            "last_error": health["last_error"],
+        }
+
+    def shutdown(self) -> None:
+        """Close the local stateless proxy; no persistent worker exists."""
+
+        return None
+
+    close = shutdown
+    stop = shutdown
+
     # ------------------------------------------------------------------
     # Diagnostics
     # ------------------------------------------------------------------
     def health(self) -> Dict[str, Any]:
-        return {
-            "status": "degraded" if self.last_error else "ok",
-            "agent": self.agent_type,
-            "implementation": self.implementation,
-            "module_path": self.module_path,
-            "class_name": self.class_name,
-            "worker_module": self.worker_module,
-            "timeout_seconds": self.timeout_seconds,
-            "invocation_count": self.invocation_count,
-            "success_count": self.success_count,
-            "degraded_count": self.degraded_count,
-            "failure_count": self.failure_count,
-            "last_error": self.last_error,
-            "last_duration_ms": self.last_duration_ms,
-        }
+        with self._lock:
+            return {
+                "status": "degraded" if self.last_error else "ok",
+                "agent": self.agent_type,
+                "implementation": self.implementation,
+                "module_path": self.module_path,
+                "class_name": self.class_name,
+                "worker_module": self.worker_module,
+                "timeout_seconds": self.timeout_seconds,
+                "invocation_count": self.invocation_count,
+                "success_count": self.success_count,
+                "degraded_count": self.degraded_count,
+                "failure_count": self.failure_count,
+                "last_error": self.last_error,
+                "last_duration_ms": self.last_duration_ms,
+                "last_returncode": self.last_returncode,
+            }
 
     def history(self, limit: Optional[int] = None) -> list[Dict[str, Any]]:
-        if limit is None:
-            records = self._history
-        else:
-            limit_value = int(ensure_non_negative_number(limit, "history.limit"))
-            records = self._history[-limit_value:] if limit_value else []
+        with self._lock:
+            if limit is None:
+                records = list(self._history)
+            else:
+                limit_value = int(ensure_non_negative_number(limit, "history.limit"))
+                records = self._history[-limit_value:] if limit_value else []
         return [record.to_dict() for record in records]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -566,6 +671,12 @@ class OutOfProcessAgentProxy:
             "allowed_methods": list(self.allowed_methods),
             "health": self.health(),
         }
+
+
+__all__ = [
+    "OutOfProcessCallRecord",
+    "OutOfProcessAgentProxy",
+]
 
 
 if __name__ == "__main__":

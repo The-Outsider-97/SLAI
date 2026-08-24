@@ -68,8 +68,18 @@ class AgentMetaData:
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def __post_init__(self) -> None:
-        self.config = load_global_config()
-        self.meta_config = get_config_section("agent_meta")
+        if self.config is None:
+            self.config = load_global_config()
+        elif not isinstance(self.config, Mapping):
+            raise InvalidFactoryConfigurationError(
+                "AgentMetaData.config must be a mapping when provided",
+                context={"actual_type": type(self.config).__name__},
+                component="agent_meta_data",
+                operation="load_agent_meta_config",
+            )
+        else:
+            self.config = dict(self.config)
+        self.meta_config = get_config_section("agent_meta", config=self.config)
 
         if not isinstance(self.meta_config, MutableMapping):
             raise InvalidFactoryConfigurationError(
@@ -262,6 +272,79 @@ class AgentRegistry:
     def _touch(self) -> None:
         self.updated_at = datetime.now(timezone.utc).isoformat()
 
+    def _snapshot_indexes(self) -> Dict[str, Any]:
+        """Capture registry indexes for transactional mutation rollback."""
+
+        return {
+            "agents": dict(self.agents),
+            "versioned_agents": {
+                name: dict(versions)
+                for name, versions in self._versioned_agents.items()
+            },
+            "version_map": {
+                version: list(names)
+                for version, names in self.version_map.items()
+            },
+            "dependency_graph": {
+                name: set(dependencies)
+                for name, dependencies in self.dependency_graph.items()
+            },
+            "reverse_dependency_graph": {
+                name: set(dependents)
+                for name, dependents in self.reverse_dependency_graph.items()
+            },
+            "registration_order": list(self.registration_order),
+            "updated_at": self.updated_at,
+        }
+
+    def _restore_indexes(self, snapshot: Mapping[str, Any]) -> None:
+        self.agents = dict(snapshot["agents"])
+        self._versioned_agents = defaultdict(
+            dict,
+            {
+                name: dict(versions)
+                for name, versions in snapshot["versioned_agents"].items()
+            },
+        )
+        self.version_map = defaultdict(
+            list,
+            {
+                version: list(names)
+                for version, names in snapshot["version_map"].items()
+            },
+        )
+        self.dependency_graph = defaultdict(
+            set,
+            {
+                name: set(dependencies)
+                for name, dependencies in snapshot["dependency_graph"].items()
+            },
+        )
+        self.reverse_dependency_graph = defaultdict(
+            set,
+            {
+                name: set(dependents)
+                for name, dependents in snapshot["reverse_dependency_graph"].items()
+            },
+        )
+        self.registration_order = list(snapshot["registration_order"])
+        self.updated_at = str(snapshot["updated_at"])
+
+    def _rebuild_dependency_indexes(self) -> None:
+        """Rebuild default-definition dependency indexes from authoritative state."""
+
+        dependency_graph: Dict[str, Set[str]] = {}
+        reverse_dependency_graph: Dict[str, Set[str]] = defaultdict(set)
+        for name, metadata in self.agents.items():
+            dependencies = set(
+                validate_dependency_names(metadata.dependencies or (), agent_name=name)
+            )
+            dependency_graph[name] = dependencies
+            for dependency in dependencies:
+                reverse_dependency_graph[dependency].add(name)
+        self.dependency_graph = defaultdict(set, dependency_graph)
+        self.reverse_dependency_graph = defaultdict(set, reverse_dependency_graph)
+
     def _allow_overwrite(self, explicit: Optional[bool]) -> bool:
         if explicit is not None:
             return bool(explicit)
@@ -295,32 +378,41 @@ class AgentRegistry:
                 operation="register",
             )
 
-        self._versioned_agents[name][version] = metadata
-        if make_default or name not in self.agents:
-            self.agents[name] = metadata
+        snapshot = self._snapshot_indexes()
+        try:
+            self._versioned_agents[name][version] = metadata
+            if make_default or name not in self.agents:
+                self.agents[name] = metadata
 
-        if name not in self.registration_order:
-            self.registration_order.append(name)
+            if name not in self.registration_order:
+                self.registration_order.append(name)
 
-        if name not in self.version_map[version]:
-            self.version_map[version].append(name)
+            if name not in self.version_map[version]:
+                self.version_map[version].append(name)
 
-        self.dependency_graph[name] = set(validate_dependency_names(metadata.dependencies or (), agent_name=name))
-        for dependency in self.dependency_graph[name]:
-            self.reverse_dependency_graph[dependency].add(name)
-
-        if self._should_validate_graph_on_register():
-            self.validate_integrity(allow_missing_dependencies=self._allow_missing_dependencies())
+            self._rebuild_dependency_indexes()
+            if self._should_validate_graph_on_register():
+                self.validate_integrity(
+                    allow_missing_dependencies=self._allow_missing_dependencies()
+                )
+        except Exception:
+            self._restore_indexes(snapshot)
+            raise
 
         self._touch()
         logger.info("Registered agent: %s v%s", name, version)
         return metadata
 
     def register_many(self, metadata_items: Iterable[AgentMetaData], *, overwrite: Optional[bool] = None) -> List[AgentMetaData]:
-        registered: List[AgentMetaData] = []
-        for metadata in metadata_items:
-            registered.append(self.register(metadata, overwrite=overwrite))
-        return registered
+        snapshot = self._snapshot_indexes()
+        try:
+            return [
+                self.register(metadata, overwrite=overwrite)
+                for metadata in metadata_items
+            ]
+        except Exception:
+            self._restore_indexes(snapshot)
+            raise
 
     def unregister(self, agent_name: str, version: Optional[str] = None) -> AgentMetaData:
         """Remove an agent or one specific version from the registry."""
@@ -342,24 +434,36 @@ class AgentRegistry:
                 operation="unregister",
             )
 
-        removed = self._versioned_agents[name].pop(selected_version)
-        if selected_version in self.version_map and name in self.version_map[selected_version]:
-            self.version_map[selected_version].remove(name)
-            if not self.version_map[selected_version]:
-                self.version_map.pop(selected_version, None)
+        snapshot = self._snapshot_indexes()
+        try:
+            removed = self._versioned_agents[name].pop(selected_version)
+            if selected_version in self.version_map and name in self.version_map[selected_version]:
+                self.version_map[selected_version].remove(name)
+                if not self.version_map[selected_version]:
+                    self.version_map.pop(selected_version, None)
 
-        if not self._versioned_agents[name]:
-            self._versioned_agents.pop(name, None)
-            self.agents.pop(name, None)
-            self.dependency_graph.pop(name, None)
-            self.registration_order = [registered for registered in self.registration_order if registered != name]
-            for dependents in self.reverse_dependency_graph.values():
-                dependents.discard(name)
-            self.reverse_dependency_graph.pop(name, None)
-        elif self.agents.get(name) is removed:
-            # Pick a deterministic fallback default version.
-            fallback_version = sorted(self._versioned_agents[name].keys())[-1]
-            self.agents[name] = self._versioned_agents[name][fallback_version]
+            if not self._versioned_agents[name]:
+                self._versioned_agents.pop(name, None)
+                self.agents.pop(name, None)
+                self.registration_order = [
+                    registered
+                    for registered in self.registration_order
+                    if registered != name
+                ]
+            elif self.agents.get(name) is removed:
+                # Versions are not guaranteed to be semantic. Use the most
+                # recently registered remaining version instead of lexicographic
+                # ordering that misorders values such as 10.0.0 and 2.0.0.
+                fallback_version = next(reversed(self._versioned_agents[name]))
+                self.agents[name] = self._versioned_agents[name][fallback_version]
+
+            self._rebuild_dependency_indexes()
+            self.validate_integrity(
+                allow_missing_dependencies=self._allow_missing_dependencies()
+            )
+        except Exception:
+            self._restore_indexes(snapshot)
+            raise
 
         self._touch()
         logger.info("Unregistered agent: %s v%s", name, selected_version)
@@ -391,7 +495,16 @@ class AgentRegistry:
 
     def set_default(self, agent_name: str, version: str) -> AgentMetaData:
         metadata = self.get(agent_name, version=version)
-        self.agents[metadata.name] = metadata
+        snapshot = self._snapshot_indexes()
+        try:
+            self.agents[metadata.name] = metadata
+            self._rebuild_dependency_indexes()
+            self.validate_integrity(
+                allow_missing_dependencies=self._allow_missing_dependencies()
+            )
+        except Exception:
+            self._restore_indexes(snapshot)
+            raise
         self._touch()
         return metadata
 
@@ -405,18 +518,18 @@ class AgentRegistry:
     def list_agents(self, *, include_config: bool = False) -> List[Dict[str, Any]]:
         return [self.agents[name].to_dict(include_config=include_config) for name in self.names() if name in self.agents]
 
-    def get_dependencies(self, agent_name: str, *, transitive: bool = False) -> List[str]:
+    def get_dependencies(
+        self,
+        agent_name: str,
+        *,
+        version: Optional[str] = None,
+        transitive: bool = False,
+    ) -> List[str]:
         name = validate_agent_name(agent_name)
-        if name not in self.agents:
-            raise AgentNotRegisteredError(
-                f"Agent '{name}' is not registered",
-                context={"agent_name": name},
-                component="agent_registry",
-                operation="get_dependencies",
-            )
+        metadata = self.get(name, version=version)
         if not transitive:
-            return sorted(self.dependency_graph.get(name, set()))
-        order = self.resolve_dependency_tree(name)
+            return sorted(metadata.dependencies or ())
+        order = self.resolve_dependency_tree(name, version=version)
         return [candidate for candidate in order if candidate != name]
 
     def get_dependents(self, agent_name: str, *, transitive: bool = False) -> List[str]:
@@ -435,23 +548,22 @@ class AgentRegistry:
             stack.extend(self.reverse_dependency_graph.get(current, set()))
         return sorted(discovered)
 
-    def resolve_dependency_tree(self, agent_name: str) -> List[str]:
+    def resolve_dependency_tree(
+        self,
+        agent_name: str,
+        *,
+        version: Optional[str] = None,
+    ) -> List[str]:
         """Return dependency-first load order for one agent."""
         root = validate_agent_name(agent_name)
-        if root not in self.agents:
-            raise AgentNotRegisteredError(
-                f"Agent '{root}' is not registered",
-                context={"agent_name": root, "registered_agents": self.names()},
-                component="agent_registry",
-                operation="resolve_dependency_tree",
-            )
+        root_metadata = self.get(root, version=version)
 
         visited: Set[str] = set()
         visiting: Set[str] = set()
         load_order: List[str] = []
         path: List[str] = []
 
-        def resolve(name: str) -> None:
+        def resolve(name: str, selected: Optional[AgentMetaData] = None) -> None:
             if name in visited:
                 return
             if name in visiting:
@@ -463,7 +575,7 @@ class AgentRegistry:
                     component="agent_registry",
                     operation="resolve_dependency_tree",
                 )
-            if name not in self.agents:
+            if selected is None and name not in self.agents:
                 raise MissingDependencyError(
                     "Dependency is not registered",
                     context={"root_agent": root, "missing_dependency": name, "known_agents": self.names()},
@@ -471,9 +583,10 @@ class AgentRegistry:
                     operation="resolve_dependency_tree",
                 )
 
+            metadata = selected or self.agents[name]
             visiting.add(name)
             path.append(name)
-            for dependency in sorted(self.dependency_graph.get(name, set())):
+            for dependency in sorted(metadata.dependencies or ()):
                 resolve(dependency)
             path.pop()
             visiting.remove(name)
@@ -481,30 +594,34 @@ class AgentRegistry:
             load_order.append(name)
 
         try:
-            resolve(root)
+            resolve(root, root_metadata)
         except FactoryError:
             raise
         except Exception as exc:
-            raise DependencyResolutionError.from_exception(
-                exc,
+            raise DependencyResolutionError(
                 message="Dependency resolution failed",
                 component="agent_registry",
                 operation="resolve_dependency_tree",
                 context={"agent_name": root},
+                cause=exc,
             ) from exc
         return load_order
 
     def validate_integrity(self, *, allow_missing_dependencies: Optional[bool] = None) -> Dict[str, Any]:
-        allow_missing = self._allow_missing_dependencies() if allow_missing_dependencies is None else bool(allow_missing_dependencies)
+        allow_missing = (
+            self._allow_missing_dependencies()
+            if allow_missing_dependencies is None
+            else bool(allow_missing_dependencies)
+        )
         known_agents = set(self.agents.keys())
         graph = {name: sorted(dependencies) for name, dependencies in self.dependency_graph.items()}
-
-        if allow_missing:
-            validate_dependency_graph(graph)
-        else:
-            validate_dependency_graph(graph, known_agents=known_agents)
-
-        missing = sorted({dependency for dependencies in graph.values() for dependency in dependencies if dependency not in known_agents})
+        all_dependencies = {
+            dependency
+            for versions in self._versioned_agents.values()
+            for metadata in versions.values()
+            for dependency in (metadata.dependencies or ())
+        }
+        missing = sorted(all_dependencies - known_agents)
         if missing and not allow_missing:
             raise MissingDependencyError(
                 "Registry contains dependencies that are not registered",
@@ -513,13 +630,68 @@ class AgentRegistry:
                 operation="validate_integrity",
             )
 
-        orphan_reverse_edges = sorted(edge for edge in self.reverse_dependency_graph.keys() if edge not in known_agents and edge not in missing)
+        def validate_root(root_name: str, root_metadata: AgentMetaData) -> None:
+            visited: Set[str] = set()
+            visiting: Set[str] = set()
+            path: List[str] = []
+
+            def visit(name: str, selected: Optional[AgentMetaData] = None) -> None:
+                if name in visited:
+                    return
+                if name in visiting:
+                    cycle_start = path.index(name) if name in path else 0
+                    raise CircularDependencyError(
+                        "Circular dependency detected while validating registry",
+                        context={
+                            "root_agent": root_name,
+                            "root_version": root_metadata.version,
+                            "cycle": path[cycle_start:] + [name],
+                        },
+                        component="agent_registry",
+                        operation="validate_integrity",
+                    )
+                if selected is None and name not in self.agents:
+                    if allow_missing:
+                        return
+                    raise MissingDependencyError(
+                        "Dependency is not registered",
+                        context={"root_agent": root_name, "missing_dependency": name},
+                        component="agent_registry",
+                        operation="validate_integrity",
+                    )
+
+                metadata = selected or self.agents[name]
+                visiting.add(name)
+                path.append(name)
+                for dependency in sorted(metadata.dependencies or ()):
+                    visit(dependency)
+                path.pop()
+                visiting.remove(name)
+                visited.add(name)
+
+            visit(root_name, root_metadata)
+
+        for root_name, versions in self._versioned_agents.items():
+            for metadata in versions.values():
+                validate_root(root_name, metadata)
+
+        expected_reverse: Dict[str, Set[str]] = defaultdict(set)
+        for name, dependencies in self.dependency_graph.items():
+            for dependency in dependencies:
+                expected_reverse[dependency].add(name)
+        reverse_index_mismatches = sorted(
+            name
+            for name in set(expected_reverse) | set(self.reverse_dependency_graph)
+            if set(expected_reverse.get(name, set()))
+            != set(self.reverse_dependency_graph.get(name, set()))
+        )
         return {
-            "status": "ok" if not missing and not orphan_reverse_edges else "warning",
+            "status": "ok" if not missing and not reverse_index_mismatches else "warning",
             "agents": len(self.agents),
             "versions": sum(len(versions) for versions in self._versioned_agents.values()),
             "missing_dependencies": missing,
-            "orphan_reverse_edges": orphan_reverse_edges,
+            "reverse_index_mismatches": reverse_index_mismatches,
+            "orphan_reverse_edges": reverse_index_mismatches,
             "updated_at": self.updated_at,
         }
 
@@ -549,6 +721,12 @@ class AgentRegistry:
         self.registration_order.clear()
         self._touch()
 
+__all__ = [
+    "_DEFINITION_LIFECYCLE_ALIASES",
+    "_DEFINITION_LIFECYCLE_TRANSITIONS",
+    "AgentMetaData",
+    "AgentRegistry",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Agent Meta Data ===\n")

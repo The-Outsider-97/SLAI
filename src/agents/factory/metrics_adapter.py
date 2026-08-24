@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import RLock
 from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
 from .utils.config_loader import get_config_section, load_global_config
@@ -31,13 +32,15 @@ class PIDState:
 
     integral: float = 0.0
     previous_error: float = 0.0
+    previous_at_ms: Optional[float] = None
     updates: int = 0
 
-    def to_dict(self) -> Dict[str, float]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "integral": self.integral,
             "previous_error": self.previous_error,
-            "updates": float(self.updates),
+            "previous_at_ms": self.previous_at_ms,
+            "updates": self.updates,
         }
 
 
@@ -127,6 +130,7 @@ class MetricsAdapter:
         self.return_tensors = bool(self.meta_config.get("return_tensors", False))
         self.strict_metric_validation = bool(self.meta_config.get("strict_metric_validation", False))
         self.record_adaptation_history = bool(self.meta_config.get("record_adaptation_history", True))
+        self._lock = RLock()
 
         self._init_control_parameters()
         self._torch_module: Optional[Any] = None
@@ -142,11 +146,11 @@ class MetricsAdapter:
         except FactoryError:
             raise
         except Exception as exc:
-            raise PIDControlError.from_exception(
-                exc,
+            raise PIDControlError(
                 message="PID parameter initialization failed",
                 component="metrics_adapter",
                 operation="init_control_parameters",
+                cause=exc,
             ) from exc
 
         self.pid_state: Dict[str, PIDState] = defaultdict(PIDState)
@@ -274,30 +278,49 @@ class MetricsAdapter:
         max_disparity = max(values) - min(values)
         return (max_disparity - target) / (1.0 + max_disparity)
 
-    def _pid_control(self, metric_type: str, error: float, delta: float) -> float:
+    def _pid_control(
+        self,
+        metric_type: str,
+        error: float,
+        delta: float,
+        *,
+        observed_at_ms: Optional[float] = None,
+    ) -> float:
         try:
-            state = self.pid_state[metric_type]
-            state.integral += error
-            if self.integral_limit > 0:
-                state.integral = max(-self.integral_limit, min(self.integral_limit, state.integral))
+            with self._lock:
+                state = self.pid_state[metric_type]
+                current_ms = monotonic_ms() if observed_at_ms is None else observed_at_ms
+                if state.previous_at_ms is None:
+                    elapsed_seconds = 1.0
+                    derivative = 0.0
+                else:
+                    elapsed_seconds = max(
+                        (current_ms - state.previous_at_ms) / 1000.0,
+                        1.0e-6,
+                    )
+                    derivative = (error - state.previous_error) / elapsed_seconds
 
-            derivative = error - state.previous_error
-            adjustment = self.Kp * error + self.Ki * state.integral + self.Kd * derivative
+                state.integral += error * elapsed_seconds
+                if self.integral_limit > 0:
+                    state.integral = max(-self.integral_limit, min(self.integral_limit, state.integral))
 
-            state.previous_error = error
-            state.updates += 1
-            self.integral[metric_type] = state.integral
-            self.prev_error[metric_type] = state.previous_error
-            return float(adjustment)
+                adjustment = self.Kp * error + self.Ki * state.integral + self.Kd * derivative
+
+                state.previous_error = error
+                state.previous_at_ms = current_ms
+                state.updates += 1
+                self.integral[metric_type] = state.integral
+                self.prev_error[metric_type] = state.previous_error
+                return float(adjustment)
         except FactoryError:
             raise
         except Exception as exc:
-            raise PIDControlError.from_exception(
-                exc,
+            raise PIDControlError(
                 message="PID control adjustment failed",
                 component="metrics_adapter",
                 operation="pid_control",
                 context={"metric_type": metric_type, "error": error, "delta": delta},
+                cause=exc,
             ) from exc
 
     def _effective_safety_bound(self, agent_types: Iterable[str]) -> float:
@@ -343,20 +366,30 @@ class MetricsAdapter:
                 metadata={"enabled": False},
             )
             if self.record_adaptation_history:
-                self.adaptation_history.append(record)
+                with self._lock:
+                    self.adaptation_history.append(record)
             return record
 
         payload = validate_metric_payload(metrics)
         agent_type_tuple = validate_agent_types(tuple(agent_types))
-        self.metric_history.append(payload)
-
-        metric_snapshot = self._metric_snapshot(payload)
-        deltas = self._calculate_metric_deltas(metric_snapshot)
-        errors = {metric_type: self._calculate_error(payload, metric_type) for metric_type in self.metric_types}
-        raw_adjustments = {
-            f"{metric_type}_adjustment": self._pid_control(metric_type, errors[metric_type], deltas.get(metric_type, 0.0))
-            for metric_type in self.metric_types
-        }
+        with self._lock:
+            self.metric_history.append(payload)
+            metric_snapshot = self._metric_snapshot(payload)
+            deltas = self._calculate_metric_deltas(metric_snapshot)
+            errors = {
+                metric_type: self._calculate_error(payload, metric_type)
+                for metric_type in self.metric_types
+            }
+            observed_at_ms = monotonic_ms()
+            raw_adjustments = {
+                f"{metric_type}_adjustment": self._pid_control(
+                    metric_type,
+                    errors[metric_type],
+                    deltas.get(metric_type, 0.0),
+                    observed_at_ms=observed_at_ms,
+                )
+                for metric_type in self.metric_types
+            }
 
         effective_bound = self._effective_safety_bound(agent_type_tuple)
         bounded_adjustments: Dict[str, float] = {}
@@ -380,10 +413,17 @@ class MetricsAdapter:
             metadata={"effective_bound": effective_bound, "return_tensors": self.return_tensors},
         )
         if self.record_adaptation_history:
-            self.adaptation_history.append(record)
+            with self._lock:
+                self.adaptation_history.append(record)
         return record
 
-    def update_factory_config(self, factory: "AgentFactory", adjustments: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+    def update_factory_config(
+        self,
+        factory: "AgentFactory",
+        adjustments: Mapping[str, Any],
+        *,
+        agent_types: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """Apply bounded adjustment values to factory-managed metadata fields.
 
         The method updates only attributes that already exist on metadata or keys
@@ -399,7 +439,14 @@ class MetricsAdapter:
 
         update_report: Dict[str, Dict[str, Any]] = {}
         agents = getattr(factory.registry, "agents", {})
+        selected = (
+            set(validate_agent_types(tuple(agent_types)))
+            if agent_types is not None
+            else set(agents)
+        )
         for agent_name, metadata in agents.items():
+            if agent_name not in selected:
+                continue
             agent_report: Dict[str, Any] = {}
             self._update_numeric_metadata_field(metadata, "exploration_rate", performance_adj, agent_report)
             self._update_numeric_metadata_field(metadata, "learning_rate", performance_adj, agent_report)
@@ -431,38 +478,42 @@ class MetricsAdapter:
             report[field_name] = {"previous": current, "updated": updated, "source": "metadata"}
 
     def history_snapshot(self, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        records = list(self.adaptation_history)
-        if limit is not None:
-            records = records[-max(0, int(limit)) :]
+        with self._lock:
+            records = list(self.adaptation_history)
+            if limit is not None:
+                records = records[-max(0, int(limit)) :]
         return [record.to_dict() for record in records]
 
     def state_dict(self) -> Dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "history_size": self.history_size,
-            "metric_types": list(self.metric_types),
-            "pid_params": {"Kp": self.Kp, "Ki": self.Ki, "Kd": self.Kd},
-            "pid_state": {metric: state.to_dict() for metric, state in self.pid_state.items()},
-            "safety_bounds": dict(self.safety_bounds),
-            "metric_history_size": len(self.metric_history),
-            "adaptation_history_size": len(self.adaptation_history),
-            "return_tensors": self.return_tensors,
-        }
+        with self._lock:
+            return {
+                "enabled": self.enabled,
+                "history_size": self.history_size,
+                "metric_types": list(self.metric_types),
+                "pid_params": {"Kp": self.Kp, "Ki": self.Ki, "Kd": self.Kd},
+                "pid_state": {metric: state.to_dict() for metric, state in self.pid_state.items()},
+                "safety_bounds": dict(self.safety_bounds),
+                "metric_history_size": len(self.metric_history),
+                "adaptation_history_size": len(self.adaptation_history),
+                "return_tensors": self.return_tensors,
+            }
 
     def health_check(self) -> Dict[str, Any]:
-        return {
-            "status": "ok" if self.enabled else "disabled",
-            "configured_metric_types": list(self.metric_types),
-            "history_size": self.history_size,
-            "metric_history_size": len(self.metric_history),
-            "adaptation_history_size": len(self.adaptation_history),
-            "torch_available": self._torch_module is not None or self._torch_import_error is None,
-        }
+        with self._lock:
+            return {
+                "status": "ok" if self.enabled else "disabled",
+                "configured_metric_types": list(self.metric_types),
+                "history_size": self.history_size,
+                "metric_history_size": len(self.metric_history),
+                "adaptation_history_size": len(self.adaptation_history),
+                "torch_available": self._torch_module is not None or self._torch_import_error is None,
+            }
 
     def reset(self) -> None:
-        self.metric_history.clear()
-        self.adaptation_history.clear()
-        self._init_control_parameters()
+        with self._lock:
+            self.metric_history.clear()
+            self.adaptation_history.clear()
+            self._init_control_parameters()
 
 
 def _record_bounded_output(self: AdaptationRecord, adapter: MetricsAdapter) -> Dict[str, Any]:
@@ -471,6 +522,14 @@ def _record_bounded_output(self: AdaptationRecord, adapter: MetricsAdapter) -> D
 
 # Attach as a method without creating another dataclass solely for output values.
 AdaptationRecord.bounded_output = _record_bounded_output  # type: ignore[attr-defined]
+
+
+__all__ = [
+    "PIDState",
+    "AdaptationRecord",
+    "MetricsAdapter",
+    "_record_bounded_output",
+]
 
 
 if __name__ == "__main__":
