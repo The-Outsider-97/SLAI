@@ -13,7 +13,7 @@ printer = PrettyPrinter()
 # ----------------------------------------------------------------------
 # Defaults & constants
 # ----------------------------------------------------------------------
-DEFAULT_CONFIG_PATH = "qnn/configs/config.yaml"
+DEFAULT_CONFIG_PATH = "qnn/configs/quantum_config.yaml"
 DEFAULT_CACHE_TTL_SECONDS = 60          # 1 minute
 FILE_WATCH_INTERVAL_SECONDS = 5         # check mtime at most every 5s (avoid stat storms)
 
