@@ -581,6 +581,18 @@ planning_agent: {}
 privacy_agent: {}
 
 
+qnn_agent:
+  num_qubits: 4
+  num_quantum_layers: 2
+  learning_rate: 0.01
+  seed: 42
+  entanglement: linear
+  loss: state_fidelity
+  gradient_method: parameter_shift
+  finite_difference_step: 1.0e-6
+  gradient_clip_norm: 5.0
+
+
 quality_agent:
     enabled: true
     default_window: latest
