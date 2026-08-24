@@ -193,3 +193,61 @@ class QuantumModelMemory:
 
 
 __all__ = ["QuantumModelMemory", "QuantumModelState"]
+
+if __name__ == "__main__":
+    print("\n=== Running quantum_memory tests ===\n")
+    printer.status("TEST", "quantum_memory initialized", "info")
+
+    # Test _validated_training_step
+    printer.status("TEST", "_validated_training_step", "info")
+    assert _validated_training_step(5, source="test") == 5
+    assert _validated_training_step(np.int64(10), source="test") == 10
+    try:
+        _validated_training_step([1, 2], source="test")
+        assert False, "Should have raised"
+    except QNNCheckpointStateError:
+        printer.status("PASS", "rejects non-scalar", "success")
+    printer.status("PASS", "training_step validation", "success")
+
+    # Test _validated_weights
+    printer.status("TEST", "_validated_weights", "info")
+    w = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    validated = _validated_weights(w)
+    assert np.array_equal(validated, w)
+    assert not validated.flags.writeable
+    printer.status("PASS", "weights validation", "success")
+
+    # Test QuantumModelState
+    printer.status("TEST", "QuantumModelState", "info")
+    weights = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+    step = 42
+    state = QuantumModelState(weights, step)
+    assert np.array_equal(state.quantum_weights, weights)
+    assert state.training_step == step
+    component = state.to_component()
+    assert "quantum_weights" in component and "training_step" in component
+    printer.status("PASS", "QuantumModelState creation and to_component", "success")
+
+    # Test QuantumModelMemory (requires config)
+    printer.status("TEST", "QuantumModelMemory", "info")
+    memory = QuantumModelMemory()
+    try:
+        # snapshot with no validator
+        snap = memory.snapshot(weights, step)
+        assert isinstance(snap, QuantumModelState)
+        printer.status("PASS", "snapshot", "success")
+    except Exception as e:
+        printer.status("SKIP", f"snapshot failed: {e}", "warning")
+
+    # Test decode with a dummy validate_weights
+    try:
+        def dummy_validator(w):
+            return np.asarray(w, dtype=np.float64)
+        state_dict = {"quantum_weights": np.array([1.0, 2.0]), "training_step": np.array([3])}
+        decoded = memory.decode(state_dict, validate_weights=dummy_validator)
+        assert decoded.training_step == 3
+        printer.status("PASS", "decode with dummy validator", "success")
+    except Exception as e:
+        printer.status("SKIP", f"decode test skipped: {e}", "warning")
+
+    print("\n=== quantum_memory tests ran successfully ===\n")

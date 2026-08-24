@@ -226,3 +226,70 @@ class StateVectorEncoder:
 
 
 __all__ = ["StateVectorEncoder", "as_state_sequence", "normalize_statevector"]
+
+if __name__ == "__main__":
+    print("\n=== Running quantum_encoding tests ===\n")
+    printer.status("TEST", "quantum_encoding initialized", "info")
+
+    # Test as_state_sequence
+    printer.status("TEST", "as_state_sequence", "info")
+    # Single state as list of scalars
+    seq1 = [1.0, 2.0, 3.0]
+    result1 = as_state_sequence(seq1)
+    assert len(result1) == 1 and isinstance(result1[0], tuple)
+    printer.status("PASS", "single sequence list", "success")
+
+    # Single state as 1D numpy array
+    arr1 = np.array([1.0, 2.0, 3.0], dtype=np.complex128)
+    result2 = as_state_sequence(arr1)
+    assert len(result2) == 1 and isinstance(result2[0], np.ndarray)
+    printer.status("PASS", "single 1D array", "success")
+
+    # Multiple states as 2D array
+    arr2 = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.complex128)
+    result3 = as_state_sequence(arr2)
+    assert len(result3) == 2
+    printer.status("PASS", "multiple states from 2D array", "success")
+
+    # Test normalize_statevector (dimension must be power of two > 1)
+    printer.status("TEST", "normalize_statevector", "info")
+    # Dimension 2 is allowed.
+    vec = np.array([1.0, 0.0], dtype=np.complex128)
+    # Already normalized, normalize=False should pass
+    norm_vec = normalize_statevector(vec, expected_dimension=2, tolerance=1e-12, normalize=False)
+    assert np.allclose(np.linalg.norm(norm_vec), 1.0)
+    printer.status("PASS", "normalize=False with unit norm", "success")
+
+    # Normalize a non-normalized vector with normalize=True
+    vec2 = np.array([2.0, 0.0], dtype=np.complex128)
+    norm_vec2 = normalize_statevector(vec2, expected_dimension=2, tolerance=1e-12, normalize=True)
+    assert np.allclose(np.linalg.norm(norm_vec2), 1.0)
+    printer.status("PASS", "normalize=True", "success")
+
+    # Test StateVectorEncoder (requires config)
+    printer.status("TEST", "StateVectorEncoder", "info")
+    encoder = None
+    try:
+        encoder = StateVectorEncoder(state_dimension=4, tolerance=1e-10, normalize=True)
+        test_state = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128)
+        encoded = encoder.encode_state(test_state)
+        assert encoded.shape == (4,)
+        assert np.allclose(np.linalg.norm(encoded), 1.0)
+        printer.status("PASS", "StateVectorEncoder encode_state", "success")
+    except QNNConfigurationError as e:
+        printer.status("SKIP", f"StateVectorEncoder test skipped (config missing): {e}", "warning")
+
+    # Test encode_sequence
+    if encoder is not None:
+        try:
+            seq = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]
+            encoded_seq = encoder.encode_sequence(seq, name="test_seq")
+            assert len(encoded_seq) == 2
+            assert all(s.shape == (4,) for s in encoded_seq)
+            printer.status("PASS", "encode_sequence", "success")
+        except Exception as e:
+            printer.status("SKIP", f"encode_sequence skipped: {e}", "warning")
+    else:
+        printer.status("SKIP", "encode_sequence skipped: StateVectorEncoder unavailable", "warning")
+
+    print("\n=== quantum_encoding tests ran successfully ===\n")

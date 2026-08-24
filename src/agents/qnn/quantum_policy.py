@@ -220,3 +220,66 @@ class QuantumExecutionPolicy:
 
 
 __all__ = ["TUNABLE_PARAMETERS", "QuantumExecutionPolicy"]
+
+if __name__ == "__main__":
+    print("\n=== Running quantum_policy tests ===\n")
+    printer.status("TEST", "quantum_policy initialized", "info")
+
+    # Test _configured_tunables
+    printer.status("TEST", "_configured_tunables", "info")
+    allowed = ["num_quantum_layers", "learning_rate"]
+    result = _configured_tunables(allowed)
+    assert result == frozenset(allowed)
+    printer.status("PASS", "valid tunables", "success")
+
+    # Test invalid tunables
+    try:
+        _configured_tunables(["num_quantum_layers", "invalid_param"])
+        assert False, "Should have raised"
+    except QNNConfigurationError:
+        printer.status("PASS", "rejects unsupported tunables", "success")
+
+    # Test QuantumExecutionPolicy from_config (requires a config-like object)
+    printer.status("TEST", "QuantumExecutionPolicy", "info")
+    class DummyConfig:
+        statevector_bytes = 1024
+        parameter_bytes = 1024
+        parameter_count = 10
+        max_working_set_bytes = 8192
+        max_sequence_length = 100
+        max_tasks_per_request = 10
+        max_gradient_evaluations = 10000
+        max_training_steps = 1000
+
+    try:
+        policy = QuantumExecutionPolicy.from_config(DummyConfig)
+        assert policy.statevector_bytes == 1024
+        # Test validation methods
+        policy.validate_sequence_length(50, name="test")
+        policy.validate_tasks([1, 2, 3])
+        policy.validate_working_set(2, operation="test")
+        policy.validate_training_work(sequence_length=10, steps=5)
+        printer.status("PASS", "QuantumExecutionPolicy validations", "success")
+    except QNNConfigurationError as e:
+        printer.status("SKIP", f"Policy test skipped (config missing): {e}", "warning")
+
+    # Test policy validates tuning parameters
+    try:
+        policy = QuantumExecutionPolicy(
+            statevector_bytes=1024,
+            parameter_bytes=1024,
+            parameter_count=10,
+            max_working_set_bytes=8192,
+            max_sequence_length=100,
+            max_tasks_per_request=10,
+            max_gradient_evaluations=10000,
+            max_training_steps=1000,
+        )
+        # In __post_init__, it loads config and may raise if config missing
+        # So we skip if config not available
+        policy.validate_tuning_parameters({"num_quantum_layers": 3})
+        printer.status("PASS", "validate_tuning_parameters", "success")
+    except QNNConfigurationError as e:
+        printer.status("SKIP", f"validate_tuning_parameters skipped: {e}", "warning")
+
+    print("\n=== quantum_policy tests ran successfully ===\n")

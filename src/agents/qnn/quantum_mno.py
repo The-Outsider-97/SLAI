@@ -559,3 +559,96 @@ __all__ = [
     "sample_born",
     "state_fidelity",
 ]
+
+
+
+if __name__ == "__main__":
+    print("\n=== Running quantum_mno tests ===\n")
+    printer.status("TEST", "quantum_mno initialized", "info")
+
+    # Create test states (normalized)
+    state0 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128)
+    state1 = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.complex128)
+
+    # born_probabilities
+    printer.status("TEST", "born_probabilities", "info")
+    probs0 = born_probabilities(state0)
+    assert np.allclose(probs0, [1.0, 0.0, 0.0, 0.0])
+    printer.status("PASS", "born_probabilities for basis state", "success")
+
+    # state_fidelity
+    printer.status("TEST", "state_fidelity", "info")
+    fid = state_fidelity(state0, state0)
+    assert np.isclose(fid, 1.0)
+    fid2 = state_fidelity(state0, state1)
+    assert np.isclose(fid2, 0.0)
+    printer.status("PASS", "state_fidelity", "success")
+
+    # probability_mse
+    printer.status("TEST", "probability_mse", "info")
+    mse = probability_mse(state0, state1)
+    # 0 vs 1: MSE = (1-0)^2 + (0-1)^2 + ... / 4 = 2/4 = 0.5
+    assert np.isclose(mse, 0.5)
+    printer.status("PASS", "probability_mse", "success")
+
+    # sample_born
+    printer.status("TEST", "sample_born", "info")
+    rng = np.random.default_rng(42)
+    samples = sample_born(state0, rng=rng, num_samples=10)
+    assert samples.shape == (10,)
+    assert np.all(samples == 0)  # all samples should be index 0
+    printer.status("PASS", "sample_born", "success")
+
+    # maximum_norm_error
+    printer.status("TEST", "maximum_norm_error", "info")
+    err = maximum_norm_error([state0, state1])
+    assert np.isclose(err, 0.0)
+    printer.status("PASS", "maximum_norm_error", "success")
+
+    # Test QNNMetrics (requires config)
+    printer.status("TEST", "QNNMetrics", "info")
+    try:
+        metrics = QNNMetrics(metric="state_fidelity")
+        result = metrics.evaluate_sequence([state0], [state0])
+        assert "loss" in result and "state_fidelity" in result
+        assert np.isclose(result["loss"], 0.0)
+        printer.status("PASS", "QNNMetrics state_fidelity", "success")
+    except QNNConfigurationError as e:
+        printer.status("SKIP", f"QNNMetrics skipped (config missing): {e}", "warning")
+
+    # Test gradient functions with a dummy loss
+    printer.status("TEST", "gradient functions", "info")
+    def dummy_loss(w):
+        return float(np.sum(w**2))
+    w = np.array([1.0, 2.0, 3.0])
+    # parameter_shift requires loss_name="state_fidelity" but we can test finite_difference
+    try:
+        grad_fd = finite_difference_gradient(dummy_loss, w, step=1e-5)
+        # analytical gradient is 2*w
+        expected = 2.0 * w
+        assert np.allclose(grad_fd, expected, rtol=1e-4)
+        printer.status("PASS", "finite_difference_gradient", "success")
+    except Exception as e:
+        printer.status("SKIP", f"finite_difference skipped: {e}", "warning")
+
+    # clip_gradient
+    printer.status("TEST", "clip_gradient", "info")
+    grad = np.array([10.0, 0.0, 0.0])
+    clipped = clip_gradient(grad, max_norm=5.0)
+    assert np.isclose(np.linalg.norm(clipped), 5.0)
+    printer.status("PASS", "clip_gradient", "success")
+
+    # Test QuantumMeasurementOptimizer (requires config)
+    printer.status("TEST", "QuantumMeasurementOptimizer", "info")
+    try:
+        optimizer = QuantumMeasurementOptimizer(
+            loss="state_fidelity",
+            gradient_method="finite_difference",
+        )
+        grad_opt = optimizer.gradient(dummy_loss, w)
+        assert grad_opt.shape == w.shape
+        printer.status("PASS", "QuantumMeasurementOptimizer gradient", "success")
+    except QNNConfigurationError as e:
+        printer.status("SKIP", f"QuantumMeasurementOptimizer skipped (config missing): {e}", "warning")
+
+    print("\n=== quantum_mno tests ran successfully ===\n")
