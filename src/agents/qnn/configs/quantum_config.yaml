@@ -1,0 +1,33 @@
+quantum_encoding:
+  norm_tolerance: 1.0e-10
+  normalize_inputs: true
+
+quantum_memory:
+  # Reject unknown checkpoint component fields unless a caller explicitly
+  # requests a compatibility load with strict=False.
+  strict_checkpoint_schema: true
+
+quantum_mno:
+  # Numerical zero guard for Born probability normalization.
+  probability_tolerance: 1.0e-12
+  # Exact shift for parameters used once in exp(-i * theta * P / 2).
+  parameter_shift: 1.5707963267948966
+
+quantum_policy:
+  max_statevector_bytes: 16777216
+  max_parameter_bytes: 16777216
+  max_working_set_bytes: 268435456
+  max_sequence_length: 128
+  max_tasks_per_request: 32
+  max_gradient_evaluations: 1000000
+  max_training_steps: 1000
+  # This operational allowlist may narrow, but never expand, the tunable fields
+  # implemented by quantum_policy.py.
+  allowed_tuning_parameters:
+    - num_quantum_layers
+    - learning_rate
+    - entanglement
+    - loss
+    - gradient_method
+    - finite_difference_step
+    - gradient_clip_norm

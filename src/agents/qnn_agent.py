@@ -1,1079 +1,1165 @@
+"""SLAI QNN agent backed by an explicit NumPy state-vector circuit.
+
+The agent owns state validation, parameterized unitary evolution, Born
+measurement, QNN-specific optimization, and model state. Agent selection,
+cross-agent comparison, tuning search, and durable checkpoint storage remain
+owned by their existing SLAI subsystems and are reached through opt-in
+adapters.
+
+This is a classical state-vector simulation of a parameterized quantum
+circuit. It does not claim quantum speed-up, hardware execution, or a quantum
+recurrent architecture.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
 import time
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-from collections import defaultdict
 
-from src.agents.base_agent import BaseAgent
-from src.agents.learning.maml_rl import MAMLAgent
-from src.agents.learning.rl_agent import RLAgent
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from .base.utils.main_config_loader import get_config_section, load_global_config
+from .base_agent import BaseAgent
+from .qnn.quantum_encoding import *
+from .qnn.quantum_memory import *
+from .qnn.quantum_mno import *
+from .qnn.quantum_policy import *
+from .qnn.utils.quantum_helpers import *
+from .qnn.utils.quantum_errors import *
+
+_CHECKPOINT_SCHEMA = "slai.qnn-agent.state.v1"
+
 
 class QNNAgent(BaseAgent):
-    """
-    A Quantum Neural Network (QNN) agent with meta-learning and recursive learning capabilities.
+    """Parameterized state-vector QNN with explicit SLAI runtime boundaries."""
 
-    This implementation is based on fundamental quantum computing principles and does not rely on high-level libraries
-    for the *quantum gate operations*. It includes a hybrid architecture with a classical meta-learner guiding a
-    quantum recurrent neural network (QRNN).
+    capabilities = (
+        "quantum_state_simulation",
+        "quantum_circuit_inference",
+        "quantum_circuit_training",
+        "quantum_state_evaluation",
+    )
 
-    **Important:** This section focuses on implementing the quantum gate operations from scratch using NumPy.
-    The meta-learning and QRNN architectures are still simplified placeholders.
-    """
+    _MODEL_STATE_FIELDS = frozenset({"quantum_weights", "training_step"})
+    _DEFAULT_SHARED_MEMORY_CONFIG = {
+        "enabled": True,
+        "ttl_seconds": None,
+        "publish_notifications": False,
+        "summary_key_prefix": "qnn:summary",
+        "event_channel": "qnn.events",
+    }
 
-    def __init__(self, shared_memory, agent_factory, config=None):
-        super().__init__(shared_memory, agent_factory, config)
-        """
-        Initializes the QNNAgent.
+    def __init__(
+        self,
+        shared_memory: Any = None,
+        agent_factory: Any = None,
+        config: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config,
+        )
 
-        Args:
-            num_qubits (int): The number of qubits in the quantum circuit.
-            num_quantum_layers (int): The number of quantum layers in the QRNN.
-            meta_learning_rate (float): The learning rate for the classical meta-learner.
-            qrnn_params (dict): Parameters for the QRNN (e.g., number of hidden units, etc.).
-        """
-        self.shared_memory=shared_memory
-        self.agent_factory=agent_factory
+        # BaseAgent already owns ``shared_memory``, ``agent_factory``, and the
+        # loaded agents_config.yaml snapshot. Do not replace those resolved
+        # dependencies with the raw constructor arguments.
+        resolved = dict(
+            get_config_section(
+                "qnn_agent",
+                config=self.config,
+            )
+            or {}
+        )
+        if config:
+            if not isinstance(config, Mapping):
+                raise QNNConfigurationError("QNN config override must be a mapping")
+            resolved.update(dict(config))
 
-        self.num_qubits = config.get("num_qubits", 4)
-        self.num_quantum_layers = config.get("num_quantum_layers", 2)
-        self.meta_learning_rate = config.get("meta_learning_rate", 0.01)
-        self.qrnn_params = config.get("qrnn_params", {"hidden_units": 16})
-        self.evaluator = PerformanceEvaluator(metric=config.get("performance_metric", "mse"))
+        self.qnn_config = from_mapping(resolved)
+        self._shared_memory_config = self._resolve_shared_memory_config(
+            resolved.get("shared_memory")
+        )
 
+        self._rng = np.random.default_rng(self.qnn_config.seed)
+        self._circuit = self._build_circuit(self.qnn_config)
+        self._encoder = self._build_encoder(self.qnn_config)
+        self._policy = self._build_policy(self.qnn_config)
+        self.measurement_optimizer = self._build_measurement_optimizer(
+            self.qnn_config
+        )
+        self.qnn_metrics = self.measurement_optimizer.metrics
+        # Compatibility alias for callers of the former monolithic QNN.
+        self.evaluator = self.qnn_metrics
         self.quantum_weights = self._initialize_quantum_weights()
-        self.meta_learner = self._initialize_meta_learner()
-
-        # Define basic quantum gates as matrices
+        self._training_step = 0
+        self._last_gradient: np.ndarray | None = None
         self.gate_definitions = self._define_quantum_gates()
 
-        self.maml_agent = MAMLAgent(
-            state_size=config.get("state_size"),
-            action_size=config.get("action_size"),
-            shared_memory=self.shared_memory
+    # ------------------------------------------------------------------
+    # Configuration and state contracts
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _build_circuit(config: QNNConfig) -> StateVectorCircuit:
+        return StateVectorCircuit(
+            num_qubits=config.num_qubits,
+            num_layers=config.num_quantum_layers,
+            entanglement=config.entanglement,
         )
 
-        self.rl_agent = RLAgent(
-            possible_actions=list(range(config.get("action_size"))),
-            learning_rate=0.01,
-            discount_factor=0.95
+    @staticmethod
+    def _build_encoder(config: QNNConfig) -> StateVectorEncoder:
+        return StateVectorEncoder(
+            state_dimension=config.state_dimension,
         )
 
-        self.agent_success_tracker = {
-            "maml": {"rewards": [], "average": 0.0},
-            "rl": {"rewards": [], "average": 0.0}
-        }
-        self.routing_temperature = 0.8 
+    @staticmethod
+    def _build_policy(config: QNNConfig) -> QuantumExecutionPolicy:
+        """Delegate QNN resource-policy construction to its owning module."""
 
-    def perform_task(self, task_data):
-        self._last_task_input_seq = task.input_sequences
-        self._last_task_ref = task
-        tasks = task_data.get("tasks", [])
-        if not tasks:
-            return {"status": "failed", "reason": "No tasks provided"}
+        return QuantumExecutionPolicy.from_config(config)
 
-        total_loss = 0.0
-        for task in tasks:
-            env = getattr(task, "env", None)
-            if env is None:
-                continue
+    @staticmethod
+    def _build_measurement_optimizer(
+        config: QNNConfig,
+    ) -> QuantumMeasurementOptimizer:
+        return QuantumMeasurementOptimizer(
+            loss=config.loss,
+            gradient_method=config.gradient_method,
+            finite_difference_step=config.finite_difference_step,
+            gradient_clip_norm=config.gradient_clip_norm,
+        )
 
-            # === Step 1: MAML Adaptation ===
-            maml_policy = self.maml_agent.inner_update(env)
-            maml_trajectory = self.maml_agent.collect_trajectory(env, maml_policy)
-            self.maml_agent.meta_update([(env, maml_trajectory)])
+    @classmethod
+    def _resolve_shared_memory_config(
+        cls,
+        value: Any,
+    ) -> dict[str, Any]:
+        if value is None:
+            section: dict[str, Any] = {}
+        elif isinstance(value, Mapping):
+            section = dict(value)
+        else:
+            raise QNNConfigurationError("qnn_agent.shared_memory must be a mapping")
 
-            # === Step 2: RL Experience Update ===
-            state, _ = env.reset()
-            for _ in range(10):  # Fixed horizon
-                action = self.rl_agent.step(state)
-                next_state, reward, done, _, _ = env.step(action)
-                self.rl_agent.receive_reward(reward)
-                self.rl_agent.learn(next_state, reward, done)
-                if done:
-                    break
-                state = next_state
-
-            # === Step 3: QRNN Output & Meta Update ===
-            output_sequence, _ = self._qrnn_forward(task.input_sequences)
-            task_performance = self._evaluate_performance(output_sequence, task)
-            self._meta_learn_update(task_performance)
-
-            total_loss += sum(task_performance)
-
-        return {
-            "status": "success",
-            "combined_loss": total_loss / len(tasks),
-            "details": {
-                "maml_evaluation": self.maml_agent.evaluate(),
-                "rl_policy": self.rl_agent.get_policy()
-            }
-        }
-
-    def _initialize_quantum_weights(self):
-        """
-        Initializes the parameters (quantum weights) of the quantum circuit.
-
-        Returns:
-            list: A list of numpy arrays representing the quantum weights (angles for gate rotations)
-                  for each layer.
-        """
-
-        quantum_weights = []
-        for _ in range(self.num_quantum_layers):
-            # Initialize weights as random angles for rotation gates
-            layer_weights = np.random.rand(self.num_qubits, 3) * 2 * np.pi  # Angles for Rx, Ry, Rz
-            quantum_weights.append(layer_weights)
-        return quantum_weights
-
-    def _initialize_meta_learner(self):
-            """
-            Initializes the RNN-based classical meta-learner.
-        
-            Returns:
-                RNNMetaLearner: A NumPy-based RNN for quantum weight prediction.
-            """
-            input_size = 1
-            hidden_size = 32
-            output_shape = (self.num_quantum_layers, self.num_qubits, 3)
-        
-            return RNNMetaLearner(
-                input_size=input_size,
-                hidden_size=hidden_size,
-                output_shape=output_shape,
-                learning_rate=self.meta_learning_rate
+        unknown = set(section) - set(cls._DEFAULT_SHARED_MEMORY_CONFIG)
+        if unknown:
+            raise QNNConfigurationError(
+                "qnn_agent.shared_memory contains unsupported field(s): "
+                f"{', '.join(sorted(str(item) for item in unknown))}"
             )
 
-    def _define_quantum_gates(self):
-        """
-        Defines the basic quantum gates as unitary matrices.
+        resolved = {**cls._DEFAULT_SHARED_MEMORY_CONFIG, **section}
+        for name in ("enabled", "publish_notifications"):
+            if not isinstance(resolved[name], bool):
+                raise QNNConfigurationError(
+                    f"qnn_agent.shared_memory.{name} must be a boolean"
+                )
 
-        Returns:
-            dict: A dictionary containing the gate matrices.
-        """
+        ttl = resolved["ttl_seconds"]
+        if ttl is not None:
+            if isinstance(ttl, bool) or not isinstance(ttl, (int, float, np.number)):
+                raise QNNConfigurationError(
+                    "qnn_agent.shared_memory.ttl_seconds must be numeric or null"
+                )
+            ttl = float(ttl)
+            if not np.isfinite(ttl) or ttl <= 0.0:
+                raise QNNConfigurationError(
+                    "qnn_agent.shared_memory.ttl_seconds must be finite and positive"
+                )
+        resolved["ttl_seconds"] = ttl
 
-        # Define single-qubit gates
-        H = np.array([[1, 1], [1, -1]]) / np.sqrt(2)  # Hadamard gate [cite: 86]
-        X = np.array([[0, 1], [1, 0]])  # Pauli-X gate [cite: 86]
-        Y = np.array([[0, -1j], [1j, 0]])  # Pauli-Y gate [cite: 86]
-        Z = np.array([[1, 0], [0, -1]])  # Pauli-Z gate [cite: 86]
-        S = np.array([[1, 0], [0, 1j]])  # Phase gate [cite: 86]
-        T = np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]])  # Pi/8 gate [cite: 86]
+        for name in ("summary_key_prefix", "event_channel"):
+            item = resolved[name]
+            if not isinstance(item, str) or not item.strip():
+                raise QNNConfigurationError(
+                    f"qnn_agent.shared_memory.{name} must be a non-empty string"
+                )
+            resolved[name] = item.strip()
+        return resolved
 
-        gate_definitions = {
-            'H': H,
-            'X': X,
-            'Y': Y,
-            'Z': Z,
-            'S': S,
-            'T': T,
-        }
-        return gate_definitions
+    @property
+    def num_qubits(self) -> int:
+        return self.qnn_config.num_qubits
 
-    def _rx_gate(self, theta):
-        """
-        Defines the rotation gate around the X-axis.
+    @property
+    def num_quantum_layers(self) -> int:
+        return self.qnn_config.num_quantum_layers
 
-        Args:
-            theta (float): The rotation angle.
+    @property
+    def learning_rate(self) -> float:
+        return self.qnn_config.learning_rate
 
-        Returns:
-            numpy.ndarray: The Rx gate matrix.
-        """
+    @property
+    def seed(self) -> int:
+        return self.qnn_config.seed
 
-        return np.array([
-            [np.cos(theta / 2), -1j * np.sin(theta / 2)],
-            [-1j * np.sin(theta / 2), np.cos(theta / 2)]
-        ])
+    @property
+    def entanglement(self) -> str:
+        return self.qnn_config.entanglement
 
-    def _ry_gate(self, theta):
-        """
-        Defines the rotation gate around the Y-axis.
+    @property
+    def loss(self) -> str:
+        return self.measurement_optimizer.loss
 
-        Args:
-            theta (float): The rotation angle.
+    @property
+    def gradient_method(self) -> str:
+        return self.measurement_optimizer.gradient_method
 
-        Returns:
-            numpy.ndarray: The Ry gate matrix.
-        """
+    @property
+    def finite_difference_step(self) -> float:
+        return self.measurement_optimizer.finite_difference_step
 
-        return np.array([
-            [np.cos(theta / 2), -np.sin(theta / 2)],
-            [np.sin(theta / 2), np.cos(theta / 2)]
-        ])
+    @property
+    def gradient_clip_norm(self) -> float:
+        return self.measurement_optimizer.gradient_clip_norm
 
-    def _rz_gate(self, theta):
-        """
-        Defines the rotation gate around the Z-axis.
+    @property
+    def estimated_statevector_bytes(self) -> int:
+        """Bytes occupied by one complex128 state vector, excluding scratch space."""
 
-        Args:
-            theta (float): The rotation angle.
+        return self.qnn_config.statevector_bytes
 
-        Returns:
-            numpy.ndarray: The Rz gate matrix.
-        """
+    @property
+    def parameter_bytes(self) -> int:
+        """Bytes occupied by the float64 rotation-parameter tensor."""
 
-        return np.array([
-            [np.cos(theta / 2) - 1j * np.sin(theta / 2), 0],
-            [0, np.cos(theta / 2) + 1j * np.sin(theta / 2)]
-        ])
+        return self.qnn_config.parameter_bytes
 
-    def _controlled_not_gate(self, control_qubit, target_qubit, num_qubits):
-        """
-        Defines the CNOT (Controlled-NOT) gate.
+    @property
+    def training_step(self) -> int:
+        return self._training_step
 
-        Args:
-            control_qubit (int): Index of the control qubit.
-            target_qubit (int): Index of the target qubit.
-            num_qubits (int): Total number of qubits in the system.
+    def _initialize_quantum_weights(self) -> np.ndarray:
+        return self._rng.uniform(
+            low=-np.pi,
+            high=np.pi,
+            size=self._circuit.weight_shape,
+        ).astype(np.float64)
 
-        Returns:
-            numpy.ndarray: The CNOT gate matrix.
-        """
+    def _normalize_sequence(
+        self,
+        sequence: Sequence[Any],
+        *,
+        name: str,
+    ) -> tuple[np.ndarray, ...]:
+        values = tuple(sequence)
+        encoded = self._encoder.encode_sequence(values, name=name)
+        self._policy.validate_sequence_length(len(encoded), name=name)
+        return encoded
 
-        # Create the CNOT gate matrix
-        I = np.eye(2)
-        X = self.gate_definitions['X']
-        Z = self.gate_definitions['Z']
-        zero_proj = np.array([[1, 0], [0, 0]])
-        one_proj = np.array([[0, 0], [0, 1]])
+    def _validate_working_set(self, state_slots: int, *, operation: str) -> None:
+        """Reject work whose conservative array budget exceeds policy."""
 
-        cnot = np.kron(zero_proj, I) + np.kron(one_proj, X)
+        self._policy.validate_working_set(state_slots, operation=operation)
 
-        # Pad the CNOT with identity matrices to act on the full system
-        pad_l = 1
-        pad_r = 1
-        if control_qubit < target_qubit:
-          pad_l = control_qubit
-          pad_r = num_qubits - 1 - target_qubit
-        elif control_qubit > target_qubit:
-          pad_l = target_qubit
-          pad_r = num_qubits - 1 - control_qubit
+    def apply_tuning_parameters(self, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        """Apply only declared QNN tunables to an isolated tuning candidate."""
 
-        gate = np.eye(1)
-        for _ in range(pad_l):
-          gate = np.kron(gate, I)
-        gate = np.kron(gate, cnot)
-        for _ in range(pad_r):
-          gate = np.kron(gate, I)
-        return gate
-
-    def _apply_gate(self, state, gate, target_qubits):
-        """
-        Applies a quantum gate to the state.
-
-        Args:
-            state (numpy.ndarray): The current quantum state.
-            gate (numpy.ndarray): The quantum gate matrix.
-            target_qubits (list): A list of qubit indices that the gate acts on.
-
-        Returns:
-            numpy.ndarray: The updated quantum state.
-        """
-
-        #  This applies the gate to the specified qubits
-        #  For single-qubit gates, reshape and multiply
-        #  For multi-qubit gates, more complex tensor product operations are needed
-        if len(target_qubits) == 1:
-            # Reshape the state for matrix multiplication
-            num_target_qubits = len(target_qubits)
-            target_index = target_qubits[0]
-            # Calculate the dimensions for reshaping
-            num_segments = 2**target_index
-            segment_size = 2**(num_qubits - num_target_qubits)
-            new_shape = (num_segments, 2, segment_size)
-            reshaped_state = state.reshape(new_shape)
-
-            # Apply the gate
-            updated_state = np.einsum('ij,abj->abi', gate, reshaped_state)
-
-            # Reshape back to the original state
-            updated_state = updated_state.reshape(state.shape)
-            return updated_state
-        elif len(target_qubits) == 2 and gate.shape == (4,4):
-          return np.dot(gate, state)
+        self._policy.validate_tuning_parameters(parameters)
+        current = self.qnn_config.to_dict()
+        candidate = QNNConfig.from_mapping({**current, **dict(parameters)})
+        structural_change = candidate.num_quantum_layers != self.num_quantum_layers
+        candidate_circuit = self._build_circuit(candidate)
+        candidate_encoder = self._build_encoder(candidate)
+        candidate_policy = self._build_policy(candidate)
+        candidate_measurement_optimizer = self._build_measurement_optimizer(candidate)
+        if structural_change:
+            baseline_rng = copy.deepcopy(self._rng.bit_generator.state)
+            try:
+                candidate_weights = self._rng.uniform(
+                    low=-np.pi,
+                    high=np.pi,
+                    size=candidate_circuit.weight_shape,
+                ).astype(np.float64)
+            except Exception:
+                self._rng.bit_generator.state = baseline_rng
+                raise
         else:
-            raise ValueError("Gate application not implemented for this number of qubits.")
+            candidate_weights = candidate_circuit.validate_weights(self.quantum_weights)
+        self.qnn_config = candidate
+        self._circuit = candidate_circuit
+        self._encoder = candidate_encoder
+        self._policy = candidate_policy
+        self.measurement_optimizer = candidate_measurement_optimizer
+        self.qnn_metrics = candidate_measurement_optimizer.metrics
+        self.evaluator = self.qnn_metrics
+        self.quantum_weights = np.array(candidate_weights, copy=True)
+        if structural_change:
+            self._training_step = 0
+        self._last_gradient = None
+        return candidate.to_dict()
 
-    def _quantum_layer(self, input_state, layer_weights):
-        """
-        Applies a quantum layer to the input state using the defined quantum gates.
+    # ------------------------------------------------------------------
+    # Circuit operations
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _define_quantum_gates() -> dict[str, np.ndarray]:
+        return {
+            "H": np.array(HADAMARD, copy=True),
+            "X": np.array(PAULI_X, copy=True),
+            "Y": np.array(PAULI_Y, copy=True),
+            "Z": np.array(PAULI_Z, copy=True),
+        }
 
-        Args:
-            input_state (numpy.ndarray): The current quantum state.
-            layer_weights (numpy.ndarray): The quantum weights (angles) for this layer.
+    @staticmethod
+    def _rx_gate(theta: float) -> np.ndarray:
+        return rx(theta)
 
-        Returns:
-            numpy.ndarray: The output quantum state after applying the layer.
-        """
-        self.qnn_layers = QuantumCircuitLayer(
-            num_layers=self.num_quantum_layers,
+    @staticmethod
+    def _ry_gate(theta: float) -> np.ndarray:
+        return ry(theta)
+
+    @staticmethod
+    def _rz_gate(theta: float) -> np.ndarray:
+        return rz(theta)
+
+    def _controlled_not_gate(
+        self,
+        control_qubit: int,
+        target_qubit: int,
+        num_qubits: int | None = None,
+    ) -> np.ndarray:
+        """Return the local CNOT; qubit order is supplied to ``_apply_gate``."""
+
+        total = self.num_qubits if num_qubits is None else num_qubits
+        for name, value in (
+            ("control_qubit", control_qubit),
+            ("target_qubit", target_qubit),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise QNNInputError(f"{name} must be an integer")
+            if value < 0 or value >= total:
+                raise QNNInputError(f"{name} is out of range")
+        if control_qubit == target_qubit:
+            raise QNNInputError("control_qubit and target_qubit must differ")
+        return np.array(CNOT, copy=True)
+
+    def _apply_gate(
+        self,
+        state: Any,
+        gate: Any,
+        target_qubits: Sequence[int],
+    ) -> np.ndarray:
+        return apply_gate(
+            state,
+            gate,
+            target_qubits,
             num_qubits=self.num_qubits,
-            gate_factory=lambda q: tuple(np.random.rand(3) * 2 * np.pi)
         )
 
-        current_state = input_state.copy()
-        for i in range(self.num_qubits):
-            current_state = self._apply_gate(current_state, self._rx_gate(layer_weights[i, 0]), [i])
-            current_state = self._apply_gate(current_state, self._ry_gate(layer_weights[i, 1]), [i])
-            current_state = self._apply_gate(current_state, self._rz_gate(layer_weights[i, 2]), [i])
-
-        # Apply CNOT gates (example: entangling adjacent qubits)
-        for i in range(0, self.num_qubits - 1, 2):
-          current_state = self._apply_gate(current_state, self._controlled_not_gate(i, i+1, self.num_qubits), [i, i+1])
-        for i in range(1, self.num_qubits - 1, 2):
-          current_state = self._apply_gate(current_state, self._controlled_not_gate(i, i+1, self.num_qubits), [i, i+1])
-
-        return current_state
-
-    def _qrnn_forward(self, input_sequence):
-        """
-        Recurrent quantum sequence processing with hidden state feedback.
-    
-        Args:
-            input_sequence (list): Quantum state inputs.
-    
-        Returns:
-            output_sequence (list), final_hidden_state (np.ndarray)
-        """
-        hidden_state = self._initialize_hidden_state()
-        output_sequence = []
-    
-        for t, input_state in enumerate(input_sequence):
-            # Combine input and hidden state
-            combined = 0.5 * (input_state + hidden_state)  # You can try other merge strategies
-            for layer_idx in range(self.num_quantum_layers):
-                combined = self._quantum_layer(combined, self.quantum_weights[layer_idx])
-    
-            output_sequence.append(combined.copy())
-            hidden_state = combined  # Recurrent update
-    
-        return output_sequence, hidden_state
-
-    def _initialize_hidden_state(self):
-        """
-        Initializes the hidden state of the QRNN.
-
-        Returns:
-            numpy.ndarray: The initial hidden state.
-        """
-
-        # Placeholder; actual initialization depends on QRNN architecture
-        return np.zeros(2**self.num_qubits) #hidden state is a vector
-
-    def _meta_learn_update(self, task_performance):
-        """
-        Updates the QNN agent's parameters based on meta-learning.
-
-        Args:
-            task_performance (list): A list of performance metrics for the QRNN on different tasks.
-        """
-        # Save references for loss_fn usage
-        self._last_task_input_seq = self._last_task_input_seq or []
-        self._last_task_ref = self._last_task_ref or None
-
-        # This is a placeholder; replace with actual meta-learning update
-        # The meta-learner observes the QRNN's performance and updates the quantum weights
-        # For example, use the meta-learner to predict new quantum weights
-        new_quantum_weights = self.meta_learner.predict(task_performance)
-        self.quantum_weights = new_quantum_weights
-
-        # Update meta-learner parameters (if applicable)
-        self._update_meta_learner(task_performance)
-
-        def loss_fn(w):
-            original_weights = self.quantum_weights
-            self.quantum_weights = w
-            out_seq, _ = self._qrnn_forward(self._last_task_input_seq)
-            score = self._evaluate_performance(out_seq, self._last_task_ref)[0]
-            self.quantum_weights = original_weights  # Restore
-            return score
-    
-        grads = self._parameter_shift_gradient(loss_fn, self.quantum_weights)
-        for l in range(len(self.quantum_weights)):
-            self.quantum_weights[l] -= self.meta_learning_rate * grads[l]
-    
-        # Predictive update via meta learner
-        new_weights = self.meta_learner.predict(task_performance)
-        self.quantum_weights = new_weights
-        self._update_meta_learner(task_performance)
-
-    def _update_meta_learner(self, task_performance):
-        """
-        Updates the meta-learner's parameters.
-
-        Args:
-            task_performance (list): Performance metrics from tasks.
-        """
-        target_weights = self.quantum_weights  # true weights before update
-        self.meta_learner.train(task_performance, np.array(target_weights))
-        pass
-
-    def meta_evaluate(self, tasks, evaluation_agent):
-        domain_groups = defaultdict(list)
-        for task in tasks:
-            domain = task.metadata.get("domain", "unknown")
-            domain_groups[domain].append(task)
-    
-        summary = {}
-        for domain, domain_tasks in domain_groups.items():
-            results = {"qnn": [], "maml": [], "rl": []}
-            for task in domain_tasks:
-                out_seq, _ = self._qrnn_forward(task.input_sequences)
-                results["qnn"].append(self._evaluate_performance(out_seq, task)[0])
-    
-                maml_policy = self.maml_agent.inner_update(task.env)
-                traj = self.maml_agent.collect_trajectory(task.env, maml_policy)
-                results["maml"].append(sum(t.reward for t in traj) / len(traj))
-    
-                state, _ = task.env.reset()
-                rewards = []
-                for _ in range(10):
-                    action = self.rl_agent.step(state)
-                    state, reward, done, *_ = task.env.step(action)
-                    rewards.append(reward)
-                    if done: break
-                results["rl"].append(sum(rewards) / len(rewards))
-    
-            evaluation_agent.log_evaluation(
-                results={"source": f"QNN Meta-Eval [{domain}]"},
-                rewards_a=results["qnn"],
-                rewards_b=results["maml"]
-            )
-            summary[domain] = results
-    
-        self._sync_agent_stats_to_memory()
-        return summary
-
-    def train(self, tasks):
-        """
-        Trains the QNNAgent on a series of tasks using meta-learning.
-
-        Args:
-            tasks (list): A list of training tasks, where each task is a list of input sequences.
-        """
-
-        for task in tasks:
-            output_sequence, _ = self._qrnn_forward(task)
-            task_performance = self._evaluate_performance(output_sequence, task)  # Evaluate performance
-            self._meta_learn_update(task_performance)  # Update based on meta-learning
-
-
-        self._sync_agent_stats_to_memory()
-
-    def _evaluate_performance(self, output_sequence, task):
-        """
-        Evaluates the performance of the QRNN on a given task.
-
-        Args:
-            output_sequence (list): The output sequence from the QRNN.
-            task (list): The input sequences for the task.
-
-        Returns:
-            list: A list with a single performance score.
-        """
-        if hasattr(task, "target_outputs") and task.target_outputs is not None:
-            score = self.evaluator.evaluate(output_sequence, task.target_outputs)
-        else:
-            score = self.evaluator.evaluate(output_sequence, output_sequence)
-    
-        # Store the score for global evaluation later
-        self.performance_metrics['loss'].append(score)
-    
-        return [score]
-
-    def run_task(self, task):
-        """
-        Runs the QNNAgent on a single task.
-
-        Args:
-            task (list): The input sequences for the task.
-
-        Returns:
-            list: The output sequence generated by the QRNN.
-        """
-
-        output_sequence, _ = self._qrnn_forward(task)
-        return output_sequence
-
-    def _probabilistic_strategy(self, task):
-        """
-        Dynamically routes task to MAML or RL using softmax over running performance.
-        """
-        # Compute moving averages
-        maml_avg = self.agent_success_tracker["maml"]["average"]
-        rl_avg = self.agent_success_tracker["rl"]["average"]
-
-        # Add slight task-conditioned noise
-        difficulty = task.metadata.get("difficulty", 0.5)
-        modifier = (1.2 * difficulty + 0.8 * (1 - task.metadata.get("success_rate", 0.5)))
-
-        logits = np.array([maml_avg + modifier, rl_avg + 1 - modifier])
-        logits = np.array(logits) / self.routing_temperature
-        probs = np.exp(logits - np.max(logits))  # softmax stabilization
-        probs /= np.sum(probs)
-
-        return np.random.choice(["maml", "rl"], p=probs)
-
-    def _check_gradient_health(self):
-        gradients = [np.linalg.norm(self.meta_learner.Wxh),
-                     np.linalg.norm(self.meta_learner.Whh),
-                     np.linalg.norm(self.meta_learner.Why)]
-        if any(np.isnan(g) or g > 1e3 for g in gradients):
-            raise ValueError("Gradient instability or explosion in QNN meta-learner")
-    
-    def _parameter_shift_gradient(self, loss_fn, weights, epsilon=np.pi/2):
-        """
-        Computes parameter-shift gradients for quantum weights.
-        """
-        gradients = []
-    
-        for l, layer_weights in enumerate(weights):
-            grad_layer = np.zeros_like(layer_weights)
-            for q in range(layer_weights.shape[0]):
-                for p in range(3):  # Rx, Ry, Rz
-                    shifted = np.copy(weights)
-                    shifted[l][q][p] += epsilon
-                    plus = loss_fn(shifted)
-    
-                    shifted[l][q][p] -= 2 * epsilon
-                    minus = loss_fn(shifted)
-    
-                    grad_layer[q][p] = (plus - minus) / 2
-            gradients.append(grad_layer)
-    
-        return gradients
-    
-    def _born_sample(self, quantum_state, num_samples=100):
-        """
-        Samples output probabilities using Born rule: P(i) = |amp_i|^2
-        """
-        probs = np.abs(quantum_state) ** 2
-        probs /= np.sum(probs)
-        return np.random.choice(len(probs), size=num_samples, p=probs)
-
-    def _plot_score_heatmap(self, qnn_scores, maml_scores, rl_scores):
-        """
-        Plots a heatmap comparison of QNN vs MAML vs RL agent scores.
-        """
-        
-
-        data = {
-            "QNN": qnn_scores,
-            "MAML": maml_scores,
-            "RL": rl_scores
-        }
-
-        # Create a matrix: rows = agents, columns = task indices
-        agent_names = list(data.keys())
-        max_len = max(len(v) for v in data.values())
-        heatmap_data = np.full((len(agent_names), max_len), np.nan)
-
-        for i, name in enumerate(agent_names):
-            vals = data[name]
-            heatmap_data[i, :len(vals)] = vals
-
-        plt.figure(figsize=(10, 3))
-        sns.heatmap(heatmap_data, cmap="viridis", annot=False, xticklabels=False,
-                    yticklabels=agent_names, cbar_kws={'label': 'Reward / Score'})
-        plt.title("Agent Performance Comparison (QNN vs MAML vs RL)")
-        plt.xlabel("Task Index")
-        plt.ylabel("Agent")
-        plt.tight_layout()
-        plt.show()
-
-    def _sync_agent_stats_to_memory(self):
-        self.shared_memory.set("qnn_agent/agent_success_tracker", {
-            agent: {
-                "average": round(stats["average"], 4),
-                "samples": len(stats["rewards"]),
-                "last_update": time.time()
-            }
-            for agent, stats in self.agent_success_tracker.items()
-        })
-
-    def visualize_output(self, output_sequence):
-        """
-        Visualizes output quantum states depending on qubit count.
-        """
-        if self.num_qubits == 1:
-            self._visualize_bloch(output_sequence)
-        else:
-            self._visualize_amplitudes(output_sequence)
-
-    def visualize_bloch(output_sequence):
-        """
-        Visualize a sequence of 1-qubit quantum states on the Bloch sphere (2D projection).
-        """
-        from mpl_toolkits.mplot3d import Axes3D
-    
-        fig = plt.figure(figsize=(8, 6))
-        ax = fig.add_subplot(111, projection='3d')
-    
-        for state in output_sequence:
-            a = state[0]
-            b = state[1]
-            x = 2 * (a * b.conj()).real
-            y = 2 * (a * b.conj()).imag
-            z = abs(a)**2 - abs(b)**2
-            ax.scatter(x, y, z, color='blue', s=50)
-    
-        ax.set_title("Bloch Sphere Projection")
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
-        plt.show()
-    
-    def visualize_amplitudes(output_sequence):
-        """
-        Plot amplitude histograms for each output state in the sequence.
-        """
-        for idx, state in enumerate(output_sequence):
-            amplitudes = np.abs(state)
-            plt.figure(figsize=(6, 3))
-            plt.bar(range(len(amplitudes)), amplitudes)
-            plt.title(f"QNN Output | Step {idx}")
-            plt.xlabel("Basis State Index")
-            plt.ylabel("Amplitude")
-            plt.tight_layout()
-            plt.show()
-
-class QuantumGate:
-    """
-    Encapsulates the logic and mathematical representation of a quantum gate.
-    """
-
-    def __init__(self, name, matrix):
-        """
-        Initializes a QuantumGate.
-
-        Args:
-            name (str): The name of the gate (e.g., "Hadamard", "CNOT").
-            matrix (numpy.ndarray): The unitary matrix representing the gate.
-        """
-        self.name = name
-        self.matrix = matrix
-
-    def apply(self, state, target_qubits):
-        """
-        Applies the gate to the given quantum state.
-
-        Args:
-            state (numpy.ndarray): The current quantum state.
-            target_qubits (list): A list of qubit indices that the gate acts on.
-
-        Returns:
-            numpy.ndarray: The updated quantum state.
-        """
-
-        #  This applies the gate to the specified qubits
-        #  For single-qubit gates, reshape and multiply
-        #  For multi-qubit gates, more complex tensor product operations are needed
-        if len(target_qubits) == 1:
-            # Reshape the state for matrix multiplication
-            num_target_qubits = len(target_qubits)
-            target_index = target_qubits[0]
-            # Calculate the dimensions for reshaping
-            num_segments = 2**target_index
-            segment_size = 2**(num_qubits - num_target_qubits)
-            new_shape = (num_segments, 2, segment_size)
-            reshaped_state = state.reshape(new_shape)
-
-            # Apply the gate
-            updated_state = np.einsum('ij,abj->abi', self.matrix, reshaped_state)
-
-            # Reshape back to the original state
-            updated_state = updated_state.reshape(state.shape)
-            return updated_state
-        elif len(target_qubits) == 2 and self.matrix.shape == (4, 4):
-            return np.dot(self.matrix, state)
-        else:
-            raise ValueError("Gate application not implemented for this number of qubits.")
-
-class QuantumCircuitLayer:
-    """
-    Represents a configurable stack of quantum gate layers in a QNN.
-
-    Each 'layer' here is a full quantum transformation step (e.g., rotation + entanglement).
-    A QuantumCircuitLayerStack can contain multiple such layers (as defined by QNNAgent.num_quantum_layers).
-    """
-
-    def __init__(self, num_layers, num_qubits, gate_factory):
-        """
-        Initializes a layered quantum circuit.
-
-        Args:
-            num_layers (int): Number of sequential quantum layers to apply.
-            num_qubits (int): Number of qubits in the system.
-            gate_factory (callable): A function that returns a tuple of rotation angles (Rx, Ry, Rz) per qubit.
-        """
-        self.num_layers = num_layers
-        self.num_qubits = num_qubits
-        self.layers = []  # Each element will be a list of gates and entanglements
-
-        for _ in range(num_layers):
-            layer = []
-            for q in range(num_qubits):
-                theta_x, theta_y, theta_z = gate_factory(q)
-                layer.append(("Rx", q, theta_x))
-                layer.append(("Ry", q, theta_y))
-                layer.append(("Rz", q, theta_z))
-            # Add entanglement scheme (default: nearest-neighbor CNOT)
-            for i in range(0, num_qubits - 1, 2):
-                layer.append(("CNOT", i, i + 1))
-            for i in range(1, num_qubits - 1, 2):
-                layer.append(("CNOT", i, i + 1))
-            self.layers.append(layer)
-
-    def apply(self, state, gate_impls):
-        """
-        Applies the full quantum layer stack to a quantum state.
-
-        Args:
-            state (np.ndarray): The input quantum state.
-            gate_impls (dict): Dictionary mapping gate names to callable implementations.
-
-        Returns:
-            np.ndarray: Updated quantum state.
-        """
-        for layer in self.layers:
-            for gate_name, *args in layer:
-                gate = gate_impls[gate_name](*args[1:]) if gate_name != "CNOT" else gate_impls[gate_name](*args, self.num_qubits)
-                state = gate_impls["apply_gate"](state, gate, args[:2] if gate_name == "CNOT" else [args[0]])
-        return state
-
-class RNNMetaLearner:
-    """
-    Classical meta-learner using a custom-built NumPy RNN to predict quantum weight updates.
-    """
-
-    def __init__(self, input_size, hidden_size, output_shape, learning_rate=0.01):
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_shape = output_shape
-        self.learning_rate = learning_rate
-
-        # Weights and state
-        self.Wxh = np.random.randn(hidden_size, input_size) * 0.1
-        self.Whh = np.random.randn(hidden_size, hidden_size) * 0.1
-        self.Why = np.random.randn(np.prod(output_shape), hidden_size) * 0.1
-
-        self.bh = np.zeros((hidden_size,))
-        self.by = np.zeros((np.prod(output_shape),))
-        self.h = np.zeros((hidden_size,))
-
-    def tanh(self, x):
-        return np.tanh(x)
-
-    def dtanh(self, x):
-        return 1.0 - np.tanh(x)**2
-
-    def predict(self, inputs):
-        self.last_inputs = []
-        self.last_hs = [np.copy(self.h)]
-
-        if isinstance(inputs, list):
-            inputs = np.array(inputs).reshape(-1, 1)
-
-        for x in inputs:
-            x = x.flatten()
-            self.last_inputs.append(x)
-            self.h = self.tanh(np.dot(self.Wxh, x) + np.dot(self.Whh, self.h) + self.bh)
-            self.last_hs.append(np.copy(self.h))
-
-        y = np.dot(self.Why, self.h) + self.by
-        return y.reshape(self.output_shape)
-
-    def dynamic_architecture_tuner(self, hyperparam_space_path, evaluation_agent):
-        from src.tuning.bayesian_search import BayesianSearch
-    
-        def evaluation_function(params):
-            self.num_qubits = params["num_qubits"]
-            self.num_quantum_layers = params["num_quantum_layers"]
-            self.quantum_weights = self._initialize_quantum_weights()
-            results = self.meta_evaluate([self._last_task_ref], evaluation_agent)
-            return np.mean(results.get("general", {}).get("qnn", [0]))
-    
-        search = BayesianSearch(
-            config_file=hyperparam_space_path,
-            evaluation_function=evaluation_function,
-            n_calls=15,
-            n_random_starts=5
+    def _quantum_layer(self, input_state: Any, layer_weights: Any) -> np.ndarray:
+        state = self._encoder.encode_state(input_state, name="input_state")
+        return self._circuit.apply_layer(state, layer_weights)
+
+    def forward_sequence(
+        self,
+        input_sequence: Sequence[Any],
+        *,
+        weights: Any | None = None,
+    ) -> tuple[list[np.ndarray], np.ndarray]:
+        """Apply the same parameterized unitary circuit to each encoded state."""
+
+        inputs = self._normalize_sequence(input_sequence, name="input_sequence")
+        parameters = self._circuit.validate_weights(
+            self.quantum_weights if weights is None else weights
         )
-        best_params, best_score, _ = search.run_search()
-        self.shared_memory.set("qnn_agent/best_architecture", best_params)
-        return best_params
+        outputs = [self._circuit.forward(state, parameters) for state in inputs]
+        return outputs, np.array(outputs[-1], copy=True)
 
-    def _update_agent_tracker(self, agent, score, maxlen=100):
-        tracker = self.agent_success_tracker[agent]
-        tracker["rewards"].append(score)
-        if len(tracker["rewards"]) > maxlen:
-            tracker["rewards"].pop(0)
-        tracker["average"] = np.mean(tracker["rewards"])
+    def _qrnn_forward(
+        self,
+        input_sequence: Sequence[Any],
+    ) -> tuple[list[np.ndarray], np.ndarray]:
+        """Compatibility alias; the repaired model is deliberately non-recurrent."""
 
-    def train(self, tasks):
-        """
-        Trains the QNNAgent with probabilistic routing between MAML and RL.
-        Also logs performance of all agents for statistical comparison.
-        """
-        qnn_scores, maml_scores, rl_scores = [], [], []
+        return self.forward_sequence(input_sequence)
 
-        for task in tasks:
-            env = getattr(task, "env", None)
-            if env is None:
-                continue
-    
-            # === Dynamic routing logic ===
-            route = self._probabilistic_strategy(task)
-    
-            if route == "maml":
-                policy = self.maml_agent.inner_update(env)
-                traj = self.maml_agent.collect_trajectory(env, policy)
-                self.maml_agent.meta_update([(env, traj)])
-                maml_score = sum(t.reward for t in traj) / len(traj)
-                maml_scores.append(maml_score)
-                self._update_agent_tracker("maml", maml_score)
-    
-            elif route == "rl":
-                state, _ = env.reset()
-                rewards = []
-                for _ in range(10):  # Fixed-length episodes
-                    action = self.rl_agent.step(state)
-                    next_state, reward, done, _, _ = env.step(action)
-                    self.rl_agent.receive_reward(reward)
-                    self.rl_agent.learn(next_state, reward, done)
-                    rewards.append(reward)
-                    if done:
-                        break
-                    state = next_state
-                rl_score = sum(rewards) / len(rewards)
-                rl_scores.append(rl_score)
-                self._update_agent_tracker("rl", rl_score)
-    
-            # === QNN Meta-learning ===
-            output_sequence, _ = self._qrnn_forward(task.input_sequences)
-            performance = self._evaluate_performance(output_sequence, task)
-            self._meta_learn_update(performance)
-            qnn_scores.append(performance[0])
+    def _initialize_hidden_state(self) -> np.ndarray:
+        """Compatibility helper returning a valid ``|0...0>`` state."""
 
-        self._plot_score_heatmap(qnn_scores, maml_scores, rl_scores)
-        self._plot_routing_probabilities()
+        return zero_state(self.num_qubits)
 
-class MetaLearner:
-    """
-    Meta-learner with checkpointing, multi-model support, and validation logic.
-    Integrates with shared memory for collaborative training environments.
-    """
-    def __init__(self, model, learning_rate, shared_memory=None, model_type='rnn'):
-        """
-        Args:
-            model: The meta-learning model (RNN, neural network, etc.)
-            learning_rate: Learning rate for meta-updates
-            shared_memory: Reference to BaseAgent's shared memory
-            model_type: Type of model ('rnn'|'linear'|'transformer')
-        """
-        self.model = model
-        self.learning_rate = learning_rate
-        self.shared_memory = shared_memory
-        self.model_type = model_type
-        self.training_history = {
-            'loss': [],
-            'validation_scores': [],
-            'update_timestamps': []
-        }
+    # ------------------------------------------------------------------
+    # Metrics and optimization
+    # ------------------------------------------------------------------
+    def _loss_for_weights(
+        self,
+        weights: np.ndarray,
+        inputs: Sequence[np.ndarray],
+        targets: Sequence[np.ndarray],
+    ) -> float:
+        outputs = [self._circuit.forward(state, weights) for state in inputs]
+        return float(self.qnn_metrics.evaluate(outputs, targets))
 
-    def update(self, task_performance, validation_data=None):
-        """
-        Update with validation check and memory integration
-        """
-        # Main update logic
-        new_quantum_weights = self.model.predict(task_performance)
+    def _parameter_shift_gradient(
+        self,
+        loss_fn: Any,
+        weights: Any,
+        epsilon: float | None = None,
+    ) -> np.ndarray:
+        """Differentiate a compatible expectation-derived loss by parameter shift."""
 
-        # Validation step
-        if validation_data:
-            val_score = self.validate(new_quantum_weights, validation_data)
-            self.training_history['validation_scores'].append(val_score)
+        parameters = self._circuit.validate_weights(weights)
+        shift = (
+            self.measurement_optimizer.parameter_shift
+            if epsilon is None
+            else float(epsilon)
+        )
+        return parameter_shift_gradient(
+            loss_fn,
+            parameters,
+            loss_name=self.measurement_optimizer.loss,
+            shift=shift,
+        )
 
-        # Log to shared memory
-        if self.shared_memory:
-            self.shared_memory.set(
-                f"meta_learner/{self.model_type}/last_weights",
-                new_quantum_weights.tolist()
+    def _finite_difference_gradient(
+        self,
+        loss_fn: Any,
+        weights: Any,
+        epsilon: float | None = None,
+    ) -> np.ndarray:
+        parameters = self._circuit.validate_weights(weights)
+        step = (
+            self.measurement_optimizer.finite_difference_step
+            if epsilon is None
+            else float(epsilon)
+        )
+        return finite_difference_gradient(loss_fn, parameters, step=step)
+
+    def _compute_gradient(
+        self,
+        inputs: Sequence[np.ndarray],
+        targets: Sequence[np.ndarray],
+    ) -> np.ndarray:
+        def loss_fn(candidate: np.ndarray) -> float:
+            return self._loss_for_weights(candidate, inputs, targets)
+
+        return self.measurement_optimizer.gradient(loss_fn, self.quantum_weights)
+
+    @staticmethod
+    def _check_gradient_health(gradient: Any) -> None:
+        values = np.asarray(gradient, dtype=np.float64)
+        if values.size == 0 or not np.all(np.isfinite(values)):
+            raise FloatingPointError("QNN gradient is empty or non-finite")
+
+    def train_task(
+        self,
+        task: QNNTask | Mapping[str, Any] | Any,
+        *,
+        steps: int = 1,
+    ) -> dict[str, Any]:
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps <= 0:
+            raise QNNInputError("steps must be a positive integer")
+        normalized_task = QNNTask.from_value(task)
+        if normalized_task.target_outputs is None:
+            raise QNNInputError("training requires target_outputs")
+        inputs = self._normalize_sequence(
+            normalized_task.input_sequences, name="inputs"
+        )
+        targets = self._normalize_sequence(
+            normalized_task.target_outputs, name="targets"
+        )
+        self._validate_working_set(4 * len(inputs), operation="training")
+        self._policy.validate_training_work(
+            sequence_length=len(inputs),
+            steps=steps,
+        )
+
+        initial_loss = self._loss_for_weights(self.quantum_weights, inputs, targets)
+        baseline_weights = np.array(self.quantum_weights, copy=True)
+        baseline_step = self._training_step
+        baseline_gradient = (
+            None
+            if self._last_gradient is None
+            else np.array(self._last_gradient, copy=True)
+        )
+        try:
+            for _ in range(steps):
+                gradient = self._compute_gradient(inputs, targets)
+                with np.errstate(over="raise", invalid="raise"):
+                    updated = self.quantum_weights - self.learning_rate * gradient
+                self.quantum_weights = np.array(
+                    self._circuit.validate_weights(updated),
+                    copy=True,
+                )
+                self._last_gradient = np.array(gradient, copy=True)
+                self._training_step += 1
+            outputs = [
+                self._circuit.forward(state, self.quantum_weights) for state in inputs
+            ]
+            metrics = self.qnn_metrics.evaluate_sequence(outputs, targets)
+            gradient = self._last_gradient
+            assert gradient is not None
+            metrics.update(
+                {
+                    "initial_loss": float(initial_loss),
+                    "gradient_norm": float(np.linalg.norm(gradient)),
+                    "gradient_variance": float(np.var(gradient)),
+                }
             )
-
-        self.training_history['loss'].append(np.mean(task_performance))
-        self.training_history['update_timestamps'].append(time.time())
-
-        return new_quantum_weights
-
-    def validate(self, proposed_weights, validation_task):
-        """
-        Evaluate proposed weights on validation tasks before deployment
-        """
-        # Create temporary agent clone with proposed weights
-        temp_agent = self.shared_memory.get('prototype_agent').clone()
-        temp_agent.quantum_weights = proposed_weights
-
-        # Execute validation task
-        results = temp_agent.run_task(validation_task)
-        evaluator = PerformanceEvaluator(metric='cosine')
-        return evaluator.evaluate(results, validation_task.target_outputs)
-
-    def save_checkpoint(self, checkpoint_key):
-        """Persist model state to shared memory"""
-        if self.shared_memory:
-            self.shared_memory.set(
-                f"meta_checkpoints/{checkpoint_key}",
-                {'model_state': self.model.state_dict(),
-                 'training_history': self.training_history}
-            )
-
-    def load_checkpoint(self, checkpoint_key):
-        """Restore model state from shared memory"""
-        if self.shared_memory:
-            checkpoint = self.shared_memory.get(f"meta_checkpoints/{checkpoint_key}")
-            self.model.load_state_dict(checkpoint['model_state'])
-            self.training_history = checkpoint['training_history']
-
-class Task:
-    """
-    Enhanced task representation with metadata tracking, data augmentation,
-    and quality control features.
-    """
-    def __init__(self, input_sequences, target_outputs=None, metadata=None):
-        """
-        Args:
-            input_sequences: List of quantum state vectors
-            target_outputs: Optional desired outputs
-            metadata: Dict containing:
-                - source: Where the task originated
-                - difficulty: Estimated complexity (0-1)
-                - creation_time: Timestamp of creation
-                - attempts: Number of times attempted
-                - success_rate: Historical success ratio
-        """
-        self.input_sequences = self._preprocess(input_sequences)
-        self.target_outputs = target_outputs
-        self.metadata = metadata or {
-            'source': 'synthetic',
-            'difficulty': 0.5,
-            'creation_time': time.time(),
-            'attempts': 0,
-            'success_rate': 0.0
-        }
-
-    def _preprocess(self, sequences):
-        """Basic quantum state normalization"""
-        return [v / np.linalg.norm(v) for v in sequences]
-
-    def record_attempt(self, success):
-        """Update task statistics"""
-        self.metadata['attempts'] += 1
-        if success:
-            current_success = self.metadata['success_rate'] * (self.metadata['attempts'] - 1)
-            self.metadata['success_rate'] = (current_success + 1) / self.metadata['attempts']
-
-    def generate_variants(self, num_variants=3, noise_level=0.01):
-        """Create modified versions of the task for data augmentation"""
-        variants = []
-        for _ in range(num_variants):
-            new_sequence = []
-            for vec in self.input_sequences:
-                noise = np.random.normal(scale=noise_level, size=vec.shape)
-                new_sequence.append((vec + noise) / np.linalg.norm(vec + noise))
-            variants.append(Task(new_sequence, self.target_outputs, self.metadata.copy()))
-        return variants
-
-    def to_quantum_batches(self, batch_size=32):
-        """Convert sequences into batches for parallel quantum processing"""
-        batches = []
-        for i in range(0, len(self.input_sequences), batch_size):
-            batch = {
-                'inputs': self.input_sequences[i:i+batch_size],
-                'targets': self.target_outputs[i:i+batch_size] if self.target_outputs else None
+            return {
+                "outputs": outputs,
+                "probabilities": [
+                    self.measurement_optimizer.probabilities(state)
+                    for state in outputs
+                ],
+                "metrics": metrics,
+                "loss": metrics["loss"],
+                "training_step": self._training_step,
             }
-            batches.append(batch)
-        return batches
+        except Exception:
+            self.quantum_weights = baseline_weights
+            self._training_step = baseline_step
+            self._last_gradient = baseline_gradient
+            raise
 
-    def visualize(self):
-        """Generate simplified 2D visualization of quantum states (placeholder)"""
-        if len(self.input_sequences[0]) > 2:
-            print("Visualization only available for 1-qubit states")
-            return
-        
-        plt.figure(figsize=(6, 6))
-        for state in self.input_sequences:
-            plt.plot(state[0].real, state[1].real, 'o')
-        plt.title(f"Task States | Source: {self.metadata['source']}")
-        plt.xlabel("Component 1")
-        plt.ylabel("Component 2")
-        plt.show()
+    def _evaluate_performance(
+        self,
+        output_sequence: Sequence[Any],
+        task: Any,
+    ) -> list[float]:
+        normalized = QNNTask.from_value(task)
+        if normalized.target_outputs is None:
+            raise QNNInputError("evaluation requires target_outputs")
+        targets = self._normalize_sequence(normalized.target_outputs, name="targets")
+        return [self.qnn_metrics.evaluate(output_sequence, targets)]
 
-class PerformanceEvaluator:
-    """
-    Evaluates QRNN or quantum agent performance using flexible metrics
-    including MSE, cosine similarity, KL divergence, and accuracy.
-    """
+    # ------------------------------------------------------------------
+    # BaseAgent task surface
+    # ------------------------------------------------------------------
+    def _task_values(self, task_data: Any) -> tuple[str, tuple[QNNTask, ...], int]:
+        if isinstance(task_data, Mapping):
+            mode = (
+                str(task_data.get("mode", task_data.get("operation", "infer")))
+                .strip()
+                .casefold()
+            )
+            steps = task_data.get("steps", 1)
+            if "tasks" in task_data:
+                raw_tasks = task_data["tasks"]
+                if not isinstance(raw_tasks, Sequence) or isinstance(
+                    raw_tasks, (str, bytes, bytearray)
+                ):
+                    raise QNNInputError("tasks must be a sequence")
+                tasks = tuple(QNNTask.from_value(item) for item in raw_tasks)
+            else:
+                tasks = (QNNTask.from_value(task_data),)
+        else:
+            mode = "infer"
+            steps = 1
+            tasks = (QNNTask.from_value(task_data),)
+        if mode in {"inference", "predict"}:
+            mode = "infer"
+        if mode not in {"infer", "evaluate", "train"}:
+            raise QNNInputError("mode must be infer, evaluate, or train")
+        if not tasks:
+            raise QNNInputError("at least one QNN task is required")
+        self._policy.validate_tasks(tasks)
+        for index, task in enumerate(tasks):
+            self._policy.validate_sequence_length(
+                len(task.input_sequences),
+                name=f"tasks[{index}].input_sequences",
+            )
+        if isinstance(steps, bool) or not isinstance(steps, int):
+            raise QNNInputError("steps must be an integer")
+        if mode == "train" and steps <= 0:
+            raise QNNInputError("training steps must be positive")
+        total_states = sum(len(task.input_sequences) for task in tasks)
+        self._validate_working_set(
+            4 * total_states,
+            operation=f"{mode} request",
+        )
+        return mode, tasks, steps
 
-    def __init__(self, metric="mse"):
-        """
-        Args:
-            metric (str): One of 'mse', 'cosine', 'kl', 'accuracy'
-        """
-        self.metric = metric.lower()
+    def _execute_qnn_task(
+        self,
+        task: QNNTask,
+        mode: str,
+        steps: int,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        if mode == "train":
+            result = self.train_task(task, steps=steps)
+        else:
+            inputs = self._normalize_sequence(task.input_sequences, name="inputs")
+            outputs = [
+                self._circuit.forward(state, self.quantum_weights) for state in inputs
+            ]
+            probabilities = [
+                self.measurement_optimizer.probabilities(state)
+                for state in outputs
+            ]
+            metrics: dict[str, float] = {
+                "norm_error": float(
+                    max(abs(float(np.linalg.norm(state)) - 1.0) for state in outputs)
+                )
+            }
+            if mode == "evaluate":
+                if task.target_outputs is None:
+                    raise QNNInputError("evaluation requires target_outputs")
+                targets = self._normalize_sequence(task.target_outputs, name="targets")
+                metrics.update(self.qnn_metrics.evaluate_sequence(outputs, targets))
+            result = {
+                "outputs": outputs,
+                "probabilities": probabilities,
+                "metrics": metrics,
+            }
+            if "loss" in metrics:
+                result["loss"] = metrics["loss"]
+        result["latency_seconds"] = float(time.perf_counter() - started)
+        result["metadata"] = dict(task.metadata)
+        return result
 
-    def evaluate(self, outputs, targets):
-        if self.metric == "mse":
-            return np.mean((outputs - targets) ** 2)
+    def perform_task(self, task_data: Any) -> dict[str, Any]:
+        mode, tasks, steps = self._task_values(task_data)
+        baseline_model = self.state_dict() if mode == "train" else None
+        baseline_gradient = (
+            None
+            if self._last_gradient is None
+            else np.array(self._last_gradient, copy=True)
+        )
+        try:
+            results = [self._execute_qnn_task(task, mode, steps) for task in tasks]
+        except Exception:
+            if baseline_model is not None:
+                self.load_state_dict(baseline_model)
+                self._last_gradient = baseline_gradient
+            raise
+        metric_names = (
+            set.intersection(*(set(result["metrics"]) for result in results))
+            if results
+            else set()
+        )
+        aggregate_metrics = {
+            name: float(np.mean([result["metrics"][name] for result in results]))
+            for name in sorted(metric_names)
+        }
+        response: dict[str, Any] = {
+            "status": "success",
+            "agent": self.name,
+            "model_kind": "parameterized_statevector_circuit",
+            "mode": mode,
+            "task_count": len(results),
+            "results": results,
+            "metrics": aggregate_metrics,
+            "training_step": self._training_step,
+            "statevector_bytes": self.estimated_statevector_bytes,
+            "parameter_bytes": self.parameter_bytes,
+            "parameter_count": self.qnn_config.parameter_count,
+        }
+        if "loss" in aggregate_metrics:
+            response["loss"] = aggregate_metrics["loss"]
+        if len(results) == 1:
+            for key in ("outputs", "probabilities", "latency_seconds"):
+                response[key] = results[0][key]
+        self._publish_qnn_summary(response)
+        return response
 
-        losses = list(self.performance_metrics['loss'])
+    def predict(self, input_data: Any, context: Any = None) -> dict[str, Any]:
+        if isinstance(input_data, Mapping):
+            payload = dict(input_data)
+            payload["mode"] = "infer"
+        else:
+            payload = {"mode": "infer", "input_sequences": input_data}
+        if context is not None:
+            metadata = dict(payload.get("metadata") or {})
+            metadata["context"] = context
+            payload["metadata"] = metadata
+        return self.perform_task(payload)
+
+    def run_task(self, task: Any) -> list[np.ndarray]:
+        """Compatibility inference helper returning only output states."""
+
+        normalized = QNNTask.from_value(task)
+        outputs, _ = self.forward_sequence(normalized.input_sequences)
+        return outputs
+
+    def train(self, tasks: Any, *, steps: int = 1) -> dict[str, Any]:
+        if isinstance(tasks, (QNNTask, Mapping)) or hasattr(tasks, "input_sequences"):
+            payload_tasks = [tasks]
+        else:
+            payload_tasks = list(tasks)
+        return self.perform_task(
+            {"mode": "train", "tasks": payload_tasks, "steps": steps}
+        )
+
+    def _born_sample(self, state: Any, num_samples: int = 1) -> np.ndarray:
+        if (
+            isinstance(num_samples, bool)
+            or not isinstance(num_samples, int)
+            or num_samples <= 0
+        ):
+            raise QNNInputError("num_samples must be a positive integer")
+        encoded_state = self._encoder.encode_state(state, name="sample_state")
+        return self.measurement_optimizer.sample(
+            encoded_state,
+            rng=self._rng,
+            num_samples=num_samples,
+        )
+
+    @staticmethod
+    def _numerical_profile_for(
+        encoder: StateVectorEncoder,
+        measurement_optimizer: QuantumMeasurementOptimizer,
+        policy: QuantumExecutionPolicy,
+    ) -> dict[str, Any]:
+        policy_limits = {
+            name: policy.policy_config[name]
+            for name in (
+                "max_statevector_bytes",
+                "max_parameter_bytes",
+                "max_working_set_bytes",
+                "max_sequence_length",
+                "max_tasks_per_request",
+                "max_gradient_evaluations",
+                "max_training_steps",
+            )
+        }
         return {
-            "agent": "QNNAgent",
-            "metrics": {
-                "average_loss": np.mean(losses) if losses else 0.0,
-                "task_count": len(losses),
-                "fidelity": round(np.random.uniform(0.9, 1.0), 4)
+            "encoding": {
+                "norm_tolerance": encoder.tolerance,
+                "normalize_inputs": encoder.normalize,
             },
-            "status": "evaluated"
+            "measurement_optimization": {
+                "loss": measurement_optimizer.loss,
+                "gradient_method": measurement_optimizer.gradient_method,
+                "probability_tolerance": (
+                    measurement_optimizer.probability_tolerance
+                ),
+                "parameter_shift": measurement_optimizer.parameter_shift,
+                "finite_difference_step": (
+                    measurement_optimizer.finite_difference_step
+                ),
+                "gradient_clip_norm": (
+                    measurement_optimizer.gradient_clip_norm
+                ),
+            },
+            "policy": {
+                **policy_limits,
+                "allowed_tuning_parameters": sorted(
+                    policy.allowed_tuning_parameters
+                ),
+            },
         }
 
-    def _mse(self, outputs, targets):
-        return np.mean((outputs - targets) ** 2)
+    def _numerical_profile(self) -> dict[str, Any]:
+        """Return behavior-defining numerical settings without mutable arrays."""
 
-    def _cosine_similarity(self, outputs, targets):
-        dot = np.sum(outputs * targets)
-        norm_prod = np.linalg.norm(outputs) * np.linalg.norm(targets)
-        return dot / norm_prod if norm_prod != 0 else 0.0
+        return self._numerical_profile_for(
+            self._encoder,
+            self.measurement_optimizer,
+            self._policy,
+        )
 
-    def _kl_divergence(self, outputs, targets):
-        outputs = np.clip(outputs, 1e-10, 1.0)
-        targets = np.clip(targets, 1e-10, 1.0)
-        return np.sum(targets * np.log(targets / outputs))
+    @classmethod
+    def _fingerprint_components(
+        cls,
+        config: QNNConfig,
+        encoder: StateVectorEncoder,
+        measurement_optimizer: QuantumMeasurementOptimizer,
+        policy: QuantumExecutionPolicy,
+    ) -> str:
+        effective_config = {
+            "agent": config.to_dict(),
+            "numerical_profile": cls._numerical_profile_for(
+                encoder,
+                measurement_optimizer,
+                policy,
+            ),
+        }
+        canonical = json.dumps(
+            json_safe(effective_config),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    def _accuracy(self, outputs, targets):
-        if outputs.shape != targets.shape:
-            return 0.0
-        return np.mean(outputs == targets)
+    def _configuration_fingerprint(self) -> str:
+        return self._fingerprint_components(
+            self.qnn_config,
+            self._encoder,
+            self.measurement_optimizer,
+            self._policy,
+        )
 
-if __name__ == '__main__':
-    # Example Usage
-    num_qubits = 2
-    num_quantum_layers = 1
-    meta_learning_rate = 0.01
-    qrnn_params = {'hidden_units': 10}  # Example parameter
+    def _publish_qnn_summary(self, response: Mapping[str, Any]) -> None:
+        if not self._shared_memory_config["enabled"]:
+            return
 
-    agent = QNNAgent(num_qubits, num_quantum_layers, meta_learning_rate, qrnn_params)
+        payload = {
+            "agent_id": self.agent_id,
+            "model_kind": response.get("model_kind"),
+            "mode": response.get("mode"),
+            "status": response.get("status"),
+            "task_count": response.get("task_count"),
+            "training_step": self._training_step,
+            "metrics": dict(response.get("metrics") or {}),
+            "statevector_bytes": self.estimated_statevector_bytes,
+            "parameter_bytes": self.parameter_bytes,
+            "parameter_count": self.qnn_config.parameter_count,
+            "config_fingerprint": self._configuration_fingerprint(),
+            "updated_at": time.time(),
+        }
+        safe_payload = json_safe(payload)
+        summary_key = (
+            f"{self._shared_memory_config['summary_key_prefix']}:"
+            f"{self.agent_id}"
+        )
+        ttl = self._shared_memory_config["ttl_seconds"]
+        self._run_optional_runtime_operation(
+            "telemetry",
+            "shared_memory.qnn_summary",
+            lambda: self.shared_memory.set(
+                summary_key,
+                safe_payload,
+                ttl=ttl,
+            ),
+        )
+        if self._shared_memory_config["publish_notifications"]:
+            event_payload = {
+                "event": "qnn_task_completed",
+                **safe_payload,
+            }
+            self._run_optional_runtime_operation(
+                "telemetry",
+                "shared_memory.qnn_event",
+                lambda: self.shared_memory.publish(
+                    self._shared_memory_config["event_channel"],
+                    event_payload,
+                ),
+            )
 
-    # Create dummy training data (replace with actual quantum data)
-    # Input states are now vectors representing the quantum state
-    tasks = [
-        [np.random.rand(2**num_qubits) for _ in range(5)],
-        [np.random.rand(2**num_qubits) for _ in range(5)],
-    ]
+    # ------------------------------------------------------------------
+    # Durable state and SLAI checkpoint adapter hooks
+    # ------------------------------------------------------------------
+    def state_dict(self) -> dict[str, np.ndarray]:
+        """Return a defensive local state snapshot for external adapters."""
 
-    agent.train(tasks)
+        return {
+            "quantum_weights": np.array(self.quantum_weights, copy=True),
+            "training_step": np.array([self._training_step], dtype=np.int64),
+        }
 
-    # Run the agent on a new task
-    new_task = [np.random.rand(2**num_qubits) for _ in range(5)]
-    output = agent.run_task(new_task)
-    print("Output from new task:", output)
+    def load_state_dict(self, state: Mapping[str, Any], *, strict: bool = True) -> None:
+        """Validate and atomically apply a decoded model-state component."""
+
+        if not isinstance(state, Mapping):
+            raise QNNInputError("QNN model state must be a mapping")
+        if not isinstance(strict, bool):
+            raise TypeError("strict must be a boolean")
+
+        keys = set(state)
+        missing = self._MODEL_STATE_FIELDS - keys
+        unknown = keys - self._MODEL_STATE_FIELDS
+        if missing or (strict and unknown):
+            raise QNNInputError(
+                "invalid QNN model state; "
+                f"missing={sorted(str(item) for item in missing)}, "
+                f"unknown={sorted(str(item) for item in unknown)}"
+            )
+
+        candidate_weights = np.array(
+            self._circuit.validate_weights(state["quantum_weights"]),
+            copy=True,
+        )
+        raw_step = np.asarray(state["training_step"])
+        if raw_step.size != 1:
+            raise QNNInputError("training_step must contain one integer")
+        step_item = raw_step.reshape(-1)[0]
+        step_array = np.asarray(step_item)
+        if np.issubdtype(step_array.dtype, np.bool_) or not np.issubdtype(
+            step_array.dtype,
+            np.integer,
+        ):
+            raise QNNInputError("training_step must be an integer")
+        candidate_step = int(step_item)
+        if candidate_step < 0:
+            raise QNNInputError("training_step must be non-negative")
+
+        self.quantum_weights = candidate_weights
+        self._training_step = candidate_step
+        self._last_gradient = None
+
+    def agent_state(self) -> dict[str, Any]:
+        return {
+            "schema": _CHECKPOINT_SCHEMA,
+            "configuration": self.qnn_config.to_dict(),
+            "numerical_profile_fingerprint": self._configuration_fingerprint(),
+            "training_step": self._training_step,
+            "rng_bit_generator": self._rng.bit_generator.__class__.__name__,
+            "rng_state": json_safe(copy.deepcopy(self._rng.bit_generator.state)),
+        }
+
+    def load_agent_state(self, state: Mapping[str, Any]) -> None:
+        if not isinstance(state, Mapping):
+            raise TypeError("QNN agent state must be a mapping")
+        if state.get("schema") != _CHECKPOINT_SCHEMA:
+            raise QNNInputError("unsupported QNN agent-state schema")
+        checkpoint_config = QNNConfig.from_mapping(state.get("configuration"))
+        if (
+            checkpoint_config.num_qubits != self.num_qubits
+            or checkpoint_config.num_quantum_layers != self.num_quantum_layers
+        ):
+            raise QNNInputError(
+                "checkpoint QNN architecture does not match the active agent"
+            )
+        state_training_step = state.get("training_step")
+        if (
+            isinstance(state_training_step, bool)
+            or not isinstance(state_training_step, (int, np.integer))
+            or int(state_training_step) < 0
+        ):
+            raise QNNInputError(
+                "checkpoint agent-state training_step must be non-negative"
+            )
+        if int(state_training_step) != self._training_step:
+            raise QNNInputError(
+                "checkpoint model and agent-state training_step values disagree"
+            )
+        generator_name = state.get("rng_bit_generator")
+        if generator_name != self._rng.bit_generator.__class__.__name__:
+            raise QNNInputError("checkpoint RNG bit generator is incompatible")
+        rng_state = state.get("rng_state")
+        if not isinstance(rng_state, Mapping):
+            raise QNNInputError("checkpoint rng_state must be a mapping")
+        # AgentStateCodec returns immutable mapping proxies. Convert the
+        # complete nested structure back to JSON-native containers before
+        # handing it to NumPy's bit generator.
+        candidate_rng = np.random.Generator(self._rng.bit_generator.__class__())
+        try:
+            candidate_rng.bit_generator.state = json_safe(rng_state)
+        except (TypeError, ValueError) as exc:
+            raise QNNInputError("checkpoint rng_state is invalid") from exc
+        candidate_circuit = self._build_circuit(checkpoint_config)
+        candidate_circuit.validate_weights(self.quantum_weights)
+        candidate_encoder = self._build_encoder(checkpoint_config)
+        candidate_policy = self._build_policy(checkpoint_config)
+        candidate_measurement_optimizer = self._build_measurement_optimizer(
+            checkpoint_config
+        )
+
+        profile_fingerprint = state.get("numerical_profile_fingerprint")
+        if profile_fingerprint is not None:
+            if not isinstance(profile_fingerprint, str) or not profile_fingerprint:
+                raise QNNInputError(
+                    "checkpoint numerical_profile_fingerprint must be a "
+                    "non-empty string"
+                )
+            candidate_profile = self._fingerprint_components(
+                checkpoint_config,
+                candidate_encoder,
+                candidate_measurement_optimizer,
+                candidate_policy,
+            )
+            if profile_fingerprint != candidate_profile:
+                raise QNNInputError(
+                    "checkpoint numerical configuration is incompatible with "
+                    "the active QNN subsystem configuration"
+                )
+
+        self.qnn_config = checkpoint_config
+        self._circuit = candidate_circuit
+        self._encoder = candidate_encoder
+        self._policy = candidate_policy
+        self.measurement_optimizer = candidate_measurement_optimizer
+        self.qnn_metrics = candidate_measurement_optimizer.metrics
+        self.evaluator = self.qnn_metrics
+        self._rng = candidate_rng
+
+    def checkpoint_components(self) -> dict[str, Any]:
+        return {"model": self.state_dict(), "agent_state": self.agent_state()}
+
+    def save_checkpoint(
+        self,
+        manager: Any,
+        *,
+        version: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        overwrite: bool | None = None,
+    ) -> Any:
+        save_components = getattr(manager, "save_components", None)
+        if not callable(save_components):
+            raise TypeError("checkpoint manager must expose save_components()")
+        try:
+            result = save_components(
+                self.checkpoint_components(),
+                version=version,
+                codec_ids={"model": "numpy", "agent_state": "agent-state"},
+                step=self._training_step,
+                metrics=self._latest_checkpoint_metrics(),
+                metadata={
+                    "agent_type": self.name,
+                    "state_schema": _CHECKPOINT_SCHEMA,
+                    **dict(metadata or {}),
+                },
+                overwrite=overwrite,
+            )
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "qnn.checkpoint.save", exc)
+            raise
+        self._mark_runtime_recovered("persistence", "qnn.checkpoint.save")
+        return result
+
+    def load_checkpoint(self, manager: Any, *, version: str | None = None) -> Any:
+        load_components = getattr(manager, "load_components", None)
+        if not callable(load_components):
+            raise TypeError("checkpoint manager must expose load_components()")
+        baseline_model = self.state_dict()
+        baseline_agent_state = self.agent_state()
+        try:
+            result = load_components(
+                version,
+                components=("model", "agent_state"),
+                expected_codecs={"model": "numpy", "agent_state": "agent-state"},
+            )
+            components = getattr(result, "components", None)
+            if not isinstance(components, Mapping):
+                raise QNNInputError(
+                    "checkpoint load result does not contain components"
+                )
+            self.load_state_dict(components["model"])
+            self.load_agent_state(components["agent_state"])
+        except Exception as exc:
+            # The checkpoint manager decodes every component before returning,
+            # while this facade owns its final in-memory application. Preserve
+            # the same all-or-nothing behavior across the two local loads.
+            self.load_state_dict(baseline_model)
+            self.load_agent_state(baseline_agent_state)
+            self._mark_runtime_degraded("persistence", "qnn.checkpoint.load", exc)
+            raise
+        self._mark_runtime_recovered("persistence", "qnn.checkpoint.load")
+        return result
+
+    def _latest_checkpoint_metrics(self) -> dict[str, float]:
+        loss_values = tuple(self.performance_metrics.get("loss", ()))
+        return {"loss": float(loss_values[-1])} if loss_values else {}
+
+    def tuning_transaction_factory(
+        self,
+        agent_builder: Any,
+        checkpoint_manager: Any = None,
+    ) -> Any:
+        """Return an opt-in factory accepted by ``src.tuning.AgentEvaluator``."""
+
+        from .qnn.integration import make_qnn_transaction_factory
+
+        return make_qnn_transaction_factory(
+            agent_builder,
+            checkpoint_manager=checkpoint_manager,
+        )
+
+    # ------------------------------------------------------------------
+    # Optional visualization; no import-time plotting dependency
+    # ------------------------------------------------------------------
+    def visualize_output(
+        self,
+        output_sequence: Sequence[Any],
+        *,
+        show: bool = False,
+    ) -> Any:
+        if self.num_qubits == 1:
+            return self.visualize_bloch(output_sequence, show=show)
+        return self.visualize_amplitudes(output_sequence, show=show)
+
+    def visualize_bloch(
+        self,
+        output_sequence: Sequence[Any],
+        *,
+        show: bool = False,
+    ) -> Any:
+        import matplotlib.pyplot as plt
+
+        states = self._normalize_sequence(output_sequence, name="output_sequence")
+        if self.num_qubits != 1:
+            raise QNNInputError("Bloch visualization requires exactly one qubit")
+        figure = plt.figure(figsize=(8, 6))
+        axes = figure.add_subplot(111, projection="3d")
+        for state in states:
+            x, y, z = self._bloch_coordinates(state)
+            axes.scatter(
+                x,
+                y,
+                z, # type: ignore
+                color="blue",
+                s=50,
+            )
+        axes.set(
+            title="Bloch Sphere Projection",
+            xlabel="X",
+            ylabel="Y",
+            zlabel="Z",
+        )
+        if show:
+            plt.show()
+        return figure
+
+    @staticmethod
+    def _bloch_coordinates(state: Any) -> tuple[float, float, float]:
+        amplitudes = np.asarray(state, dtype=np.complex128)
+        if amplitudes.shape != (2,):
+            raise QNNInputError("Bloch coordinates require a one-qubit state")
+        a, b = amplitudes
+        coherence = np.conjugate(a) * b
+        return (
+            float(2.0 * coherence.real),
+            float(2.0 * coherence.imag),
+            float(abs(a) ** 2 - abs(b) ** 2),
+        )
+
+    def visualize_amplitudes(
+        self,
+        output_sequence: Sequence[Any],
+        *,
+        show: bool = False,
+    ) -> list[Any]:
+        import matplotlib.pyplot as plt
+
+        states = self._normalize_sequence(output_sequence, name="output_sequence")
+        figures = []
+        for index, state in enumerate(states):
+            figure, axes = plt.subplots(figsize=(7, 3))
+            axes.bar(range(state.size), np.abs(state))
+            axes.set(
+                title=f"QNN Output | Step {index}",
+                xlabel="Basis State Index",
+                ylabel="Amplitude magnitude",
+            )
+            figure.tight_layout()
+            figures.append(figure)
+        if show:
+            plt.show()
+        return figures
+
+
+# Bounded import compatibility for the former monolithic module.
+Task = QNNTask
+
+
+__all__ = [
+    "PerformanceEvaluator",
+    "QNNAgent",
+    "QNNConfig",
+    "QNNTask",
+    "QuantumGate",
+    "Task",
+]
+
+
+if __name__ == "__main__":
+    basis_zero = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128)
+    agent = QNNAgent(config={"num_qubits": 2, "num_quantum_layers": 1, "seed": 7})
+    result = agent.perform_task({"mode": "infer", "input_sequences": [basis_zero]})
+    print(
+        {
+            "status": result["status"],
+            "model_kind": result["model_kind"],
+            "norm_error": result["metrics"]["norm_error"],
+        }
+    )
