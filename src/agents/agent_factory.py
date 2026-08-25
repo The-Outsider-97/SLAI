@@ -45,6 +45,8 @@ from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissi
 
 logger = get_logger("Agent Factory")
 printer = PrettyPrinter()
+
+
 _AGENTS_CONFIG = bind_config(
     Path(__file__).resolve().parent / "base" / "configs" / "agents_config.yaml"
 )
@@ -1267,17 +1269,15 @@ class AgentFactory:
             adapter = self._get_metrics_adapter()
             if hasattr(adapter, "process_metrics_result"):
                 result = adapter.process_metrics_result(dict(metrics), list(targets))
-                adjustments: Mapping[str, Any] = (
-                    dict(result.bounded_adjustments) if hasattr(result, "bounded_adjustments") else cast(Mapping[str, Any], result)
-                )
+                adjustments = dict(result.bounded_adjustments) if hasattr(result, "bounded_adjustments") else result
             else:
-                adjustments = cast(Mapping[str, Any], adapter.process_metrics(dict(metrics), list(targets)))
+                adjustments = adapter.process_metrics(dict(metrics), list(targets))
 
             applied_updates: Dict[str, Any] = {}
             if hasattr(adapter, "update_factory_config"):
                 applied_updates = adapter.update_factory_config(  # type: ignore
                     self,
-                    adjustments,
+                    adjustments, # type: ignore
                     agent_types=targets,
                 )
 
