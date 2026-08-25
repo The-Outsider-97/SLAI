@@ -688,19 +688,49 @@ class TaskRouter:
                     ranking_report = report.to_dict()
                 elif isinstance(report, Mapping):
                     ranking_report = dict(report)
-            return self._normalize_ranked_agents(ranked), ranking_report
+            return (self._normalize_ranked_agents(ranked, authoritative_agents=eligible_agents), ranking_report)
         except BaseException as exc:
             raise self._routing_error("Router strategy failed to rank agents.", task_type=getattr(envelope, "task_type", "unknown"), context={"candidate_count": len(eligible_agents)}, cause=exc) from exc
 
-    def _normalize_ranked_agents(self, ranked: Any) -> List[RankedAgent]:
+    def _normalize_ranked_agents(self, ranked: Any, *,
+        authoritative_agents: Optional[Mapping[str, Mapping[str, Any]]] = None) -> List[RankedAgent]:
+        """
+        Normalize strategy output while preserving registry-owned runtime metadata.
+    
+        Strategies determine ordering and score. They do not own executable
+        agent-instance references. When authoritative registry metadata is
+        available, it is therefore rebound by normalized agent name.
+        """
         if ranked is None:
             return []
+    
+        authoritative = authoritative_agents or {}
         normalized: List[RankedAgent] = []
+    
         for index, item in enumerate(list(ranked), start=1):
-            if not isinstance(item, Sequence) or isinstance(item, (str, bytes)) or len(item) < 3:
-                raise self._routing_error("Router strategy returned an invalid ranking item.", context={"index": index, "item": json_safe(item)})
-            name, meta, score = item[0], item[1], item[2]
-            normalized.append((normalize_agent_name(name), ensure_mapping(meta, field_name=f"ranked[{index}].meta", allow_none=True), coerce_float(score, default=0.0)))
+            if (
+                not isinstance(item, Sequence)
+                or isinstance(item, (str, bytes))
+                or len(item) < 3
+            ):
+                raise self._routing_error(
+                    "Router strategy returned an invalid ranking item.",
+                    context={"index": index, "item": json_safe(item)})
+    
+            raw_name, strategy_meta, raw_score = (
+                item[0],
+                item[1],
+                item[2],
+            )
+    
+            name = normalize_agent_name(raw_name)
+    
+            # The strategy owns ranking/score; the registry owns the executable
+            # runtime metadata.
+            source_meta = authoritative.get(name, strategy_meta)
+            meta = ensure_mapping(source_meta, field_name=f"ranked[{index}].meta",allow_none=True)
+            normalized.append((name, meta, coerce_float(raw_score, default=0.0)))
+    
         return normalized
 
     def _task_data_for_strategy(self, envelope: Any) -> Dict[str, Any]:
@@ -1126,14 +1156,16 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Test route with real agents
     # ------------------------------------------------------------------
-    result = router.route("translate", {"text": "hello", "source": "smoke"})
+    result = router.route("translate", {"text": "hello", "source": "smoke", "preferred_agent": "FailingAgent"})
     assert result["agent"] == "TranslateAgent", f"Expected TranslateAgent, got {result}"
     assert result["task"]["text"] == "hello", result
 
     # Check agent stats in shared memory
     stats = memory.get("agent_stats")
-    assert stats["TranslateAgent"]["successes"] >= 1, stats # type: ignore
-    assert stats["FailingAgent"]["failures"] == 0, stats   # type: ignore # FailingAgent not used yet
+    assert stats is not None, "agent_stats was not initialized in shared memory"
+    assert stats["TranslateAgent"]["successes"] >= 1, stats
+    assert stats["FailingAgent"]["failures"] >= 1, stats
+    assert stats["TranslateAgent"]["successes"] >= 1, stats   # FailingAgent not used yet
 
     # ------------------------------------------------------------------
     # Explanation

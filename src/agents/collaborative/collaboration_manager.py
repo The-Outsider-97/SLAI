@@ -1015,7 +1015,7 @@ if __name__ == "__main__":
     manager.register_agent("FailFirst", _Agent("FailFirst", fail=True), ["translate"])
     manager.register_agent("Echo", _Agent("Echo"), ["translate"])
 
-    result = manager.run_task("translate", {"text": "hola"}, retries=1)
+    result = manager.run_task("translate", {"text": "hola", "preferred_agent": "FailFirst"}, retries=1)
     assert result["ok"] is True
     assert result["agent"] == "Echo"
 
