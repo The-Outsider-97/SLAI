@@ -954,29 +954,45 @@ if __name__ == "__main__":
 
         def append(self, key, value, **kwargs):
             current = self._store.setdefault(key, [])
+
             if not isinstance(current, list):
                 current = [current]
+
             current.append(value)
             self._store[key] = current
+
             return time.time()
 
         def get_all_keys(self):
             return list(self._store.keys())
 
         def metrics(self):
-            return {"item_count": len(self._store)}
+            return {
+                "item_count": len(self._store),
+            }
 
     class _Agent:
         capabilities = ["translate"]
 
-        def __init__(self, name: str, fail: bool = False):
+        def __init__(
+            self,
+            name: str,
+            fail: bool = False,
+        ):
             self.name = name
             self.fail = fail
 
         def execute(self, data):
             if self.fail:
-                raise RuntimeError(f"{self.name} failed")
-            return {"ok": True, "agent": self.name, "payload": data}
+                raise RuntimeError(
+                    f"{self.name} failed"
+                )
+
+            return {
+                "ok": True,
+                "agent": self.name,
+                "payload": data,
+            }
 
     class _Registry:
         def __init__(self):
@@ -990,14 +1006,24 @@ if __name__ == "__main__":
             return {
                 name: meta
                 for name, meta in self._agents.items()
-                if task_type in meta.get("capabilities", [])
+                if task_type
+                in meta.get("capabilities", [])
             }
 
         def list_agents(self):
-            return {name: list(meta.get("capabilities", [])) for name, meta in self._agents.items()}
+            return {
+                name: list(
+                    meta.get("capabilities", [])
+                )
+                for name, meta in self._agents.items()
+            }
 
+    # ------------------------------------------------------------------
+    # Runtime construction
+    # ------------------------------------------------------------------
     memory = _Memory()
     registry = _Registry()
+
     manager = CollaborationManager(
         shared_memory=memory,
         registry=registry,
@@ -1013,51 +1039,130 @@ if __name__ == "__main__":
     )
 
     manager.register_agent("FailFirst", _Agent("FailFirst", fail=True), ["translate"])
+
     manager.register_agent("Echo", _Agent("Echo"), ["translate"])
 
-    result = manager.run_task("translate", {"text": "hola", "preferred_agent": "FailFirst"}, retries=1)
-    assert result["ok"] is True
-    assert result["agent"] == "Echo"
+    # ------------------------------------------------------------------
+    # Deterministic fallback
+    #
+    # Force FailFirst to be attempted first so this test explicitly verifies:
+    #
+    #     FailFirst -> failure -> Echo -> success
+    #
+    # rather than depending on ranking tie-break behavior.
+    # ------------------------------------------------------------------
+    result = manager.run_task(
+        "translate",
+        {
+            "text": "hola",
+            "preferred_agent": "FailFirst",
+        },
+        retries=1,
+    )
 
+    assert result["ok"] is True, result
+    assert result["agent"] == "Echo", result
+
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
     stats = manager.get_agent_stats()
-    assert stats["FailFirst"]["failures"] >= 1
-    assert stats["Echo"]["successes"] >= 1
 
+    assert "FailFirst" in stats, stats
+    assert "Echo" in stats, stats
+
+    assert stats["FailFirst"]["successes"] == 0, stats
+    assert stats["FailFirst"]["failures"] >= 1, stats
+    assert stats["FailFirst"]["active_tasks"] == 0, stats
+
+    assert stats["Echo"]["successes"] >= 1, stats
+    assert stats["Echo"]["failures"] == 0, stats
+    assert stats["Echo"]["active_tasks"] == 0, stats
+
+    # ------------------------------------------------------------------
+    # Explain routing
+    # ------------------------------------------------------------------
     explanation = manager.explain_task("translate", {"text": "ciao"})
-    assert explanation.get("candidate_count", 0) >= 1 or explanation.get("ranked_agents") is not None
 
+    assert (
+        explanation.get("candidate_count", 0) >= 1
+        or explanation.get("ranked_agents") is not None
+    ), explanation
+
+    # ------------------------------------------------------------------
+    # Async execution
+    # ------------------------------------------------------------------
     future = manager.run_task_async("translate", {"text": "bonjour"})
+
     async_result = future.result(timeout=5)
-    assert async_result["ok"] is True
 
-    batch = manager.run_tasks([
-        {"task_type": "translate", "payload": {"text": "uno"}},
-        {"task_type": "missing", "payload": {"text": "dos"}},
-    ])
-    assert batch["total"] == 2
-    assert batch["successes"] == 1
-    assert batch["failures"] == 1
+    assert async_result["ok"] is True, async_result
+    assert async_result["agent"] == "Echo", async_result
 
+    # ------------------------------------------------------------------
+    # Batch execution:
+    # one successful task + one unsupported task
+    # ------------------------------------------------------------------
+    batch = manager.run_tasks([{"task_type": "translate", "payload": {"text": "uno"}}, {"task_type": "missing", "payload": {"text": "dos"}}])
+
+    assert batch["total"] == 2, batch
+    assert batch["successes"] == 1, batch
+    assert batch["failures"] == 1, batch
+
+    # ------------------------------------------------------------------
+    # Snapshot and health
+    # ------------------------------------------------------------------
     snapshot = manager.snapshot()
-    assert snapshot["component"] == "collaboration_manager"
+
+    assert (
+        snapshot["component"]
+        == "collaboration_manager"
+    ), snapshot
+
     health = manager.health_report()
-    assert "manager" in health
 
+    assert "manager" in health, health
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
     export_path = manager.export_snapshot_to_json("/tmp/collaboration_manager_snapshot_test.json")
-    assert Path(export_path).exists()
-    manager.export_stats_to_json("/tmp/collaboration_manager_stats_test.json")
-    assert Path("/tmp/collaboration_manager_stats_test.json").exists()
 
-    # Force overload path.
+    assert Path(export_path).exists(), export_path
+
+    stats_export_path = ("/tmp/collaboration_manager_stats_test.json")
+
+    manager.export_stats_to_json(stats_export_path)
+
+    assert Path(stats_export_path).exists()
+
+    # ------------------------------------------------------------------
+    # Force overload path
+    # ------------------------------------------------------------------
     max_load = manager.max_load
-    memory.set(DEFAULT_AGENT_STATS_KEY, {"Echo": {"active_tasks": max_load}})
+
+    memory.set(DEFAULT_AGENT_STATS_KEY, {"Echo": {"successes": 0, "failures": 0, "active_tasks": max_load}})
+
     try:
         manager.run_task("translate", {"text": "boom"})
         raise AssertionError("Expected overload")
-    except Exception as exc:
-        assert "OVERLOAD" in str(exc).upper() or "load" in str(exc).lower()
 
+    except Exception as exc:
+        assert (
+            "OVERLOAD" in str(exc).upper()
+            or "load" in str(exc).lower()
+        ), exc
+
+    # ------------------------------------------------------------------
+    # Shutdown lifecycle
+    # ------------------------------------------------------------------
     manager.shutdown()
-    assert manager.snapshot(include_history=False)["status"] == "shutdown"
+
+    shutdown_snapshot = manager.snapshot(include_history=False)
+
+    assert (
+        shutdown_snapshot["status"]
+        == "shutdown"
+    ), shutdown_snapshot
 
     print("\n=== Test ran successfully ===\n")

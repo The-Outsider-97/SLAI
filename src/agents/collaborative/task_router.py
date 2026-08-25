@@ -1047,6 +1047,7 @@ __all__ = [
 if __name__ == "__main__":
     print("\n=== Running Task Router with Real Modules ===\n")
     printer.status("TEST", "Task Router initialized", "info")
+
     from .shared_memory import SharedMemory
     from .registry import AgentRegistry
     from ..base_agent import BaseAgent
@@ -1062,51 +1063,94 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Real AgentRegistry (auto_discover=False)
     # ------------------------------------------------------------------
-    # Define concrete agents that inherit from BaseAgent and provide execute
     class TranslateAgent(BaseAgent):
         capabilities = ["translate"]
 
-        def __init__(self, shared_memory=None, agent_factory=None, config=None):
+        def __init__(
+            self,
+            shared_memory=None,
+            agent_factory=None,
+            config=None,
+        ):
             super().__init__(shared_memory, agent_factory, config)
             self.name = "TranslateAgent"
 
-        def execute(self, task_data): # type: ignore
-            return {"agent": self.name, "task": task_data, "status": "ok"}
+        def execute(self, task_data):  # type: ignore
+            return {
+                "agent": self.name,
+                "task": task_data,
+                "status": "ok",
+            }
 
     class FailingAgent(BaseAgent):
         capabilities = ["translate"]
 
-        def __init__(self, shared_memory=None, agent_factory=None, config=None):
+        def __init__(
+            self,
+            shared_memory=None,
+            agent_factory=None,
+            config=None,
+        ):
             super().__init__(shared_memory, agent_factory, config)
             self.name = "FailingAgent"
 
-        def execute(self, task_data): # type: ignore
+        def execute(self, task_data):  # type: ignore
             raise RuntimeError("FailingAgent always fails")
 
     class SummarizeAgent(BaseAgent):
         capabilities = ["summarize"]
 
-        def __init__(self, shared_memory=None, agent_factory=None, config=None):
+        def __init__(
+            self,
+            shared_memory=None,
+            agent_factory=None,
+            config=None,
+        ):
             super().__init__(shared_memory, agent_factory, config)
             self.name = "SummarizeAgent"
 
-        def execute(self, task_data): # type: ignore
-            return {"agent": self.name, "task": task_data, "status": "summarized"}
+        def execute(self, task_data):  # type: ignore
+            return {
+                "agent": self.name,
+                "task": task_data,
+                "status": "summarized",
+            }
 
-    # Create registry (without auto-discovery)
-    registry = AgentRegistry(shared_memory=memory, auto_discover=False)
+    registry = AgentRegistry(
+        shared_memory=memory,
+        auto_discover=False,
+    )
 
-    # Register instances (agent_factory=None is fine)
-    registry.register("TranslateAgent", agent_instance=TranslateAgent(shared_memory=memory, agent_factory=None))
-    registry.register("FailingAgent", agent_instance=FailingAgent(shared_memory=memory, agent_factory=None))
-    registry.register("SummarizeAgent", agent_instance=SummarizeAgent(shared_memory=memory, agent_factory=None))
+    registry.register(
+        "TranslateAgent",
+        agent_instance=TranslateAgent(
+            shared_memory=memory,
+            agent_factory=None,
+        ),
+    )
+    registry.register(
+        "FailingAgent",
+        agent_instance=FailingAgent(
+            shared_memory=memory,
+            agent_factory=None,
+        ),
+    )
+    registry.register(
+        "SummarizeAgent",
+        agent_instance=SummarizeAgent(
+            shared_memory=memory,
+            agent_factory=None,
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Real TaskContractRegistry
     # ------------------------------------------------------------------
-    contract_registry = TaskContractRegistry(shared_memory=memory, load_configured=False)
+    contract_registry = TaskContractRegistry(
+        shared_memory=memory,
+        load_configured=False,
+    )
 
-    # Register a simple contract for "translate" tasks
     contract_registry.register_contract(
         "translate",
         required_fields=["text"],
@@ -1117,9 +1161,11 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Real PolicyEngine
     # ------------------------------------------------------------------
-    policy_engine = PolicyEngine(shared_memory=memory, load_config_rules=False)
+    policy_engine = PolicyEngine(
+        shared_memory=memory,
+        load_config_rules=False,
+    )
 
-    # Add a simple deny rule for testing
     policy_engine.add_simple_rule(
         rule_id="deny_blocked",
         description="Deny tasks that have 'blocked' = True",
@@ -1131,10 +1177,12 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Real ReliabilityManager
     # ------------------------------------------------------------------
-    reliability_manager = ReliabilityManager(shared_memory=memory)
+    reliability_manager = ReliabilityManager(
+        shared_memory=memory,
+    )
 
     # ------------------------------------------------------------------
-    # TaskRouter with all real components
+    # TaskRouter with real collaborative components
     # ------------------------------------------------------------------
     router = TaskRouter(
         registry=registry,
@@ -1154,73 +1202,172 @@ if __name__ == "__main__":
     )
 
     # ------------------------------------------------------------------
-    # Test route with real agents
+    # Fallback routing
+    #
+    # Explicitly prefer FailingAgent so the smoke test deterministically
+    # exercises:
+    #
+    #     FailingAgent -> failure -> TranslateAgent -> success
+    #
+    # rather than depending on tie-breaking or dictionary ordering.
     # ------------------------------------------------------------------
-    result = router.route("translate", {"text": "hello", "source": "smoke", "preferred_agent": "FailingAgent"})
-    assert result["agent"] == "TranslateAgent", f"Expected TranslateAgent, got {result}"
+    result = router.route(
+        "translate",
+        {
+            "text": "hello",
+            "source": "smoke",
+            "preferred_agent": "FailingAgent",
+        },
+    )
+
+    assert result["agent"] == "TranslateAgent", (
+        f"Expected fallback to TranslateAgent, got {result}"
+    )
+    assert result["status"] == "ok", result
     assert result["task"]["text"] == "hello", result
 
-    # Check agent stats in shared memory
-    stats = memory.get("agent_stats")
-    assert stats is not None, "agent_stats was not initialized in shared memory"
-    assert stats["TranslateAgent"]["successes"] >= 1, stats
-    assert stats["FailingAgent"]["failures"] >= 1, stats
-    assert stats["TranslateAgent"]["successes"] >= 1, stats   # FailingAgent not used yet
+    # ------------------------------------------------------------------
+    # Agent statistics
+    # ------------------------------------------------------------------
+    stats = memory.get("agent_stats", default={})
+
+    assert isinstance(stats, dict), stats
+    assert "FailingAgent" in stats, stats
+    assert "TranslateAgent" in stats, stats
+
+    failing_stats = stats["FailingAgent"]
+    translate_stats = stats["TranslateAgent"]
+
+    assert failing_stats["successes"] == 0, stats
+    assert failing_stats["failures"] >= 1, stats
+    assert failing_stats["active_tasks"] == 0, stats
+
+    assert translate_stats["successes"] >= 1, stats
+    assert translate_stats["failures"] == 0, stats
+    assert translate_stats["active_tasks"] == 0, stats
+
+    # ------------------------------------------------------------------
+    # Route history and fallback semantics
+    # ------------------------------------------------------------------
+    history = router.route_history()
+    assert history, "Expected at least one route history record"
+
+    last_route = router.last_route()
+    assert last_route is not None
+    assert last_route["status"] == "success", last_route
+    assert last_route["selected_agent"] == "TranslateAgent", last_route
+
+    attempts = last_route.get("attempts", [])
+    assert len(attempts) >= 2, attempts
+
+    assert any(
+        attempt.get("agent_name") == "FailingAgent"
+        and attempt.get("status") == "failed"
+        for attempt in attempts
+    ), attempts
+
+    assert any(
+        attempt.get("agent_name") == "TranslateAgent"
+        and attempt.get("status") == "success"
+        for attempt in attempts
+    ), attempts
 
     # ------------------------------------------------------------------
     # Explanation
     # ------------------------------------------------------------------
-    explanation = router.explain_route("translate", {"text": "hello"})
-    assert explanation["candidate_count"] == 2, explanation  # TranslateAgent and FailingAgent
-    assert explanation["ranked_count"] == 2, explanation
+    explanation = router.explain_route(
+        "translate",
+        {
+            "text": "hello",
+        },
+    )
 
-    # ------------------------------------------------------------------
-    # Route history
-    # ------------------------------------------------------------------
-    history = router.route_history()
-    assert history and history[-1]["status"] == "success", history
-    assert router.last_route()["selected_agent"] == "TranslateAgent", router.last_route() # type: ignore
+    assert explanation["candidate_count"] == 2, explanation
+    assert explanation["ranked_count"] == 2, explanation
 
     # ------------------------------------------------------------------
     # Health and snapshot
     # ------------------------------------------------------------------
     health = router.health_report()
-    assert health["status"] in {"healthy", "degraded"}, health
+    assert health["status"] in {
+        "healthy",
+        "degraded",
+    }, health
+
     snapshot = router.snapshot()
+
     assert snapshot["routes_succeeded"] >= 1, snapshot
+    assert snapshot["attempts_succeeded"] >= 1, snapshot
+    assert snapshot["attempts_failed"] >= 1, snapshot
 
     # ------------------------------------------------------------------
-    # Policy denial test
+    # Policy denial
     # ------------------------------------------------------------------
     try:
-        router.route("translate", {"blocked": True, "text": "x"})
+        router.route(
+            "translate",
+            {
+                "blocked": True,
+                "text": "x",
+            },
+        )
         raise AssertionError("Expected policy failure")
+
     except Exception as exc:
-        assert "Policy blocked" in str(exc) or "deny" in str(exc).lower(), exc
+        assert (
+            "Policy blocked" in str(exc)
+            or "deny" in str(exc).lower()
+        ), exc
 
     # ------------------------------------------------------------------
     # Contract validation failure
     # ------------------------------------------------------------------
     try:
-        router.route("translate", {"source": "missing-text"})   # missing 'text' field
+        router.route(
+            "translate",
+            {
+                "source": "missing-text",
+            },
+        )
         raise AssertionError("Expected contract failure")
+
     except Exception as exc:
-        assert "contract" in str(exc).lower() or "missing" in str(exc).lower(), exc
+        assert (
+            "contract" in str(exc).lower()
+            or "missing" in str(exc).lower()
+        ), exc
 
     # ------------------------------------------------------------------
     # No capable agent
     # ------------------------------------------------------------------
     try:
-        router.route("missing", {"text": "x"})
+        router.route(
+            "missing",
+            {
+                "text": "x",
+            },
+        )
         raise AssertionError("Expected missing-task failure")
+
     except Exception as exc:
-        assert "No capable agent" in str(exc) or "No agents" in str(exc), exc
+        assert (
+            "No capable agent" in str(exc)
+            or "No agents" in str(exc)
+        ), exc
 
     # ------------------------------------------------------------------
-    # Verify shared-memory status and audit events
+    # Shared-memory observability
     # ------------------------------------------------------------------
-    assert memory.get("collaboration:task_router_status"), "Task router status not published"
-    audit_events = memory.get("collaboration:task_router_events", [])
+    router_status = memory.get(
+        "collaboration:task_router_status",
+        default=None,
+    )
+    assert router_status, "Task router status not published"
+
+    audit_events = memory.get(
+        "collaboration:task_router_events",
+        default=[],
+    )
     assert audit_events, "No audit events recorded"
 
     print("\n=== Test ran successfully ===\n")
