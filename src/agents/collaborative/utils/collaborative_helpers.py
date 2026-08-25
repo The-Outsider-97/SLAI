@@ -1739,17 +1739,56 @@ def build_delegation_record(
 # ---------------------------------------------------------------------------
 # Shared-memory safety wrappers
 # ---------------------------------------------------------------------------
-def memory_get(memory: MemoryLike, key: str, default: Any = None) -> Any:
-    """Safely read a key from a SharedMemory-like object."""
+def memory_get(
+    memory: MemoryLike,
+    key: str,
+    default: Any = None,
+) -> Any:
+    """
+    Safely read a key from a SharedMemory-like object.
 
+    The fallback value is passed by keyword rather than positionally because
+    SLAI's SharedMemory.get() uses ``version_timestamp`` as its second
+    positional parameter:
+
+        get(key, version_timestamp=None, update_access=True, default=None)
+
+    Passing ``default`` positionally would therefore be interpreted as a
+    historical-version timestamp and could cause reads to return the wrong
+    value or None.
+
+    The keyword-based call remains compatible with ordinary dict-like ``get``
+    implementations and SharedMemory proxies. A single-argument fallback is
+    retained for minimal custom memory implementations that do not accept a
+    ``default`` keyword.
+    """
     if memory is None:
         return default
+
+    getter = getattr(memory, "get", None)
+    if not callable(getter):
+        logger.warning("Shared memory object %s does not expose callable get().", type(memory).__name__)
+        return default
+
     try:
+        # IMPORTANT:
+        # Do not change this to getter(key, default).
+        #
+        # SharedMemory.get() defines its second positional argument as
+        # version_timestamp rather than default.
+        return getter(key, default=default)
+
+    except TypeError:
+        # Compatibility path for minimal/custom memory implementations whose
+        # get() method does not accept a keyword argument named "default".
         try:
-            return memory.get(key, default)
-        except TypeError:
-            result = memory.get(key)
-            return default if result is None else result
+            result = getter(key)
+        except Exception as exc:
+            logger.warning("Shared memory get failed for key %s: %s", key, exc)
+            return default
+
+        return default if result is None else result
+
     except Exception as exc:
         logger.warning("Shared memory get failed for key %s: %s", key, exc)
         return default
