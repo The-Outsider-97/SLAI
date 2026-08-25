@@ -6,7 +6,7 @@ python-dotenv>=1.0.0
 # Security / hardening
 Flask-Talisman>=1.1.0
 Flask-Limiter==3.5.0
-bleach==6.0.0
+bleach==6.4.0
 Werkzeug==2.3.7
 cryptography>=41.0.0
 
@@ -65,7 +65,7 @@ watchdog>=3.0.0
 
 # Utilities and integrations
 beautifulsoup4>=4.12.0
-python-whois==0.9.0
+python-whois==0.9.6
 fuzzywuzzy>=0.18.0
 metaphone>=0.6
 pyspellchecker>=0.8.1
