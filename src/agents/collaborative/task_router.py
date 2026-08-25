@@ -1005,6 +1005,15 @@ class TaskRouter:
         )
 
 
+__all__ = [
+    "TaskRouter",
+    "TaskRouterConfig",
+    "RouteEventType",
+    "RouteAttemptRecord",
+    "RouteRecord",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Task Router with Real Modules ===\n")
     printer.status("TEST", "Task Router initialized", "info")

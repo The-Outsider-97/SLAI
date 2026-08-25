@@ -819,6 +819,13 @@ class ReliabilityManager:
         )
         append_audit_event(self.shared_memory, event, key=self._audit_key, max_events=self._audit_max_events)
 
+__all__ =[
+    "CircuitState",
+    "RetryPolicy",
+    "CircuitBreakerConfig",
+    "AgentCircuitBreaker",
+    "ReliabilityManager",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Reliability Manager ===\n")

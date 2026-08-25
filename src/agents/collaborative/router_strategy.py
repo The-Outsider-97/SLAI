@@ -874,6 +874,33 @@ def _register_default_strategies() -> None:
 _register_default_strategies()
 
 
+__all__ = [
+    "RouterStrategyName",
+    "RouterScoreWeights",
+    "RouterStrategyConfig",
+    "RouterScoreBreakdown",
+    "RankedAgentRecord",
+    "RouterRankingReport",
+    "BaseRouterStrategy",
+    "WeightedRouterStrategy",
+    "LeastLoadedRouterStrategy",
+    "CapabilityMatchRouterStrategy",
+    "RoundRobinRouterStrategy",
+    "RandomWeightedRouterStrategy",
+    "normalize_strategy_name",
+    "get_task_routing_config",
+    "extract_task_type",
+    "extract_required_capabilities",
+    "extract_preferred_agents",
+    "normalize_agents_for_ranking",
+    "normalize_stats_for_ranking",
+    "agent_is_marked_unavailable",
+    "register_router_strategy",
+    "list_router_strategies",
+    "build_router_strategy",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Router Strategy ===\n")
     printer.status("TEST", "Router Strategy initialized", "info")

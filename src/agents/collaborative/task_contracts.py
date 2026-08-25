@@ -42,7 +42,7 @@ import threading
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, field as dataclass_field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Pattern, Tuple, Union
@@ -145,7 +145,7 @@ class ContractValidationIssue:
     severity: ContractIssueSeverity = ContractIssueSeverity.ERROR
     expected: Any = None
     actual: Any = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = dataclass_field(default_factory=dict)
 
     def to_dict(self, *, redact: bool = True) -> Dict[str, Any]:
         payload = prune_none(
@@ -1437,6 +1437,31 @@ def _contract_error(
         retryable=False,
         component="task_contracts",
     ) # type: ignore
+
+
+__all__ = [
+    "Validator",
+    "FieldTransform",
+    "ContractIssueSeverity",
+    "ContractFieldOperator",
+    "ContractValidationIssue",
+    "FieldConstraint",
+    "FieldRule",
+    "ContractValidationResult",
+    "TaskContract",
+    "TaskContractRegistry",
+    "make_required_one_of_validator",
+    "make_mutually_exclusive_validator",
+    "make_numeric_range_validator",
+    "make_regex_validator",
+    "make_allowed_values_validator",
+    "normalize_field_name",
+    "normalize_issue_severity",
+    "normalize_constraint_operator",
+    "parse_field_types",
+    "normalize_type_spec",
+    "coerce_value_for_types",
+]
 
 
 if __name__ == "__main__":

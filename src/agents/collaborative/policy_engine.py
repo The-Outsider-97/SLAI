@@ -1080,6 +1080,28 @@ def _policy_error(message: str, *, context: Optional[Mapping[str, Any]] = None, 
     ) # type: ignore
 
 
+__all__ = [
+    "PolicyDecision",
+    "PolicyPredicate",
+    "PolicyCondition",
+    "PolicyRuleEvaluation",
+    "PolicyRule",
+    "PolicyEvaluation",
+    "PolicyEngine",
+    "normalize_policy_decision",
+    "normalize_rule_id",
+    "normalize_condition_operator",
+    "normalize_condition_source",
+    "normalize_condition_match",
+    "build_rule_from_config",
+    "ensure_policy_rule",
+    "evaluate_conditions",
+    "evaluate_condition",
+    "resolve_path",
+    "compare_condition_values",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Policy Engine ===\n")
     printer.status("TEST", "Policy Engine initialized", "info")

@@ -62,11 +62,6 @@ from .task_router import TaskRouter
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.collaboration_error import *
 from .utils.collaborative_helpers import *
-from .utils.collaborative_helpers import (
-    DEFAULT_AGENT_STATS_KEY,
-    DEFAULT_AGENT_TASK_MULTIPLIER,
-    DEFAULT_MAX_AUDIT_EVENTS,
-)
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Collaboration Manager")
@@ -285,7 +280,7 @@ class CollaborationManager:
             },
         )
         self._publish_status()
-        logger.info("Collaboration Manager initialized")
+        printer.status("INIT", "Collaboration Manager initialized", "success")
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -928,6 +923,14 @@ def _overload_error(message: str, *, current_load: int, max_load: int, context: 
             return OverloadError(message, context=merged_context) # type: ignore
         except TypeError:
             return OverloadError(message) # type: ignore
+
+
+__all__ = [
+    "CollaborationManager",
+    "CollaborationManagerConfig",
+    "ManagerTaskRecord",
+    "BatchTaskRecord",
+]
 
 
 if __name__ == "__main__":
