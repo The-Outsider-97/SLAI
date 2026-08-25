@@ -2,24 +2,25 @@ from __future__ import annotations
 
 import pickle
 import random
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np # type: ignore
+import torch # type: ignore
+import torch.nn as nn # type: ignore
+import torch.nn.functional as F # type: ignore
 
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union, cast
 from collections import deque
 
 from .adaptive_memory import MultiModalMemory
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.adaptive_errors import *
-from logs.logger import get_logger, PrettyPrinter
+from .utils.adaptive_helpers import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Imitation Learning")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass(frozen=True)
@@ -208,11 +209,12 @@ class ImitationLearningWorker:
         self.scheduler_name = scheduler_name
 
     def _resolve_device(self) -> torch.device:
-        if self.device_preference == "cuda":
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if self.device_preference == "cpu":
-            return torch.device("cpu")
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # if self.device_preference == "cuda":
+        #     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # if self.device_preference == "cpu":
+        #     return torch.device("cpu")
+        # return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return resolve_worker_device(self.device_preference)
 
     def _configure_optimizer(self) -> torch.optim.Optimizer:
         params = self.policy_net.parameters()
@@ -252,7 +254,7 @@ class ImitationLearningWorker:
             component="imitation_learning",
         )
 
-    def _configure_scheduler(self) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
+    def _configure_scheduler(self) -> Optional[torch.optim.lr_scheduler.LRScheduler]:
         if self.scheduler_name == "none":
             return None
 
@@ -274,12 +276,13 @@ class ImitationLearningWorker:
             factor = float(self.scheduler_config.get("factor", 0.5))
             patience = int(self.scheduler_config.get("patience", 5))
             min_lr = float(self.scheduler_config.get("min_lr", 1.0e-6))
+            mode_str = str(self.scheduler_config.get("mode", "min")).lower()
             ensure_in_range(factor, "scheduler.factor", minimum=0.0, maximum=1.0, component="imitation_learning")
             ensure_positive(patience, "scheduler.patience", component="imitation_learning")
             ensure_in_range(min_lr, "scheduler.min_lr", minimum=0.0, component="imitation_learning")
             return torch.optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer,
-                mode=str(self.scheduler_config.get("mode", "min")).lower(),
+                mode=mode_str,  # type: ignore[arg-type]
                 factor=factor,
                 patience=patience,
                 min_lr=min_lr,
@@ -394,9 +397,11 @@ class ImitationLearningWorker:
 
     def _resolve_training_outputs(self, states: torch.Tensor) -> Tuple[torch.Tensor, bool]:
         """Return policy output and whether it represents probabilities for discrete control."""
-        if hasattr(self.policy_net, "forward_logits") and callable(getattr(self.policy_net, "forward_logits")):
-            outputs = self.policy_net.forward_logits(states)
-            return outputs, False
+        if hasattr(self.policy_net, "forward_logits"):
+            forward_logits = getattr(self.policy_net, "forward_logits")
+            if callable(forward_logits):
+                outputs: torch.Tensor = cast(torch.Tensor, forward_logits(states))
+                return outputs, False
 
         outputs = self.policy_net(states)
         if self.continuous_actions:
@@ -464,7 +469,7 @@ class ImitationLearningWorker:
         if self.scheduler_name == "reduce_on_plateau":
             if metric is None:
                 return
-            self.scheduler.step(metric)
+            self.scheduler.step(int(metric))
         else:
             self.scheduler.step()
 
@@ -479,8 +484,14 @@ class ImitationLearningWorker:
                 output = self.policy_net(state_tensor)
                 return output.squeeze(0).detach().cpu().numpy()
 
-            if hasattr(self.policy_net, "forward_logits") and callable(getattr(self.policy_net, "forward_logits")):
-                logits = self.policy_net.forward_logits(state_tensor)
+            if hasattr(self.policy_net, "forward_logits"):
+                forward_logits = getattr(self.policy_net, "forward_logits")
+                if callable(forward_logits):
+                    logits = forward_logits(state_tensor)
+                else:
+                    logits = forward_logits
+                if not isinstance(logits, torch.Tensor):
+                    logits = torch.tensor(logits, device=self.device, dtype=torch.float32)
                 probs = torch.softmax(logits, dim=-1)
             else:
                 output = self.policy_net(state_tensor)
@@ -702,15 +713,11 @@ class ImitationLearningWorker:
                 uncertainty = float(outputs.std(dim=-1).mean().item())
                 return bool(uncertainty > self.entropy_threshold)
 
-            if hasattr(self.policy_net, "forward_logits") and callable(getattr(self.policy_net, "forward_logits")):
-                logits = self.policy_net.forward_logits(state_tensor)
-                probs = torch.softmax(logits, dim=-1)
+            outputs = self.policy_net(state_tensor)
+            if torch.any(outputs < 0) or not torch.allclose(outputs.sum(dim=-1), torch.ones(outputs.shape[0], device=outputs.device), atol=1e-4, rtol=1e-4):
+                probs = torch.softmax(outputs, dim=-1)
             else:
-                outputs = self.policy_net(state_tensor)
-                if torch.any(outputs < 0) or not torch.allclose(outputs.sum(dim=-1), torch.ones(outputs.shape[0], device=outputs.device), atol=1e-4, rtol=1e-4):
-                    probs = torch.softmax(outputs, dim=-1)
-                else:
-                    probs = outputs
+                probs = outputs
 
             entropy = float((-torch.sum(probs * torch.log(probs.clamp_min(1.0e-8)), dim=-1)).item())
             return bool(entropy > self.entropy_threshold)

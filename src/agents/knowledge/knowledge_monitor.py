@@ -2,31 +2,28 @@ import hashlib
 import json
 import threading
 import time
-import yaml
+import yaml # type: ignore
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from src.agents.knowledge.utils.config_loader import get_config_section, load_global_config
-from logs.logger import PrettyPrinter, get_logger
+from .utils.config_loader import get_config_section, load_global_config
+from .utils.knowledge_helpers import *
+from .utils.knowledge_errors import *
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Monitor")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class KnowledgeMonitor:
     """Knowledge integrity monitor with lazy dependency wiring and explicit lifecycle control."""
 
-    def __init__(
-        self,
-        agent: Any = None,
-        knowledge_cache: Any = None,
-        rule_engine: Any = None,
-        governor: Any = None,
-        perform_action: Any = None,
-        autostart: bool = False,
+    def __init__(self, agent: Any = None, knowledge_cache: Any = None, action_executor = None,
+                 governor: Any = None, perform_action: Any = None, autostart: bool = False, cache = None,
+                 rule_engine: Any = None,
     ):
         self.agent = agent
         self.config = load_global_config()
@@ -40,6 +37,8 @@ class KnowledgeMonitor:
         self._rule_engine = rule_engine
         self._governor = governor
         self._perform_action = perform_action
+        self._action_executor = action_executor or getattr(agent, "perform_action", None)
+        self._cache = cache or getattr(agent, "knowledge_cache", None)
 
         self.academic_sources = self._load_academic_sources()
         self.integrity_hashes: Dict[str, Dict[str, str]] = {"papers": {}, "datasets": {}}
@@ -58,7 +57,7 @@ class KnowledgeMonitor:
             if self._is_cache_like(cache):
                 self._knowledge_cache = cache
                 return self._knowledge_cache
-            from src.agents.knowledge.knowledge_cache import KnowledgeCache
+            from .knowledge_cache import KnowledgeCache
 
             self._knowledge_cache = KnowledgeCache()
             return self._knowledge_cache
@@ -72,10 +71,35 @@ class KnowledgeMonitor:
             if self._is_rule_engine_like(engine):
                 self._rule_engine = engine
                 return self._rule_engine
-            from src.agents.knowledge.utils.rule_engine import RuleEngine
+            from .modules.rule_engine import RuleEngine
 
             self._rule_engine = RuleEngine()
             return self._rule_engine
+
+    @property
+    def action_executor(self):
+        with self._component_lock:
+            if self._action_executor is not None:
+                return self._action_executor
+            executor = getattr(self.agent, "perform_action", None)
+            if self._is_action_handler_like(executor):
+                self._action_executor = executor
+                return self._action_executor
+            return None
+
+    @property
+    def cache(self):
+        with self._component_lock:
+            if self._cache is not None:
+                return self._cache
+            cache = getattr(self.agent, "knowledge_cache", None)
+            if self._is_cache_like(cache):
+                self._cache = cache
+                return self._cache
+            from .knowledge_cache import KnowledgeCache
+
+            self._cache = KnowledgeCache()
+            return self._cache
 
     @property
     def governor(self):
@@ -87,11 +111,14 @@ class KnowledgeMonitor:
                 self._governor = governor
                 return self._governor
             try:
-                from src.agents.knowledge.governor import Governor
+                from .governor import Governor
 
                 self._governor = Governor(knowledge_agent=self.agent)
                 if hasattr(self._governor, "agent"):
-                    self._governor.agent = self.agent
+                    try:
+                        self._governor = self.agent
+                    except (AttributeError, TypeError):
+                        pass
             except Exception as exc:  # pragma: no cover
                 logger.warning("Governor initialization skipped: %s", exc)
                 self._governor = None
@@ -107,7 +134,7 @@ class KnowledgeMonitor:
                 self._perform_action = action_handler
                 return self._perform_action
             try:
-                from src.agents.knowledge.perform_action import PerformAction
+                from .perform_action import PerformAction
 
                 self._perform_action = PerformAction()
             except Exception as exc:  # pragma: no cover
@@ -149,25 +176,32 @@ class KnowledgeMonitor:
         except (TypeError, AttributeError):
             return 0
 
-
     def _resolve_path(self, path_value: str) -> Path:
         path = Path(path_value)
         if path.is_absolute():
             return path
-
+    
         candidates = [Path.cwd() / path]
-        config_path = self.config.get("__config_path__") if isinstance(self.config, dict) else None
+    
+        config_path = self.config.get("__config_path__")
         if config_path:
-            config_dir = Path(config_path).resolve().parent
-            candidates.extend([config_dir / path, config_dir.parent / path, config_dir.parent.parent / path])
-
+            candidates.extend(
+                config_relative_candidates(
+                    path,
+                    Path(config_path),
+                )
+            )
+    
         module_dir = Path(__file__).resolve().parent
-        candidates.append(module_dir / path)
-
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[0]
+        candidates.extend(
+            [
+                module_dir / path,
+                module_dir.parent.parent.parent / path,
+            ]
+        )
+    
+        existing = first_existing_path(candidates)
+        return existing if existing is not None else candidates[0]
 
     def _load_academic_sources(self) -> Dict[str, Any]:
         sources = {
@@ -419,6 +453,7 @@ class KnowledgeMonitor:
                     quarantined.append(entry_name)
 
             if entry_name:
+                assert self.knowledge_cache is not None
                 key = self.knowledge_cache.hash_query(entry_name)
                 self.knowledge_cache.set(key, {"status": "quarantined", "entry": entry_name})
 
@@ -447,6 +482,7 @@ class KnowledgeMonitor:
                 logger.warning("Governor emergency alert failed: %s", exc)
 
         if self.monitor_config.get("auto_flush_on_alert", True):
+            assert self.knowledge_cache is not None
             self.knowledge_cache.flush_flagged_entries()
         return alert_report
 
@@ -454,6 +490,7 @@ class KnowledgeMonitor:
         invalid_entries = [violation["entry"] for violation in violations if violation.get("entry")]
 
         for entry in invalid_entries:
+            assert self.knowledge_cache is not None
             key = self.knowledge_cache.hash_query(entry)
             cached = self.knowledge_cache.get(key)
             if isinstance(cached, dict):
@@ -466,8 +503,10 @@ class KnowledgeMonitor:
         }
         if hasattr(self.rule_engine, "update_validation_context"):
             try:
-                self.rule_engine.update_validation_context(**self.validation_context)
-            except Exception as exc:  # pragma: no cover
+                assert self.rule_engine is not None
+                if hasattr(self.rule_engine, "update_validation_context"):
+                    self.rule_engine.update_validation_context(**self.validation_context) # type: ignore
+            except (AttributeError, Exception) as exc:  # pragma: no cover
                 logger.warning("Rule engine validation-context update failed: %s", exc)
 
     def generate_academic_report(self) -> Dict[str, Any]:
@@ -510,11 +549,44 @@ class KnowledgeMonitor:
         doi = doi.strip()
         return bool(doi and doi.startswith("10.") and "/" in doi)
 
+    def cleanup(self) -> None:
+        self.stop_monitoring()
+        self._knowledge_cache = None
+        self._rule_engine = None
+        self._governor = None
+        self._perform_action = None
+        self._action_executor = None
+        self._cache = None
+
+    def restart(self) -> None:
+        self.cleanup()
+        if self.enabled:
+            self.start_monitoring()
+
+    @staticmethod
+    def _is_valid_url(url: str) -> bool:
+        try:
+            result = urlparse(url)
+            return all([result.scheme, result.netloc])
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_valid_domain(domain: str) -> bool:
+        domain = domain.strip().lower()
+        if not domain:
+            return False
+        if any(c in domain for c in " /\\"):
+            return False
+        if "." not in domain:
+            return False
+        return True
+
 
 if __name__ == "__main__":  # pragma: no cover
-    from src.agents.handler_agent import HandlerAgent
-    from src.agents.agent_factory import AgentFactory
-    from src.agents.collaborative.shared_memory import SharedMemory
+    from ..handler_agent import HandlerAgent
+    from ..agent_factory import AgentFactory
+    from ..collaborative.shared_memory import SharedMemory
 
     memory = SharedMemory()
     factory = AgentFactory()

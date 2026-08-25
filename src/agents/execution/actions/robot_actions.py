@@ -1,28 +1,94 @@
 import time
 import math
-from typing import Dict, Any, Optional, Tuple, List, Callable
+from typing import Dict, Any, Optional, Tuple, List, Callable, cast
 
 from ..actions.base_action import BaseAction, ActionStatus, SoftInterrupt
-from ..utils.robot_interface import RobotInterface
-from ..utils.execution_error import ActionFailureError, UnreachableTargetError, InvalidContextError
+from ..modules.robot_interface import RobotInterface
+from ..utils.execution_error import *
+from ..utils.execution_helpers import *
 from ..utils.config_loader import get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("RobotActions")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
+
+_MISSING = object()
 
 
 class RobotAction(BaseAction):
-    """Base class for all robot actions that need hardware access."""
+    """Base class for actions that cross the robot hardware boundary.
+
+    Concrete actions declare only the capabilities they consume. This supports
+    both ``RobotInterface`` subclasses and structurally compatible adapters,
+    while rejecting unsupported operations before execution begins.
+    """
     _required_context_keys = ["robot"]
+    robot_capabilities: Tuple[str, ...] = ()
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)
-        self.robot: RobotInterface = self.context.get("robot")
-        if not self.robot:
+        robot = self.context.get("robot")
+        if robot is None:
             raise InvalidContextError(self.name, ["robot"])
+        unsupported_capabilities = missing_capabilities(
+            robot,
+            self.robot_capabilities,
+        )
+        if unsupported_capabilities:
+            raise InvalidContextError(
+                self.name,
+                [f"robot.{name}" for name in unsupported_capabilities],
+            )
+        self.robot = cast(RobotInterface, robot)
         self.robot_cfg = get_config_section("robot_actions") or {}
+
+    def _execute_robot_command(self, capability: str, *args: Any, **kwargs: Any) -> None:
+        """Execute a validated robot command and enforce its Boolean contract."""
+        command = getattr(self.robot, capability, None)
+        if not callable(command):
+            raise ActionFailureError(
+                self.name,
+                f"Robot capability {capability!r} became unavailable",
+            )
+        try:
+            accepted = command(*args, **kwargs)
+        except Exception as exc:
+            raise ActionFailureError(
+                self.name,
+                f"Robot command {capability!r} raised {type(exc).__name__}: {exc}",
+            ) from exc
+        if accepted is not True:
+            raise ActionFailureError(
+                self.name,
+                f"Robot command {capability!r} was rejected or violated its Boolean return contract",
+            )
+
+    def _read_pose(self) -> Tuple[float, float, float]:
+        """Read and validate a finite ``(x, y, theta)`` hardware pose."""
+        pose = self._read_robot_value("get_pose")
+        if not is_position(pose, dimensions=3):
+            raise ActionFailureError(
+                self.name,
+                "Robot get_pose() must return three finite real coordinates",
+            )
+        return float(pose[0]), float(pose[1]), float(pose[2])
+
+    def _read_robot_value(self, capability: str, *args: Any, **kwargs: Any) -> Any:
+        """Read a validated robot capability and translate adapter failures."""
+        reader = getattr(self.robot, capability, None)
+        if not callable(reader):
+            raise ActionFailureError(
+                self.name,
+                f"Robot capability {capability!r} became unavailable",
+            )
+        try:
+            return reader(*args, **kwargs)
+        except Exception as exc:
+            raise ActionFailureError(
+                self.name,
+                f"Robot read {capability!r} raised {type(exc).__name__}: {exc}",
+            ) from exc
 
 
 # ========================== Locomotion Actions ==========================
@@ -32,6 +98,7 @@ class MotorAction(RobotAction):
     name = "motor"
     preconditions = ["robot_ready"]
     postconditions = ["motors_set"]
+    robot_capabilities = ("set_motor_speed", "stop")
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -44,18 +111,21 @@ class MotorAction(RobotAction):
         self.right_speed = self.context.get("right_speed", 0.0)
         self.duration = self.context.get("duration", 0.0)
 
-        if not self.robot.set_motor_speed(self.left_speed, self.right_speed):
-            raise ActionFailureError(self.name, "Failed to set motor speeds")
+        self._execute_robot_command(
+            "set_motor_speed",
+            self.left_speed,
+            self.right_speed,
+        )
 
         if self.duration > 0:
             start = time.time()
             while time.time() - start < self.duration:
                 if self._should_interrupt():
-                    self.robot.stop()
+                    self._execute_robot_command("stop")
                     raise SoftInterrupt("Motor action interrupted")
                 time.sleep(0.05)
             # Auto-stop after duration
-            self.robot.set_motor_speed(0.0, 0.0)
+            self._execute_robot_command("set_motor_speed", 0.0, 0.0)
         return True
 
 
@@ -64,25 +134,24 @@ class AckermannAction(RobotAction):
     name = "ackermann"
     preconditions = ["robot_ready"]
     postconditions = ["steering_set", "throttle_set"]
+    robot_capabilities = ("set_steering", "set_throttle", "stop")
 
     def _execute(self) -> bool:
         steering = self.context.get("steering", 0.0)
         throttle = self.context.get("throttle", 0.0)
         duration = self.context.get("duration", 0.0)
 
-        if not self.robot.set_steering(steering):
-            raise ActionFailureError(self.name, "Failed to set steering")
-        if not self.robot.set_throttle(throttle):
-            raise ActionFailureError(self.name, "Failed to set throttle")
+        self._execute_robot_command("set_steering", steering)
+        self._execute_robot_command("set_throttle", throttle)
 
         if duration > 0:
             start = time.time()
             while time.time() - start < duration:
                 if self._should_interrupt():
-                    self.robot.stop()
+                    self._execute_robot_command("stop")
                     raise SoftInterrupt("Ackermann action interrupted")
                 time.sleep(0.05)
-            self.robot.set_throttle(0.0)
+            self._execute_robot_command("set_throttle", 0.0)
         return True
 
 
@@ -92,9 +161,10 @@ class StopAction(RobotAction):
     priority = 10  # high priority
     preconditions = []
     postconditions = ["stopped"]
+    robot_capabilities = ("stop",)
 
     def _execute(self) -> bool:
-        self.robot.stop()
+        self._execute_robot_command("stop")
         return True
 
 
@@ -103,16 +173,17 @@ class SpinAction(RobotAction):
     name = "spin"
     _required_context_keys = ["angle_deg"]
     preconditions = ["robot_ready", "localized"]
+    robot_capabilities = ("get_pose", "set_motor_speed", "stop")
 
     def _execute(self) -> bool:
         angle_deg = self.context["angle_deg"]
         angular_speed = self.context.get("angular_speed", 30.0)  # deg/s
         # Assume robot can get current orientation via get_pose()
-        start_yaw = self.robot.get_pose()[2]
+        start_yaw = self._read_pose()[2]
         target_yaw = start_yaw + math.radians(angle_deg)
 
         # Normalize target_yaw to [-pi, pi]
-        target_yaw = math.atan2(math.sin(target_yaw), math.cos(target_yaw))
+        target_yaw = normalize_angle(target_yaw)
 
         # Simple PID‑less open‑loop spin (differential drive)
         # Positive angle = clockwise? Define sign convention.
@@ -120,22 +191,21 @@ class SpinAction(RobotAction):
         left_speed = direction * angular_speed / 90.0   # normalize to speed range
         right_speed = -direction * angular_speed / 90.0
 
-        self.robot.set_motor_speed(left_speed, right_speed)
+        self._execute_robot_command("set_motor_speed", left_speed, right_speed)
 
         # Wait until within tolerance
         tolerance = math.radians(2.0)
         while True:
             if self._should_interrupt():
-                self.robot.stop()
+                self._execute_robot_command("stop")
                 raise SoftInterrupt("Spin interrupted")
-            current_yaw = self.robot.get_pose()[2]
-            error = abs(math.atan2(math.sin(target_yaw - current_yaw),
-                                   math.cos(target_yaw - current_yaw)))
+            current_yaw = self._read_pose()[2]
+            error = abs(normalize_angle(target_yaw - current_yaw))
             if error < tolerance:
                 break
             time.sleep(0.02)
 
-        self.robot.set_motor_speed(0.0, 0.0)
+        self._execute_robot_command("set_motor_speed", 0.0, 0.0)
         return True
 
 
@@ -150,6 +220,7 @@ class NavigateAction(RobotAction):
     _required_context_keys = ["target_x", "target_y"]
     preconditions = ["robot_ready", "localized"]
     timeout = 30.0
+    robot_capabilities = ("get_pose", "set_motor_speed", "stop")
 
     def __init__(self, context: Optional[Dict[str, Any]] = None):
         super().__init__(context)
@@ -168,38 +239,41 @@ class NavigateAction(RobotAction):
         start_time = time.time()
         while True:
             if self._should_interrupt():
-                self.robot.stop()
+                self._execute_robot_command("stop")
                 raise SoftInterrupt("Navigation interrupted")
             if time.time() - start_time > self.timeout:
+                self._execute_robot_command("stop")
                 raise ActionFailureError(self.name, "Navigation timeout")
 
-            x, y, theta = self.robot.get_pose()
+            x, y, theta = self._read_pose()
             dx = target_x - x
             dy = target_y - y
-            distance = math.hypot(dx, dy)
+            distance = euclidean_distance((x, y), (target_x, target_y)) # pyright: ignore[reportArgumentType]
             if distance < self.distance_tolerance:
                 # Position reached; handle orientation if needed
                 if self.target_theta is None:
                     break
-                angle_error = math.atan2(math.sin(self.target_theta - theta),
-                                         math.cos(self.target_theta - theta))
+                angle_error = normalize_angle(self.target_theta - theta)
                 if abs(angle_error) < self.angle_tolerance:
                     break
                 # Rotate in place
                 angular = self.kp_angular * angle_error
-                angular = max(-self.max_angular, min(self.max_angular, angular))
-                self.robot.set_motor_speed(-angular, angular)  # differential spin
+                angular = clamp(angular, -self.max_angular, self.max_angular)
+                self._execute_robot_command(
+                    "set_motor_speed",
+                    -angular,
+                    angular,
+                )
                 time.sleep(0.02)
                 continue
 
             # Go‑to‑goal control
             angle_to_target = math.atan2(dy, dx)
-            angle_error = math.atan2(math.sin(angle_to_target - theta),
-                                     math.cos(angle_to_target - theta))
+            angle_error = normalize_angle(angle_to_target - theta)
             linear = self.kp_linear * distance
-            linear = max(0.0, min(self.max_speed, linear))
+            linear = clamp(linear, 0.0, self.max_speed)
             angular = self.kp_angular * angle_error
-            angular = max(-self.max_angular, min(self.max_angular, angular))
+            angular = clamp(angular, -self.max_angular, self.max_angular)
 
             # Convert to differential drive speeds
             left = linear - angular
@@ -209,10 +283,10 @@ class NavigateAction(RobotAction):
             if max_abs > 1.0:
                 left /= max_abs
                 right /= max_abs
-            self.robot.set_motor_speed(left, right)
+            self._execute_robot_command("set_motor_speed", left, right)
             time.sleep(0.05)
 
-        self.robot.set_motor_speed(0.0, 0.0)
+        self._execute_robot_command("set_motor_speed", 0.0, 0.0)
         return True
 
 
@@ -221,20 +295,39 @@ class FollowPathAction(RobotAction):
     name = "follow_path"
     _required_context_keys = ["path"]
     preconditions = ["robot_ready", "localized"]
+    robot_capabilities = ("get_pose", "set_motor_speed", "stop")
 
     def _execute(self) -> bool:
         path = self.context["path"]
-        original_targets = self.context.copy()
-        for i, (wp_x, wp_y) in enumerate(path):
-            self.context["target_x"] = wp_x
-            self.context["target_y"] = wp_y
-            # Optionally, final waypoint orientation
-            if i == len(path) - 1 and "target_theta" in original_targets:
-                self.context["target_theta"] = original_targets["target_theta"]
-            nav = NavigateAction(self.context)
-            nav.robot = self.robot
-            if not nav.execute():
-                raise ActionFailureError(self.name, f"Failed at waypoint {i}")
+        target_keys = ("target_x", "target_y", "target_theta")
+        original_targets = {
+            key: self.context.get(key, _MISSING) for key in target_keys
+        }
+        try:
+            for index, (waypoint_x, waypoint_y) in enumerate(path):
+                self.context["target_x"] = waypoint_x
+                self.context["target_y"] = waypoint_y
+                is_final_waypoint = index == len(path) - 1
+                if (
+                    is_final_waypoint
+                    and original_targets["target_theta"] is not _MISSING
+                ):
+                    self.context["target_theta"] = original_targets["target_theta"]
+                else:
+                    self.context.pop("target_theta", None)
+
+                navigation = NavigateAction(self.context)
+                if not navigation.execute():
+                    raise ActionFailureError(
+                        self.name,
+                        f"Failed at waypoint {index}",
+                    )
+        finally:
+            for key, value in original_targets.items():
+                if value is _MISSING:
+                    self.context.pop(key, None)
+                else:
+                    self.context[key] = value
         return True
 
 
@@ -245,12 +338,12 @@ class GripperAction(RobotAction):
     name = "gripper"
     preconditions = ["robot_ready"]
     postconditions = ["gripper_changed"]
+    robot_capabilities = ("set_gripper",)
 
     def _execute(self) -> bool:
         open_gripper = self.context.get("open", True)
         force = self.context.get("force", 1.0)
-        if not self.robot.set_gripper(open_gripper, force):
-            raise ActionFailureError(self.name, "Gripper command failed")
+        self._execute_robot_command("set_gripper", open_gripper, force)
         return True
 
 
@@ -259,13 +352,18 @@ class JointAction(RobotAction):
     name = "joint"
     _required_context_keys = ["joint_id", "position"]
     preconditions = ["robot_ready"]
+    robot_capabilities = ("set_joint_position",)
 
     def _execute(self) -> bool:
         joint_id = self.context["joint_id"]
         position = self.context["position"]
         speed = self.context.get("speed", 0.5)
-        if not self.robot.set_joint_position(joint_id, position, speed):
-            raise ActionFailureError(self.name, f"Joint {joint_id} move failed")
+        self._execute_robot_command(
+            "set_joint_position",
+            joint_id,
+            position,
+            speed,
+        )
         # Optionally wait for completion
         if self.context.get("wait", True):
             # Simulate motion time (simplified)
@@ -280,11 +378,12 @@ class SensorReadAction(RobotAction):
     name = "sensor_read"
     _required_context_keys = ["sensor_name", "output_key"]
     preconditions = []
+    robot_capabilities = ("get_sensor_value",)
 
     def _execute(self) -> bool:
         sensor_name = self.context["sensor_name"]
         output_key = self.context["output_key"]
-        value = self.robot.get_sensor_value(sensor_name)
+        value = self._read_robot_value("get_sensor_value", sensor_name)
         self.context[output_key] = value
         logger.debug(f"Read {sensor_name} = {value}")
         return True
@@ -325,12 +424,12 @@ class LedAction(RobotAction):
     name = "led"
     _required_context_keys = ["led_id", "state"]
     preconditions = []
+    robot_capabilities = ("set_led",)
 
     def _execute(self) -> bool:
         led_id = self.context["led_id"]
         state = self.context["state"]
-        if not self.robot.set_led(led_id, state):
-            raise ActionFailureError(self.name, f"LED {led_id} control failed")
+        self._execute_robot_command("set_led", led_id, state)
         return True
 
 
@@ -359,9 +458,27 @@ class SequenceAction(BaseAction):
                 raise ActionFailureError(self.name,
                                          f"Sub-action {action.name} failed")
         return True
-        
-        
+
+
+__all__ = [
+    "AckermannAction",
+    "FollowPathAction",
+    "GripperAction",
+    "JointAction",
+    "LedAction",
+    "MotorAction",
+    "NavigateAction",
+    "RobotAction",
+    "SensorReadAction",
+    "SequenceAction",
+    "SpinAction",
+    "StopAction",
+    "WaitAction",
+]
+
+
 if __name__ == "__main__":
+    printer = PrettyPrinter()
     print("\n=== Running Robot Actions ===\n")
     printer.status("TEST", "Starting Robot Actions tests", "info")
 

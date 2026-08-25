@@ -1,1011 +1,2523 @@
-"""
-Production-ready checkpoint management for SLAI training/inference workflows.
+"""Production orchestration for SLAI checkpointing.
 
-The manager owns orchestration. Reusable helper functions, error classes,
-manifest serialization, atomic persistence, integrity checks, tokenizer logic,
-and RNG utilities live in ``checkpoint_utils.py``.
+``CheckpointManager`` coordinates the package's deliberately separate layers:
 
-Key properties
---------------
-- Atomic checkpoint commits through staging directories.
-- Manifest-based file integrity verification with SHA-256 hashes.
-- PyTorch and NPZ checkpoint formats.
-- Backward-compatible loading for legacy ``model_weights.pt`` and
-  ``model_weights.npz`` layouts.
-- Optional optimizer, scheduler, AMP scaler, RNG, metrics, and metadata support.
-- Tokenizer persistence for simple custom tokenizers and common save/load APIs.
-- Safe version handling to prevent path traversal and accidental overwrite.
-- Optional retention cleanup and archive creation.
+* codecs serialize and deserialize individual components;
+* manifests describe exactly what was committed;
+* storage stages and atomically publishes files;
+* policy makes deterministic, auditable recovery and retention decisions; and
+* observability reports outcomes without becoming business logic.
 
-Public API examples
--------------------
-    manager = CheckpointManager("src/checkpoints", create_archive=True)
-    record = manager.save(model, tokenizer, optimizer=optim, epoch=3)
-    state = manager.load(model, tokenizer, optimizer=optim, version="latest")
+The manager contains no framework serialization, learned selection heuristic,
+global executor, global registry, or import-time logging configuration.  Its
+canonical APIs are :meth:`save_components` and :meth:`load_components`.
+Compatibility-oriented ``save``/``load`` and format helpers only normalize
+arguments before delegating to those canonical paths.
 """
 
 from __future__ import annotations
 
-import concurrent.futures
+import base64
 import os
-import shutil
-import tempfile
-import numpy as np
-import torch
+import threading
+import time
 
-from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from collections import defaultdict
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
+from typing import Any, Mapping, Sequence
 
-from .checkpoint_utils import *
-from .checkpoint_utils import read_manifest as read_manifest_file
-from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
+from .checkpoint_codecs import *
+from .checkpoint_errors import *
+from .checkpoint_manifest import *
+from .checkpoint_observability import *
+from .checkpoint_policy import *
+from .checkpoint_storage import *
+from .checkpoint_types import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
-logger = get_logger("SLAI Checkpoint Manager")
+
+logger = get_logger("Checkpoint Manager")
 printer = PrettyPrinter()
+
+_MANAGER_CODEC_ROOT = "codec_root"
+_LEGACY_PAYLOAD_KEYS = {
+    "model_state": StandardComponent.MODEL.value,
+    "optimizer_state": StandardComponent.OPTIMIZER.value,
+    "scheduler_state": StandardComponent.SCHEDULER.value,
+    "scaler_state": StandardComponent.SCALER.value,
+    "extra_state": StandardComponent.AGENT_STATE.value,
+    "rng_state": StandardComponent.RNG.value,
+}
+_LEGACY_COMPONENT_ALIASES = {
+    **_LEGACY_PAYLOAD_KEYS,
+    "model_weights": StandardComponent.MODEL.value,
+}
+_RESTORE_ORDER = {
+    StandardComponent.MODEL.value: 0,
+    StandardComponent.OPTIMIZER.value: 1,
+    StandardComponent.SCHEDULER.value: 2,
+    StandardComponent.SCALER.value: 3,
+    StandardComponent.TOKENIZER.value: 4,
+}
+_EXTENSIONS = {
+    "torch": ".pt",
+    "numpy": ".npz",
+    "rng": ".npz",
+    "agent-state": ".json",
+}
+
+
+def _normalize_component(value: str) -> str:
+    """Normalize only documented v2.2 component aliases."""
+
+    candidate = _LEGACY_COMPONENT_ALIASES.get(value, value)
+    try:
+        return validate_component_name(candidate)
+    except ValueError as exc:
+        raise CheckpointConfigurationError(
+            str(exc),
+            stage=CheckpointStage.VALIDATION,
+            component=value if isinstance(value, str) else None,
+        ) from exc
+
+
+def _normalize_format_for_operation(
+    value: str | CheckpointFormat,
+    operation: CheckpointOperation,
+) -> CheckpointFormat:
+    try:
+        return normalize_format(value)
+    except (TypeError, ValueError) as exc:
+        raise CheckpointConfigurationError(
+            str(exc),
+            operation=operation,
+            stage=CheckpointStage.VALIDATION,
+        ) from exc
+
+
+def _validate_version_for_operation(
+    value: str,
+    operation: CheckpointOperation,
+) -> str:
+    try:
+        return validate_version(value)
+    except ValueError as exc:
+        raise CheckpointConfigurationError(
+            str(exc),
+            operation=operation,
+            stage=CheckpointStage.VALIDATION,
+            version=value if isinstance(value, str) else None,
+        ) from exc
+
+
+def _component_segment(component: str) -> str:
+    """Return a reversible, cross-platform-safe directory segment."""
+
+    encoded = base64.urlsafe_b64encode(component.encode("utf-8")).decode("ascii")
+    # The prefix prevents Windows device names; removing base64 padding avoids
+    # trailing dots/spaces and leaves only portable alphanumerics, '-' and '_'.
+    return "c-" + encoded.rstrip("=")
+
+
+def _contextualize(
+    error: CheckpointError,
+    *,
+    operation: CheckpointOperation,
+    stage: CheckpointStage | None = None,
+    path: Path | None = None,
+    version: str | None = None,
+    checkpoint_id: str | None = None,
+    component: str | None = None,
+    committed: bool | None = None,
+) -> CheckpointError:
+    """Add boundary context without replacing context supplied downstream."""
+
+    changes: dict[str, Any] = {}
+    for name, value in (
+        ("operation", operation.value),
+        ("stage", stage.value if stage is not None else None),
+        ("path", path),
+        ("version", version),
+        ("checkpoint_id", checkpoint_id),
+        ("component", component),
+        ("committed", committed),
+    ):
+        if value is not None and getattr(error.context, name) is None:
+            changes[name] = value
+    return error.with_context(**changes) if changes else error
+
+
+def _codec_destination(staging: Path, component: str, codec: Any) -> tuple[Path, str]:
+    root = PurePosixPath("components", _component_segment(component))
+    if bool(getattr(codec, "multi_file", False)):
+        relative = root.as_posix()
+        return staging.joinpath(*root.parts), relative
+    extension = _EXTENSIONS.get(codec.codec_id, ".bin")
+    relative = (root / f"payload{extension}").as_posix()
+    return staging.joinpath(*PurePosixPath(relative).parts), relative
+
+
+def _infer_checkpoint_format(codec_ids: set[str], component_count: int) -> CheckpointFormat:
+    if component_count == 1 and codec_ids == {"torch"}:
+        return CheckpointFormat.TORCH
+    if component_count == 1 and codec_ids == {"numpy"}:
+        return CheckpointFormat.NPZ
+    return CheckpointFormat.COMPOSITE
+
+
+def _record_size(record: CheckpointRecord) -> int:
+    return sum(artifact.size_bytes for artifact in record.manifest.artifacts)
+
+
+def _is_legacy_manifest(manifest: CheckpointManifest) -> bool:
+    return bool(
+        manifest.metadata.get("legacy_layout") is True
+        or manifest.metadata.get("legacy_manifest_schema_version") in {0, 1, 2}
+    )
 
 
 class CheckpointManager:
-    """
-    Save, load, list, verify, archive, and delete model checkpoints.
+    """Coordinate durable, deterministic, component-oriented checkpoints.
 
-    Parameters
-    ----------
-    base_dir:
-        Directory where checkpoint version directories are stored.
-    default_format:
-        Format used when ``save``/``load`` do not receive a format.
-    allow_overwrite:
-        Whether a save may replace an existing checkpoint version.
-    create_archive:
-        Whether saves should create a ``.tar.gz`` archive after committing.
-    retention_limit:
-        Optional maximum number of checkpoint directories to keep.
+    Args:
+        base_dir: Local checkpoint root.  Mutually exclusive with ``config``
+            and ``storage``.
+        config: Cross-cutting filesystem and verification configuration.
+        storage: Transactional storage adapter.  Extended operations such as
+            listing or archival are capability-checked when invoked.
+        codecs: Explicit codec registry.  A new frozen default registry is
+            created per manager when omitted.
+        policy: Pure deterministic policy engine.
+        telemetry: Structured observability coordinator.  The default records
+            in-process metrics and sends events to no external sink.
+        runtime: Capabilities used for compatibility gates.  The default
+            declares only the exact versions in ``codecs``; applications that
+            persist SLAI, Python, platform, or component-schema constraints
+            must supply the corresponding runtime facts.
+        producer: Default manifest producer identity.
+        create_archive: Whether successful saves create ``tar.gz`` archives.
+        retention_limit: Optional compatibility setting for latest-N cleanup.
+            It is implemented through :class:`RetentionRules`.
+        allow_legacy: Permit discovery and bounded decoding of recognized
+            v2.2 layouts.  New saves always use schema v3.
+        executor: Optional caller-owned executor for ``save_async``.
     """
 
-    def __init__(self, base_dir: str | os.PathLike[str] = "src/checkpoints", *,
-        default_format: CheckpointFormat = "torch",
-        allow_overwrite: bool = False, create_archive: bool = False,
-        retention_limit: Optional[int] = None,
+    def __init__(
+        self,
+        base_dir: str | os.PathLike[str] | None = None,
+        *,
+        config: CheckpointConfig | None = None,
+        storage: CheckpointStorageAdapter | None = None,
+        codecs: CodecRegistry | None = None,
+        policy: CheckpointPolicy | None = None,
+        telemetry: CheckpointTelemetry | None = None,
+        runtime: RuntimeCapabilities | None = None,
+        producer: ProducerInfo | None = None,
+        create_archive: bool = False,
+        retention_limit: int | None = None,
+        allow_legacy: bool = True,
+        executor: Executor | None = None,
     ) -> None:
-        self.base_dir = ensure_directory(Path(base_dir))
-        self.default_format = normalize_format(default_format)
-        self.allow_overwrite = allow_overwrite
+        if base_dir is not None and (config is not None or storage is not None):
+            raise CheckpointConfigurationError(
+                "base_dir is mutually exclusive with config and storage",
+                stage=CheckpointStage.VALIDATION,
+            )
+        if storage is not None and not isinstance(storage, CheckpointStorageAdapter):
+            raise CheckpointConfigurationError(
+                "storage does not implement the transactional checkpoint contract",
+                stage=CheckpointStage.VALIDATION,
+            )
+        if storage is not None:
+            if config is None:
+                active_config = CheckpointConfig(base_dir=storage.base_dir)
+            else:
+                configured = config.base_dir.resolve(strict=False)
+                supplied = Path(storage.base_dir).resolve(strict=False)
+                if configured != supplied:
+                    raise CheckpointConfigurationError(
+                        "config.base_dir does not match storage.base_dir",
+                        stage=CheckpointStage.VALIDATION,
+                        details={
+                            "config_base_dir": str(configured),
+                            "storage_base_dir": str(supplied),
+                        },
+                    )
+                active_config = config
+            active_storage = storage
+        else:
+            active_config = config or CheckpointConfig(
+                base_dir=Path(base_dir) if base_dir is not None else Path("src/checkpoints")
+            )
+            active_storage = FileSystemCheckpointStorage(config=active_config)
+
+        active_codecs = codecs or build_default_codec_registry()
+        if not isinstance(active_codecs, CodecRegistry):
+            raise CheckpointConfigurationError(
+                "codecs must be a CodecRegistry",
+                stage=CheckpointStage.VALIDATION,
+            )
+        if policy is not None and not isinstance(policy, CheckpointPolicy):
+            raise CheckpointConfigurationError(
+                "policy must be a CheckpointPolicy",
+                stage=CheckpointStage.VALIDATION,
+            )
+        if telemetry is not None and not isinstance(telemetry, CheckpointTelemetry):
+            raise CheckpointConfigurationError(
+                "telemetry must be CheckpointTelemetry",
+                stage=CheckpointStage.VALIDATION,
+            )
+        if not isinstance(create_archive, bool) or not isinstance(allow_legacy, bool):
+            raise CheckpointConfigurationError(
+                "create_archive and allow_legacy must be booleans",
+                stage=CheckpointStage.VALIDATION,
+            )
+        if retention_limit is not None and (
+            isinstance(retention_limit, bool)
+            or not isinstance(retention_limit, int)
+            or retention_limit < 1
+        ):
+            raise CheckpointConfigurationError(
+                "retention_limit must be a positive integer",
+                stage=CheckpointStage.VALIDATION,
+            )
+        if executor is not None and not callable(getattr(executor, "submit", None)):
+            raise CheckpointConfigurationError(
+                "executor must expose submit()",
+                stage=CheckpointStage.VALIDATION,
+            )
+
+        self.config = active_config
+        self.storage = active_storage
+        self.codecs = active_codecs
+        self.policy = policy or CheckpointPolicy()
+        self.telemetry = telemetry or CheckpointTelemetry()
+        self.runtime = runtime or RuntimeCapabilities(
+            codecs=self.codecs.required_codecs()
+        )
+        self.producer = producer or ProducerInfo(name="SLAI")
         self.create_archive = create_archive
         self.retention_limit = retention_limit
-        logger.info("CheckpointManager initialized at %s", self.base_dir)
+        self.allow_legacy = allow_legacy
+        self._executor = executor
+        self._owns_executor = False
+        self._executor_lock = threading.Lock()
 
-    def save_async(self, model: torch.nn.Module, tokenizer: Any = None,
-        metadata: Optional[Mapping[str, Any]] = None,
-        version: Optional[str] = None, format: Optional[str] = None, *,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        scheduler: Any = None,
-        scaler: Any = None,
-        epoch: Optional[int] = None,
-        current_epoch: Optional[int] = None,
-        step: Optional[int] = None,
-        metrics: Optional[Mapping[str, Any]] = None,
-        extra_state: Optional[Mapping[str, Any]] = None,
-        archive: Optional[bool] = None,
-        overwrite: Optional[bool] = None,
-        save_rng: bool = True,
-        save_on_cpu: bool = True,
-        executor: Optional[concurrent.futures.Executor] = None,
-    ) -> concurrent.futures.Future:
+    @property
+    def base_dir(self) -> Path:
+        return Path(self.storage.base_dir)
+
+    @property
+    def default_format(self) -> CheckpointFormat:
+        return self.config.default_format
+
+    @property
+    def allow_overwrite(self) -> bool:
+        return self.config.allow_overwrite
+
+    def _storage_method(self, name: str) -> Any:
+        method = getattr(self.storage, name, None)
+        if not callable(method):
+            raise CheckpointConfigurationError(
+                f"storage adapter does not support {name}()",
+                stage=CheckpointStage.VALIDATION,
+                path=self.base_dir,
+                details={"required_capability": name},
+            )
+        return method
+
+    def _checkpoint_path(self, version: str) -> Path:
+        method = getattr(self.storage, "checkpoint_path", None)
+        if callable(method):
+            return Path(str(method(version)))
+        return resolve_checkpoint_path(self.base_dir, version)
+
+    # ------------------------------------------------------------------
+    # Save orchestration
+    # ------------------------------------------------------------------
+    def save_components(
+        self,
+        components: Mapping[str, Any],
+        *,
+        version: str | None = None,
+        codec_ids: Mapping[str, str] | None = None,
+        preferred_codecs: Mapping[str, Sequence[str]] | None = None,
+        codec_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+        checkpoint_format: str | CheckpointFormat | None = None,
+        epoch: int | None = None,
+        step: int | None = None,
+        metrics: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        provenance: CheckpointProvenance | None = None,
+        compatibility: CompatibilityConstraints | None = None,
+        producer: ProducerInfo | None = None,
+        archive: bool | None = None,
+        overwrite: bool | None = None,
+        trace_id: str | None = None,
+        apply_retention: bool = True,
+    ) -> SaveResult:
+        """Serialize, verify, and atomically commit named components.
+
+        All components are encoded into a transaction-local staging directory.
+        The manifest is written last, after storage-derived sizes and digests
+        are known.  No final checkpoint path is exposed before commit.
         """
-        Asynchronous version of `save()`.
 
-        Returns a Future that resolves to the CheckpointRecord (or raises an
-        exception on failure). If no executor is provided, a default thread
-        pool is created and reused.
-        """
-        if executor is None:
-            if not hasattr(self, "_default_executor"):
-                self._default_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            executor = self._default_executor
+        if not isinstance(components, Mapping) or not components:
+            raise CheckpointConfigurationError(
+                "components must be a non-empty mapping",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if producer is not None and not isinstance(producer, ProducerInfo):
+            raise CheckpointConfigurationError(
+                "producer must be ProducerInfo",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if not isinstance(apply_retention, bool):
+            raise CheckpointConfigurationError(
+                "apply_retention must be a boolean",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        normalized: dict[str, Any] = {}
+        for raw_name, value in components.items():
+            if not isinstance(raw_name, str):
+                raise CheckpointConfigurationError(
+                    "component mapping keys must be strings",
+                    operation=CheckpointOperation.SAVE,
+                    stage=CheckpointStage.VALIDATION,
+                )
+            name = _normalize_component(raw_name)
+            if name in normalized:
+                raise CheckpointConfigurationError(
+                    "component aliases produce a duplicate canonical name",
+                    operation=CheckpointOperation.SAVE,
+                    stage=CheckpointStage.VALIDATION,
+                    component=name,
+                )
+            normalized[name] = value
 
-        future = executor.submit(
-            self.save,
-            model=model,
-            tokenizer=tokenizer,
-            metadata=metadata,
-            version=version,
-            format=format,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            scaler=scaler,
-            epoch=epoch,
-            current_epoch=current_epoch,
-            step=step,
-            metrics=metrics,
-            extra_state=extra_state,
-            archive=archive,
-            overwrite=overwrite,
-            save_rng=save_rng,
-            save_on_cpu=save_on_cpu,
+        explicit_codecs = self._normalize_component_mapping(codec_ids, "codec_ids")
+        preferences = self._normalize_component_mapping(
+            preferred_codecs, "preferred_codecs"
         )
-        logger.debug("Submitted asynchronous save for version %s", version or "auto")
-        return future
+        per_component_metadata = self._normalize_component_mapping(
+            codec_metadata, "codec_metadata"
+        )
+        unknown_settings = (
+            set(explicit_codecs) | set(preferences) | set(per_component_metadata)
+        ) - set(normalized)
+        if unknown_settings:
+            raise CheckpointConfigurationError(
+                "codec settings refer to components that are not being saved",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+                details={"unknown_components": sorted(unknown_settings)},
+            )
 
-    # ------------------------------------------------------------------
-    # Save API
-    # ------------------------------------------------------------------
+        should_archive = self.create_archive if archive is None else archive
+        should_overwrite = self.allow_overwrite if overwrite is None else overwrite
+        if not isinstance(should_archive, bool) or not isinstance(should_overwrite, bool):
+            raise CheckpointConfigurationError(
+                "archive and overwrite must be booleans",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+
+        version_tag = make_version(version)
+        checkpoint_id = make_checkpoint_id()
+        active_provenance = self._prepare_provenance(
+            provenance,
+            saved_components=tuple(sorted(normalized)),
+            trace_id=trace_id,
+        )
+        started = time.monotonic()
+        staging = None
+        committed = False
+        archive_path: Path | None = None
+        agent_id = active_provenance.agent_id
+        run_id = active_provenance.run_id
+        effective_trace = active_provenance.trace_id
+
+        with self.telemetry.operation(
+            CheckpointOperation.SAVE,
+            stage=CheckpointStage.STAGING,
+            version=version_tag,
+            checkpoint_id=checkpoint_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            trace_id=effective_trace,
+            attributes={"components": sorted(normalized)},
+        ) as span:
+            try:
+                staging = self.storage.begin(
+                    version_tag, allow_overwrite=should_overwrite
+                )
+                artifacts: list[CheckpointArtifact] = []
+                used_codecs: dict[str, str] = {}
+
+                for component in sorted(normalized):
+                    value = normalized[component]
+                    raw_preferred = preferences.get(component, ())
+                    if isinstance(raw_preferred, (str, bytes)):
+                        raise CheckpointConfigurationError(
+                            "preferred codec values must be sequences, not strings",
+                            operation=CheckpointOperation.SAVE,
+                            stage=CheckpointStage.VALIDATION,
+                            component=component,
+                        )
+                    codec = self.codecs.resolve(
+                        component,
+                        value,
+                        codec_id=explicit_codecs.get(component),
+                        preferred=tuple(raw_preferred),
+                    )
+                    used_codecs[codec.codec_id] = codec.codec_version
+                    destination, codec_root = _codec_destination(
+                        staging.path, component, codec
+                    )
+                    destination.parent.mkdir(
+                        parents=True,
+                        exist_ok=True,
+                        mode=self.config.directory_mode,
+                    )
+                    context_metadata = dict(per_component_metadata.get(component, {}))
+                    # Storage synchronizes the complete staged tree once.  A
+                    # codec-level fsync would duplicate work without improving
+                    # the commit boundary.
+                    context_metadata["durable"] = False
+                    context = CodecContext(
+                        checkpoint_id=checkpoint_id,
+                        version=version_tag,
+                        component=component,
+                        metadata=context_metadata,
+                    )
+                    outputs = tuple(codec.encode(value, destination, context=context))
+                    for output in sorted(outputs, key=lambda item: str(item.path)):
+                        try:
+                            resolved_output = output.path.resolve(strict=True)
+                            staging_root = staging.path.resolve(strict=True)
+                            relative_path = resolved_output.relative_to(
+                                staging_root
+                            ).as_posix()
+                        except (OSError, ValueError) as exc:
+                            raise CheckpointPathError(
+                                "codec output is outside the checkpoint staging area",
+                                operation=CheckpointOperation.SAVE,
+                                stage=CheckpointStage.SERIALIZATION,
+                                path=output.path,
+                                version=version_tag,
+                                checkpoint_id=checkpoint_id,
+                                component=component,
+                                committed=False,
+                            ) from exc
+                        resolved_output.chmod(self.config.file_mode)
+                        parent = resolved_output.parent
+                        while parent != staging_root:
+                            parent.chmod(self.config.directory_mode)
+                            parent = parent.parent
+                        artifact_metadata = dict(output.metadata)
+                        if _MANAGER_CODEC_ROOT in artifact_metadata:
+                            raise CheckpointManifestError(
+                                f"artifact metadata key {_MANAGER_CODEC_ROOT!r} is reserved",
+                                operation=CheckpointOperation.SAVE,
+                                stage=CheckpointStage.MANIFEST,
+                                component=component,
+                                committed=False,
+                            )
+                        artifact_metadata[_MANAGER_CODEC_ROOT] = codec_root
+                        artifacts.append(
+                            build_artifact(
+                                staging.path,
+                                relative_path,
+                                component=component,
+                                codec=codec.codec_id,
+                                codec_version=codec.codec_version,
+                                media_type=output.media_type,
+                                required=output.required,
+                                metadata=artifact_metadata,
+                            )
+                        )
+
+                inferred_format = _infer_checkpoint_format(
+                    set(used_codecs), len(normalized)
+                )
+                if checkpoint_format is None:
+                    active_format = inferred_format
+                else:
+                    try:
+                        active_format = normalize_format(checkpoint_format)
+                    except ValueError as exc:
+                        raise CheckpointConfigurationError(
+                            str(exc),
+                            operation=CheckpointOperation.SAVE,
+                            stage=CheckpointStage.VALIDATION,
+                        ) from exc
+                    if (
+                        active_format is not inferred_format
+                        and active_format is not CheckpointFormat.COMPOSITE
+                    ):
+                        raise CheckpointConfigurationError(
+                            "declared checkpoint format does not match the encoded artifacts",
+                            operation=CheckpointOperation.SAVE,
+                            stage=CheckpointStage.VALIDATION,
+                            details={
+                                "declared": active_format.value,
+                                "inferred": inferred_format.value,
+                                "codecs": sorted(used_codecs),
+                                "component_count": len(normalized),
+                            },
+                        )
+
+                active_compatibility = self._prepare_compatibility(
+                    compatibility, used_codecs
+                )
+                manifest = build_manifest(
+                    version=version_tag,
+                    checkpoint_id=checkpoint_id,
+                    artifacts=tuple(sorted(artifacts, key=lambda item: item.relative_path)),
+                    checkpoint_format=active_format,
+                    producer=producer or self.producer,
+                    epoch=epoch,
+                    step=step,
+                    metrics=metrics,
+                    metadata=metadata,
+                    provenance=active_provenance,
+                    compatibility=active_compatibility,
+                )
+                manifest_path = write_manifest(
+                    staging.path,
+                    manifest,
+                    verify_artifacts=True,
+                    exact_files=self.config.require_exact_files,
+                    durable=False,
+                    limits=self.config.manifest_limits,
+                )
+                manifest_path.chmod(self.config.file_mode)
+                manifest_size = manifest_path.stat().st_size
+                final_path = self.storage.commit(
+                    staging, allow_overwrite=should_overwrite
+                )
+                committed = True
+                span.set_result(committed=True)
+                record = read_checkpoint_record(
+                    final_path,
+                    verify=True,
+                    exact_files=self.config.require_exact_files,
+                    limits=self.config.manifest_limits,
+                )
+                if record.verification is None or not record.verification.ok:
+                    raise CheckpointSaveError(
+                        "committed checkpoint failed post-commit verification",
+                        operation=CheckpointOperation.SAVE,
+                        stage=CheckpointStage.INTEGRITY,
+                        path=final_path,
+                        version=version_tag,
+                        checkpoint_id=checkpoint_id,
+                        committed=True,
+                    )
+
+                if should_archive:
+                    archive_path = Path(
+                        self._storage_method("create_archive")(
+                            version_tag, overwrite=should_overwrite
+                        )
+                    )
+
+                if apply_retention and self.retention_limit is not None:
+                    rules = RetentionRules(
+                        max_checkpoints=self.retention_limit,
+                        minimum_keep=1,
+                        keep_latest=1,
+                        protected_checkpoint_ids=(checkpoint_id,),
+                    )
+                    plan = self.plan_retention(rules)
+                    self.execute_retention(plan, require_constraints_satisfied=True)
+
+                bytes_written = sum(item.size_bytes for item in artifacts)
+                bytes_written += manifest_size
+                duration = time.monotonic() - started
+                span.set_result(
+                    checkpoint_id=checkpoint_id,
+                    size_bytes=bytes_written,
+                    component_count=len(normalized),
+                    health=record.health,
+                    committed=True,
+                    attributes={"format": record.format},
+                )
+                return SaveResult(
+                    record=record,
+                    committed=True,
+                    bytes_written=bytes_written,
+                    duration_seconds=duration,
+                    archive_path=archive_path,
+                )
+            except Exception as exc:
+                abort_error: Exception | None = None
+                if staging is not None and not committed:
+                    try:
+                        self.storage.abort(staging)
+                    except Exception as cleanup_exc:  # Preserve the primary failure.
+                        abort_error = cleanup_exc
+                if isinstance(exc, CheckpointError):
+                    if committed and exc.committed is False:
+                        raise CheckpointSaveError(
+                            "checkpoint was committed but a post-commit operation failed",
+                            operation=CheckpointOperation.SAVE,
+                            stage=CheckpointStage.CLEANUP,
+                            path=self._checkpoint_path(version_tag),
+                            version=version_tag,
+                            checkpoint_id=checkpoint_id,
+                            retryable=exc.retryable,
+                            committed=True,
+                            details={"post_commit_error": exc.to_dict()},
+                        ) from exc
+                    contextual = _contextualize(
+                        exc,
+                        operation=CheckpointOperation.SAVE,
+                        stage=CheckpointStage.SERIALIZATION,
+                        path=staging.path if staging is not None else self.base_dir,
+                        version=version_tag,
+                        checkpoint_id=checkpoint_id,
+                        committed=committed,
+                    )
+                    if abort_error is not None and not contextual.details.get(
+                        "cleanup_error"
+                    ):
+                        details = dict(contextual.details)
+                        details["cleanup_error"] = (
+                            f"{type(abort_error).__name__}: {abort_error}"
+                        )
+                        contextual = contextual.with_context(details=details)
+                    raise contextual from exc.__cause__
+                raise CheckpointSaveError(
+                    "checkpoint save failed",
+                    operation=CheckpointOperation.SAVE,
+                    stage=CheckpointStage.SERIALIZATION,
+                    path=staging.path if staging is not None else self.base_dir,
+                    version=version_tag,
+                    checkpoint_id=checkpoint_id,
+                    retryable=isinstance(exc, OSError),
+                    committed=committed,
+                    details={
+                        "error_type": type(exc).__name__,
+                        **(
+                            {
+                                "cleanup_error": (
+                                    f"{type(abort_error).__name__}: {abort_error}"
+                                )
+                            }
+                            if abort_error is not None
+                            else {}
+                        ),
+                    },
+                ) from exc
+
+        raise CheckpointSaveError(
+            "checkpoint save completed without producing a result",
+            operation=CheckpointOperation.SAVE,
+            stage=CheckpointStage.CLEANUP,
+            version=version_tag,
+            checkpoint_id=checkpoint_id,
+            committed=committed,
+        )
+
+    @staticmethod
+    def _normalize_component_mapping(
+        value: Mapping[str, Any] | None,
+        field_name: str,
+    ) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise CheckpointConfigurationError(
+                f"{field_name} must be a mapping",
+                stage=CheckpointStage.VALIDATION,
+            )
+        result: dict[str, Any] = {}
+        for raw_name, item in value.items():
+            if not isinstance(raw_name, str):
+                raise CheckpointConfigurationError(
+                    f"{field_name} keys must be strings",
+                    stage=CheckpointStage.VALIDATION,
+                )
+            name = _normalize_component(raw_name)
+            if name in result:
+                raise CheckpointConfigurationError(
+                    f"{field_name} contains duplicate canonical component names",
+                    stage=CheckpointStage.VALIDATION,
+                    component=name,
+                )
+            result[name] = item
+        return result
+
+    @staticmethod
+    def _prepare_provenance(
+        provenance: CheckpointProvenance | None,
+        *,
+        saved_components: tuple[str, ...],
+        trace_id: str | None,
+    ) -> CheckpointProvenance:
+        active = provenance or CheckpointProvenance()
+        if not isinstance(active, CheckpointProvenance):
+            raise CheckpointConfigurationError(
+                "provenance must be CheckpointProvenance",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if trace_id is not None and active.trace_id not in {None, trace_id}:
+            raise CheckpointConfigurationError(
+                "trace_id conflicts with provenance.trace_id",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if not active.requested_components:
+            if active.omitted_components:
+                raise CheckpointConfigurationError(
+                    "omitted components require an explicit requested capture plan",
+                    operation=CheckpointOperation.SAVE,
+                    stage=CheckpointStage.VALIDATION,
+                )
+            active = replace(active, requested_components=saved_components)
+        if trace_id is not None and active.trace_id is None:
+            active = replace(active, trace_id=trace_id)
+        return active
+
+    @staticmethod
+    def _prepare_compatibility(
+        compatibility: CompatibilityConstraints | None,
+        used_codecs: Mapping[str, str],
+    ) -> CompatibilityConstraints:
+        active = compatibility or CompatibilityConstraints()
+        if not isinstance(active, CompatibilityConstraints):
+            raise CheckpointConfigurationError(
+                "compatibility must be CompatibilityConstraints",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        conflicts = {
+            codec_id: {
+                "declared": active.required_codecs[codec_id],
+                "actual": actual,
+            }
+            for codec_id, actual in used_codecs.items()
+            if codec_id in active.required_codecs
+            and active.required_codecs[codec_id] != actual
+        }
+        if conflicts:
+            raise CheckpointConfigurationError(
+                "compatibility constraints conflict with selected codec versions",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.COMPATIBILITY,
+                details={"conflicts": conflicts},
+            )
+        required = dict(active.required_codecs)
+        required.update(used_codecs)
+        return replace(active, required_codecs=required)
+
     def save(
         self,
-        model: torch.nn.Module,
+        model: Any = None,
         tokenizer: Any = None,
-        metadata: Optional[Mapping[str, Any]] = None,
-        version: Optional[str] = None,
-        format: Optional[str] = None,
+        metadata: Mapping[str, Any] | None = None,
+        version: str | None = None,
+        format: str | CheckpointFormat | None = None,
         *,
-        optimizer: Optional[torch.optim.Optimizer] = None,
+        components: Mapping[str, Any] | None = None,
+        optimizer: Any = None,
         scheduler: Any = None,
         scaler: Any = None,
-        epoch: Optional[int] = None,
-        current_epoch: Optional[int] = None,
-        step: Optional[int] = None,
-        metrics: Optional[Mapping[str, Any]] = None,
-        extra_state: Optional[Mapping[str, Any]] = None,
-        archive: Optional[bool] = None,
-        overwrite: Optional[bool] = None,
+        epoch: int | None = None,
+        current_epoch: int | None = None,
+        step: int | None = None,
+        metrics: Mapping[str, Any] | None = None,
+        extra_state: Mapping[str, Any] | None = None,
+        archive: bool | None = None,
+        overwrite: bool | None = None,
         save_rng: bool = True,
         save_on_cpu: bool = True,
-    ) -> CheckpointRecord:
-        """
-        Save a checkpoint and return its manifest record.
+        provenance: CheckpointProvenance | None = None,
+        compatibility: CompatibilityConstraints | None = None,
+        trace_id: str | None = None,
+    ) -> SaveResult:
+        """Compatibility wrapper for v2.2-style training-state saves.
 
-        ``current_epoch`` is accepted for compatibility with earlier code.
-        New code should prefer ``epoch``.
+        New code should call :meth:`save_components`.  ``components=`` is
+        available here only to ease call-site migration and cannot be combined
+        with positional training objects.
         """
-        checkpoint_format = normalize_format(format or self.default_format)
-        epoch_value = epoch if epoch is not None else current_epoch
 
-        if checkpoint_format == "torch":
-            return self.save_torch(
-                model=model,
-                tokenizer=tokenizer,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                epoch=epoch_value,
-                step=step,
-                metadata=metadata,
-                metrics=metrics,
-                extra_state=extra_state,
+        if components is not None:
+            if model is not None or any(
+                value is not None
+                for value in (tokenizer, optimizer, scheduler, scaler, extra_state)
+            ):
+                raise CheckpointConfigurationError(
+                    "components cannot be combined with model/tokenizer/training objects",
+                    operation=CheckpointOperation.SAVE,
+                    stage=CheckpointStage.VALIDATION,
+                )
+            return self.save_components(
+                components,
                 version=version,
+                checkpoint_format=format,
+                epoch=epoch if epoch is not None else current_epoch,
+                step=step,
+                metrics=metrics,
+                metadata=metadata,
+                provenance=provenance,
+                compatibility=compatibility,
                 archive=archive,
                 overwrite=overwrite,
-                save_rng=save_rng,
-                save_on_cpu=save_on_cpu,
+                trace_id=trace_id,
             )
-
-        return self.save_npz(
-            model=model,
-            tokenizer=tokenizer,
-            metadata=metadata,
-            metrics=metrics,
+        if model is None:
+            raise CheckpointConfigurationError(
+                "save requires a model or an explicit components mapping",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if not isinstance(save_rng, bool) or not isinstance(save_on_cpu, bool):
+            raise CheckpointConfigurationError(
+                "save_rng and save_on_cpu must be booleans",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        active_format = _normalize_format_for_operation(
+            format or self.default_format,
+            CheckpointOperation.SAVE,
+        )
+        values: dict[str, Any] = {StandardComponent.MODEL.value: model}
+        for name, value in (
+            (StandardComponent.TOKENIZER.value, tokenizer),
+            (StandardComponent.OPTIMIZER.value, optimizer),
+            (StandardComponent.SCHEDULER.value, scheduler),
+            (StandardComponent.SCALER.value, scaler),
+            (StandardComponent.AGENT_STATE.value, extra_state),
+        ):
+            if value is not None:
+                values[name] = value
+        if save_rng and active_format is not CheckpointFormat.NPZ:
+            # ``None`` instructs RNGStateCodec to capture current providers.
+            values[StandardComponent.RNG.value] = None
+        codec_ids: dict[str, str] = {
+            StandardComponent.MODEL.value: (
+                "numpy" if active_format is CheckpointFormat.NPZ else "torch"
+            )
+        }
+        if active_format is CheckpointFormat.NPZ and any(
+            value is not None for value in (optimizer, scheduler, scaler)
+        ):
+            raise CheckpointConfigurationError(
+                "NPZ compatibility saves do not serialize optimizer, scheduler, or scaler; "
+                "use torch or save_components()",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        codec_metadata = {
+            name: {"save_on_cpu": save_on_cpu}
+            for name in values
+            if name
+            in {
+                StandardComponent.MODEL.value,
+                StandardComponent.OPTIMIZER.value,
+                StandardComponent.SCHEDULER.value,
+                StandardComponent.SCALER.value,
+            }
+        }
+        # A multi-component v2.3 checkpoint is structurally composite even
+        # when the primary model representation is torch or NPZ.
+        declared_format = active_format if len(values) == 1 else CheckpointFormat.COMPOSITE
+        return self.save_components(
+            values,
             version=version,
-            epoch=epoch_value,
+            codec_ids=codec_ids,
+            codec_metadata=codec_metadata,
+            checkpoint_format=declared_format,
+            epoch=epoch if epoch is not None else current_epoch,
             step=step,
+            metrics=metrics,
+            metadata=metadata,
+            provenance=provenance,
+            compatibility=compatibility,
             archive=archive,
             overwrite=overwrite,
+            trace_id=trace_id,
         )
 
-    def save_torch(
-        self,
-        model: torch.nn.Module,
-        tokenizer: Any = None,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        current_epoch: Optional[int] = None,
-        metadata: Optional[Mapping[str, Any]] = None,
-        version: Optional[str] = None,
-        *,
-        scheduler: Any = None,
-        scaler: Any = None,
-        epoch: Optional[int] = None,
-        step: Optional[int] = None,
-        metrics: Optional[Mapping[str, Any]] = None,
-        extra_state: Optional[Mapping[str, Any]] = None,
-        archive: Optional[bool] = None,
-        overwrite: Optional[bool] = None,
-        save_rng: bool = True,
-        save_on_cpu: bool = True,
-    ) -> CheckpointRecord:
-        """Save a full PyTorch training checkpoint."""
-        version_tag = make_version(version)
-        allow_overwrite = self.allow_overwrite if overwrite is None else overwrite
-        final_dir, staging_dir = prepare_staging_dir(
-            self.base_dir,
-            version_tag,
-            allow_overwrite=allow_overwrite,
-        )
-        epoch_value = epoch if epoch is not None else current_epoch
-
-        try:
-            payload: Dict[str, Any] = {
-                "schema_version": 2,
-                "format": "torch",
-                "version": version_tag,
-                "created_at": utc_now_iso(),
-                "model_state": recursive_to_cpu(model.state_dict()) if save_on_cpu else model.state_dict(),
-                "epoch": epoch_value,
-                "step": step,
-                "metadata": dict(metadata or {}),
-                "metrics": dict(metrics or {}),
-                "extra_state": dict(extra_state or {}),
-            }
-
-            if optimizer is not None:
-                payload["optimizer_state"] = (
-                    recursive_to_cpu(optimizer.state_dict()) if save_on_cpu else optimizer.state_dict()
-                )
-            if scheduler is not None and hasattr(scheduler, "state_dict"):
-                payload["scheduler_state"] = scheduler.state_dict()
-            if scaler is not None and hasattr(scaler, "state_dict"):
-                payload["scaler_state"] = scaler.state_dict()
-            if save_rng:
-                payload["rng_state"] = capture_rng_state()
-
-            atomic_torch_save(payload, staging_dir / TORCH_CHECKPOINT_NAME)
-            tokenizer_kind = save_tokenizer(tokenizer, staging_dir)
-            atomic_json_dump(dict(metadata or {}), staging_dir / METADATA_NAME)
-
-            write_manifest(
-                staging_dir,
-                version=version_tag,
-                checkpoint_format="torch",
-                checkpoint_path=final_dir,
-                epoch=epoch_value,
-                step=step,
-                metadata=dict(metadata or {}),
-                metrics=dict(metrics or {}),
-                tokenizer_kind=tokenizer_kind,
-            )
-            commit_staging_dir(staging_dir, final_dir, allow_overwrite=allow_overwrite)
-            record = self.read_manifest(version_tag)
-            assert record is not None, f"Manifest for version '{version_tag}' should exist after commit"
-            self._post_save(version_tag, archive=archive)
-            logger.info("Saved PyTorch checkpoint '%s' to %s", version_tag, final_dir)
-            return record
-        except Exception as exc:
-            safe_rmtree(staging_dir)
-            logger.exception("Failed to save PyTorch checkpoint '%s'", version_tag)
-            if isinstance(exc, CheckpointError):
-                raise
-            raise CheckpointSaveError(f"Failed to save PyTorch checkpoint '{version_tag}': {exc}") from exc
+    def save_torch(self, model: Any, *args: Any, **kwargs: Any) -> SaveResult:
+        kwargs["format"] = CheckpointFormat.TORCH
+        return self.save(model, *args, **kwargs)
 
     def save_npz(
         self,
-        model: torch.nn.Module,
+        model: Any,
         tokenizer: Any = None,
-        metadata: Optional[Mapping[str, Any]] = None,
-        version: Optional[str] = None,
+        metadata: Mapping[str, Any] | None = None,
+        version: str | None = None,
         *,
-        metrics: Optional[Mapping[str, Any]] = None,
-        epoch: Optional[int] = None,
-        step: Optional[int] = None,
-        archive: Optional[bool] = None,
-        overwrite: Optional[bool] = None,
+        metrics: Mapping[str, Any] | None = None,
+        epoch: int | None = None,
+        step: int | None = None,
+        archive: bool | None = None,
+        overwrite: bool | None = None,
         compressed: bool = True,
-    ) -> CheckpointRecord:
-        """
-        Save model tensors in NPZ format.
-
-        NPZ stores model tensors and tokenizer/metadata files. It does not
-        store optimizer, scheduler, scaler, or RNG state; use torch format for
-        resumable training checkpoints.
-        """
-        version_tag = make_version(version)
-        allow_overwrite = self.allow_overwrite if overwrite is None else overwrite
-        final_dir, staging_dir = prepare_staging_dir(
-            self.base_dir,
-            version_tag,
-            allow_overwrite=allow_overwrite,
+        provenance: CheckpointProvenance | None = None,
+        compatibility: CompatibilityConstraints | None = None,
+        trace_id: str | None = None,
+    ) -> SaveResult:
+        if not isinstance(compressed, bool):
+            raise CheckpointConfigurationError(
+                "compressed must be a boolean",
+                operation=CheckpointOperation.SAVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        values = {StandardComponent.MODEL.value: model}
+        if tokenizer is not None:
+            values[StandardComponent.TOKENIZER.value] = tokenizer
+        return self.save_components(
+            values,
+            version=version,
+            codec_ids={StandardComponent.MODEL.value: "numpy"},
+            codec_metadata={
+                StandardComponent.MODEL.value: {"compressed": compressed}
+            },
+            checkpoint_format=(
+                CheckpointFormat.NPZ
+                if len(values) == 1
+                else CheckpointFormat.COMPOSITE
+            ),
+            epoch=epoch,
+            step=step,
+            metrics=metrics,
+            metadata=metadata,
+            provenance=provenance,
+            compatibility=compatibility,
+            archive=archive,
+            overwrite=overwrite,
+            trace_id=trace_id,
         )
+
+    def save_async(
+        self,
+        *args: Any,
+        executor: Executor | None = None,
+        **kwargs: Any,
+    ) -> Future[SaveResult]:
+        """Submit ``save`` without creating process-global resources.
+
+        State-bearing objects must remain quiescent until the future completes;
+        the manager intentionally does not make an opaque deep copy of models.
+        """
+
+        active = executor
+        if active is None:
+            with self._executor_lock:
+                if self._executor is None:
+                    self._executor = ThreadPoolExecutor(
+                        max_workers=1, thread_name_prefix="slai-checkpoint"
+                    )
+                    self._owns_executor = True
+                active = self._executor
+        assert active is not None
+        return active.submit(self.save, *args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Discovery, selection, and verification
+    # ------------------------------------------------------------------
+    def read_record(
+        self,
+        version: str,
+        *,
+        verify: bool = False,
+        allow_legacy: bool | None = None,
+    ) -> CheckpointRecord:
+        try:
+            safe_version = validate_version(version)
+        except ValueError as exc:
+            raise CheckpointNotFoundError(
+                str(exc),
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+                version=version if isinstance(version, str) else None,
+            ) from exc
+        path = self._checkpoint_path(safe_version)
+        if not path.is_dir() or path.is_symlink():
+            raise CheckpointNotFoundError(
+                "checkpoint version does not exist",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.DISCOVERY,
+                path=path,
+                version=safe_version,
+            )
+        use_legacy = self.allow_legacy if allow_legacy is None else allow_legacy
+        if not isinstance(use_legacy, bool):
+            raise CheckpointConfigurationError(
+                "allow_legacy must be a boolean",
+                stage=CheckpointStage.VALIDATION,
+            )
+        if (path / MANIFEST_NAME).is_file():
+            return read_checkpoint_record(
+                path,
+                verify=verify,
+                exact_files=self.config.require_exact_files,
+                limits=self.config.manifest_limits,
+            )
+        if use_legacy and looks_like_legacy_checkpoint(path):
+            record = build_legacy_record(path)
+            if verify:
+                verification = verify_manifest_files(
+                    path,
+                    record.manifest,
+                    exact_files=self.config.require_exact_files,
+                )
+                record = CheckpointRecord(
+                    manifest=record.manifest,
+                    path=record.path,
+                    health=verification.health,
+                    verification=verification,
+                )
+            return record
+        raise CheckpointManifestError(
+            "checkpoint has no manifest and is not a recognized legacy layout",
+            operation=CheckpointOperation.LOAD,
+            stage=CheckpointStage.MANIFEST,
+            path=path,
+            version=safe_version,
+        )
+
+    def read_manifest(
+        self,
+        version: str,
+        *,
+        missing_ok: bool = False,
+    ) -> CheckpointRecord | None:
+        """Compatibility view returning a record rather than a bare manifest."""
 
         try:
-            arrays = model_state_to_numpy(model)
-            if compressed:
-                np.savez_compressed(staging_dir / NPZ_WEIGHTS_NAME, **arrays)  # type: ignore[arg-type]
-            else:
-                np.savez(staging_dir / NPZ_WEIGHTS_NAME, **arrays)  # type: ignore[arg-type]
+            return self.read_record(version, verify=False)
+        except CheckpointNotFoundError:
+            if missing_ok:
+                return None
+            raise
 
-            tokenizer_kind = save_tokenizer(tokenizer, staging_dir)
-            atomic_json_dump(dict(metadata or {}), staging_dir / METADATA_NAME)
-            write_manifest(
-                staging_dir,
-                version=version_tag,
-                checkpoint_format="npz",
-                checkpoint_path=final_dir,
-                epoch=epoch,
-                step=step,
-                metadata=dict(metadata or {}),
-                metrics=dict(metrics or {}),
-                tokenizer_kind=tokenizer_kind,
-            )
-            commit_staging_dir(staging_dir, final_dir, allow_overwrite=allow_overwrite)
-            record = self.read_manifest(version_tag)
-            assert record is not None, f"Manifest for version '{version_tag}' should exist after commit"
-            self._post_save(version_tag, archive=archive)
-            logger.info("Saved NPZ checkpoint '%s' to %s", version_tag, final_dir)
-            return record
-        except Exception as exc:
-            safe_rmtree(staging_dir)
-            logger.exception("Failed to save NPZ checkpoint '%s'", version_tag)
-            if isinstance(exc, CheckpointError):
-                raise
-            raise CheckpointSaveError(f"Failed to save NPZ checkpoint '{version_tag}': {exc}") from exc
-
-    # ------------------------------------------------------------------
-    # Load API
-    # ------------------------------------------------------------------
-    def load(
+    def _discover_records(
         self,
-        model: torch.nn.Module,
-        tokenizer: Any = None,
-        version: Optional[str] = None,
-        format: Optional[str] = None,
         *,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        scheduler: Any = None,
-        scaler: Any = None,
-        map_location: str | torch.device | Mapping[str, str] | None = "cpu",
-        strict: bool = True,
-        restore_rng: bool = False,
-        load_optimizer: bool = True,
-        load_scheduler: bool = True,
-        load_scaler: bool = True,
-        verify_integrity: bool = True,
-        load_components: Optional[Sequence[str]] = None,
-        skip_components: Optional[Sequence[str]] = None,
-        load_key_prefix: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Load a checkpoint into provided model/tokenizer/training objects."""
-        resolved_version = self._resolve_version(version)
-        record = self.read_manifest(resolved_version, missing_ok=True)
-        checkpoint_format = normalize_format(format or (record.format if record else self.default_format))
-
-        if checkpoint_format == "torch":
-            return self.load_torch(
-                model=model,
-                tokenizer=tokenizer,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                version=resolved_version,
-                map_location=map_location,
-                strict=strict,
-                restore_rng=restore_rng,
-                load_optimizer=load_optimizer,
-                load_scheduler=load_scheduler,
-                load_scaler=load_scaler,
-                verify_integrity=verify_integrity,
-                load_components=load_components,
-                skip_components=skip_components,
-                load_key_prefix=load_key_prefix,
-            )
-
-        return self.load_npz(
-            model=model,
-            tokenizer=tokenizer,
-            version=resolved_version,
-            strict=strict,
-            verify_integrity=verify_integrity,
-            load_key_prefix=load_key_prefix,
-            skip_components=skip_components,
-        )
-
-    def load_torch(
-        self,
-        model: torch.nn.Module,
-        tokenizer: Any = None,
-        metadata: Optional[Mapping[str, Any]] = None,  # kept for compatibility; ignored.
-        version: Optional[str] = None,
-        *,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        scheduler: Any = None,
-        scaler: Any = None,
-        map_location: str | torch.device | Mapping[str, str] | None = "cpu",
-        strict: bool = True,
-        restore_rng: bool = False,
-        load_optimizer: bool = True,
-        load_scheduler: bool = True,
-        load_scaler: bool = True,
-        verify_integrity: bool = True,
-        auto_repair: bool = False,
-        load_components: Optional[Sequence[str]] = None,
-        skip_components: Optional[Sequence[str]] = None,
-        load_key_prefix: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Load a PyTorch checkpoint, optionally restricting which components are loaded.
-    
-        `load_components` can be a list like ["model_state", "optimizer_state"].
-        `skip_components` overrides `load_components` if both are given.
-        `load_key_prefix` filters model state dict keys by prefix (useful for submodules).
-        """
-        del metadata
-        resolved_version = self._resolve_version(version)
-        checkpoint_dir = self._checkpoint_dir(resolved_version)
-    
-        if verify_integrity:
-            try:
-                self.verify_checkpoint(resolved_version)
-            except CheckpointIntegrityError as e:
-                if auto_repair:
-                    logger.warning("Integrity check failed for '%s': %s. Attempting repair from archive.", resolved_version, e)
-                    try:
-                        self._restore_from_archive(resolved_version)
-                    except Exception as repair_err:
-                        raise CheckpointLoadError(f"Auto‑repair failed for '{resolved_version}': {repair_err}") from e
-                else:
-                    raise
-    
-        checkpoint_file = first_existing(
-            checkpoint_dir / TORCH_CHECKPOINT_NAME,
-            checkpoint_dir / LEGACY_TORCH_CHECKPOINT_NAME,
-        )
-        if checkpoint_file is None:
-            raise CheckpointLoadError(f"No PyTorch checkpoint file found in {checkpoint_dir}")
-    
-        payload = torch_load(checkpoint_file, map_location=map_location)
-        # Normalise legacy payloads (same as existing code) ...
-    
-        # Determine which components to load
-        allowed = None
-        if load_components is not None:
-            allowed = set(load_components)
-        if skip_components is not None:
-            disallowed = set(skip_components)
-            if allowed is None:
-                # Default set of all possible components
-                all_components = {"model_state", "optimizer_state", "scheduler_state", "scaler_state", "rng_state"}
-                allowed = all_components - disallowed
-            else:
-                allowed -= disallowed
-    
-        incompatible: Any = None
-
-        # Load model state with optional prefix filtering
-        if allowed is None or "model_state" in allowed:
-            model_state = payload.get("model_state")
-            if model_state is not None:
-                if load_key_prefix:
-                    model_state = {key: value for key, value in model_state.items() if key.startswith(load_key_prefix)}
-                incompatible = model.load_state_dict(model_state, strict=strict)
-            else:
-                incompatible = {"missing_keys": list(model.state_dict().keys()), "unexpected_keys": []}
-    
-        # Conditionally load other components
-        if (allowed is None or "optimizer_state" in allowed) and optimizer is not None and payload.get("optimizer_state"):
-            optimizer.load_state_dict(payload["optimizer_state"])
-        if (allowed is None or "scheduler_state" in allowed) and scheduler is not None and payload.get("scheduler_state"):
-            scheduler.load_state_dict(payload["scheduler_state"])
-        if (allowed is None or "scaler_state" in allowed) and scaler is not None and payload.get("scaler_state"):
-            scaler.load_state_dict(payload["scaler_state"])
-        if (allowed is None or "rng_state" in allowed) and restore_rng and payload.get("rng_state"):
-            restore_rng_state(payload["rng_state"])
-    
-        loaded_tokenizer = None
-        if allowed is None or "tokenizer" in allowed:
-            loaded_tokenizer = load_tokenizer(tokenizer, checkpoint_dir)
-    
-        # Build result dictionary (same as before)
-        record = self.read_manifest(resolved_version, missing_ok=True)
-        logger.info("Loaded PyTorch checkpoint '%s' from %s", resolved_version, checkpoint_dir)
-        return {
-            "version": resolved_version,
-            "path": str(checkpoint_dir),
-            "format": "torch",
-            "manifest": record.to_json_dict() if record else None,
-            "epoch": payload.get("epoch"),
-            "step": payload.get("step"),
-            "metadata": payload.get("metadata") or {},
-            "metrics": payload.get("metrics") or {},
-            "extra_state": payload.get("extra_state") or {},
-            "missing_keys": list(getattr(incompatible, "missing_keys", [])) if incompatible is not None else [],
-            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])) if incompatible is not None else [],
-            "tokenizer": loaded_tokenizer,
-        }
-
-    def load_npz(
-        self,
-        model: torch.nn.Module,
-        tokenizer: Any = None,
-        version: Optional[str] = None,
-        *,
-        strict: bool = True,
-        verify_integrity: bool = True,
-        load_key_prefix: Optional[str] = None,
-        skip_components: Optional[Sequence[str]] = None,
-    ) -> Dict[str, Any]:
-        """Load model tensors from an NPZ checkpoint."""
-        resolved_version = self._resolve_version(version)
-        checkpoint_dir = self._checkpoint_dir(resolved_version)
-    
-        if verify_integrity:
-            self.verify_checkpoint(resolved_version)
-    
-        # Load model weights with optional key prefix filtering
-        weight_path = checkpoint_dir / NPZ_WEIGHTS_NAME
-        if not weight_path.exists():
-            raise CheckpointLoadError(f"NPZ weights file not found: {weight_path}")
-    
-        # Use load_npz_into_model with prefix filtering
-        # Since load_npz_into_model doesn't support prefix, we do it ourselves
-        state = model.state_dict()
-        loaded: set[str] = set()
-        unexpected: list[str] = []
-        mismatched: list[Dict[str, Any]] = []
-    
-        with np.load(weight_path, allow_pickle=False) as weights:
-            for name in weights.files:
-                if load_key_prefix and not name.startswith(load_key_prefix):
-                    continue
-                target_name = name  # keep the full key; target model uses the same names
-                if target_name not in state:
-                    unexpected.append(name)
-                    continue
-                source = torch.as_tensor(weights[name], dtype=state[target_name].dtype, device=state[target_name].device)
-                if tuple(source.shape) != tuple(state[target_name].shape):
-                    mismatched.append({
-                        "name": name,
-                        "checkpoint_shape": tuple(source.shape),
-                        "model_shape": tuple(state[target_name].shape),
-                    })
-                    continue
-                state[target_name] = source
-                loaded.add(target_name)
-    
-        missing = [name for name in state.keys() if name not in loaded]
-        if strict and (missing or unexpected or mismatched):
-            raise CheckpointLoadError(
-                "NPZ checkpoint is incompatible with the model. "
-                f"missing={missing}, unexpected={unexpected}, mismatched={mismatched}"
-            )
-        incompatible = model.load_state_dict(state, strict=False)
-    
-        # Load tokenizer only if not skipped
-        loaded_tokenizer = None
-        if skip_components is None or "tokenizer" not in skip_components:
-            loaded_tokenizer = load_tokenizer(tokenizer, checkpoint_dir)
-    
-        record = self.read_manifest(resolved_version, missing_ok=True)
-        result = {
-            "version": resolved_version,
-            "path": str(checkpoint_dir),
-            "format": "npz",
-            "manifest": record.to_json_dict() if record else None,
-            "epoch": record.epoch if record else None,
-            "step": record.step if record else None,
-            "metadata": record.metadata if record else {},
-            "metrics": record.metrics if record else {},
-            "tokenizer": loaded_tokenizer,
-            "missing_keys": missing or list(getattr(incompatible, "missing_keys", [])),
-            "unexpected_keys": unexpected or list(getattr(incompatible, "unexpected_keys", [])),
-            "mismatched_keys": mismatched,
-        }
-        logger.info("Loaded NPZ checkpoint '%s' from %s", resolved_version, checkpoint_dir)
-        return result
-
-    # ------------------------------------------------------------------
-    # Discovery, verification, archive, and deletion
-    # ------------------------------------------------------------------
-    def list_checkpoints(self) -> list[str]:
-        """Return checkpoint version names sorted by creation time and name."""
-        return [record.version for record in self.list_checkpoint_records()]
-
-    def list_checkpoint_records(self) -> list[CheckpointRecord]:
-        """Return checkpoint records, using manifest data when available."""
+        verify: bool,
+        allow_legacy: bool,
+        strict: bool,
+    ) -> tuple[tuple[CheckpointRecord, ...], tuple[dict[str, Any], ...]]:
+        versions = self._storage_method("list_versions")()
         records: list[CheckpointRecord] = []
-        if not self.base_dir.exists():
+        failures: list[dict[str, Any]] = []
+        for version in versions:
+            try:
+                records.append(
+                    self.read_record(
+                        version, verify=verify, allow_legacy=allow_legacy
+                    )
+                )
+            except CheckpointError as exc:
+                if strict:
+                    raise _contextualize(
+                        exc,
+                        operation=CheckpointOperation.LIST,
+                        stage=CheckpointStage.DISCOVERY,
+                        version=version,
+                    ) from exc.__cause__
+                failures.append(exc.to_dict())
+        return tuple(records), tuple(failures)
+
+    def list_records(
+        self,
+        *,
+        verify: bool = False,
+        allow_legacy: bool | None = None,
+        strict: bool = True,
+    ) -> tuple[CheckpointRecord, ...]:
+        use_legacy = self.allow_legacy if allow_legacy is None else allow_legacy
+        if not all(isinstance(value, bool) for value in (verify, use_legacy, strict)):
+            raise CheckpointConfigurationError(
+                "verify, allow_legacy, and strict must be booleans",
+                operation=CheckpointOperation.LIST,
+                stage=CheckpointStage.VALIDATION,
+            )
+        with self.telemetry.operation(
+            CheckpointOperation.LIST,
+            stage=CheckpointStage.DISCOVERY,
+        ) as span:
+            records, failures = self._discover_records(
+                verify=verify, allow_legacy=use_legacy, strict=strict
+            )
+            span.set_result(
+                component_count=len(records),
+                attributes={"discovery_error_count": len(failures)},
+            )
             return records
 
-        for path in self.base_dir.iterdir():
-            if not path.is_dir() or path.name.startswith(".tmp-") or path.name.startswith(".replace-"):
-                continue
-            try:
-                record = read_manifest_file(path, missing_ok=True)
-                if record is not None:
-                    records.append(record)
-                elif looks_like_legacy_checkpoint(path):
-                    records.append(build_legacy_record(path))
-            except Exception as exc:
-                logger.warning("Skipping unreadable checkpoint at %s: %s", path, exc)
-        return sorted(records, key=lambda item: (item.created_at, item.version))
+    def list_checkpoints(self) -> tuple[str, ...]:
+        return tuple(record.version for record in self.list_records(strict=True))
 
-    def get_latest_checkpoint(self) -> Optional[str]:
-        """Return the newest checkpoint version, or None when no checkpoints exist."""
-        records = self.list_checkpoint_records()
-        return records[-1].version if records else None
+    def select_checkpoint(
+        self,
+        criteria: SelectionCriteria | None = None,
+        *,
+        runtime: RuntimeCapabilities | None = None,
+        verify: bool | None = None,
+    ) -> SelectionDecision:
+        if criteria is not None and not isinstance(criteria, SelectionCriteria):
+            raise CheckpointConfigurationError(
+                "criteria must be SelectionCriteria",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if runtime is not None and not isinstance(runtime, RuntimeCapabilities):
+            raise CheckpointConfigurationError(
+                "runtime must be RuntimeCapabilities",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+            )
+        active_criteria = criteria or SelectionCriteria()
+        should_verify = (
+            active_criteria.require_verified if verify is None else verify
+        )
+        if not isinstance(should_verify, bool):
+            raise CheckpointConfigurationError(
+                "verify must be a boolean",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+            )
+        records, failures = self._discover_records(
+            verify=should_verify,
+            allow_legacy=self.allow_legacy,
+            strict=False,
+        )
+        decision = self.policy.select(
+            records, active_criteria, runtime=runtime or self.runtime
+        )
+        self._emit_selection_decision(decision, failures=failures)
+        return decision
 
-    def read_manifest(self, version: str, *, missing_ok: bool = False) -> Optional[CheckpointRecord]:
-        """Read a checkpoint manifest by version."""
-        checkpoint_dir = self._checkpoint_dir(version)
-        return read_manifest_file(checkpoint_dir, missing_ok=missing_ok)
+    def _emit_selection_decision(
+        self,
+        decision: SelectionDecision,
+        *,
+        failures: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        attributes = decision.to_dict()
+        attributes["discovery_errors"] = list(failures)
+        selected = decision.selected
+        provenance = selected.manifest.provenance if selected is not None else None
+        self.telemetry.emit(
+            CheckpointEvent(
+                kind=CheckpointEventKind.SELECTION_DECIDED,
+                severity=(EventSeverity.INFO if selected else EventSeverity.WARNING),
+                message=(
+                    "checkpoint selection completed"
+                    if selected
+                    else "checkpoint selection found no eligible recovery point"
+                ),
+                operation=CheckpointOperation.LOAD.value,
+                stage=CheckpointStage.DISCOVERY.value,
+                checkpoint_id=selected.checkpoint_id if selected else None,
+                version=selected.version if selected else None,
+                agent_id=provenance.agent_id if provenance else None,
+                run_id=provenance.run_id if provenance else None,
+                trace_id=provenance.trace_id if provenance else None,
+                success=selected is not None,
+                health=selected.health if selected else None,
+                attributes=attributes,
+            )
+        )
+
+    def get_latest_checkpoint(self) -> str | None:
+        decision = self.select_checkpoint()
+        return decision.selected.version if decision.selected is not None else None
+
+    def verify(
+        self,
+        version: str,
+        *,
+        exact_files: bool | None = None,
+    ) -> VerificationResult:
+        exact = self.config.require_exact_files if exact_files is None else exact_files
+        if not isinstance(exact, bool):
+            raise CheckpointConfigurationError(
+                "exact_files must be a boolean",
+                operation=CheckpointOperation.VERIFY,
+                stage=CheckpointStage.VALIDATION,
+            )
+        record = self.read_record(version, verify=False)
+        provenance = record.manifest.provenance
+        with self.telemetry.operation(
+            CheckpointOperation.VERIFY,
+            stage=CheckpointStage.INTEGRITY,
+            version=record.version,
+            checkpoint_id=record.checkpoint_id,
+            agent_id=provenance.agent_id,
+            run_id=provenance.run_id,
+            trace_id=provenance.trace_id,
+        ) as span:
+            result = verify_manifest_files(
+                record.path,
+                record.manifest,
+                exact_files=exact,
+            )
+            span.set_result(
+                size_bytes=_record_size(record),
+                component_count=len(record.manifest.saved_components),
+                health=result.health,
+            )
+            return result
 
     def verify_checkpoint(self, version: str) -> bool:
-        """Verify manifest-tracked files for a checkpoint."""
-        safe_version = self._sanitize_or_resolve(version)
-        checkpoint_dir = self._checkpoint_dir(safe_version)
-        record = read_manifest_file(checkpoint_dir, missing_ok=True)
+        record = self.read_record(version, verify=False)
+        assert_manifest_files(
+            record.path,
+            record.manifest,
+            exact_files=self.config.require_exact_files,
+        )
+        return True
 
-        if record is None:
-            if looks_like_legacy_checkpoint(checkpoint_dir):
-                logger.warning("Checkpoint '%s' has no manifest; skipping integrity verification", safe_version)
-                return True
-            raise CheckpointManifestError(f"Checkpoint '{safe_version}' has no manifest and is not a legacy checkpoint", path=checkpoint_dir, version=safe_version)
+    # ------------------------------------------------------------------
+    # Load orchestration
+    # ------------------------------------------------------------------
+    def load_components(
+        self,
+        version: str | None = None,
+        *,
+        components: Sequence[str] | None = None,
+        skip_components: Sequence[str] = (),
+        targets: Mapping[str, Any] | None = None,
+        codec_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+        strict: bool = True,
+        restore_rng: bool = False,
+        verify_integrity: bool | None = None,
+        criteria: SelectionCriteria | None = None,
+        runtime: RuntimeCapabilities | None = None,
+        expected_codecs: Mapping[str, str] | None = None,
+        expected_format: str | CheckpointFormat | None = None,
+        load_key_prefix: str | None = None,
+        trace_id: str | None = None,
+    ) -> LoadResult:
+        """Select, verify, decode, then explicitly restore components.
 
-        return verify_files_against_record(checkpoint_dir, record)
+        Integrity and compatibility checks and all component decodes complete
+        before any target is mutated.  Arbitrary target objects cannot provide
+        a general cross-component rollback transaction, so restoration occurs
+        in a documented deterministic order with RNG restored last.
+        """
 
-    def archive_checkpoint(self, version: str, *, overwrite: bool = True) -> Path:
-        """Create a ``.tar.gz`` archive for a checkpoint directory and hash it."""
-        safe_version = self._sanitize_or_resolve(version)
-        return archive_checkpoint_dir(self.base_dir, safe_version, overwrite=overwrite)
+        if not isinstance(strict, bool) or not isinstance(restore_rng, bool):
+            raise CheckpointConfigurationError(
+                "strict and restore_rng must be booleans",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if criteria is not None and not isinstance(criteria, SelectionCriteria):
+            raise CheckpointConfigurationError(
+                "criteria must be SelectionCriteria",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if runtime is not None and not isinstance(runtime, RuntimeCapabilities):
+            raise CheckpointConfigurationError(
+                "runtime must be RuntimeCapabilities",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+            )
+        verify = self.config.verify_on_load if verify_integrity is None else verify_integrity
+        if not isinstance(verify, bool):
+            raise CheckpointConfigurationError(
+                "verify_integrity must be a boolean",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+            )
+        requested = self._normalize_component_sequence(components, "components")
+        skipped_by_caller = set(
+            self._normalize_component_sequence(skip_components, "skip_components") or ()
+        )
+        if requested is not None and skipped_by_caller.intersection(requested):
+            requested = tuple(name for name in requested if name not in skipped_by_caller)
+        target_map = self._normalize_component_mapping(targets, "targets")
+        metadata_map = self._normalize_component_mapping(
+            codec_metadata, "codec_metadata"
+        )
+        expected_map = self._normalize_component_mapping(
+            expected_codecs, "expected_codecs"
+        )
+        if load_key_prefix is not None and (
+            not isinstance(load_key_prefix, str) or not load_key_prefix
+        ):
+            raise CheckpointConfigurationError(
+                "load_key_prefix must be a non-empty string",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.VALIDATION,
+            )
 
-    def delete_checkpoint(self, version: str, *, delete_archive: bool = True, missing_ok: bool = True) -> bool:
-        """Delete a checkpoint directory and optionally its archive/hash."""
-        safe_version = self._sanitize_or_resolve(version)
-        checkpoint_dir = self._checkpoint_dir(safe_version)
-        removed = False
+        if version == "latest":
+            version = None
+        if version is not None:
+            try:
+                safe_version = validate_version(version)
+            except ValueError as exc:
+                raise CheckpointNotFoundError(
+                    str(exc),
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.VALIDATION,
+                    version=version,
+                ) from exc
+            record = self.read_record(safe_version, verify=verify)
+            if verify and record.verification is not None and not record.verification.ok:
+                assert_manifest_files(
+                    record.path,
+                    record.manifest,
+                    exact_files=self.config.require_exact_files,
+                )
+            if criteria is None:
+                active_criteria = self._default_load_criteria(
+                    verify=verify, version=safe_version
+                )
+            else:
+                active_criteria = criteria
+            decision = self.policy.select(
+                (record,), active_criteria, runtime=runtime or self.runtime
+            )
+            self._emit_selection_decision(decision)
+            record = decision.require_selected()
+        else:
+            active_criteria = criteria or self._default_load_criteria(verify=verify)
+            decision = self.select_checkpoint(
+                active_criteria,
+                runtime=runtime,
+                verify=verify,
+            )
+            record = decision.require_selected()
 
-        if checkpoint_dir.exists():
-            shutil.rmtree(checkpoint_dir)
-            removed = True
-            logger.info("Deleted checkpoint directory %s", checkpoint_dir)
-        elif not missing_ok:
-            raise FileNotFoundError(f"Checkpoint '{safe_version}' not found at {checkpoint_dir}")
+        if expected_format is not None:
+            try:
+                normalized_format = normalize_format(expected_format)
+            except ValueError as exc:
+                raise CheckpointConfigurationError(
+                    str(exc),
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.VALIDATION,
+                ) from exc
+            if record.manifest.checkpoint_format is not normalized_format:
+                raise CheckpointIncompatibleError(
+                    "checkpoint format does not match the requested loader",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    path=record.path,
+                    version=record.version,
+                    checkpoint_id=record.checkpoint_id,
+                    format=record.format,
+                    details={"expected_format": normalized_format.value},
+                )
 
-        if delete_archive:
-            for path in (self.base_dir / f"{safe_version}.tar.gz", self.base_dir / f"{safe_version}.tar.gz.sha256"):
-                if path.exists():
-                    path.unlink()
-                    removed = True
-        return removed
+        provenance = record.manifest.provenance
+        effective_trace = trace_id or provenance.trace_id
+        started = time.monotonic()
+        with self.telemetry.operation(
+            CheckpointOperation.LOAD,
+            stage=CheckpointStage.DESERIALIZATION,
+            version=record.version,
+            checkpoint_id=record.checkpoint_id,
+            agent_id=provenance.agent_id,
+            run_id=provenance.run_id,
+            trace_id=effective_trace,
+        ) as span:
+            try:
+                decoded, codec_by_component, manifest_selected, unsupported = (
+                    self._decode_record_components(
+                        record,
+                        requested=requested,
+                        skipped=skipped_by_caller,
+                        codec_metadata=metadata_map,
+                        expected_codecs=expected_map,
+                    )
+                )
+                if requested is not None:
+                    decoded = {
+                        name: value for name, value in decoded.items() if name in requested
+                    }
+                    codec_by_component = {
+                        name: value
+                        for name, value in codec_by_component.items()
+                        if name in decoded
+                    }
+                    missing_requested = set(requested) - set(decoded)
+                    if missing_requested:
+                        raise CheckpointIncompatibleError(
+                            "checkpoint does not provide every requested component",
+                            operation=CheckpointOperation.LOAD,
+                            stage=CheckpointStage.COMPATIBILITY,
+                            path=record.path,
+                            version=record.version,
+                            checkpoint_id=record.checkpoint_id,
+                            missing_keys=sorted(missing_requested),
+                        )
 
-    def cleanup_old_checkpoints(self, keep: Optional[int] = None) -> list[str]:
-        """Keep the newest checkpoints and delete older ones."""
-        keep_count = self.retention_limit if keep is None else keep
-        if keep_count is None or keep_count < 0:
-            return []
+                unknown_targets = set(target_map) - set(decoded)
+                if unknown_targets:
+                    raise CheckpointIncompatibleError(
+                        "restore targets refer to components that were not decoded",
+                        operation=CheckpointOperation.LOAD,
+                        stage=CheckpointStage.COMPATIBILITY,
+                        path=record.path,
+                        version=record.version,
+                        checkpoint_id=record.checkpoint_id,
+                        missing_keys=sorted(unknown_targets),
+                    )
+                self._validate_restore_plan(
+                    decoded,
+                    codec_by_component,
+                    target_map,
+                    restore_rng=restore_rng,
+                )
+                self._restore_decoded(
+                    decoded,
+                    codec_by_component,
+                    target_map,
+                    strict=strict,
+                    restore_rng=restore_rng,
+                    load_key_prefix=load_key_prefix,
+                )
 
-        records = self.list_checkpoint_records()
-        if len(records) <= keep_count:
-            return []
+                manifest_names = set(record.manifest.saved_components)
+                loaded_names = tuple(sorted(decoded))
+                skippable_names = manifest_names | set(_LEGACY_PAYLOAD_KEYS.values())
+                skipped_names = tuple(
+                    sorted(
+                        (manifest_names - manifest_selected)
+                        | (skipped_by_caller & skippable_names)
+                        | unsupported
+                    )
+                )
+                duration = time.monotonic() - started
+                span.set_result(
+                    size_bytes=_record_size(record),
+                    component_count=len(loaded_names),
+                    health=record.health,
+                    committed=True,
+                    attributes={"restored_rng": restore_rng and "rng" in decoded},
+                )
+                return LoadResult(
+                    record=record,
+                    components=decoded,
+                    loaded_components=loaded_names,
+                    skipped_components=skipped_names,
+                    restored_rng=restore_rng and StandardComponent.RNG.value in decoded,
+                    duration_seconds=duration,
+                )
+            except CheckpointError as exc:
+                raise _contextualize(
+                    exc,
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.DESERIALIZATION,
+                    path=record.path,
+                    version=record.version,
+                    checkpoint_id=record.checkpoint_id,
+                    committed=True,
+                ) from exc.__cause__
+            except Exception as exc:
+                raise CheckpointLoadError(
+                    "checkpoint load failed",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.DESERIALIZATION,
+                    path=record.path,
+                    version=record.version,
+                    checkpoint_id=record.checkpoint_id,
+                    format=record.format,
+                    committed=True,
+                    details={"error_type": type(exc).__name__},
+                ) from exc
 
-        to_delete = records[: max(0, len(records) - keep_count)]
+    @staticmethod
+    def _normalize_component_sequence(
+        value: Sequence[str] | None,
+        field_name: str,
+    ) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if isinstance(value, (str, bytes)):
+            raise CheckpointConfigurationError(
+                f"{field_name} must be a sequence, not a string",
+                stage=CheckpointStage.VALIDATION,
+            )
+        result = tuple(dict.fromkeys(_normalize_component(item) for item in value))
+        return result
+
+    @staticmethod
+    def _default_load_criteria(
+        *, verify: bool, version: str | None = None
+    ) -> SelectionCriteria:
+        if verify:
+            return SelectionCriteria(version=version) if version else SelectionCriteria()
+        accepted = (
+            CheckpointHealth.UNKNOWN,
+            CheckpointHealth.HEALTHY,
+            CheckpointHealth.DEGRADED,
+        )
+        return SelectionCriteria(
+            version=version,
+            require_verified=False,
+            accepted_health=accepted,
+        )
+
+    def _decode_record_components(
+        self,
+        record: CheckpointRecord,
+        *,
+        requested: tuple[str, ...] | None,
+        skipped: set[str],
+        codec_metadata: Mapping[str, Mapping[str, Any]],
+        expected_codecs: Mapping[str, str],
+    ) -> tuple[dict[str, Any], dict[str, Any], set[str], set[str]]:
+        grouped: dict[str, list[CheckpointArtifact]] = defaultdict(list)
+        for artifact in record.manifest.artifacts:
+            grouped[artifact.component].append(artifact)
+
+        legacy_payload = StandardComponent.CHECKPOINT_PAYLOAD.value in grouped
+        selected: set[str] = set()
+        for component, artifacts in grouped.items():
+            if component in skipped:
+                continue
+            if requested is None:
+                # Codec-less legacy metadata/tokenizer artifacts remain
+                # integrity-verified but are not guessed into a modern codec.
+                if any(item.codec is None for item in artifacts):
+                    continue
+                selected.add(component)
+            elif component in requested:
+                selected.add(component)
+            elif legacy_payload and component == StandardComponent.CHECKPOINT_PAYLOAD.value:
+                if set(requested).intersection(_LEGACY_PAYLOAD_KEYS.values()):
+                    selected.add(component)
+
+        unsupported: set[str] = set()
+        if requested is None:
+            unsupported = {
+                component
+                for component, artifacts in grouped.items()
+                if any(item.codec is None for item in artifacts)
+            }
+        decoded: dict[str, Any] = {}
+        codecs: dict[str, Any] = {}
+        # Validate every selected group before performing any decode.
+        plans: list[tuple[str, Any, Path, tuple[CheckpointArtifact, ...]]] = []
+        for component in sorted(selected):
+            artifacts = tuple(sorted(grouped[component], key=lambda item: item.relative_path))
+            codec_ids = {item.codec for item in artifacts}
+            codec_versions = {item.codec_version for item in artifacts}
+            legacy = _is_legacy_manifest(record.manifest)
+            if (
+                None in codec_ids
+                or len(codec_ids) != 1
+                or len(codec_versions) != 1
+                or (None in codec_versions and not legacy)
+            ):
+                raise CheckpointIncompatibleError(
+                    "component artifacts do not declare one exact codec identity",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    path=record.path,
+                    version=record.version,
+                    checkpoint_id=record.checkpoint_id,
+                    component=component,
+                    details={
+                        "codec_ids": sorted(str(item) for item in codec_ids),
+                        "codec_versions": sorted(str(item) for item in codec_versions),
+                    },
+                )
+            codec_id = next(iter(codec_ids))
+            codec_version = next(iter(codec_versions))
+            assert codec_id is not None
+            codec = self.codecs.get(codec_id)
+            if codec_version is not None and codec.codec_version != codec_version:
+                raise CheckpointIncompatibleError(
+                    "registered codec version does not match the artifact declaration",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    path=record.path,
+                    version=record.version,
+                    checkpoint_id=record.checkpoint_id,
+                    component=component,
+                    details={
+                        "codec_id": codec_id,
+                        "required": codec_version,
+                        "actual": codec.codec_version,
+                    },
+                )
+            expected = expected_codecs.get(component)
+            if expected is not None and expected != codec_id:
+                raise CheckpointIncompatibleError(
+                    "component codec does not match the requested loader",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    path=record.path,
+                    version=record.version,
+                    checkpoint_id=record.checkpoint_id,
+                    component=component,
+                    details={"expected_codec": expected, "actual_codec": codec_id},
+                )
+            source = self._component_source(record.path, artifacts, codec)
+            plans.append((component, codec, source, artifacts))
+
+        for component, codec, source, _ in plans:
+            context = CodecContext(
+                checkpoint_id=record.checkpoint_id,
+                version=record.version,
+                component=component,
+                metadata=dict(codec_metadata.get(component, {})),
+            )
+            decoded[component] = codec.decode(source, context=context)
+            codecs[component] = codec
+
+        if (
+            _is_legacy_manifest(record.manifest)
+            and StandardComponent.CHECKPOINT_PAYLOAD.value in decoded
+        ):
+            payload = decoded.pop(StandardComponent.CHECKPOINT_PAYLOAD.value)
+            payload_codec = codecs.pop(StandardComponent.CHECKPOINT_PAYLOAD.value)
+            if not isinstance(payload, Mapping):
+                raise CheckpointIncompatibleError(
+                    "legacy monolithic checkpoint payload is not a mapping",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    path=record.path,
+                    version=record.version,
+                    checkpoint_id=record.checkpoint_id,
+                )
+            for old_name, component in _LEGACY_PAYLOAD_KEYS.items():
+                if old_name in payload and payload[old_name] is not None:
+                    decoded[component] = payload[old_name]
+                    # v2.2 training-state fields were all carried by torch's
+                    # monolithic payload except RNG, whose old representation
+                    # is returned but intentionally not applied automatically.
+                    codecs[component] = payload_codec if component != "rng" else None
+            selected.discard(StandardComponent.CHECKPOINT_PAYLOAD.value)
+            selected.update(decoded)
+        for component, expected in expected_codecs.items():
+            if component not in decoded:
+                continue
+            actual = getattr(codecs.get(component), "codec_id", None)
+            if actual != expected:
+                raise CheckpointIncompatibleError(
+                    "component codec does not match the requested loader",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    path=record.path,
+                    version=record.version,
+                    checkpoint_id=record.checkpoint_id,
+                    component=component,
+                    details={"expected_codec": expected, "actual_codec": actual},
+                )
+        return decoded, codecs, selected, unsupported
+
+    @staticmethod
+    def _component_source(
+        checkpoint_dir: Path,
+        artifacts: tuple[CheckpointArtifact, ...],
+        codec: Any,
+    ) -> Path:
+        # Metadata values are JSONValue instances and may be unhashable (for
+        # example, a malformed list or object), so do not collect them in a
+        # set before validating the value below.
+        roots = [item.metadata.get(_MANAGER_CODEC_ROOT) for item in artifacts]
+        if None not in roots and len(roots) == 1:
+            raw_root = next(iter(roots))
+            if not isinstance(raw_root, str):
+                raise CheckpointManifestError(
+                    "artifact codec_root metadata must be a string",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.MANIFEST,
+                    path=checkpoint_dir,
+                )
+            try:
+                relative_root = validate_relative_path(raw_root)
+            except ValueError as exc:
+                raise CheckpointManifestError(
+                    f"invalid artifact codec_root metadata: {exc}",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.MANIFEST,
+                    path=checkpoint_dir,
+                ) from exc
+            source = resolve_artifact_path(checkpoint_dir, relative_root)
+        elif bool(getattr(codec, "multi_file", False)):
+            parents = [PurePosixPath(item.relative_path).parent for item in artifacts]
+            common = PurePosixPath(os.path.commonpath([item.as_posix() for item in parents]))
+            source = checkpoint_dir.joinpath(*common.parts)
+        elif len(artifacts) == 1:
+            source = resolve_artifact_path(
+                checkpoint_dir, artifacts[0].relative_path, must_exist=True
+            )
+        else:
+            raise CheckpointManifestError(
+                "single-file codec component declares multiple artifacts",
+                operation=CheckpointOperation.LOAD,
+                stage=CheckpointStage.MANIFEST,
+                path=checkpoint_dir,
+                component=artifacts[0].component,
+            )
+
+        if bool(getattr(codec, "multi_file", False)):
+            if source.is_symlink() or not source.is_dir():
+                raise CheckpointPathError(
+                    "multi-file codec root is not a regular directory",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.INTEGRITY,
+                    path=source,
+                    component=artifacts[0].component,
+                )
+            resolved_root = source.resolve(strict=True)
+            for artifact in artifacts:
+                file_path = resolve_artifact_path(
+                    checkpoint_dir, artifact.relative_path, must_exist=True
+                ).resolve(strict=True)
+                if not file_path.is_relative_to(resolved_root):
+                    raise CheckpointPathError(
+                        "component artifact lies outside its codec root",
+                        operation=CheckpointOperation.LOAD,
+                        stage=CheckpointStage.INTEGRITY,
+                        path=file_path,
+                        component=artifacts[0].component,
+                    )
+        else:
+            if len(artifacts) != 1:
+                raise CheckpointManifestError(
+                    "single-file codec component declares multiple artifacts",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.MANIFEST,
+                    path=checkpoint_dir,
+                    component=artifacts[0].component,
+                )
+            source = resolve_artifact_path(
+                checkpoint_dir, artifacts[0].relative_path, must_exist=True
+            )
+        return source
+
+    @staticmethod
+    def _validate_restore_plan(
+        decoded: Mapping[str, Any],
+        codecs: Mapping[str, Any],
+        targets: Mapping[str, Any],
+        *,
+        restore_rng: bool,
+    ) -> None:
+        for component in targets:
+            codec = codecs.get(component)
+            if not isinstance(
+                codec,
+                (TorchCheckpointCodec, NumpyCheckpointCodec, TokenizerCheckpointCodec),
+            ):
+                raise CheckpointConfigurationError(
+                    "codec protocol defines decoding but not generic target mutation; "
+                    "this component has no manager-supported restore adapter",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    component=component,
+                    details={
+                        "codec_id": getattr(codec, "codec_id", None),
+                        "resolution": "consume the decoded component explicitly",
+                    },
+                )
+        if restore_rng:
+            if StandardComponent.RNG.value not in decoded:
+                raise CheckpointIncompatibleError(
+                    "RNG restoration was requested but no RNG component was decoded",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    component=StandardComponent.RNG.value,
+                )
+            if not isinstance(codecs.get(StandardComponent.RNG.value), RNGStateCodec):
+                raise CheckpointIncompatibleError(
+                    "legacy or custom RNG state has no safe automatic restore adapter",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.COMPATIBILITY,
+                    component=StandardComponent.RNG.value,
+                )
+
+    @staticmethod
+    def _restore_decoded(
+        decoded: Mapping[str, Any],
+        codecs: Mapping[str, Any],
+        targets: Mapping[str, Any],
+        *,
+        strict: bool,
+        restore_rng: bool,
+        load_key_prefix: str | None,
+    ) -> None:
+        ordered = sorted(
+            targets,
+            key=lambda item: (_RESTORE_ORDER.get(item, 100), item),
+        )
+        for component in ordered:
+            codec = codecs[component]
+            payload = decoded[component]
+            if isinstance(codec, NumpyCheckpointCodec):
+                codec.restore(
+                    targets[component],
+                    payload,
+                    strict=strict,
+                    key_prefix=load_key_prefix,
+                )
+            elif isinstance(codec, TorchCheckpointCodec):
+                if load_key_prefix is not None and component == StandardComponent.MODEL.value:
+                    if not isinstance(payload, Mapping):
+                        raise CheckpointIncompatibleError(
+                            "prefix-filtered torch state is not a mapping",
+                            stage=CheckpointStage.COMPATIBILITY,
+                            component=component,
+                        )
+                    payload = {
+                        name: value
+                        for name, value in payload.items()
+                        if isinstance(name, str) and name.startswith(load_key_prefix)
+                    }
+                codec.restore(targets[component], payload, strict=strict)
+            elif isinstance(codec, TokenizerCheckpointCodec):
+                codec.restore(targets[component], payload)
+        if restore_rng:
+            rng_codec = codecs[StandardComponent.RNG.value]
+            assert isinstance(rng_codec, RNGStateCodec)
+            rng_codec.restore(decoded[StandardComponent.RNG.value], strict=strict)
+
+    def load(
+        self,
+        model: Any = None,
+        tokenizer: Any = None,
+        version: str | None = None,
+        format: str | CheckpointFormat | None = None,
+        *,
+        optimizer: Any = None,
+        scheduler: Any = None,
+        scaler: Any = None,
+        map_location: str = "cpu",
+        strict: bool = True,
+        restore_rng: bool = False,
+        load_optimizer: bool = True,
+        load_scheduler: bool = True,
+        load_scaler: bool = True,
+        verify_integrity: bool | None = None,
+        load_components: Sequence[str] | None = None,
+        skip_components: Sequence[str] = (),
+        load_key_prefix: str | None = None,
+        criteria: SelectionCriteria | None = None,
+        runtime: RuntimeCapabilities | None = None,
+        trace_id: str | None = None,
+    ) -> LoadResult:
+        """Compatibility wrapper that restores supplied training targets."""
+
+        for name, value in (
+            ("load_optimizer", load_optimizer),
+            ("load_scheduler", load_scheduler),
+            ("load_scaler", load_scaler),
+        ):
+            if not isinstance(value, bool):
+                raise CheckpointConfigurationError(
+                    f"{name} must be a boolean",
+                    operation=CheckpointOperation.LOAD,
+                    stage=CheckpointStage.VALIDATION,
+                )
+        targets: dict[str, Any] = {}
+        for component, target, enabled in (
+            (StandardComponent.MODEL.value, model, model is not None),
+            (StandardComponent.TOKENIZER.value, tokenizer, tokenizer is not None),
+            (
+                StandardComponent.OPTIMIZER.value,
+                optimizer,
+                optimizer is not None and load_optimizer,
+            ),
+            (
+                StandardComponent.SCHEDULER.value,
+                scheduler,
+                scheduler is not None and load_scheduler,
+            ),
+            (
+                StandardComponent.SCALER.value,
+                scaler,
+                scaler is not None and load_scaler,
+            ),
+        ):
+            if enabled:
+                targets[component] = target
+        metadata = {
+            name: {"map_location": map_location}
+            for name in (
+                StandardComponent.MODEL.value,
+                StandardComponent.OPTIMIZER.value,
+                StandardComponent.SCHEDULER.value,
+                StandardComponent.SCALER.value,
+            )
+        }
+        expected_codecs: dict[str, str] = {}
+        expected_manifest_format: CheckpointFormat | None = None
+        if format is not None:
+            normalized = _normalize_format_for_operation(
+                format,
+                CheckpointOperation.LOAD,
+            )
+            if normalized is CheckpointFormat.TORCH:
+                expected_codecs[StandardComponent.MODEL.value] = "torch"
+            elif normalized is CheckpointFormat.NPZ:
+                expected_codecs[StandardComponent.MODEL.value] = "numpy"
+            else:
+                expected_manifest_format = CheckpointFormat.COMPOSITE
+        return self.load_components(
+            version,
+            components=load_components,
+            skip_components=skip_components,
+            targets=targets,
+            codec_metadata=metadata,
+            strict=strict,
+            restore_rng=restore_rng,
+            verify_integrity=verify_integrity,
+            criteria=criteria,
+            runtime=runtime,
+            expected_codecs=expected_codecs,
+            expected_format=expected_manifest_format,
+            load_key_prefix=load_key_prefix,
+            trace_id=trace_id,
+        )
+
+    def load_torch(self, model: Any, *args: Any, **kwargs: Any) -> LoadResult:
+        kwargs["format"] = CheckpointFormat.TORCH
+        return self.load(model, *args, **kwargs)
+
+    def load_npz(self, model: Any, *args: Any, **kwargs: Any) -> LoadResult:
+        kwargs["format"] = CheckpointFormat.NPZ
+        return self.load(model, *args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Retention, archival, recovery, and lifecycle
+    # ------------------------------------------------------------------
+    def plan_retention(self, rules: RetentionRules) -> RetentionPlan:
+        if not isinstance(rules, RetentionRules):
+            raise CheckpointConfigurationError(
+                "rules must be RetentionRules",
+                operation=CheckpointOperation.RETAIN,
+                stage=CheckpointStage.VALIDATION,
+            )
+        records, failures = self._discover_records(
+            verify=True,
+            allow_legacy=self.allow_legacy,
+            strict=False,
+        )
+        plan = self.policy.plan_retention(records, rules)
+        if failures:
+            plan = replace(
+                plan,
+                constraints_satisfied=False,
+                reasons=plan.reasons
+                + (
+                    PolicyReason(
+                        "checkpoint_discovery_failed",
+                        "retention cannot safely account for every checkpoint directory",
+                        {"discovery_error_count": len(failures)},
+                    ),
+                ),
+            )
+        attributes = plan.to_dict()
+        attributes["discovery_errors"] = list(failures)
+        self.telemetry.emit(
+            CheckpointEvent(
+                kind=CheckpointEventKind.RETENTION_PLANNED,
+                severity=(
+                    EventSeverity.INFO
+                    if plan.constraints_satisfied
+                    else EventSeverity.WARNING
+                ),
+                message="checkpoint retention plan created",
+                operation=CheckpointOperation.RETAIN.value,
+                stage=CheckpointStage.CLEANUP.value,
+                success=plan.constraints_satisfied,
+                attributes=attributes,
+            )
+        )
+        return plan
+
+    def plan_rollback(
+        self,
+        current: str | CheckpointRecord,
+        rules: RollbackRules | None = None,
+        *,
+        runtime: RuntimeCapabilities | None = None,
+    ) -> RollbackPlan:
+        """Create, but never execute, an evidence-backed rollback plan."""
+
+        if rules is not None and not isinstance(rules, RollbackRules):
+            raise CheckpointConfigurationError(
+                "rules must be RollbackRules",
+                operation=CheckpointOperation.RESTORE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if runtime is not None and not isinstance(runtime, RuntimeCapabilities):
+            raise CheckpointConfigurationError(
+                "runtime must be RuntimeCapabilities",
+                operation=CheckpointOperation.RESTORE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        active_rules = rules or RollbackRules()
+        if isinstance(current, str):
+            current_record = self.read_record(
+                current,
+                verify=active_rules.criteria.require_verified,
+            )
+        elif isinstance(current, CheckpointRecord):
+            current_record = current
+        else:
+            raise CheckpointConfigurationError(
+                "current must be a checkpoint version or CheckpointRecord",
+                operation=CheckpointOperation.RESTORE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        records, failures = self._discover_records(
+            verify=active_rules.criteria.require_verified,
+            allow_legacy=self.allow_legacy,
+            strict=False,
+        )
+        plan = self.policy.plan_rollback(
+            current_record,
+            records,
+            active_rules,
+            runtime=runtime or self.runtime,
+        )
+        attributes = plan.to_dict()
+        attributes["discovery_errors"] = list(failures)
+        provenance = current_record.manifest.provenance
+        self.telemetry.emit(
+            CheckpointEvent(
+                kind=CheckpointEventKind.ROLLBACK_PLANNED,
+                severity=(EventSeverity.INFO if plan.possible else EventSeverity.WARNING),
+                message=(
+                    "checkpoint rollback target planned"
+                    if plan.possible
+                    else "no eligible checkpoint rollback target was found"
+                ),
+                operation=CheckpointOperation.RESTORE.value,
+                stage=CheckpointStage.DISCOVERY.value,
+                checkpoint_id=(
+                    plan.target.checkpoint_id if plan.target is not None else None
+                ),
+                version=plan.target.version if plan.target is not None else None,
+                agent_id=provenance.agent_id,
+                run_id=provenance.run_id,
+                trace_id=provenance.trace_id,
+                success=plan.possible,
+                health=plan.target.health if plan.target is not None else None,
+                attributes=attributes,
+            )
+        )
+        return plan
+
+    def execute_retention(
+        self,
+        plan: RetentionPlan,
+        *,
+        require_constraints_satisfied: bool = True,
+        delete_archives: bool = True,
+    ) -> tuple[str, ...]:
+        """Execute only a previously audited retention plan.
+
+        Each version is re-read and matched by checkpoint identity immediately
+        before deletion, preventing a stale plan from deleting a replacement.
+        """
+
+        if not isinstance(plan, RetentionPlan):
+            raise CheckpointConfigurationError(
+                "plan must be RetentionPlan",
+                operation=CheckpointOperation.RETAIN,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if not isinstance(require_constraints_satisfied, bool) or not isinstance(
+            delete_archives, bool
+        ):
+            raise CheckpointConfigurationError(
+                "retention execution flags must be booleans",
+                operation=CheckpointOperation.RETAIN,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if require_constraints_satisfied and not plan.constraints_satisfied:
+            raise CheckpointRetentionError(
+                "retention plan cannot satisfy its declared constraints",
+                operation=CheckpointOperation.RETAIN,
+                stage=CheckpointStage.VALIDATION,
+                committed=False,
+                details=plan.to_dict(),
+            )
         deleted: list[str] = []
-        for record in to_delete:
-            if self.delete_checkpoint(record.version):
-                deleted.append(record.version)
-        if deleted:
-            logger.info("Deleted old checkpoints due to retention policy: %s", deleted)
+        with self.telemetry.operation(
+            CheckpointOperation.RETAIN,
+            stage=CheckpointStage.CLEANUP,
+            attributes={"delete_count": len(plan.delete)},
+        ) as span:
+            try:
+                for planned in plan.delete:
+                    current = self.read_record(planned.version, verify=False)
+                    if current.checkpoint_id != planned.checkpoint_id:
+                        raise CheckpointRetentionError(
+                            "retention plan is stale; checkpoint identity changed",
+                            operation=CheckpointOperation.RETAIN,
+                            stage=CheckpointStage.VALIDATION,
+                            path=current.path,
+                            version=current.version,
+                            checkpoint_id=current.checkpoint_id,
+                            committed=bool(deleted),
+                            details={
+                                "planned_checkpoint_id": planned.checkpoint_id,
+                                "deleted_versions": list(deleted),
+                            },
+                        )
+                    self.delete_checkpoint(
+                        current.version,
+                        missing_ok=False,
+                        delete_archive=delete_archives,
+                    )
+                    deleted.append(current.version)
+                span.set_result(
+                    component_count=len(deleted),
+                    committed=bool(deleted),
+                )
+                return tuple(deleted)
+            except CheckpointError as exc:
+                raise _contextualize(
+                    exc,
+                    operation=CheckpointOperation.RETAIN,
+                    stage=CheckpointStage.CLEANUP,
+                    committed=bool(deleted),
+                ) from exc.__cause__
+
+    def cleanup_old_checkpoints(self, keep: int | None = None) -> tuple[str, ...]:
+        limit = self.retention_limit if keep is None else keep
+        if limit is None:
+            return ()
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise CheckpointConfigurationError(
+                "keep must be a positive integer",
+                operation=CheckpointOperation.RETAIN,
+                stage=CheckpointStage.VALIDATION,
+            )
+        plan = self.plan_retention(
+            RetentionRules(
+                max_checkpoints=limit,
+                minimum_keep=1,
+                keep_latest=1,
+            )
+        )
+        return self.execute_retention(plan)
+
+    def archive_checkpoint(
+        self, version: str, *, overwrite: bool = False
+    ) -> Path:
+        if not isinstance(overwrite, bool):
+            raise CheckpointConfigurationError(
+                "overwrite must be a boolean",
+                operation=CheckpointOperation.ARCHIVE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        safe_version = _validate_version_for_operation(
+            version, CheckpointOperation.ARCHIVE
+        )
+        with self.telemetry.operation(
+            CheckpointOperation.ARCHIVE,
+            stage=CheckpointStage.ARCHIVAL,
+            version=safe_version,
+        ) as span:
+            path = Path(
+                self._storage_method("create_archive")(
+                    safe_version, overwrite=overwrite
+                )
+            )
+            span.set_result(committed=True)
+            return path
+
+    def restore_archive(
+        self,
+        version: str,
+        *,
+        allow_overwrite: bool = False,
+        require_digest: bool = True,
+        max_members: int = 100_000,
+        max_total_bytes: int | None = None,
+    ) -> CheckpointRecord:
+        if not isinstance(allow_overwrite, bool) or not isinstance(
+            require_digest, bool
+        ):
+            raise CheckpointConfigurationError(
+                "allow_overwrite and require_digest must be booleans",
+                operation=CheckpointOperation.RESTORE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        if (
+            isinstance(max_members, bool)
+            or not isinstance(max_members, int)
+            or max_members < 1
+            or (
+                max_total_bytes is not None
+                and (
+                    isinstance(max_total_bytes, bool)
+                    or not isinstance(max_total_bytes, int)
+                    or max_total_bytes < 0
+                )
+            )
+        ):
+            raise CheckpointConfigurationError(
+                "archive extraction limits are invalid",
+                operation=CheckpointOperation.RESTORE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        safe_version = _validate_version_for_operation(
+            version, CheckpointOperation.RESTORE
+        )
+        with self.telemetry.operation(
+            CheckpointOperation.RESTORE,
+            stage=CheckpointStage.RESTORATION,
+            version=safe_version,
+        ) as span:
+            published = False
+            path = self.base_dir
+            try:
+                path = Path(
+                    self._storage_method("restore_archive")(
+                        safe_version,
+                        allow_overwrite=allow_overwrite,
+                        require_digest=require_digest,
+                        max_members=max_members,
+                        max_total_bytes=max_total_bytes,
+                    )
+                )
+                published = True
+                record = read_checkpoint_record(
+                    path,
+                    verify=True,
+                    exact_files=self.config.require_exact_files,
+                    limits=self.config.manifest_limits,
+                )
+                if record.verification is None or not record.verification.ok:
+                    raise CheckpointLoadError(
+                        "restored archive failed checkpoint verification",
+                        operation=CheckpointOperation.RESTORE,
+                        stage=CheckpointStage.INTEGRITY,
+                        path=path,
+                        version=safe_version,
+                        checkpoint_id=record.checkpoint_id,
+                        committed=True,
+                    )
+                span.set_result(
+                    checkpoint_id=record.checkpoint_id,
+                    size_bytes=_record_size(record),
+                    component_count=len(record.manifest.saved_components),
+                    health=record.health,
+                    committed=True,
+                )
+                return record
+            except CheckpointError as exc:
+                raise _contextualize(
+                    exc,
+                    operation=CheckpointOperation.RESTORE,
+                    stage=CheckpointStage.RESTORATION,
+                    path=path,
+                    version=safe_version,
+                    committed=published,
+                ) from exc.__cause__
+
+    def delete_checkpoint(
+        self,
+        version: str,
+        *,
+        missing_ok: bool = False,
+        delete_archive: bool = True,
+    ) -> bool:
+        if not isinstance(missing_ok, bool) or not isinstance(delete_archive, bool):
+            raise CheckpointConfigurationError(
+                "missing_ok and delete_archive must be booleans",
+                operation=CheckpointOperation.DELETE,
+                stage=CheckpointStage.VALIDATION,
+            )
+        try:
+            safe_version = validate_version(version)
+        except ValueError as exc:
+            raise CheckpointNotFoundError(
+                str(exc),
+                operation=CheckpointOperation.DELETE,
+                stage=CheckpointStage.VALIDATION,
+                version=version if isinstance(version, str) else None,
+            ) from exc
+        deleted = False
+        with self.telemetry.operation(
+            CheckpointOperation.DELETE,
+            stage=CheckpointStage.CLEANUP,
+            version=safe_version,
+        ) as span:
+            try:
+                deleted = bool(
+                    self._storage_method("delete")(
+                        safe_version, missing_ok=missing_ok
+                    )
+                )
+                if delete_archive:
+                    archive_method = getattr(self.storage, "archive_path", None)
+                    if callable(archive_method):
+                        archive_value = archive_method(safe_version)
+                        if not isinstance(archive_value, (str, os.PathLike)):
+                            raise CheckpointPathError(
+                                "storage returned an invalid archive path",
+                                operation=CheckpointOperation.DELETE,
+                                stage=CheckpointStage.VALIDATION,
+                                version=safe_version,
+                                committed=deleted,
+                            )
+                        archive = Path(archive_value)
+                        sidecar = archive.with_name(f"{archive.name}.sha256")
+                        root = self.base_dir.resolve(strict=True)
+                        for candidate in (archive, sidecar):
+                            if candidate.parent.resolve(strict=False) != root:
+                                raise CheckpointPathError(
+                                    "storage returned an archive path outside base_dir",
+                                    operation=CheckpointOperation.DELETE,
+                                    stage=CheckpointStage.VALIDATION,
+                                    path=candidate,
+                                    version=safe_version,
+                                    committed=deleted,
+                                )
+                            if candidate.is_symlink():
+                                raise CheckpointPathError(
+                                    "refusing to delete a symbolic-link archive",
+                                    operation=CheckpointOperation.DELETE,
+                                    stage=CheckpointStage.VALIDATION,
+                                    path=candidate,
+                                    version=safe_version,
+                                    committed=deleted,
+                                )
+                            if candidate.exists():
+                                if not candidate.is_file():
+                                    raise CheckpointPathError(
+                                        "archive path is not a regular file",
+                                        operation=CheckpointOperation.DELETE,
+                                        stage=CheckpointStage.VALIDATION,
+                                        path=candidate,
+                                        version=safe_version,
+                                        committed=deleted,
+                                    )
+                                candidate.unlink()
+                span.set_result(committed=deleted)
+                return deleted
+            except CheckpointError:
+                raise
+            except OSError as exc:
+                raise CheckpointStorageError(
+                    "failed to remove checkpoint archive files",
+                    operation=CheckpointOperation.DELETE,
+                    stage=CheckpointStage.CLEANUP,
+                    path=self.base_dir,
+                    version=safe_version,
+                    retryable=True,
+                    committed=deleted,
+                    details={"error_type": type(exc).__name__},
+                ) from exc
         return deleted
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _restore_from_archive(self, version: str) -> Path:
-        """Restore a checkpoint directory from its .tar.gz archive. Returns the restored directory path."""
-        safe_version = self._sanitize_or_resolve(version)
-        archive_path = self.base_dir / f"{safe_version}.tar.gz"
-        if not archive_path.exists():
-            raise CheckpointIntegrityError(f"No archive found for checkpoint '{safe_version}' at {archive_path}")
-    
-        # Optionally verify archive hash before extraction
-        hash_path = self.base_dir / f"{safe_version}.tar.gz.sha256"
-        if hash_path.exists():
-            expected = hash_path.read_text().strip()
-            actual = sha256_file(archive_path)
-            if expected != actual:
-                raise CheckpointIntegrityError(f"Archive SHA256 mismatch for '{safe_version}'")
-    
-        # Remove existing (broken) checkpoint directory and extract
-        checkpoint_dir = self._checkpoint_dir(version)
-        safe_rmtree(checkpoint_dir)
-        checkpoint_dir.parent.mkdir(parents=True, exist_ok=True)
-    
-        import tarfile
+    def recover_incomplete_transactions(self) -> tuple[Path, ...]:
+        with self.telemetry.operation(
+            CheckpointOperation.RESTORE,
+            stage=CheckpointStage.RESTORATION,
+        ) as span:
+            recovered = tuple(
+                Path(item)
+                for item in self._storage_method(
+                    "recover_incomplete_transactions"
+                )()
+            )
+            span.set_result(component_count=len(recovered), committed=bool(recovered))
+            return recovered
 
-        def _validate_member(member: tarfile.TarInfo) -> None:
-            member_path = Path(member.name)
-            if member_path.is_absolute() or ".." in member_path.parts:
-                raise CheckpointIntegrityError(
-                    f"Unsafe archive member path '{member.name}' for checkpoint '{safe_version}'"
-                )
-            if member.issym() or member.islnk():
-                raise CheckpointIntegrityError(
-                    f"Refusing to extract link member '{member.name}' for checkpoint '{safe_version}'"
-                )
+    def health_report(
+        self,
+        *,
+        emit: bool = True,
+        trace_id: str | None = None,
+    ) -> CheckpointHealthReport:
+        if not isinstance(emit, bool):
+            raise CheckpointConfigurationError(
+                "emit must be a boolean",
+                operation=CheckpointOperation.VERIFY,
+                stage=CheckpointStage.VALIDATION,
+            )
+        records, failures = self._discover_records(
+            verify=True,
+            allow_legacy=self.allow_legacy,
+            strict=False,
+        )
+        report = build_health_report(records)
+        if failures:
+            report = replace(
+                report,
+                overall_health=CheckpointHealth.CORRUPT,
+                findings=report.findings
+                + (
+                    HealthFinding(
+                        code="checkpoint_discovery_failed",
+                        severity=EventSeverity.ERROR,
+                        message=(
+                            f"{len(failures)} checkpoint director"
+                            f"{'y' if len(failures) == 1 else 'ies'} could not be "
+                            "read as a valid checkpoint"
+                        ),
+                    ),
+                ),
+            )
+        if emit:
+            self.telemetry.emit_health_report(report, trace_id=trace_id)
+        return report
 
-        tmp_extract = Path(tempfile.mkdtemp(dir=self.base_dir, prefix=f".restore-{safe_version}-"))
-        restore_dir = tmp_extract / safe_version
-        restore_dir.mkdir(parents=True, exist_ok=False)
-        try:
-            with tarfile.open(archive_path, "r:gz") as tar:
-                members = tar.getmembers()
-                for member in members:
-                    _validate_member(member)
-                tar.extractall(path=restore_dir, members=members)
+    def close(self, *, wait: bool = True, cancel_futures: bool = False) -> None:
+        """Release a lazily created manager-owned async executor."""
 
-            extracted_items = list(restore_dir.iterdir())
-            if len(extracted_items) == 1 and extracted_items[0].is_dir():
-                extracted_items[0].rename(checkpoint_dir)
-            else:
-                restore_dir.rename(checkpoint_dir)
-        finally:
-            safe_rmtree(tmp_extract)
-    
-        logger.info("Restored checkpoint '%s' from archive %s", safe_version, archive_path)
-        return checkpoint_dir
+        if not isinstance(wait, bool) or not isinstance(cancel_futures, bool):
+            raise TypeError("wait and cancel_futures must be booleans")
+        with self._executor_lock:
+            executor = self._executor if self._owns_executor else None
+            if self._owns_executor:
+                self._executor = None
+                self._owns_executor = False
+        if executor is not None:
+            executor.shutdown(wait=wait, cancel_futures=cancel_futures)
 
-    def _post_save(self, version: str, *, archive: Optional[bool]) -> None:
-        should_archive = self.create_archive if archive is None else archive
-        if should_archive:
-            self.archive_checkpoint(version)
-        self.cleanup_old_checkpoints()
+    def __enter__(self) -> "CheckpointManager":
+        return self
 
-    def _resolve_version(self, version: Optional[str]) -> str:
-        if version is None or version == "latest":
-            latest = self.get_latest_checkpoint()
-            if latest is None:
-                raise FileNotFoundError("No checkpoints available")
-            return latest
-        return sanitize_version(version)
-
-    def _sanitize_or_resolve(self, version: str) -> str:
-        if version == "latest":
-            latest = self.get_latest_checkpoint()
-            if latest is None:
-                raise FileNotFoundError("No checkpoints available")
-            return latest
-        return sanitize_version(version)
-
-    def _checkpoint_dir(self, version: str) -> Path:
-        safe_version = self._sanitize_or_resolve(version)
-        return resolve_checkpoint_path(self.base_dir, safe_version)
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        del exc_type, exc, traceback
+        self.close()
 
 
-__all__ = [
-    "CheckpointError",
-    "CheckpointFileInfo",
-    "CheckpointIntegrityError",
-    "CheckpointLoadError",
-    "CheckpointManager",
-    "CheckpointRecord",
-    "CheckpointSaveError",
-    "CheckpointVersionError",
-]
-
+__all__ = ["CheckpointManager"]
 
 if __name__ == "__main__":
     print("\n=== Running Checkpoint Manager Comprehensive Self-Test ===\n")
-    printer.status("TEST", "Starting enhanced checkpoint tests", "info")
-    from src.agents.perception.modules.tokenizer import Tokenizer # pyright: ignore[reportMissingImports]
+    import tempfile
 
-    class _TinyModel(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.net = torch.nn.Sequential(
-                torch.nn.Linear(4, 8),
-                torch.nn.ReLU(),
-                torch.nn.Linear(8, 2),
-            )
-            self.extra = torch.nn.Linear(2, 2)
+    printer.status("TEST", "Starting Checkpoint Manager tests", "info")
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.extra(self.net(x))
-
-    def _assert(condition: bool, message: str) -> None:
-        if not condition:
-            raise AssertionError(message)
-
-    def _corrupt_checkpoint(version_dir: Path, file_to_corrupt: str = "checkpoint.pt") -> None:
-        """Deliberately corrupt a file inside a checkpoint directory."""
-        target = version_dir / file_to_corrupt
-        if target.exists():
-            with open(target, "ab") as f:
-                f.write(b"CORRUPTED_DATA")
-            print(f"  Corrupted {target}")
-
-
-    with tempfile.TemporaryDirectory(prefix="checkpoint-manager-test-") as tmpdir:
-        base_dir = Path(tmpdir) / "checkpoints"
-        manager = CheckpointManager(
-            base_dir=base_dir,
-            default_format="torch",
-            allow_overwrite=False,
-            create_archive=True,          # archives are needed for auto-repair
-            retention_limit=None,
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manager = CheckpointManager(base_dir=tmpdir)
+        # Register a dummy codec if needed, but default registry already has some
+        # Save a simple component (agent_state)
+        result = manager.save_components(
+            {"agent_state": {"test": 1}},
+            version="v1",
         )
+        assert result.committed
+        # Load it back
+        load_result = manager.load_components("v1", components=["agent_state"])
+        assert load_result.components["agent_state"] == {"test": 1}
+    printer.status("SMOKE", "save/load cycle with agent_state passed", "success")
 
-        torch.manual_seed(7)
-        model = _TinyModel()
-        tokenizer = Tokenizer()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
-
-        # One forward/backward step to make state non‑trivial
-        x = torch.randn(3, 4)
-        y = torch.tensor([0, 1, 0])
-        loss = torch.nn.functional.cross_entropy(model(x), y)
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad(set_to_none=True)
-        printer.status("TEST", "Prepared model, optimizer, scheduler", "success")
-
-        # ------------------------------------------------------------------
-        # 1. Asynchronous save
-        # ------------------------------------------------------------------
-        printer.status("TEST", "Testing async save (torch format)", "info")
-        future = manager.save_async(
-            model=model,
-            tokenizer=tokenizer,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=2,
-            step=20,
-            metrics={"loss": float(loss.detach().cpu())},
-            metadata={"test": "async"},
-            version="async_torch",
-            format="torch",
-        )
-        record_async = future.result(timeout=30)
-        _assert(record_async.version == "async_torch", "Async save version mismatch")
-        _assert((base_dir / "async_torch" / MANIFEST_NAME).exists(), "Async manifest missing")
-        _assert((base_dir / "async_torch.tar.gz").exists(), "Async archive missing")
-        printer.status("TEST", "Async save completed successfully", "success")
-
-        # ------------------------------------------------------------------
-        # 2. Selective loading (load only model and tokenizer, skip optimizer)
-        # ------------------------------------------------------------------
-        printer.status("TEST", "Testing selective loading (skip optimizer)", "info")
-        model2 = _TinyModel()
-        tokenizer2 = Tokenizer()
-        optimizer2 = torch.optim.Adam(model2.parameters(), lr=0.999)  # different LR
-        load_result = manager.load(
-            model=model2,
-            tokenizer=tokenizer2,
-            optimizer=optimizer2,
-            version="async_torch",
-            format="torch",
-            skip_components=["optimizer_state"],
-            verify_integrity=True,
-        )
-        # Optimizer state should NOT be restored -> LR remains 0.999
-        _assert(optimizer2.param_groups[0]["lr"] == 0.999, "Optimizer was incorrectly restored")
-        _assert(tokenizer2.vocab_size == tokenizer.vocab_size, "Tokenizer not restored")
-        _assert("missing_keys" not in load_result or not load_result["missing_keys"], "Unexpected missing keys")
-        printer.status("TEST", "Selective loading (skip_components) works", "success")
-
-        # ------------------------------------------------------------------
-        # 3. Prefix loading (load only "net." submodule)
-        # ------------------------------------------------------------------
-        printer.status("TEST", "Testing load_key_prefix (load only 'net.')", "info")
-        model_prefix = _TinyModel()
-        # First, manually zero out the 'extra' layer to verify it stays untouched
-        with torch.no_grad():
-            model_prefix.extra.weight.fill_(0.0)
-            model_prefix.extra.bias.fill_(0.0)
-
-        load_result_prefix = manager.load(
-            model=model_prefix,
-            version="async_torch",
-            format="torch",
-            load_key_prefix="net.",
-            strict=False,
-        )
-        # Check that 'net' weights were loaded (not zero) while 'extra' remains zero
-        net_changed = not torch.allclose(model_prefix.net[0].weight, torch.zeros_like(model_prefix.net[0].weight)) # pyright: ignore[reportArgumentType]
-        extra_unchanged = torch.allclose(model_prefix.extra.weight, torch.zeros_like(model_prefix.extra.weight))
-        _assert(net_changed, "Prefix loading did not load 'net' weights")
-        _assert(extra_unchanged, "Prefix loading incorrectly modified 'extra' layer")
-        printer.status("TEST", "load_key_prefix works correctly", "success")
-
-        # ------------------------------------------------------------------
-        # 4. NPZ with prefix and skip_components
-        # ------------------------------------------------------------------
-        printer.status("TEST", "Testing NPZ save/load with prefix and skip_components", "info")
-        npz_version = "test_npz_prefix"
-        manager.save_npz(
-            model=model,
-            tokenizer=tokenizer,
-            version=npz_version,
-            metadata={"format": "npz"},
-            compressed=True,
-        )
-        npz_model = _TinyModel()
-        # Zero out extra layer again
-        with torch.no_grad():
-            npz_model.extra.weight.fill_(0.0)
-        load_npz_prefix = manager.load_npz(
-            model=npz_model,
-            version=npz_version,
-            load_key_prefix="net.",
-            skip_components=["tokenizer"],
-            strict=False,
-        )
-        net_loaded = not torch.allclose(npz_model.net[0].weight, torch.zeros_like(npz_model.net[0].weight)) # pyright: ignore[reportArgumentType]
-        extra_still_zero = torch.allclose(npz_model.extra.weight, torch.zeros_like(npz_model.extra.weight))
-        _assert(net_loaded, "NPZ prefix loading failed for 'net'")
-        _assert(extra_still_zero, "NPZ prefix loading modified 'extra'")
-        _assert(load_npz_prefix.get("tokenizer") is None, "Tokenizer was not skipped")
-        printer.status("TEST", "NPZ with prefix and skip_components works", "success")
-
-        # ------------------------------------------------------------------
-        # 5. Auto‑repair from archive
-        # ------------------------------------------------------------------
-        printer.status("TEST", "Testing auto‑repair from archive", "info")
-        # First create a healthy checkpoint (torch format)
-        manager.save_torch(
-            model=model,
-            tokenizer=tokenizer,
-            optimizer=optimizer,
-            epoch=3,
-            version="repair_me",
-            archive=True,
-        )
-        # Corrupt the manifest (or any tracked file) inside the checkpoint directory
-        ckpt_dir = base_dir / "repair_me"
-        _corrupt_checkpoint(ckpt_dir, MANIFEST_NAME)
-
-        # Attempt to load with auto_repair=True – should restore from archive
-        repaired_model = _TinyModel()
-        repaired_tokenizer = Tokenizer()
-        try:
-            load_repaired = manager.load_torch(
-                model=repaired_model,
-                tokenizer=repaired_tokenizer,
-                version="repair_me",
-                verify_integrity=True,
-                auto_repair=True,
-            )
-            # After repair, the manifest must exist and be valid
-            _assert((ckpt_dir / MANIFEST_NAME).exists(), "Auto‑repair did not restore manifest")
-            _assert(manager.verify_checkpoint("repair_me"), "Checkpoint still corrupted after repair")
-            printer.status("TEST", "Auto‑repair successfully restored checkpoint from archive", "success")
-        except Exception as e:
-            printer.status("TEST", f"Auto‑repair failed: {e}", "error")
-            raise
-
-        # ------------------------------------------------------------------
-        # 6. Negative test: auto_repair=False raises integrity error
-        # ------------------------------------------------------------------
-        # Corrupt again
-        _corrupt_checkpoint(ckpt_dir, MANIFEST_NAME)
-        try:
-            manager.load_torch(
-                model=repaired_model,
-                tokenizer=repaired_tokenizer,
-                version="repair_me",
-                verify_integrity=True,
-                auto_repair=False,
-            )
-            raise AssertionError("Expected CheckpointIntegrityError but none was raised")
-        except CheckpointIntegrityError:
-            printer.status("TEST", "Integrity error correctly raised when auto_repair=False", "success")
-
-        # ------------------------------------------------------------------
-        # 7. Cleanup and retention test
-        # ------------------------------------------------------------------
-        printer.status("TEST", "Testing cleanup_old_checkpoints", "info")
-        # Create a few more checkpoints
-        for i in range(3):
-            manager.save_torch(model, tokenizer, version=f"dummy_{i}", archive=False)
-        # Set retention limit to 2 (oldest two should be deleted)
-        manager.retention_limit = 2
-        deleted = manager.cleanup_old_checkpoints()
-        remaining = manager.list_checkpoints()
-        _assert(len(remaining) == 2, f"Expected 2 checkpoints after cleanup, got {len(remaining)}")
-        _assert("dummy_0" not in remaining, "Oldest checkpoint not deleted")
-        printer.status("TEST", "Retention policy works", "success")
-
-        # ------------------------------------------------------------------
-        # Summary
-        # ------------------------------------------------------------------
-        printer.pretty("FINAL CHECKPOINTS", [
-            checkpoint_summary(r) for r in manager.list_checkpoint_records()
-        ], "info")
-        printer.status("ALL TESTS", "CheckpointManager enhancements verified successfully", "success")
-
-    print("\n=== All tests passed ===\n")
+    print("\n=== All manager tests passed ===\n")

@@ -22,19 +22,20 @@ import os
 import re
 import threading
 import time
-
 import numpy as np
 import pandas as pd
 import yaml
 
-from src.agents.alignment.bias_detection import BiasDetector
-from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
-from src.agents.knowledge.utils.rule_engine import RuleEngine
-from src.agents.knowledge.knowledge_memory import KnowledgeMemory
-from logs.logger import get_logger, PrettyPrinter
+from ..alignment.bias_detection import BiasDetector
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.knowledge_helpers import *
+from .utils.knowledge_errors import *
+from .modules.rule_engine import RuleEngine
+from .knowledge_memory import KnowledgeMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Governor")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class DotDict(dict):
@@ -52,8 +53,12 @@ class DotDict(dict):
 
 
 class Governor:
-    def __init__(self, knowledge_agent=None):
+    def __init__(self, knowledge_agent=None,
+                 knowledge_memory=None,
+                 rule_engine=None):
         self.knowledge_agent = knowledge_agent
+        self.knowledge_memory = knowledge_memory or KnowledgeMemory()
+        self.rule_engine = rule_engine or RuleEngine()
         self.config = load_global_config() or {}
         self.enabled = bool(self.config.get("enabled", True))
 
@@ -83,14 +88,12 @@ class Governor:
         config_path_value = self.config.get("__config_path__")
         self.config_path = Path(config_path_value).resolve() if config_path_value else None
 
-        self.violation_thresholds = DotDict(
-            {
+        self.violation_thresholds = DotDict({
                 "unethical": 0.65,
                 "similarity": 0.85,
                 "consecutive_errors": 5,
                 "critical": 0.8,
-            }
-        )
+            })
         violation_config = self.governor_config.get("violation_thresholds", {})
         if isinstance(violation_config, Mapping):
             self.violation_thresholds.update(violation_config)
@@ -100,8 +103,8 @@ class Governor:
         if isinstance(memory_config, Mapping):
             self.memory_thresholds.update(memory_config)
 
-        self.rule_engine = RuleEngine()
-        self.knowledge_memory = KnowledgeMemory()
+        self.rule_engine = rule_engine or RuleEngine()
+        self.knowledge_memory = knowledge_memory or KnowledgeMemory()
         self._bias_detector = None
         self.guidelines = self._load_guidelines()
         self.bias_categories = self._load_bias_categories()
@@ -138,33 +141,33 @@ class Governor:
             return list(value)
         return [value]
 
-    def _resolve_path(self, raw_path: Any) -> Optional[Path]:
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            return None
-
-        candidate = Path(raw_path)
-        candidate_paths = []
+    @staticmethod
+    def _resolve_path(filename: str, base_path: Path) -> Path:
+        candidate = Path(filename)
+    
         if candidate.is_absolute():
-            candidate_paths.append(candidate)
-        else:
-            candidate_paths.append(Path.cwd() / candidate)
-            if self.config_path is not None:
-                candidate_paths.append(self.config_path.parent / candidate)
-            candidate_paths.append(self.project_root / candidate)
-            candidate_paths.append(Path(__file__).resolve().parent / candidate)
-
-        for path in candidate_paths:
-            if path.exists():
-                return path.resolve()
-
-        return candidate_paths[0].resolve() if candidate_paths else None
+            return candidate
+    
+        candidate_paths = (
+            base_path / candidate,
+            Path.cwd() / candidate,
+            Path.cwd() / "src" / "agents" / "knowledge" / "config" / candidate,
+            Path.cwd() / "src" / "agents" / "knowledge" / candidate,
+        )
+    
+        existing = first_existing_path(candidate_paths)
+        if existing is not None:
+            return existing.resolve()
+    
+        return candidate_paths[0].resolve()
 
     def _load_bias_categories(self) -> dict:
         """Load bias categories from JSON/YAML file specified in config."""
-        resolved_path = self._resolve_path(self.bias_categories_path)
-        if resolved_path is None:
+        if not self.bias_categories_path:
             logger.warning("No bias_categories path configured in governor")
             return {}
+        
+        resolved_path = self._resolve_path(self.bias_categories_path, self.config_path.parent if self.config_path else Path.cwd())
 
         try:
             with open(resolved_path, "r", encoding="utf-8") as file_handle:
@@ -197,7 +200,7 @@ class Governor:
 
         resolved_paths: List[Path] = []
         for rule_file in rule_files:
-            resolved = self._resolve_path(rule_file)
+            resolved = self._resolve_path(rule_file, self.config_path.parent if self.config_path else Path.cwd())
             if resolved is None or not resolved.exists():
                 logger.warning(f"Rule file not found: {rule_file}")
                 continue
@@ -227,14 +230,23 @@ class Governor:
         rule_dict.setdefault("id", hashlib.md5(description.encode("utf-8")).hexdigest())
         return rule_dict
 
-    def _store_rules_in_memory(self, rules: List[Dict[str, Any]]) -> None:
+    def _store_rules_in_memory(self, rules: List[Dict[str, Any]], rule_type: str = "configured_rule") -> None:
         if not rules:
             return
-
+    
         if hasattr(self.knowledge_memory, "add_all"):
-            self.knowledge_memory.add_all(rules)
+            # We need to pass the rule_type to each update; add_all doesn't support it.
+            # So we'll iterate manually.
+            for rule in rules:
+                key = rule.get("id") or rule.get("name")
+                if key:
+                    self.knowledge_memory.update(
+                        key=key,
+                        value=rule,
+                        metadata={"type": rule_type},
+                    )
             return
-
+    
         if hasattr(self.knowledge_memory, "update"):
             for rule in rules:
                 key = rule.get("id") or rule.get("name")
@@ -242,7 +254,7 @@ class Governor:
                     self.knowledge_memory.update(
                         key=key,
                         value=rule,
-                        metadata={"type": "system_rule"},
+                        metadata={"type": rule_type},
                     )
 
     def _init_knowledge_memory(self):
@@ -292,13 +304,7 @@ class Governor:
                 tags.append(item.strip().lower())
         return tags
 
-    def _normalize_guideline_entry(
-        self,
-        entry: Any,
-        bucket: str,
-        source: str,
-        index: int,
-    ) -> Optional[Dict[str, Any]]:
+    def _normalize_guideline_entry(self, entry: Any, bucket: str, source: str, index: int) -> Optional[Dict[str, Any]]:
         if isinstance(entry, str):
             description = entry.strip()
             if not description:
@@ -355,11 +361,7 @@ class Governor:
             normalized["forbidden_content"] = forbidden_content.strip()
         return normalized
 
-    def _merge_guideline_entries(
-        self,
-        target: Dict[str, Dict[str, Any]],
-        entry: Dict[str, Any],
-    ) -> None:
+    def _merge_guideline_entries(self, target: Dict[str, Dict[str, Any]], entry: Dict[str, Any]) -> None:
         existing = target.get(entry["id"])
         if existing is None:
             target[entry["id"]] = entry
@@ -429,8 +431,9 @@ class Governor:
         sources_loaded: List[str] = []
         invalid_entries = 0
 
+        base_path = self.config_path.parent if self.config_path else Path.cwd()
         for raw_path in self.guideline_paths:
-            resolved_path = self._resolve_path(raw_path)
+            resolved_path = self._resolve_path(raw_path, base_path)
             if resolved_path is None or not resolved_path.exists():
                 logger.warning(f"Guideline file not found: {raw_path}")
                 continue
@@ -524,30 +527,28 @@ class Governor:
     def _memory_recall(self, **kwargs) -> List[Any]:
         recall_fn = getattr(self.knowledge_memory, "recall", None)
         if callable(recall_fn):
-            return recall_fn(**kwargs)
+            result = recall_fn(**kwargs)
+            return result if isinstance(result, list) else []
         return []
 
     def get_approved_rules(self) -> List[Dict]:
-        """
-        Retrieve approved rules from multiple sources:
-        1. Pre-configured rule sources
-        2. Manually approved rules in knowledge memory
-        3. System-generated rules that meet approval thresholds
-        """
         approved_rules: List[Dict[str, Any]] = []
-
-        rule_sources = self._memory_recall(filters={"type": "rule_source"})
-        for value, _metadata in rule_sources:
-            if isinstance(value, Mapping) and isinstance(value.get("rules"), list):
-                approved_rules.extend([rule for rule in value["rules"] if isinstance(rule, Mapping)])
-
+    
+        # 1. Configured rules – always approved (no confidence needed)
+        configured_rules = self._memory_recall(filters={"type": "configured_rule"})
+        for value, _metadata in configured_rules:
+            if isinstance(value, Mapping):
+                approved_rules.append(dict(value))
+    
+        # 2. Manually approved rules
         manual_rules = self._memory_recall(
             filters={"type": "approved_rule", "approval_status": "approved"}
         )
         for value, _metadata in manual_rules:
             if isinstance(value, Mapping):
                 approved_rules.append(dict(value))
-
+    
+        # 3. System‑generated rules – require confidence threshold
         system_rules = self._memory_recall(
             filters={"type": "system_rule"},
             sort_by="confidence",
@@ -560,7 +561,7 @@ class Governor:
                 min_confidence = float(rule_engine_config.get("min_rule_confidence", 0.7))
             except (TypeError, ValueError):
                 min_confidence = 0.7
-
+    
         for rule, metadata in system_rules:
             if not isinstance(rule, Mapping):
                 continue
@@ -571,14 +572,16 @@ class Governor:
                 confidence_value = 0.0
             if confidence_value >= min_confidence:
                 approved_rules.append(dict(rule))
-
+    
+        # Deduplicate (by normalized id)
         deduped_rules: Dict[str, Dict[str, Any]] = {}
         for rule in approved_rules:
             normalized = self._normalize_rule(rule)
             if normalized is None:
                 continue
             deduped_rules[normalized["id"]] = normalized
-
+    
+        # Apply governance filtering (same as before)
         filtered_rules = [
             rule for rule in deduped_rules.values() if self._rule_passes_governance(rule)
         ]
@@ -710,25 +713,34 @@ class Governor:
             return dict(agent_memory)
         return {}
 
-    def _evaluate_rule_violations(self, knowledge_graph: Dict[str, Any]) -> Dict[str, Any]:
+    def _evaluate_governance_violations(self, knowledge_graph: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Scan knowledge_graph against governance guidelines (principles & restrictions).
+        Returns dict of violation identifiers with severity scores.
+        """
         if not knowledge_graph:
             return {}
-        apply_fn = getattr(self.rule_engine, "apply", None)
-        if not callable(apply_fn):
-            logger.warning("Rule engine unavailable during audit computation")
-            return {}
-        try:
-            result = apply_fn(knowledge_graph)
-        except Exception as exc:
-            logger.error(f"Error applying rules during audit: {exc}", exc_info=True)
-            return {}
-        return result if isinstance(result, Mapping) else {}
+        violations = {}
+        text = " ".join(str(v) for v in knowledge_graph.values())
+        # Check against unethical content
+        unethical_score = self._detect_unethical_content(text)
+        if unethical_score > self.violation_thresholds.get("unethical", 0.65):
+            violations["UNETHICAL_CONTENT"] = unethical_score
+        # Check against restrictions
+        for restriction in self.guidelines.get("restrictions", []):
+            if not isinstance(restriction, Mapping):
+                continue
+            for pattern in self._normalize_pattern_list(restriction.get("patterns")):
+                if self._matches_pattern(text, pattern):
+                    violations[f"RESTRICTION_{restriction.get('id', 'unknown')}"] = 1.0
+                    break
+        return violations
 
     def full_audit(self):
         """Comprehensive system audit."""
         approved_rules = self.get_approved_rules()
         current_memory_store = self._extract_agent_memory_store()
-        violations = self._evaluate_rule_violations(current_memory_store)
+        violations = self._evaluate_governance_violations(current_memory_store)
 
         audit_report = {
             "timestamp": time.time(),
@@ -814,7 +826,7 @@ class Governor:
                 for res_doc in [item[1]]
             }
             knowledge_graph_for_rules["query"] = query
-            audit_entry["rule_violations"] = self._evaluate_rule_violations(knowledge_graph_for_rules)
+            audit_entry["rule_violations"] = self._evaluate_governance_violations(knowledge_graph_for_rules)
 
         self.audit_history.append(audit_entry)
 
@@ -1007,6 +1019,109 @@ class Governor:
                 return "Disable related knowledge entries"
         return "Log violation only"
 
+    def translate_policy_to_executable(self, policy_rule: Dict) -> Optional[Dict]:
+        """
+        Convert a governance policy rule into an executable RuleEngine rule.
+    
+        The translation contract:
+          - Policy rule: { "id": ..., "description": ..., "conditions": [...], "action": ... }
+          - Executable rule: { "name": ..., "code": "...", "weight": ..., "tags": [...] }
+    
+        Conditions are treated as regex patterns. The generated rule will scan the knowledge
+        base (values concatenated as text) and if any pattern matches, it will set the
+        inference fact 'policy_<id>' with confidence 1.0.
+    
+        Args:
+            policy_rule: Dict with at least 'id' and 'action'; 'conditions' optional.
+    
+        Returns:
+            Dict suitable for RuleEngine.add_rule(), or None if translation fails.
+        """
+        if not isinstance(policy_rule, Mapping):
+            logger.warning("Invalid policy_rule for translation: not a mapping.")
+            return None
+    
+        # Extract required fields
+        rule_id = str(policy_rule.get("id", "")).strip()
+        action = str(policy_rule.get("action", "")).strip()
+        if not rule_id:
+            logger.warning("Policy rule missing 'id' – cannot translate.")
+            return None
+        if not action:
+            logger.warning(f"Policy rule '{rule_id}' missing 'action' – cannot translate.")
+            return None
+    
+        description = str(policy_rule.get("description", rule_id)).strip()
+    
+        # Normalise conditions to a list of strings (patterns)
+        conditions = policy_rule.get("conditions", [])
+        if not isinstance(conditions, list):
+            conditions = [conditions]
+        patterns = [str(c).strip() for c in conditions if c]
+    
+        # Generate Python code for the rule
+        # The code must define a function body that populates the `inferred` dict.
+        code_lines = []
+        code_lines.append("import re")
+        code_lines.append("def rule_body(kb):")
+        code_lines.append("    # Concatenate all values in knowledge base into a single text")
+        code_lines.append("    text = ' '.join(str(v) for v in kb.values())")
+        if patterns:
+            code_lines.append("    patterns = [")
+            for p in patterns:
+                # Escape single quotes in pattern to avoid syntax errors
+                escaped_p = p.replace("'", "\\'")
+                code_lines.append(f"        r'{escaped_p}',")
+            code_lines.append("    ]")
+            code_lines.append("    for pattern in patterns:")
+            code_lines.append("        if re.search(pattern, text, re.IGNORECASE):")
+            code_lines.append(f"            inferred['policy_{rule_id}'] = 1.0")
+            code_lines.append("            return")
+            # If no pattern matches, no inference is added.
+        else:
+            # No conditions – always fire (still requires action, but we treat as unconditional)
+            code_lines.append("    # No conditions – always trigger")
+            code_lines.append(f"    inferred['policy_{rule_id}'] = 1.0")
+        code_lines.append("")
+        code = "\n".join(code_lines)
+    
+        # Build executable rule metadata
+        weight = float(policy_rule.get("weight", 1.0))
+        # Enforce positive weight
+        if weight <= 0:
+            weight = 1.0
+    
+        tags = list(policy_rule.get("tags", []))
+        # Ensure 'policy' tag is present for identification
+        if "policy" not in tags:
+            tags.append("policy")
+        if "governance" not in tags:
+            tags.append("governance")
+    
+        executable_rule = {
+            "name": f"policy_{rule_id}",
+            "code": code,
+            "weight": weight,
+            "tags": tags,
+            "meta": {
+                "source": "translated_from_policy",
+                "original_id": rule_id,
+                "description": description,
+                "original_action": action,
+            }
+        }
+    
+        # Log translation and record audit event
+        logger.info(f"Translated policy rule '{rule_id}' to executable rule.")
+        self.audit_history.append({
+            "timestamp": time.time(),
+            "type": "policy_translation",
+            "rule_id": rule_id,
+            "translation_status": "success",
+        })
+    
+        return executable_rule
+
     def _check_agent_health(self):
         """Real-time health checks against optional shared memory implementations."""
         if not self.knowledge_agent or not hasattr(self.knowledge_agent, "name"):
@@ -1065,19 +1180,14 @@ class Governor:
         for violation_item in violations:
             if isinstance(violation_item, dict):
                 self.audit_history.append(violation_item)
-                logger.warning(
-                    "External violation recorded by Governor: %s - %s",
-                    violation_item.get("type", "Unknown Type"),
-                    violation_item.get("entry", ""),
-                )
+                logger.warning("External violation recorded by Governor: %s - %s",
+                               violation_item.get("type", "Unknown Type"), violation_item.get("entry", ""))
             else:
                 logger.warning(f"Attempted to record non-dict violation: {violation_item}")
 
     def handle_emergency_alert(self, alert_report: Dict):
         """Handles an emergency alert."""
-        logger.critical(
-            f"EMERGENCY ALERT RECEIVED BY GOVERNOR: {alert_report.get('trigger')}"
-        )
+        logger.critical(f"EMERGENCY ALERT RECEIVED BY GOVERNOR: {alert_report.get('trigger')}")
         self.audit_history.append(
             {
                 "timestamp": time.time(),
@@ -1126,6 +1236,24 @@ if __name__ == "__main__":
     format_type = "json"
     text = "I love the way you talk! SLAI is the future of decentralized Agentic AI"
     auditor = Governor()
+    rule_engine = RuleEngine()
+    
+    policy_rule = {
+        "id": "ethics_check_1",
+        "description": "Flag content containing forbidden terms",
+        "conditions": ["violence", "hate speech"],
+        "action": "log violation"
+    }
+    
+    executable = auditor.translate_policy_to_executable(policy_rule)
+    if executable:
+        rule_engine.add_rule(
+            name=executable["name"],
+            rule_code=executable["code"],
+            weight=executable["weight"],
+            tags=executable["tags"],
+            metadata=executable["meta"]
+        )
 
     printer.status("Auditor", auditor, "success")
     printer.status("Detector", auditor._get_bias_detector(), "success")

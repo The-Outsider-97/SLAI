@@ -1,3 +1,4 @@
+from .logger import LoggingSettings, configure_logging, get_logger, shutdown_logging
 from .observability import (
     LogGovernancePolicy,
     MetricsAlertThresholds,
@@ -8,10 +9,14 @@ from .observability import (
 )
 
 __all__ = [
+    "LoggingSettings",
     "LogGovernancePolicy",
     "MetricsAlertThresholds",
     "MetricsSnapshot",
     "PIIRedactingFormatter",
     "ServiceMetrics",
     "StructuredLogger",
+    "configure_logging",
+    "get_logger",
+    "shutdown_logging",
 ]

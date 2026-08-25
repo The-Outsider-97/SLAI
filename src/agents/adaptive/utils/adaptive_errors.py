@@ -287,6 +287,17 @@ class EmptyRegistryError(RegistryStateError):
     default_code = "EMPTY_REGISTRY"
 
 
+class StateImportError(AdaptiveStateError):
+    """
+    Raised when importing a previously exported state dictionary fails.
+
+    This error is used when the structure, content, or types of a state
+    dictionary do not match what the component expects, or when a lower‑level
+    exception occurs during the import process.
+    """
+    default_code = "STATE_IMPORT_ERROR"
+
+
 # ---------------------------------------------------------------------------
 # Memory and replay errors
 # ---------------------------------------------------------------------------
@@ -727,6 +738,7 @@ __all__ = [
     "InvalidLifecycleStateError",
     "RegistryStateError",
     "EmptyRegistryError",
+    "StateImportError",
     # Memory
     "AdaptiveMemoryError",
     "ExperienceValidationError",

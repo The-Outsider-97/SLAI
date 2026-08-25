@@ -44,6 +44,13 @@ from .base.issue_handler import *
 from .base.lazy_agent import LazyAgent
 from .base.light_metric_store import LightMetricStore
 from .collaborative.shared_memory import SharedMemory
+from .runtime_contracts import (
+    AgentRuntimeIdentity,
+    RuntimeContractViolation,
+    RuntimeLifecycle,
+    RuntimeStatus,
+    build_runtime_scope_id,
+)
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("SLAI Base Agent")
@@ -53,6 +60,19 @@ torch = None
 nn = None
 TORCH_AVAILABLE: Optional[bool] = None
 TORCH_IMPORT_ERROR: Optional[BaseException] = None
+
+
+class _DegradedMetricStore:
+    """No-op telemetry fallback retained after metric-store initialization fails."""
+
+    def start_tracking(self, *_: Any, **__: Any) -> None:
+        return None
+
+    def stop_tracking(self, *_: Any, **__: Any) -> None:
+        return None
+
+    def record_value(self, *_: Any, **__: Any) -> None:
+        return None
 
 
 def _ensure_torch_imported() -> bool:
@@ -127,6 +147,13 @@ class BaseAgent(abc.ABC):
         self.name = self.__class__.__name__
         self.agent_id = f"{self.name}:{uuid.uuid4().hex[:12]}"
         self._lock = RLock()
+        self.runtime_identity = AgentRuntimeIdentity(
+            agent_type=self.name,
+            version=__version__,
+            instance_id=self.agent_id,
+            scope_id=build_runtime_scope_id(shared_memory=shared_memory, config=config),
+        )
+        self._runtime_status = RuntimeStatus()
 
         self.shared_memory = shared_memory if shared_memory is not None else SharedMemory()
         self.agent_factory = agent_factory
@@ -155,13 +182,93 @@ class BaseAgent(abc.ABC):
         self.retraining_thresholds: Dict[str, Any] = {}
 
         self.evaluation_log_dir = str(self.base_config.get("evaluation_log_dir", "evaluation_logs"))
-        Path(self.evaluation_log_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            Path(self.evaluation_log_dir).mkdir(parents=True, exist_ok=True)
+            self._mark_runtime_recovered("persistence", "evaluation_log.initialize")
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "evaluation_log.initialize", exc)
+            self.logger.warning("[%s] Evaluation-log persistence is degraded: %s", self.name, exc)
 
-        self.metric_store = LightMetricStore()
+        try:
+            self.metric_store = LightMetricStore()
+            self._mark_runtime_recovered("telemetry", "metric_store.initialize")
+        except Exception as exc:
+            self.metric_store = _DegradedMetricStore()
+            self._mark_runtime_degraded("telemetry", "metric_store.initialize", exc)
+            self.logger.warning("[%s] Metric-store telemetry is degraded: %s", self.name, exc)
         self.issue_handler = IssueHandler()
         self.register_default_known_issue_handlers()
         self._init_core_components()
         self._publish_lifecycle_event("initialized", {"agent_id": self.agent_id})
+        self._transition_runtime_lifecycle(RuntimeLifecycle.ACTIVE)
+
+    def bind_runtime_identity(self, identity: AgentRuntimeIdentity) -> None:
+        """Bind the exact factory definition/scope identity after construction."""
+        if not isinstance(identity, AgentRuntimeIdentity):
+            raise BaseStateError(
+                "runtime identity must be an AgentRuntimeIdentity instance.",
+                component=self.name,
+                details={"actual_type": type(identity).__name__},
+            )
+        if identity.instance_id != self.agent_id:
+            raise BaseStateError(
+                "Factory runtime identity does not match the constructed agent identity.",
+                component=self.name,
+                details={"agent_id": self.agent_id, "instance_id": identity.instance_id},
+            )
+        self.runtime_identity = identity
+
+    def transition_runtime_lifecycle(self, lifecycle: RuntimeLifecycle | str) -> str:
+        """Apply a validated lifecycle transition and return the resulting state."""
+        return self._transition_runtime_lifecycle(lifecycle).value
+
+    def _transition_runtime_lifecycle(self, lifecycle: RuntimeLifecycle | str) -> RuntimeLifecycle:
+        try:
+            return self._runtime_status.transition(lifecycle)
+        except (ValueError, RuntimeContractViolation) as exc:
+            raise BaseStateError(
+                "Invalid agent runtime lifecycle transition.",
+                component=self.name,
+                details={"current": self._runtime_status.lifecycle.value, "requested": str(lifecycle)},
+                cause=exc,
+            ) from exc
+
+    def _mark_runtime_degraded(
+        self,
+        channel: str,
+        operation: str,
+        error: BaseException | str,
+        *,
+        retryable: bool = True,
+    ) -> None:
+        self._runtime_status.mark_degraded(channel, operation, error, retryable=retryable)
+
+    def _mark_runtime_recovered(self, channel: str, operation: str) -> None:
+        self._runtime_status.mark_recovered(channel, operation)
+
+    def runtime_status(self) -> Dict[str, Any]:
+        """Return lifecycle, identity, and active degraded-channel state."""
+        payload = self._runtime_status.snapshot(self.runtime_identity)
+        payload["operational_state"] = self.operational_state
+        return payload
+
+    def _run_optional_runtime_operation(
+        self,
+        channel: str,
+        operation: str,
+        callback: Callable[[], Any],
+        *,
+        default: Any = None,
+    ) -> Any:
+        """Run a best-effort sink operation while preserving visible health state."""
+        try:
+            result = callback()
+        except Exception as exc:
+            self._mark_runtime_degraded(channel, operation, exc)
+            self.logger.warning("[%s] %s operation '%s' is degraded: %s", self.name, channel, operation, exc)
+            return default
+        self._mark_runtime_recovered(channel, operation)
+        return result
 
     def _load_base_config(self) -> None:
         self.defer_initialization = bool(self.base_config.get("defer_initialization", True))
@@ -276,12 +383,26 @@ class BaseAgent(abc.ABC):
 
     def execute(self, input_data: Any) -> Any:
         """Execute task data through the common production envelope."""
+        if self._runtime_status.lifecycle not in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
+            raise BaseStateError(
+                "Agent cannot execute outside an active runtime lifecycle.",
+                component=self.name,
+                details={"lifecycle": self._runtime_status.lifecycle.value},
+            )
         execution_id = uuid.uuid4().hex
         started_at = time.time()
         attempts = 0
         last_exception: Optional[BaseException] = None
         self.operational_state = "running"
-        self.metric_store.start_tracking("execute", "performance", metadata={"agent": self.name, "execution_id": execution_id})
+        self._run_optional_runtime_operation(
+            "telemetry",
+            "metric_store.start_tracking",
+            lambda: self.metric_store.start_tracking(
+                "execute",
+                "performance",
+                metadata={"agent": self.name, "execution_id": execution_id},
+            ),
+        )
 
         try:
             for attempt_index in range(self.max_task_retries + 1):
@@ -329,7 +450,11 @@ class BaseAgent(abc.ABC):
             self._publish_stats(success=False, attempts=attempts, error=error_info)
             return failure
         finally:
-            self.metric_store.stop_tracking("execute", "performance")
+            self._run_optional_runtime_operation(
+                "telemetry",
+                "metric_store.stop_tracking",
+                lambda: self.metric_store.stop_tracking("execute", "performance"),
+            )
             self.operational_state = "idle"
 
     def _execute_once(self, input_data: Any) -> Any:
@@ -388,20 +513,26 @@ class BaseAgent(abc.ABC):
         if not self.enable_shared_memory_audit:
             return
         error_key = f"{self.shared_memory_error_key_prefix}:{self.name}"
-        try:
+
+        def persist_error() -> None:
             errors = self.shared_memory.get(error_key) or []
             errors.append(dict(error_entry))
             self.shared_memory.set(error_key, errors[-self.max_error_log_size:])
-        except Exception as exc:
-            self.logger.warning("[%s] Failed to write error audit to shared memory: %s", self.name, exc)
+
+        self._run_optional_runtime_operation("persistence", "shared_memory.error_audit", persist_error)
 
     def _check_and_log_similar_errors(self, new_error_info: Mapping[str, Any]) -> bool:
         if not self.enable_shared_memory_audit:
             return False
         error_key = f"{self.shared_memory_error_key_prefix}:{self.name}"
-        try:
-            history = self.shared_memory.get(error_key) or []
-        except Exception:
+        marker = object()
+        history = self._run_optional_runtime_operation(
+            "persistence",
+            "shared_memory.error_history",
+            lambda: self.shared_memory.get(error_key) or [],
+            default=marker,
+        )
+        if history is marker:
             return False
         new_type = str(new_error_info.get("error_type", ""))
         new_message = str(new_error_info.get("error_message", ""))
@@ -452,7 +583,7 @@ class BaseAgent(abc.ABC):
     def alternative_execute(self, task_data: Any, original_error: Optional[BaseException] = None) -> Any:
         if hasattr(self, "replan") and callable(getattr(self, "replan")) and self.current_goal:
             with contextlib.suppress(Exception):
-                new_plan = self.replan(self.current_goal)
+                new_plan = self.replan(self.current_goal)  # pyright: ignore[reportAttributeAccessIssue]
                 if new_plan:
                     return self.execute_plan(new_plan, goal=self.current_goal)
         sanitized_input = self.sanitize_input(task_data)
@@ -688,8 +819,15 @@ class BaseAgent(abc.ABC):
             if not isinstance(value, (int, float)):
                 continue
             self.performance_metrics[str(key)].append(float(value))
-            with contextlib.suppress(Exception):
-                self.metric_store.record_value(str(key), float(value), category="performance")
+            self._run_optional_runtime_operation(
+                "telemetry",
+                "metric_store.record_value",
+                lambda metric_key=str(key), metric_value=float(value): self.metric_store.record_value(
+                    metric_key,
+                    metric_value,
+                    category="performance",
+                ),
+            )
         self.log_evaluation_result(dict(metrics))
         for metric_key, current_value in metrics.items():
             threshold_info = self.retraining_thresholds.get(metric_key)
@@ -708,11 +846,13 @@ class BaseAgent(abc.ABC):
     def log_evaluation_result(self, metrics: Mapping[str, Any]) -> None:
         log_entry = {"timestamp": time.time(), "agent_name": self.name, "metrics": dict(metrics)}
         path = Path(self.evaluation_log_dir) / f"{self.name}_eval.jsonl"
-        try:
+
+        def persist_evaluation() -> None:
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(log_entry, default=str) + "\n")
-        except Exception as exc:
-            self.logger.warning("[%s] Failed to write evaluation log: %s", self.name, exc)
+            self._mark_runtime_recovered("persistence", "evaluation_log.initialize")
+
+        self._run_optional_runtime_operation("persistence", "evaluation_log.write", persist_evaluation)
 
     def _publish_stats(self, *, success: bool, attempts: int, result: Any = None, error: Any = None, recovered_by: Optional[str] = None, execution_id: Optional[str] = None) -> None:
         if not self.enable_shared_memory_audit:
@@ -726,18 +866,24 @@ class BaseAgent(abc.ABC):
             "result_summary": self._preview(result) if result is not None else None,
             "error": error,
         }
-        with contextlib.suppress(Exception):
-            self.shared_memory.set(f"{self.shared_memory_stats_key_prefix}:{self.name}", payload)
+        self._run_optional_runtime_operation(
+            "telemetry",
+            "shared_memory.publish_stats",
+            lambda: self.shared_memory.set(f"{self.shared_memory_stats_key_prefix}:{self.name}", payload),
+        )
 
     def _publish_lifecycle_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
         if not self.enable_shared_memory_audit:
             return
         key = f"{self.shared_memory_event_key_prefix}:{self.name}"
         event = {"event_type": event_type, "timestamp": time.time(), "payload": dict(payload)}
-        with contextlib.suppress(Exception):
+
+        def publish_event() -> None:
             events = self.shared_memory.get(key) or []
             events.append(event)
             self.shared_memory.set(key, events[-self.execution_history_limit:])
+
+        self._run_optional_runtime_operation("telemetry", "shared_memory.publish_lifecycle", publish_event)
 
     def _warm_start_if_available(self) -> bool:
         warm_start_key = f"{self.warm_start_key_prefix}:{self.name}"
@@ -792,10 +938,13 @@ class BaseAgent(abc.ABC):
                 super().__init__()
                 self.input_dim = input_dim
                 self.output_dim = output_dim
+                assert nn is not None
+                assert torch is not None
                 self.weights = nn.Parameter(torch.randn(input_dim, output_dim) * torch.sqrt(torch.tensor(1.0 / input_dim)))
                 self.bias = nn.Parameter(torch.zeros(output_dim))
 
             def predict(self, state: Any) -> int:
+                assert torch is not None
                 state_vec = torch.tensor(state, dtype=torch.float32).flatten()
                 if state_vec.shape[0] != self.input_dim:
                     raise ValueError(f"Input dimension {state_vec.shape[0]} does not match {self.input_dim}.")
@@ -808,6 +957,7 @@ class BaseAgent(abc.ABC):
         if not _ensure_torch_imported():
             return {"status": "skipped", "reason": "torch_unavailable", "error": str(TORCH_IMPORT_ERROR)}
         projection = getattr(self, "projection", None)
+        assert torch is not None
         if projection is None or not isinstance(projection, torch.Tensor):
             return {"status": "skipped", "reason": "projection_tensor_missing"}
         rewards = torch.tensor(list(reward_scores), dtype=torch.float32, device=projection.device)

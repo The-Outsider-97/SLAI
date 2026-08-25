@@ -1,6 +1,4 @@
 import gzip
-import hashlib
-import json
 import os
 import pickle
 import shelve
@@ -9,14 +7,28 @@ import time
 import lz4.frame
 
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from .utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from .utils.execution_error import *
+from .utils.execution_helpers import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Execution Memory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
+MEMORY_KEY = "__memory_cache"
+
+_execution_memory_instance: Optional["ExecutionMemory"] = None
+
+
+def get_execution_memory() -> "ExecutionMemory":    
+    """Singleton accessor for the global ExecutionMemory instance."""
+    global _execution_memory_instance
+    if _execution_memory_instance is None:
+        _execution_memory_instance = ExecutionMemory()
+    return _execution_memory_instance
 
 class ExecutionMemory:
     """
@@ -44,7 +56,7 @@ class ExecutionMemory:
 
         self.cache_dir = self._ensure_dir(self.cache_dir)
         self.checkpoint_dir = self._ensure_dir(self.checkpoint_dir)
-        self.cookie_jar_path = os.path.abspath(self.cookie_jar_path)
+        self.cookie_jar_path = os.path.abspath(self.cookie_jar_path) if self.cookie_jar_path else ""
 
         self.memory_cache: Dict[str, Dict[str, Any]] = {}
         self.disk_cache = self._init_shelve(os.path.join(self.cache_dir, "agent_cache.db"))
@@ -79,9 +91,9 @@ class ExecutionMemory:
         """Load, validate, and normalize configuration values."""
         memory_config = self.memory_config
 
-        self.cache_dir = memory_config.get("cache_dir")
-        self.checkpoint_dir = memory_config.get("checkpoint_dir")
-        self.cookie_jar_path = memory_config.get("cookie_jar")
+        self.cache_dir = memory_config.get("cache_dir") or ".cache"
+        self.checkpoint_dir = memory_config.get("checkpoint_dir") or ".checkpoints"
+        self.cookie_jar_path = memory_config.get("cookie_jar") or ""
 
         self.cache_ttl = max(1, int(memory_config.get("cache_ttl", 3600)))
         self.max_memory_cache = max(1, int(memory_config.get("max_memory_cache", 500)))
@@ -156,7 +168,7 @@ class ExecutionMemory:
         os.makedirs(full_path, exist_ok=True)
         return full_path
 
-    def _init_shelve(self, path: str) -> shelve.DbfilenameShelf:
+    def _init_shelve(self, path: str) -> shelve.Shelf[Any]:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         return shelve.open(path, flag="c", protocol=pickle.HIGHEST_PROTOCOL, writeback=False)
 
@@ -224,7 +236,7 @@ class ExecutionMemory:
         if not params:
             return ""
         try:
-            return json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
+            return stable_json_dumps(params)
         except TypeError:
             # Fallback for nested non-JSON-serializable values.
             return urlencode(sorted((str(k), repr(v)) for k, v in params.items()))
@@ -236,7 +248,7 @@ class ExecutionMemory:
         namespace: str = "default",
     ) -> str:
         base = f"{namespace}::{url}::{self._normalize_cache_params(params)}"
-        digest = hashlib.blake2b(base.encode("utf-8"), digest_size=16).hexdigest()
+        digest = stable_digest(base, algorithm="blake2b", digest_size=16)
         return f"cache::{namespace}::{digest}"
 
     def _is_entry_expired(self, entry: Dict[str, Any], now: Optional[float] = None) -> bool:
@@ -738,37 +750,56 @@ class ExecutionMemory:
             self.checkpoint_store[self._TAG_INDEX_KEY] = tag_index
             return True
 
-    def prune_checkpoints(
-        self,
-        max_entries: Optional[int] = None,
-        max_age: Optional[int] = None,
-    ) -> Dict[str, int]:
-        """Prune checkpoints by age and/or total count."""
+    def prune_checkpoints(self, max_entries: Optional[int] = None, max_age: Optional[int] = None) -> Dict[str, int]:
         with self.lock:
             self._ensure_open()
             max_entries = max_entries or self.max_checkpoints
             deleted = 0
             now = time.time()
-
-            checkpoint_ids = [
-                k for k in self.checkpoint_store.keys() if isinstance(k, str) and k.startswith("chk_")
-            ]
-            checkpoint_ids.sort(
-                key=lambda cid: self.checkpoint_store[cid].get("created", 0), reverse=True
-            )
-
+    
+            # Collect checkpoint IDs safely
+            checkpoint_ids = []
+            for key in list(self.checkpoint_store.keys()):
+                if not isinstance(key, str) or not key.startswith("chk_"):
+                    continue
+                checkpoint_ids.append(key)
+    
+            # Sort safely – skip corrupted entries
+            valid_checkpoints = []
+            for cid in checkpoint_ids:
+                try:
+                    entry = self.checkpoint_store[cid]
+                    created = entry.get("created", 0)
+                    valid_checkpoints.append((cid, created))
+                except Exception as exc:
+                    logger.warning("Corrupt checkpoint %s removed during prune: %s", cid, exc)
+                    try:
+                        del self.checkpoint_store[cid]
+                    except Exception:
+                        pass
+                    deleted += 1
+    
+            # Sort by created (newest first)
+            valid_checkpoints.sort(key=lambda pair: pair[1], reverse=True)
+    
+            # Apply max_age pruning
             if max_age is not None:
-                for cid in list(checkpoint_ids):
-                    if (now - self.checkpoint_store[cid].get("created", now)) > max_age:
-                        if self.delete_checkpoint(cid):
-                            deleted += 1
-                        checkpoint_ids.remove(cid)
-
-            if len(checkpoint_ids) > max_entries:
-                for cid in checkpoint_ids[max_entries:]:
+                to_remove = []
+                for cid, created in valid_checkpoints:
+                    if (now - created) > max_age:
+                        to_remove.append(cid)
+                for cid in to_remove:
                     if self.delete_checkpoint(cid):
                         deleted += 1
-
+                # Rebuild valid list after deletion
+                valid_checkpoints = [pair for pair in valid_checkpoints if pair[0] not in to_remove]
+    
+            # Apply max_entries pruning
+            if len(valid_checkpoints) > max_entries:
+                for cid, _ in valid_checkpoints[max_entries:]:
+                    if self.delete_checkpoint(cid):
+                        deleted += 1
+    
             return {"deleted": deleted, "remaining": len(self.find_checkpoints())}
 
     # ------------------------------------------------------------------
@@ -776,7 +807,7 @@ class ExecutionMemory:
     # ------------------------------------------------------------------
     def _load_cookies(self) -> Dict[str, Any]:
         try:
-            if os.path.exists(self.cookie_jar_path):
+            if self.cookie_jar_path and os.path.exists(self.cookie_jar_path):
                 with open(self.cookie_jar_path, "rb") as fh:
                     cookies = pickle.load(fh)
                 if isinstance(cookies, dict):
@@ -789,6 +820,8 @@ class ExecutionMemory:
 
     def save_cookies(self) -> None:
         with self.lock:
+            if not self.cookie_jar_path:
+                return
             payload = self._serialize(self.cookies)
             self._atomic_write_bytes(self.cookie_jar_path, payload)
             self.cookies_saved += 1

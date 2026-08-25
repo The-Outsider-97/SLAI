@@ -198,6 +198,15 @@ class RankedAgentRecord:
         return (self.agent_name, self.agent_meta, self.score)
 
     def to_dict(self, *, include_agent_meta: bool = True, redact: bool = True) -> Dict[str, Any]:
+        """
+        Return a diagnostic, serialization-safe representation.
+    
+        This method MUST NOT be used as the source of runtime execution metadata.
+        ``agent_meta`` is intentionally converted through ``json_safe`` and may
+        therefore no longer contain executable object references.
+    
+        Use ``to_tuple()`` when passing ranked agents to TaskRouter.
+        """
         payload: Dict[str, Any] = {
             "rank": self.rank,
             "agent_name": self.agent_name,
@@ -205,9 +214,12 @@ class RankedAgentRecord:
             "selected": self.selected,
             "breakdown": self.breakdown.to_dict(redact=redact),
         }
+    
         if include_agent_meta:
             payload["agent_meta"] = json_safe(self.agent_meta)
+    
         payload = prune_none(payload, drop_empty=True)
+    
         return redact_mapping(payload) if redact else payload
 
 
@@ -396,7 +408,20 @@ class BaseRouterStrategy:
         stats: Dict[str, Dict[str, Any]],
         task_data: Dict[str, Any],
     ) -> List[Tuple[str, Dict[str, Any], float]]:
-        raise NotImplementedError
+        """
+        Rank candidate agents while preserving their live runtime metadata.
+    
+        This method is the operational ranking boundary consumed by TaskRouter.
+        Agent metadata returned from here MUST retain live object references,
+        particularly ``meta["instance"]``. JSON-safe conversion belongs only to
+        diagnostic/reporting paths.
+        """
+        ranked_records, _ = self._rank_records_with_report(
+            agents,
+            stats,
+            task_data,
+        )
+        return [record.to_tuple() for record in ranked_records]
 
     @property
     def last_report(self) -> Optional[RouterRankingReport]:
@@ -419,29 +444,78 @@ class BaseRouterStrategy:
         stats: Optional[Mapping[str, Any]],
         task_data: Optional[Mapping[str, Any]],
     ) -> RouterRankingReport:
-        """Rank agents and return detailed scoring records."""
-
-        started_ms = monotonic_ms()
-        normalized_agents = self._filter_candidates(
-            normalize_agents_for_ranking(agents),
-            normalize_stats_for_ranking(stats),
-            task_data or {},
+        """
+        Rank candidate agents and return a JSON-safe diagnostic report.
+    
+        Unlike ``rank_agents()``, this method intentionally serializes agent
+        metadata for inspection, logging, telemetry, and explanation APIs.
+        """
+        _, report = self._rank_records_with_report(
+            agents,
+            stats,
+            task_data,
         )
+        return report
+
+    def _rank_records_with_report(
+        self,
+        agents: Dict[str, Dict[str, Any]],
+        stats: Optional[Mapping[str, Any]],
+        task_data: Optional[Mapping[str, Any]],
+    ) -> Tuple[List[RankedAgentRecord], RouterRankingReport]:
+        """
+        Execute one canonical ranking pass.
+    
+        Returns both:
+          1. live ``RankedAgentRecord`` objects for runtime execution; and
+          2. a JSON-safe ``RouterRankingReport`` for diagnostics.
+    
+        Keeping these outputs separate prevents serialization from destroying
+        executable agent-instance references.
+        """
+        started_ms = monotonic_ms()
+    
         normalized_stats = normalize_stats_for_ranking(stats)
-        task = ensure_mapping(task_data, field_name="task_data", allow_none=True)
-        records = self._score_records(normalized_agents, normalized_stats, task)
-        ranked = self._assign_ranks(records)
+        normalized_task = ensure_mapping(
+            task_data,
+            field_name="task_data",
+            allow_none=True,
+        )
+    
+        normalized_agents = normalize_agents_for_ranking(agents)
+        filtered_agents = self._filter_candidates(
+            normalized_agents,
+            normalized_stats,
+            normalized_task,
+        )
+    
+        records = self._score_records(
+            filtered_agents,
+            normalized_stats,
+            normalized_task,
+        )
+        ranked_records = self._assign_ranks(records)
+    
         report = RouterRankingReport(
             strategy=self.name,
-            task_type=extract_task_type(task),
-            ranked_agents=tuple(record.to_dict(include_agent_meta=True) for record in ranked),
+            task_type=extract_task_type(normalized_task),
+            ranked_agents=tuple(
+                record.to_dict(
+                    include_agent_meta=True,
+                    redact=True,
+                )
+                for record in ranked_records
+            ),
             candidate_count=len(agents or {}),
-            returned_count=len(ranked),
+            returned_count=len(ranked_records),
             duration_ms=elapsed_ms(started_ms),
-            metadata={"strategy_config": self.strategy_config.to_dict()},
+            metadata={
+                "strategy_config": self.strategy_config.to_dict(),
+            },
         )
+    
         self._last_report = report
-        return report
+        return ranked_records, report
 
     def _score_records(self, agents: AgentMap, stats: StatsMap, task_data: Dict[str, Any]) -> List[RankedAgentRecord]:
         records: List[RankedAgentRecord] = []
@@ -521,15 +595,6 @@ class WeightedRouterStrategy(BaseRouterStrategy):
         self.weights = weights or RouterScoreWeights.from_config(self.config_source)
         logger.info("Weighted Router Strategy initialized")
 
-    def rank_agents(
-        self,
-        agents: Dict[str, Dict[str, Any]],
-        stats: Dict[str, Dict[str, Any]],
-        task_data: Dict[str, Any],
-    ) -> List[Tuple[str, Dict[str, Any], float]]:
-        report = self.rank_agents_detailed(agents, stats, task_data)
-        return [(row["agent_name"], row["agent_meta"], row["score"]) for row in report.ranked_agents]
-
     def score_agent(self, agent_name: str, agent_meta: Mapping[str, Any], agent_stats: Mapping[str, Any], task_data: Mapping[str, Any]) -> RouterScoreBreakdown:
         task_type = extract_task_type(task_data)
         required_capabilities = extract_required_capabilities(task_data)
@@ -600,15 +665,6 @@ class LeastLoadedRouterStrategy(BaseRouterStrategy):
         super().__init__(config=config)
         logger.info("Least Loaded Router Strategy initialized")
 
-    def rank_agents(
-        self,
-        agents: Dict[str, Dict[str, Any]],
-        stats: Dict[str, Dict[str, Any]],
-        task_data: Dict[str, Any],
-    ) -> List[Tuple[str, Dict[str, Any], float]]:
-        report = self.rank_agents_detailed(agents, stats, task_data)
-        return [(row["agent_name"], row["agent_meta"], row["score"]) for row in report.ranked_agents]
-
     def score_agent(self, agent_name: str, agent_meta: Mapping[str, Any], agent_stats: Mapping[str, Any], task_data: Mapping[str, Any]) -> RouterScoreBreakdown:
         active_tasks = coerce_float(agent_stats.get("active_tasks"), default=0.0, minimum=0.0)
         capability_score = _capability_match_score(extract_agent_capabilities(agent_meta), extract_required_capabilities(task_data))
@@ -635,15 +691,6 @@ class CapabilityMatchRouterStrategy(BaseRouterStrategy):
     def __init__(self, config: Optional[Mapping[str, Any]] = None):
         super().__init__(config=config)
         logger.info("Capability Match Router Strategy initialized")
-
-    def rank_agents(
-        self,
-        agents: Dict[str, Dict[str, Any]],
-        stats: Dict[str, Dict[str, Any]],
-        task_data: Dict[str, Any],
-    ) -> List[Tuple[str, Dict[str, Any], float]]:
-        report = self.rank_agents_detailed(agents, stats, task_data)
-        return [(row["agent_name"], row["agent_meta"], row["score"]) for row in report.ranked_agents]
 
     def score_agent(self, agent_name: str, agent_meta: Mapping[str, Any], agent_stats: Mapping[str, Any], task_data: Mapping[str, Any]) -> RouterScoreBreakdown:
         caps = extract_agent_capabilities(agent_meta)
@@ -686,21 +733,47 @@ class RoundRobinRouterStrategy(BaseRouterStrategy):
             return [(row["agent_name"], row["agent_meta"], row["score"]) for row in report.ranked_agents]
 
     def _score_records(self, agents: AgentMap, stats: StatsMap, task_data: Dict[str, Any]) -> List[RankedAgentRecord]:
+        """
+        Produce deterministic round-robin ranking records.
+    
+        Cursor mutation is guarded locally so both operational ranking and
+        diagnostic/explanation ranking remain thread-safe.
+        """
         names = sorted(agents.keys(), key=str.lower)
         if not names:
             return []
+    
         route_key = extract_task_type(task_data) or "default"
-        cursor = self._cursors[route_key] % len(names)
-        ordered_names = names[cursor:] + names[:cursor]
-        self._cursors[route_key] = (cursor + 1) % len(names)
+    
+        with self._lock:
+            cursor = self._cursors[route_key] % len(names)
+            ordered_names = names[cursor:] + names[:cursor]
+            self._cursors[route_key] = (cursor + 1) % len(names)
+    
         records: List[RankedAgentRecord] = []
         count = len(ordered_names)
+    
         for index, name in enumerate(ordered_names):
             meta = agents[name]
             row = stats.get(name, {})
-            capability_score = _capability_match_score(extract_agent_capabilities(meta), extract_required_capabilities(task_data))
-            availability_penalty = self.strategy_config.unavailable_score_penalty if agent_is_marked_unavailable(meta, row) else 0.0
-            score = (count - index) + capability_score - availability_penalty
+    
+            capability_score = _capability_match_score(
+                extract_agent_capabilities(meta),
+                extract_required_capabilities(task_data),
+            )
+    
+            availability_penalty = (
+                self.strategy_config.unavailable_score_penalty
+                if agent_is_marked_unavailable(meta, row)
+                else 0.0
+            )
+    
+            score = (
+                (count - index)
+                + capability_score
+                - availability_penalty
+            )
+    
             breakdown = RouterScoreBreakdown(
                 agent_name=name,
                 task_type=extract_task_type(task_data),
@@ -709,10 +782,23 @@ class RoundRobinRouterStrategy(BaseRouterStrategy):
                 active_tasks=coerce_float(row.get("active_tasks"), default=0.0, minimum=0.0),
                 capability_score=capability_score,
                 availability_penalty=availability_penalty,
-                reason="round-robin order with capability and availability adjustment",
+                reason=(
+                    "round-robin order with capability and "
+                    "availability adjustment"
+                ),
                 metadata={"cursor": cursor, "route_key": route_key},
             )
-            records.append(RankedAgentRecord(rank=0, agent_name=name, score=breakdown.score, agent_meta=meta, breakdown=breakdown))
+    
+            records.append(
+                RankedAgentRecord(
+                    rank=0,
+                    agent_name=name,
+                    score=breakdown.score,
+                    agent_meta=meta,
+                    breakdown=breakdown,
+                )
+            )
+    
         return records
 
 
@@ -872,6 +958,33 @@ def _register_default_strategies() -> None:
 
 
 _register_default_strategies()
+
+
+__all__ = [
+    "RouterStrategyName",
+    "RouterScoreWeights",
+    "RouterStrategyConfig",
+    "RouterScoreBreakdown",
+    "RankedAgentRecord",
+    "RouterRankingReport",
+    "BaseRouterStrategy",
+    "WeightedRouterStrategy",
+    "LeastLoadedRouterStrategy",
+    "CapabilityMatchRouterStrategy",
+    "RoundRobinRouterStrategy",
+    "RandomWeightedRouterStrategy",
+    "normalize_strategy_name",
+    "get_task_routing_config",
+    "extract_task_type",
+    "extract_required_capabilities",
+    "extract_preferred_agents",
+    "normalize_agents_for_ranking",
+    "normalize_stats_for_ranking",
+    "agent_is_marked_unavailable",
+    "register_router_strategy",
+    "list_router_strategies",
+    "build_router_strategy",
+]
 
 
 if __name__ == "__main__":

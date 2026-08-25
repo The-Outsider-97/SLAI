@@ -6,36 +6,34 @@ import os, sys
 import time
 import math
 import queue
-import psutil
 import hashlib
 import zlib
 import statistics
 import atexit
 import shutil
 import pprint
+import threading
 if os.name == 'nt':
     import msvcrt
 else:
     msvcrt = None
 import uuid
-import pynvml
-
 from logging.handlers import RotatingFileHandler
 from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
+
+from .standards import LogDomain, default_log_path
 if TYPE_CHECKING:
-    from src.utils.system_optimizer import SystemOptimizer # pyright: ignore[reportMissingImports]
+    from ..monitoring.system_optimizer import SystemOptimizer
 
-sys.stdout.isatty = lambda: True
-
-if os.name == 'nt':
-    os.system("")
-
-
-log_dir = "logs"
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir, exist_ok=True)
-    os.chmod(log_dir, 0o755)  # Read/write for owner, read for others
+try:
+    import colorama # type: ignore
+    colorama.just_fix_windows_console()  # enables ANSI on Windows without changing stdout
+    _COLOR_SUPPORT = True
+except ImportError:
+    _COLOR_SUPPORT = sys.stdout.isatty() and (os.name != 'nt' or os.getenv('TERM') or os.getenv('ANSICON'))
 
 # ========== Status Tags ==========
 INIT       = "[INIT]"
@@ -252,8 +250,33 @@ STYLES = {
 # Shared logging queue
 log_queue = queue.Queue()
 
-# Global flag to track initialization
+# Logging is configured explicitly by application entry points. Merely importing
+# this module or declaring a module logger must not touch files, streams, or the
+# process-wide root logger.
 _logger_initialized = False
+_logging_lock = threading.RLock()
+_atexit_registered = False
+_HANDLER_MARKER = "_slai_managed_handler"
+
+
+@dataclass(frozen=True)
+class LoggingSettings:
+    level: int = logging.INFO
+    console: bool = True
+    file: bool = True
+    queue: bool = True
+    log_path: Path = field(default_factory=lambda: default_log_path(LogDomain.RUNTIME, "app.log"))
+    max_bytes: int = 1_000_000
+    backup_count: int = 5
+
+
+def _mark_managed(handler: logging.Handler) -> logging.Handler:
+    setattr(handler, _HANDLER_MARKER, True)
+    return handler
+
+
+def _managed_handlers(logger: logging.Logger) -> list[logging.Handler]:
+    return [handler for handler in logger.handlers if getattr(handler, _HANDLER_MARKER, False)]
 
 class ColorFormatter(logging.Formatter):
     """Formatter that adds color to the level name only."""
@@ -307,45 +330,81 @@ class QueueLogHandler(logging.Handler):
         self.batch.clear()
         self.last_flush = time.time()
 
+    def flush(self) -> None:
+        """Publish a partial batch during explicit logging shutdown."""
+
+        self.acquire()
+        try:
+            if self.batch:
+                self._flush_batch()
+        finally:
+            self.release()
+        super().flush()
+
 def get_logger(name: str) -> logging.Logger:
-    global _logger_initialized, log_queue
-    logger = logging.getLogger(name)
-    
-    if not _logger_initialized:
-        _logger_initialized = True
-        formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
+    """Return a named logger without configuring global logging."""
+    return logging.getLogger(name)
 
-        # Initialize root logger first
+
+def configure_logging(settings: LoggingSettings | None = None, *, force: bool = False) -> logging.Logger:
+    """Configure SLAI-owned root handlers explicitly and idempotently.
+
+    Existing handlers owned by embedding applications, test runners, or other
+    libraries are preserved. ``force=True`` replaces only SLAI-managed handlers.
+    """
+
+    def _initialize_console_support() -> None:
+        try:
+            import colorama
+        except ImportError:
+            return
+        colorama.just_fix_windows_console()
+
+    global _logger_initialized, _atexit_registered
+    settings = settings or LoggingSettings()
+
+    with _logging_lock:
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
+        if _logger_initialized and not force:
+            return root_logger
+        if force:
+            shutdown_logging()
 
-        # Remove any existing handlers
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
+        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+        root_logger.setLevel(settings.level)
 
-        # File handler (no colors)
-        file_handler = RotatingHandler(
-            'logs/app.log', 
-            maxBytes=1000000, 
-            backupCount=5, 
-            delay=True
-        )
-        file_handler.setFormatter(formatter)
-        file_handler.setLevel(logging.DEBUG)
-        root_logger.addHandler(file_handler)
+        if settings.file:
+            settings.log_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = _mark_managed(
+                RotatingHandler(
+                    str(settings.log_path),
+                    maxBytes=settings.max_bytes,
+                    backupCount=settings.backup_count,
+                    delay=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            )
+            file_handler.setFormatter(formatter)
+            file_handler.setLevel(logging.DEBUG)
+            root_logger.addHandler(file_handler)
 
-        # Console handler with colored level names
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_formatter = ColorFormatter('%(asctime)s | %(levelname)s | %(name)s | %(message)s')
-        console_handler.setFormatter(console_formatter)
-        root_logger.addHandler(console_handler)
+        if settings.console:
+            _initialize_console_support()
+            console_handler = _mark_managed(logging.StreamHandler(sys.stdout))
+            console_handler.setFormatter(ColorFormatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+            root_logger.addHandler(console_handler)
 
-        # Queue handler (no colors)
-        handler = QueueLogHandler(log_queue, batch_size=10, flush_interval=5)
-        handler.setFormatter(formatter)
-        root_logger.addHandler(handler)
+        if settings.queue:
+            queue_handler = _mark_managed(QueueLogHandler(log_queue, batch_size=10, flush_interval=5))
+            queue_handler.setFormatter(formatter)
+            root_logger.addHandler(queue_handler)
 
-    return logger
+        _logger_initialized = True
+        if not _atexit_registered:
+            atexit.register(shutdown_logging)
+            _atexit_registered = True
+        return root_logger
 
 def get_log_queue():
     return log_queue
@@ -356,16 +415,34 @@ def cleanup_logger(name):
     Useful before rollback or app shutdown to release file locks.
     """
     logger = logging.getLogger(name)
-    handlers = logger.handlers[:]
+    handlers = logger.handlers[:] if name is not None else _managed_handlers(logger)
     for handler in handlers:
-        handler.flush()
-        handler.close()
-        logger.removeHandler(handler)
+        try:
+            handler.flush()
+        except (OSError, ValueError):
+            # Console and test-capture streams may already be closed during
+            # interpreter shutdown. Cleanup must remain best effort.
+            pass
+        try:
+            handler.close()
+        except (OSError, ValueError):
+            pass
+        finally:
+            logger.removeHandler(handler)
 
-def exit_handler():
-    cleanup_logger(None)  # Cleanup root logger
+def shutdown_logging() -> None:
+    """Flush and close only handlers installed by :func:`configure_logging`."""
 
-atexit.register(exit_handler)
+    global _logger_initialized
+    with _logging_lock:
+        cleanup_logger(None)
+        _logger_initialized = False
+
+
+def exit_handler() -> None:
+    """Backward-compatible alias for explicit logging shutdown."""
+
+    shutdown_logging()
 
 class RotatingHandler(RotatingFileHandler):
     def __init__(self, *args, **kwargs):
@@ -503,29 +580,37 @@ class RotatingHandler(RotatingFileHandler):
 
 class ResourceLogger:
     def __init__(self, optimizer: SystemOptimizer):
+        import psutil  # type: ignore
+
         self.optimizer = optimizer
+        self._psutil = psutil
         self.cpu_history = deque(maxlen=60)  # 60 samples for 1-min window
         self.mem_history = deque(maxlen=60)
         self._gpu_initialized = False
+        self._pynvml = None
         self.throughput_window = deque(maxlen=100)
         
     def _initialize_gpu(self):
         try:
+            import pynvml  # type: ignore
+
             pynvml.nvmlInit()
+            self._pynvml = pynvml
             self._gpu_initialized = True
-        except:
-            pass
+        except Exception:
+            self._pynvml = None
 
     def _get_gpu_usage(self):
         if not self._gpu_initialized:
             self._initialize_gpu()
+        if not self._gpu_initialized or self._pynvml is None:
             return 0.0
             
         try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            handle = self._pynvml.nvmlDeviceGetHandleByIndex(0)
+            util = self._pynvml.nvmlDeviceGetUtilizationRates(handle)
             return util.gpu
-        except:
+        except Exception:
             return 0.0
     
     def collect_metrics(self) -> dict:
@@ -533,7 +618,7 @@ class ResourceLogger:
 
         metrics = {
             'cpu': self._exp_smoothed_cpu(),
-            'mem': psutil.virtual_memory().percent,
+            'mem': self._psutil.virtual_memory().percent,
             'gpu': self._get_gpu_usage(),
             'throughput': self._calc_throughput(),
             'entropy': self._log_entropy()
@@ -542,7 +627,7 @@ class ResourceLogger:
 
     def _exp_smoothed_cpu(self, alpha=0.7):
         # Exponential smoothing for noise reduction
-        current = psutil.cpu_percent()
+        current = self._psutil.cpu_percent()
         if not self.cpu_history:
             return current
         return alpha * current + (1-alpha) * self.cpu_history[-1]
@@ -564,7 +649,9 @@ class ResourceLogger:
 
     def _log_entropy(self):
         # Calculate information entropy of recent logs
-        log_contents = "\n".join(list(get_log_queue().queue)[-100:])
+        log_contents = "\n".join(str(item) for item in list(get_log_queue().queue)[-100:])
+        if not log_contents:
+            return 0.0
         prob = {}
         for c in log_contents:
             prob[c] = prob.get(c, 0) + 1/len(log_contents)
@@ -601,7 +688,6 @@ class AnomalyDetector:
         z_score = (latest_interval - self.mean) / self.std
         return abs(z_score) > self.sigma
 
-USE_ANSI = sys.stdout.isatty()
 class PrettyPrinter:
     @classmethod
     def pretty(cls, label: str, obj: Any, status: str = "info"):
@@ -611,7 +697,7 @@ class PrettyPrinter:
 
     @classmethod
     def _style(cls, text, *styles):
-        if not USE_ANSI:
+        if not cls._use_colors():
             return text
         codes = []
         for style in styles:
@@ -620,6 +706,23 @@ class PrettyPrinter:
             elif style in COLOR_CODES:
                 codes.append(COLOR_CODES[style])
         return f"{''.join(codes)}{text}{STYLES['reset']}"
+    
+    @classmethod
+    def _use_colors(cls):
+        # Cache the decision to avoid repeated checks
+        if not hasattr(cls, "_color_enabled"):
+            if os.name == 'nt':
+                # Try to enable ANSI support if possible
+                try:
+                    import colorama # type: ignore
+                    colorama.just_fix_windows_console()
+                    cls._color_enabled = True
+                except ImportError:
+                    # Fallback: check environment or just disable
+                    cls._color_enabled = bool(os.getenv('TERM') or os.getenv('ANSICON') or os.getenv('WT_SESSION'))
+            else:
+                cls._color_enabled = sys.stdout.isatty()
+        return cls._color_enabled
 
     @classmethod
     def table(cls, headers, rows, title=None):

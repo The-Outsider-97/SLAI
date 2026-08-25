@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 """
 Production-grade Safety Agent for the SLAI multi-agent runtime.
@@ -12,7 +12,6 @@ allow/review/block decision for incoming content or proposed actions.
 """
 
 import json
-import math
 import os
 import re
 import time
@@ -25,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .base_agent import BaseAgent
+from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .safety.secure_stpa import SecureSTPA
 from .safety.reward_model import RewardModel
@@ -198,6 +198,15 @@ class SafetyAgent(BaseAgent):
         self.safety_config = get_config_section("safety_agent")
         if config:
             self.safety_config = {**dict(self.safety_config or {}), **dict(config)}
+        assert_valid_config_contract(
+            global_config=self.config,
+            agent_key="safety_agent",
+            agent_config=self.safety_config,
+            logger=logger,
+            require_global_keys=False,
+            require_agent_section=False,
+            warn_unknown_global_keys=False,
+        )
         self._validate_configuration()
 
         self.audit_level = coerce_int(self._cfg("audit_level", 2), 2, minimum=0, maximum=5)
@@ -208,6 +217,7 @@ class SafetyAgent(BaseAgent):
         self.store_audit_events = coerce_bool(self._cfg("shared_memory.store_audit_events", True), True)
         self.assessment_history_limit = coerce_int(self._cfg("assessment_history_limit", 500), 500, minimum=10)
         self.audit_trail_limit = coerce_int(self._cfg("audit_trail_limit", 1000), 1000, minimum=50)
+        self.verbose_console = coerce_bool(self._cfg("verbose_console", False), False)
         self.risk_thresholds = dict(self._cfg("risk_thresholds", {}))
         self.aggregation_weights = dict(self._cfg("aggregation_weights", {}))
         self.component_timeouts = dict(self._cfg("component_timeouts", {}))
@@ -585,7 +595,8 @@ class SafetyAgent(BaseAgent):
         warnings: List[str] = []
         sanitized_text = input_text
 
-        printer.status("SAFETY", "Performing comprehensive safety assessment", "info")
+        if self.verbose_console:
+            printer.status("SAFETY", "Performing comprehensive safety assessment", "info")
 
         # SafetyGuard is the first gate because it sanitizes content and detects fail-closed prompt/content risks.
         if self._component_enabled("safety_guard"):

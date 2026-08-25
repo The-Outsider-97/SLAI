@@ -34,10 +34,10 @@ from .utils import (load_global_config, get_config_section,
                     # Waterfall
                     WaterfallAnalyzer, summarize_waterfall)
 from .observability_memory import ObservabilityMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Observability Capacity & Performance")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 # ---------------------------------------------------------------------------
@@ -856,10 +856,8 @@ class ObservabilityPerformance:
         )
 
     def analyze_trace(self, trace_id: str, spans: Sequence[Mapping[str, Any]], *,
-        incident_level: str = "info",
-        metadata: Optional[Mapping[str, Any]] = None,
-        persist_to_memory: bool = True,
-    ) -> Dict[str, Any]:
+        incident_level: str = "info", metadata: Optional[Mapping[str, Any]] = None,
+        persist_to_memory: bool = True) -> Dict[str, Any]:
         try:
             self._ensure_enabled(operation="analyze_trace")
             trace_id = _coerce_non_empty_str(trace_id, field_name="trace_id", operation="analyze_trace")
@@ -1113,7 +1111,7 @@ class ObservabilityPerformance:
     def summarize_performance(self) -> Dict[str, Any]:
         try:
             with self._lock:
-                subjects = sorted(self._latency_samples)
+                subjects = sorted(set(self._latency_samples) | set(self._throughput_samples))
                 trace_records = [record.to_dict() for record in self._trace_records]
 
             subject_summaries = {}
@@ -1243,11 +1241,32 @@ class ObservabilityPerformance:
             notes=["Latency regression uses p95 comparison between baseline and recent windows."],
         )
 
-    def _assess_throughput_regression(self, subject: str,
+    def _assess_throughput_regression(
+        self,
+        subject: str,
         samples: Sequence[ThroughputSample],
     ) -> RegressionAssessment:
-        enough_data = len(samples) >= (self.min_regression_samples * 2)
-        if not enough_data:
+        sample_rates = [float(sample.count) for sample in samples]
+    
+        recent_window = max(1, int(self.recent_sample_window))
+        baseline_window = max(1, int(self.baseline_sample_window))
+        min_samples = max(1, int(self.min_regression_samples))
+    
+        if not sample_rates:
+            return RegressionAssessment(
+                subject=subject,
+                metric_name="throughput_rate_per_sample",
+                baseline_value=0.0,
+                recent_value=0.0,
+                delta=0.0,
+                delta_ratio=0.0,
+                level="info",
+                direction="flat",
+                enough_data=False,
+                notes=["No throughput samples available to evaluate regression."],
+            )
+    
+        if len(sample_rates) < (min_samples * 2):
             return RegressionAssessment(
                 subject=subject,
                 metric_name="throughput_rate_per_sample",
@@ -1260,26 +1279,69 @@ class ObservabilityPerformance:
                 enough_data=False,
                 notes=["Not enough throughput samples to evaluate regression."],
             )
-
-        sample_rates = [float(sample.count) for sample in samples]
-        baseline_values = sample_rates[-(self.baseline_sample_window + self.recent_sample_window):-self.recent_sample_window]
-        recent_values = sample_rates[-self.recent_sample_window:]
+    
+        if len(sample_rates) <= recent_window:
+            return RegressionAssessment(
+                subject=subject,
+                metric_name="throughput_rate_per_sample",
+                baseline_value=0.0,
+                recent_value=0.0,
+                delta=0.0,
+                delta_ratio=0.0,
+                level="info",
+                direction="flat",
+                enough_data=False,
+                notes=["Not enough throughput samples to create a non-empty baseline window."],
+            )
+    
+        recent_values = sample_rates[-recent_window:]
+        baseline_values = sample_rates[-(baseline_window + recent_window):-recent_window]
+    
         if not baseline_values:
-            baseline_values = sample_rates[:-self.recent_sample_window]
-
+            baseline_values = sample_rates[:-recent_window]
+    
+        if not baseline_values:
+            return RegressionAssessment(
+                subject=subject,
+                metric_name="throughput_rate_per_sample",
+                baseline_value=0.0,
+                recent_value=0.0,
+                delta=0.0,
+                delta_ratio=0.0,
+                level="info",
+                direction="flat",
+                enough_data=False,
+                notes=["Throughput regression skipped because baseline window is empty."],
+            )
+    
+        if not recent_values:
+            return RegressionAssessment(
+                subject=subject,
+                metric_name="throughput_rate_per_sample",
+                baseline_value=0.0,
+                recent_value=0.0,
+                delta=0.0,
+                delta_ratio=0.0,
+                level="info",
+                direction="flat",
+                enough_data=False,
+                notes=["Throughput regression skipped because recent window is empty."],
+            )
+    
         baseline_value = sum(baseline_values) / len(baseline_values)
         recent_value = sum(recent_values) / len(recent_values)
         delta = recent_value - baseline_value
         ratio = _ratio(recent_value, baseline_value) if baseline_value > 0 else 0.0
-
+    
         if baseline_value > 0 and ratio <= self.throughput_regression_critical_ratio:
             level = "critical"
         elif baseline_value > 0 and ratio <= self.throughput_regression_warning_ratio:
             level = "warning"
         else:
             level = "ok"
-
+    
         direction = "down" if delta < 0 else "up" if delta > 0 else "flat"
+    
         return RegressionAssessment(
             subject=subject,
             metric_name="throughput_rate_per_sample",

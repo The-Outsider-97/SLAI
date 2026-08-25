@@ -18,28 +18,30 @@ It provides:
 from __future__ import annotations
 
 import inspect
-import os
 import random
 import time
 import hashlib
-import numpy as np
-import torch
+import numpy as np # type: ignore
+import torch # type: ignore
 
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
 
-from src.agents.learning.utils.config_loader import load_global_config, get_config_section
-from src.agents.learning.dqn import DQNAgent
-from src.agents.learning.maml_rl import MAMLAgent
-from src.agents.learning.rsi import RSIAgent
-from src.agents.learning.rl_agent import RLAgent
-from src.agents.learning.learning_memory import LearningMemory, Transition
-from src.agents.learning.utils.neural_network import NeuralNetwork
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.learning_error import *
+from .utils.learning_calculations import *
+from .utils.learning_helpers import *
+from .modules.neural_network import NeuralNetwork
+from .dqn import DQNAgent
+from .maml_rl import MAMLAgent
+from .rsi import RSIAgent
+from .rl_agent import RLAgent
+from .learning_memory import LearningMemory, Transition
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Learning Factory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 AgentName = str
 TaskMetadata = Dict[str, Any]
@@ -1094,7 +1096,7 @@ class LearningFactory:
 
 if __name__ == "__main__":
     print("\n=== Running Learning Factory ===\n")
-    from src.agents.learning.slaienv import SLAIEnv
+    from .slaienv import SLAIEnv
 
     env = SLAIEnv()
     factory = LearningFactory(env, performance_metrics={})

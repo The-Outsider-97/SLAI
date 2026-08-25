@@ -766,3 +766,19 @@ if __name__ == "__main__":
         assert wrapped.to_audit_format()["cause"]["type"] == "RuntimeError"
 
     print("All collaboration_error.py tests passed.")
+
+__all__ = [
+    "AgentRegistrationError",
+    "CollaborationError",
+    "CollaborationErrorConfig",
+    "CollaborationErrorType",
+    "CollaborationSeverity",
+    "DelegationFailureError",
+    "NoCapableAgentError",
+    "OverloadError",
+    "RegistrationFailureError",
+    "RoutingFailureError",
+    "SharedMemoryAccessError",
+    "SharedMemoryFailureError",
+    "as_collaboration_error",
+]

@@ -26,12 +26,12 @@ codebase.
 from __future__ import annotations
 
 import math
-import numpy as np
+import numpy as np # pyright: ignore[reportMissingImports]
 
 from dataclasses import dataclass, field
 from collections import deque
 from collections.abc import Mapping
-from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_errors import *
@@ -40,50 +40,6 @@ from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissi
 
 logger = get_logger("Physics Constraints")
 printer = PrettyPrinter()
-
-
-@dataclass
-class PhysicsConfig:
-    """Configuration parameters for the physics engine."""
-
-    gravity: float = 9.80665
-    friction_coeff: float = 0.02
-    rotational_friction: float = 0.01
-
-    wind_strength: float = 0.0
-    wind_direction: float = 0.0
-    wind_turbulence_ratio: float = 0.1
-
-    drag_coeff: float = 0.01
-    terminal_velocity: float = 50.0
-    min_speed_for_drag: float = 0.01
-
-    elasticity: float = 0.8
-    tangential_damping: float = 0.2
-    boundary_margin: float = 0.01
-    corner_threshold: float = 0.05
-    max_angular_velocity: float = 5.0
-
-    default_mass: float = 1.0
-    default_charge: float = 0.0
-
-    enable_tunneling: bool = False
-    tunneling_probability: float = 0.05
-    barrier_positions: Tuple[float, ...] = (-8.0, 8.0)
-    barrier_width: float = 0.1
-
-    enable_relativistic: bool = True
-    relativistic_threshold: float = 0.1
-    relativistic_safety_factor: float = 0.999999
-
-    enable_electromagnetic: bool = False
-    electric_field: Tuple[float, float] = (0.0, 10.0)
-    magnetic_field: float = 0.5
-
-    dt: float = 0.02
-    enable_history: bool = True
-    history_limit: int = 200
-    random_seed: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -158,29 +114,130 @@ class PhysicsEngine:
         "TP": 1.416784e32,
     }
 
-    def __init__(self, config: Optional[Union[PhysicsConfig, Mapping[str, Any]]] = None):
+    CONFIG_FIELDS: Tuple[str, ...] = (
+        "gravity",
+        "friction_coeff",
+        "rotational_friction",
+        "wind_strength",
+        "wind_direction",
+        "wind_turbulence_ratio",
+        "drag_coeff",
+        "terminal_velocity",
+        "min_speed_for_drag",
+        "elasticity",
+        "tangential_damping",
+        "boundary_margin",
+        "corner_threshold",
+        "max_angular_velocity",
+        "default_mass",
+        "default_charge",
+        "enable_tunneling",
+        "tunneling_probability",
+        "barrier_positions",
+        "barrier_width",
+        "enable_relativistic",
+        "relativistic_threshold",
+        "relativistic_safety_factor",
+        "enable_electromagnetic",
+        "electric_field",
+        "magnetic_field",
+        "dt",
+        "enable_history",
+        "history_limit",
+        "random_seed",
+    )
+
+    def __init__(self, config: Optional[Mapping[str, Any]] = None):
         self.global_config = load_global_config()
-        self.physics_config = get_config_section("physics_constraints") or {}
+        base_physics_config = get_config_section("physics_constraints") or {}
+        ensure_mapping(
+            base_physics_config,
+            "physics_constraints",
+            config=base_physics_config,
+            error_cls=BaseConfigurationError,
+            component="PhysicsEngine",
+            operation="__init__",
+        )
 
         if config is None:
-            self.config = self._build_config_from_mapping(self.physics_config)
-        elif isinstance(config, PhysicsConfig):
-            self.config = config
+            self.physics_config = dict(base_physics_config)
         elif isinstance(config, Mapping):
-            merged = deep_merge_dicts(self.physics_config, dict(config))
-            self.config = self._build_config_from_mapping(merged)
+            # Runtime overrides are still supported for the legacy wrappers, but
+            # the canonical defaults remain in base_config.yaml.
+            self.physics_config = deep_merge_dicts(base_physics_config, dict(config))
         else:
             raise BaseValidationError(
-                "config must be None, a mapping, or PhysicsConfig.",
-                self.physics_config,
+                "config must be None or a mapping of physics constraint overrides.",
+                base_physics_config,
                 component="PhysicsEngine",
                 operation="__init__",
                 context={"received_type": type(config).__name__},
             )
 
+        mapping = self.physics_config
+
+        self.gravity = coerce_float(mapping.get("gravity", 9.80665), 9.80665)
+        self.friction_coeff = coerce_float(mapping.get("friction_coeff", 0.02), 0.02, minimum=0.0)
+        self.rotational_friction = coerce_float(mapping.get("rotational_friction", 0.01), 0.01, minimum=0.0)
+
+        self.wind_strength = coerce_float(mapping.get("wind_strength", 0.0), 0.0, minimum=0.0)
+        self.wind_direction = coerce_float(mapping.get("wind_direction", 0.0), 0.0)
+        self.wind_turbulence_ratio = coerce_float(mapping.get("wind_turbulence_ratio", 0.1), 0.1, minimum=0.0)
+
+        self.drag_coeff = coerce_float(mapping.get("drag_coeff", 0.01), 0.01, minimum=0.0)
+        self.terminal_velocity = coerce_float(mapping.get("terminal_velocity", 50.0), 50.0, minimum=0.0)
+        self.min_speed_for_drag = coerce_float(mapping.get("min_speed_for_drag", 0.01), 0.01, minimum=0.0)
+
+        self.elasticity = coerce_float(mapping.get("elasticity", 0.8), 0.8, minimum=0.0, maximum=1.0)
+        self.tangential_damping = coerce_float(mapping.get("tangential_damping", 0.2), 0.2, minimum=0.0, maximum=1.0)
+        self.boundary_margin = coerce_float(mapping.get("boundary_margin", 0.01), 0.01, minimum=0.0)
+        self.corner_threshold = coerce_float(mapping.get("corner_threshold", 0.05), 0.05, minimum=0.0)
+        self.max_angular_velocity = coerce_float(mapping.get("max_angular_velocity", 5.0), 5.0, minimum=0.0)
+
+        self.default_mass = coerce_float(mapping.get("default_mass", 1.0), 1.0, minimum=1.0e-12)
+        self.default_charge = coerce_float(mapping.get("default_charge", 0.0), 0.0)
+
+        self.enable_tunneling = coerce_bool(mapping.get("enable_tunneling", False), False)
+        self.tunneling_probability = coerce_float(
+            mapping.get("tunneling_probability", 0.05),
+            0.05,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.barrier_positions = tuple(
+            coerce_float(value, 0.0)
+            for value in ensure_list(mapping.get("barrier_positions", (-8.0, 8.0)))
+        )
+        self.barrier_width = coerce_float(mapping.get("barrier_width", 0.1), 0.1, minimum=0.0)
+
+        self.enable_relativistic = coerce_bool(mapping.get("enable_relativistic", True), True)
+        self.relativistic_threshold = coerce_float(
+            mapping.get("relativistic_threshold", 0.1),
+            0.1,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.relativistic_safety_factor = coerce_float(
+            mapping.get("relativistic_safety_factor", 0.999999),
+            0.999999,
+            minimum=0.0,
+            maximum=1.0,
+        )
+
+        self.enable_electromagnetic = coerce_bool(mapping.get("enable_electromagnetic", False), False)
+        self.electric_field = self._normalize_vector(mapping.get("electric_field", (0.0, 10.0)), "electric_field")
+        self.magnetic_field = coerce_float(mapping.get("magnetic_field", 0.5), 0.5)
+
+        self.dt = coerce_float(mapping.get("dt", 0.02), 0.02, minimum=1.0e-12)
+        self.enable_history = coerce_bool(mapping.get("enable_history", True), True)
+        self.history_limit = coerce_int(mapping.get("history_limit", 200), 200, minimum=1)
+
+        raw_seed = mapping.get("random_seed", None)
+        self.random_seed = None if raw_seed in (None, "", "none", "None") else coerce_int(raw_seed, 0)
+
         self.constants = dict(self.CONSTANTS)
-        self._history: Deque[Dict[str, Any]] = deque(maxlen=self.config.history_limit)
-        self._rng = np.random.default_rng(self.config.random_seed)
+        self._history: Deque[Dict[str, Any]] = deque(maxlen=self.history_limit)
+        self._rng = np.random.default_rng(self.random_seed)
         self._stats: Dict[str, int] = {
             "environment_steps": 0,
             "boundary_steps": 0,
@@ -196,45 +253,9 @@ class PhysicsEngine:
     # ------------------------------------------------------------------
     # Configuration and validation
     # ------------------------------------------------------------------
-    def _build_config_from_mapping(self, mapping: Mapping[str, Any]) -> PhysicsConfig:
-        ensure_mapping(
-            mapping,
-            "physics_constraints",
-            config=self.physics_config,
-            error_cls=BaseConfigurationError,
-        )
-        return PhysicsConfig(
-            gravity=coerce_float(mapping.get("gravity", 9.80665), 9.80665),
-            friction_coeff=coerce_float(mapping.get("friction_coeff", 0.02), 0.02, minimum=0.0),
-            rotational_friction=coerce_float(mapping.get("rotational_friction", 0.01), 0.01, minimum=0.0),
-            wind_strength=coerce_float(mapping.get("wind_strength", 0.0), 0.0, minimum=0.0),
-            wind_direction=coerce_float(mapping.get("wind_direction", 0.0), 0.0),
-            wind_turbulence_ratio=coerce_float(mapping.get("wind_turbulence_ratio", 0.1), 0.1, minimum=0.0),
-            drag_coeff=coerce_float(mapping.get("drag_coeff", 0.01), 0.01, minimum=0.0),
-            terminal_velocity=coerce_float(mapping.get("terminal_velocity", 50.0), 50.0, minimum=0.0),
-            min_speed_for_drag=coerce_float(mapping.get("min_speed_for_drag", 0.01), 0.01, minimum=0.0),
-            elasticity=coerce_float(mapping.get("elasticity", 0.8), 0.8, minimum=0.0, maximum=1.0),
-            tangential_damping=coerce_float(mapping.get("tangential_damping", 0.2), 0.2, minimum=0.0, maximum=1.0),
-            boundary_margin=coerce_float(mapping.get("boundary_margin", 0.01), 0.01, minimum=0.0),
-            corner_threshold=coerce_float(mapping.get("corner_threshold", 0.05), 0.05, minimum=0.0),
-            max_angular_velocity=coerce_float(mapping.get("max_angular_velocity", 5.0), 5.0, minimum=0.0),
-            default_mass=coerce_float(mapping.get("default_mass", 1.0), 1.0, minimum=1.0e-12),
-            default_charge=coerce_float(mapping.get("default_charge", 0.0), 0.0),
-            enable_tunneling=coerce_bool(mapping.get("enable_tunneling", False), False),
-            tunneling_probability=coerce_float(mapping.get("tunneling_probability", 0.05), 0.05, minimum=0.0, maximum=1.0),
-            barrier_positions=tuple(coerce_float(v, 0.0) for v in ensure_list(mapping.get("barrier_positions", (-8.0, 8.0)))),
-            barrier_width=coerce_float(mapping.get("barrier_width", 0.1), 0.1, minimum=0.0),
-            enable_relativistic=coerce_bool(mapping.get("enable_relativistic", True), True),
-            relativistic_threshold=coerce_float(mapping.get("relativistic_threshold", 0.1), 0.1, minimum=0.0, maximum=1.0),
-            relativistic_safety_factor=coerce_float(mapping.get("relativistic_safety_factor", 0.999999), 0.999999, minimum=0.0, maximum=1.0),
-            enable_electromagnetic=coerce_bool(mapping.get("enable_electromagnetic", False), False),
-            electric_field=self._normalize_vector(mapping.get("electric_field", (0.0, 10.0)), "electric_field"),
-            magnetic_field=coerce_float(mapping.get("magnetic_field", 0.5), 0.5),
-            dt=coerce_float(mapping.get("dt", 0.02), 0.02, minimum=1.0e-12),
-            enable_history=coerce_bool(mapping.get("enable_history", True), True),
-            history_limit=coerce_int(mapping.get("history_limit", 200), 200, minimum=1),
-            random_seed=(None if mapping.get("random_seed", None) in (None, "", "none", "None") else coerce_int(mapping.get("random_seed"), 0)),
-        )
+    def _config_as_dict(self) -> Dict[str, Any]:
+        """Return the active physics configuration as a plain dictionary."""
+        return {key: getattr(self, key) for key in self.CONFIG_FIELDS}
 
     def _normalize_vector(self, value: Any, name: str) -> Tuple[float, float]:
         if isinstance(value, str):
@@ -254,14 +275,14 @@ class PhysicsEngine:
 
     def _validate_config(self) -> None:
         ensure_numeric_range(
-            self.config.gravity,
+            self.gravity,
             "gravity",
             minimum=0.0,
             config=self.physics_config,
             error_cls=BaseConfigurationError,
         )
         ensure_numeric_range(
-            self.config.elasticity,
+            self.elasticity,
             "elasticity",
             minimum=0.0,
             maximum=1.0,
@@ -269,7 +290,7 @@ class PhysicsEngine:
             error_cls=BaseConfigurationError,
         )
         ensure_numeric_range(
-            self.config.relativistic_threshold,
+            self.relativistic_threshold,
             "relativistic_threshold",
             minimum=0.0,
             maximum=1.0,
@@ -336,8 +357,8 @@ class PhysicsEngine:
     ) -> np.ndarray:
         """Apply gravity, damping, drag, wind, and advanced effects in-place."""
         state = self._validate_state_array(np.asarray(state, dtype=float))
-        step_dt = self.config.dt if dt is None else coerce_float(dt, self.config.dt, minimum=1.0e-12)
-        particle_mass = coerce_float(mass if mass is not None else self.config.default_mass, self.config.default_mass, minimum=1.0e-12)
+        step_dt = self.dt if dt is None else coerce_float(dt, self.dt, minimum=1.0e-12)
+        particle_mass = coerce_float(mass if mass is not None else self.default_mass, self.default_mass, minimum=1.0e-12)
 
         has_vel_x = len(state) >= 3
         has_vel_y = len(state) >= 4
@@ -349,47 +370,47 @@ class PhysicsEngine:
         electromagnetic_applied = False
 
         if has_vel_y:
-            state[3] -= self.config.gravity * step_dt
+            state[3] -= self.gravity * step_dt
 
-        damping = max(0.0, 1.0 - self.config.friction_coeff * step_dt)
+        damping = max(0.0, 1.0 - self.friction_coeff * step_dt)
         if has_vel_x:
             state[2] *= damping
         if has_vel_y:
             state[3] *= damping
 
-        if has_vel_x and has_vel_y and self.config.wind_strength > 0.0:
-            base_wind_x = self.config.wind_strength * math.cos(self.config.wind_direction)
-            base_wind_y = self.config.wind_strength * math.sin(self.config.wind_direction)
-            turbulence_scale = self.config.wind_strength * self.config.wind_turbulence_ratio
+        if has_vel_x and has_vel_y and self.wind_strength > 0.0:
+            base_wind_x = self.wind_strength * math.cos(self.wind_direction)
+            base_wind_y = self.wind_strength * math.sin(self.wind_direction)
+            turbulence_scale = self.wind_strength * self.wind_turbulence_ratio
             turbulence_x, turbulence_y = self._rng.normal(0.0, turbulence_scale, 2)
             state[2] += (base_wind_x + turbulence_x) * step_dt
             state[3] += (base_wind_y + turbulence_y) * step_dt
 
-        if has_vel_x and has_vel_y and self.config.drag_coeff > 0.0:
+        if has_vel_x and has_vel_y and self.drag_coeff > 0.0:
             vx = float(state[2])
             vy = float(state[3])
             speed = float(np.hypot(vx, vy))
-            if speed > self.config.min_speed_for_drag:
-                drag_force = self.config.drag_coeff * (speed ** 2)
+            if speed > self.min_speed_for_drag:
+                drag_force = self.drag_coeff * (speed ** 2)
                 drag_accel = drag_force / particle_mass
                 state[2] += (-drag_accel * vx / speed) * step_dt
                 state[3] += (-drag_accel * vy / speed) * step_dt
 
-        if has_vel_x and has_vel_y and self.config.terminal_velocity > 0.0:
+        if has_vel_x and has_vel_y and self.terminal_velocity > 0.0:
             speed = self._speed(state)
-            if speed > self.config.terminal_velocity:
-                scale = self.config.terminal_velocity / speed
+            if speed > self.terminal_velocity:
+                scale = self.terminal_velocity / speed
                 state[2] *= scale
                 state[3] *= scale
 
         if has_ang_vel:
-            rotational_damping = max(0.0, 1.0 - self.config.rotational_friction * step_dt)
+            rotational_damping = max(0.0, 1.0 - self.rotational_friction * step_dt)
             state[5] *= rotational_damping
 
-        if self.config.enable_relativistic and has_vel_x and has_vel_y:
+        if self.enable_relativistic and has_vel_x and has_vel_y:
             speed = self._speed(state)
-            if speed > self.config.relativistic_threshold * self.constants["c"]:
-                max_allowed = self.constants["c"] * self.config.relativistic_safety_factor
+            if speed > self.relativistic_threshold * self.constants["c"]:
+                max_allowed = self.constants["c"] * self.relativistic_safety_factor
                 if speed > max_allowed and speed > 0:
                     scale = max_allowed / speed
                     state[2] *= scale
@@ -397,20 +418,20 @@ class PhysicsEngine:
                     relativistic_clamp_applied = True
                     self._stats["relativistic_clamps"] += 1
 
-        if self.config.enable_tunneling and has_vel_x and self.config.barrier_width > 0.0:
-            for barrier in self.config.barrier_positions:
-                if abs(float(state[0]) - barrier) <= self.config.barrier_width:
-                    if self._rng.random() < self.config.tunneling_probability:
+        if self.enable_tunneling and has_vel_x and self.barrier_width > 0.0:
+            for barrier in self.barrier_positions:
+                if abs(float(state[0]) - barrier) <= self.barrier_width:
+                    if self._rng.random() < self.tunneling_probability:
                         direction = np.sign(state[2]) if abs(float(state[2])) > 0 else 1.0
-                        state[0] = barrier + self.config.barrier_width * direction
+                        state[0] = barrier + self.barrier_width * direction
                         tunneling_events += 1
                         self._stats["tunneling_events"] += 1
 
-        if self.config.enable_electromagnetic and has_charge and has_vel_x and has_vel_y:
-            charge = float(state[7]) if abs(float(state[7])) > 1.0e-12 else self.config.default_charge
+        if self.enable_electromagnetic and has_charge and has_vel_x and has_vel_y:
+            charge = float(state[7]) if abs(float(state[7])) > 1.0e-12 else self.default_charge
             if abs(charge) > 1.0e-12:
-                ex, ey = self.config.electric_field
-                bz = self.config.magnetic_field
+                ex, ey = self.electric_field
+                bz = self.magnetic_field
                 vx = float(state[2])
                 vy = float(state[3])
                 ax = (charge / particle_mass) * (ex + vy * bz)
@@ -453,23 +474,23 @@ class PhysicsEngine:
         collisions = 0
         speed_before = self._speed(state)
 
-        left = float(low[0] + self.config.boundary_margin)
-        right = float(high[0] - self.config.boundary_margin)
-        bottom = float(low[1] + self.config.boundary_margin)
-        top = float(high[1] - self.config.boundary_margin)
+        left = float(low[0] + self.boundary_margin)
+        right = float(high[0] - self.boundary_margin)
+        bottom = float(low[1] + self.boundary_margin)
+        top = float(high[1] - self.boundary_margin)
 
         def damp_tangent(value: float) -> float:
-            return value * max(0.0, 1.0 - self.config.tangential_damping)
+            return value * max(0.0, 1.0 - self.tangential_damping)
 
         def in_corner(x: float, y: float) -> bool:
             corners = ((left, bottom), (left, top), (right, bottom), (right, top))
-            return any(abs(x - cx) <= self.config.corner_threshold and abs(y - cy) <= self.config.corner_threshold for cx, cy in corners)
+            return any(abs(x - cx) <= self.corner_threshold and abs(y - cy) <= self.corner_threshold for cx, cy in corners)
 
         if float(state[1]) < bottom:
             state[1] = bottom
             collisions += 1
             if has_vel_y:
-                state[3] = abs(float(state[3])) * self.config.elasticity
+                state[3] = abs(float(state[3])) * self.elasticity
             if has_vel_x:
                 state[2] = damp_tangent(float(state[2]))
 
@@ -477,7 +498,7 @@ class PhysicsEngine:
             state[1] = top
             collisions += 1
             if has_vel_y:
-                state[3] = -abs(float(state[3])) * self.config.elasticity
+                state[3] = -abs(float(state[3])) * self.elasticity
             if has_vel_x:
                 state[2] = damp_tangent(float(state[2]))
 
@@ -485,7 +506,7 @@ class PhysicsEngine:
             state[0] = left
             collisions += 1
             if has_vel_x:
-                state[2] = abs(float(state[2])) * self.config.elasticity
+                state[2] = abs(float(state[2])) * self.elasticity
             if has_vel_y:
                 state[3] = damp_tangent(float(state[3]))
 
@@ -493,25 +514,25 @@ class PhysicsEngine:
             state[0] = right
             collisions += 1
             if has_vel_x:
-                state[2] = -abs(float(state[2])) * self.config.elasticity
+                state[2] = -abs(float(state[2])) * self.elasticity
             if has_vel_y:
                 state[3] = damp_tangent(float(state[3]))
 
         if collisions > 1 and has_vel_x and has_vel_y and in_corner(float(state[0]), float(state[1])):
-            state[2] *= self.config.elasticity
-            state[3] *= self.config.elasticity
+            state[2] *= self.elasticity
+            state[3] *= self.elasticity
 
         if has_angle:
             state[4] = float(state[4]) % (2.0 * math.pi)
-        if has_ang_vel and abs(float(state[5])) > self.config.max_angular_velocity:
-            state[5] = math.copysign(self.config.max_angular_velocity, float(state[5]))
+        if has_ang_vel and abs(float(state[5])) > self.max_angular_velocity:
+            state[5] = math.copysign(self.max_angular_velocity, float(state[5]))
 
         self._stats["boundary_steps"] += 1
         self._stats["collisions"] += collisions
         self._record_history(
             PhysicsStepSummary(
                 timestamp=utc_now_iso(),
-                dt=self.config.dt,
+                dt=self.dt,
                 collisions=collisions,
                 relativistic_clamp_applied=False,
                 tunneling_events=0,
@@ -540,7 +561,7 @@ class PhysicsEngine:
     # Observability
     # ------------------------------------------------------------------
     def _record_history(self, summary: PhysicsStepSummary) -> None:
-        if not self.config.enable_history:
+        if not self.enable_history:
             return
         self._history.append(summary.to_dict())
 
@@ -550,7 +571,7 @@ class PhysicsEngine:
 
     def stats(self) -> Dict[str, Any]:
         return {
-            "config": to_json_safe(self.config.__dict__),
+            "config": to_json_safe(self._config_as_dict()),
             "stats": dict(self._stats),
             "history_length": len(self._history),
             "constants_count": len(self.constants),
@@ -607,8 +628,8 @@ def apply_environmental_effects(env_instance: Any, state_array: np.ndarray) -> n
 
     if override:
         engine = PhysicsEngine(config=override)
-    mass = getattr(env_instance, "mass", engine.config.default_mass)
-    return engine.apply_environmental_effects(np.asarray(state_array, dtype=float), dt=engine.config.dt, mass=mass)
+    mass = getattr(env_instance, "mass", engine.default_mass)
+    return engine.apply_environmental_effects(np.asarray(state_array, dtype=float), dt=engine.dt, mass=mass)
 
 
 def enforce_physics_constraints(env_instance: Any, state_array: np.ndarray) -> np.ndarray:
@@ -635,8 +656,8 @@ def apply_all_physics_constraints(
 ) -> np.ndarray:
     """Compatibility wrapper that applies both environment and boundary effects."""
     engine = _get_engine()
-    dt = getattr(env_instance, "dt", engine.config.dt)
-    mass = getattr(env_instance, "mass", engine.config.default_mass)
+    dt = getattr(env_instance, "dt", engine.dt)
+    mass = getattr(env_instance, "mass", engine.default_mass)
 
     if low_bound is None or high_bound is None:
         if hasattr(env_instance, "observation_space"):

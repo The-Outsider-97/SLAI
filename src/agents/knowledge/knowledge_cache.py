@@ -1,6 +1,6 @@
 import os
 import re
-import yaml
+import yaml # type: ignore
 import json
 import time
 import hashlib
@@ -9,16 +9,15 @@ import warnings
 from pathlib import Path
 from typing import Optional, Any, List, Set
 from collections import OrderedDict, defaultdict
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken # type: ignore
 
 from .utils.knowledge_errors import CacheError
+from .utils.knowledge_helpers import *
 from .utils.config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Cache")
 printer = PrettyPrinter()
-
-ACTION_PATTERN = re.compile(r"action:(\w+):(.+)", re.IGNORECASE)
 
 
 class KnowledgeCache:
@@ -43,8 +42,7 @@ class KnowledgeCache:
         self._last_cleanup_time = time.time()
         self.cipher = self._initialize_cipher(encryption_key)
 
-        logger.info(
-            "Knowledge Cache initialized with max_size=%s hashing=%s encryption=%s",
+        logger.info("Knowledge Cache initialized with max_size=%s hashing=%s encryption=%s",
             self.max_size,
             self.hashing_method,
             self.enable_encryption,
@@ -294,25 +292,27 @@ class KnowledgeCache:
         path = Path(path_value)
         if path.is_absolute():
             return path
-
+    
         candidates = [Path.cwd() / path]
-        config_path = self.config.get("__config_path__") if isinstance(self.config, dict) else None
+    
+        config_path = self.config.get("__config_path__")
         if config_path:
-            config_dir = Path(config_path).resolve().parent
-            candidates.append(config_dir / path)
-            candidates.append(config_dir.parent / path)
-            candidates.append(config_dir.parent.parent / path)
-
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[0]
+            candidates.extend(
+                config_relative_candidates(
+                    path,
+                    Path(config_path),
+                )
+            )
+    
+        existing = first_existing_path(candidates)
+        return existing if existing is not None else candidates[0]
 
     def _is_expired(self, key: str, current_time: float) -> bool:
         expiry = self._expiration.get(key)
         return expiry is not None and expiry <= current_time
 
-    def _is_flagged_value(self, value: Any) -> bool:
+    @staticmethod
+    def _is_flagged_value(value: Any) -> bool:
         if isinstance(value, dict):
             if value.get("flagged") is True:
                 return True
@@ -326,8 +326,8 @@ class KnowledgeCache:
             return False
 
         if isinstance(value, str):
-            match = ACTION_PATTERN.match(value.strip())
-            return bool(match and match.group(1).lower() == "flag")
+            directive = match_action_directive(value.strip())
+            return bool(directive and directive[0] == "flag")
 
         return False
 

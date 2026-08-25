@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import importlib
-import json
-import subprocess
 import sys
+import json
+import importlib
 import traceback
 
 from pathlib import Path
@@ -13,8 +12,8 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (
+from PyQt5.QtCore import Qt, pyqtSignal # type: ignore
+from PyQt5.QtWidgets import ( # type: ignore
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -32,10 +31,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from src.functions.loading import create_loading_controller, start_loading, update_loading, complete_loading
-from component.utils.loading_overlay import LoadingOverlay
-from component.styles.autopublisher_style import AUTOPUBLISHER_STYLE, sanitize_qss
-from logs.logger import get_logger
+from src.functions.loading import create_loading_controller, start_loading, update_loading, complete_loading # pyright: ignore[reportMissingImports]
+from .utils.loading_overlay import LoadingOverlay
+from .styles.autopublisher_style import AUTOPUBLISHER_STYLE, sanitize_qss
+from logs.logger import get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("ContentOps Autopublisher")
 
@@ -93,6 +92,7 @@ class Workspace:
 
 
 class AutopublisherWindow(QMainWindow):
+    home_requested = pyqtSignal()
     BOARD_COLUMNS = ["Backlog", "In Progress", "Ready", "Approved"]
     CORE_AGENT_TYPES = ["planning", "browser", "knowledge", "reasoning", "language", "evaluation", "safety", "learning"]
     OPTIONAL_AGENT_TYPES = ["alignment", "adaptive"]
@@ -128,6 +128,7 @@ class AutopublisherWindow(QMainWindow):
             "torch_subsystem": "untested",
             "core_agents": "not_evaluated",
             "optional_agents": "not_evaluated",
+            "collaboration_health": "not_evaluated",
         }
 
         self._build_ui()
@@ -473,7 +474,17 @@ class AutopublisherWindow(QMainWindow):
         start_loading(self.loading_controller, "Generating weekly plan…")
         update_loading(self.loading_controller, progress=0.45, message="Calling planning agent…")
         self.status_label.setText("Generating plan...")
-        planning = self._agent_call("planning", {"objective": "weekly editorial slate", "workspace": "autopublisher"})
+        planning_payload = {"objective": "weekly editorial slate", "workspace": "autopublisher"}
+        planning = self._agent_call("planning", planning_payload)
+        if planning.get("status") != "ok":
+            planning = self._collab_call(
+                {
+                    "mode": "delegate",
+                    "task_type": "planning",
+                    "payload": planning_payload,
+                    "context": {"workspace": "autopublisher"},
+                }
+            )
 
         if planning.get("status") == "ok":
             if self.shared_memory is not None:
@@ -551,7 +562,7 @@ class AutopublisherWindow(QMainWindow):
         alignment = self._agent_call("alignment", {"draft": draft.text, "topic": topic.title})
         collab = {"status": "runtime_unavailable"}
         if self.collab is not None:
-            collab = self.collab.perform_task({
+            collab = self._collab_call({
                 "mode": "assess",
                 "risk_score": 0.4,
                 "task_type": "editorial_qa",
@@ -580,6 +591,17 @@ class AutopublisherWindow(QMainWindow):
             topic.status = "Approved"
         self.status_label.setText(f"QA complete: {verdict}")
         self._refresh_board(); self._update_detail_panels(); self._refresh_agent_fleet()
+
+    def _collab_call(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.collab is None:
+            return {"status": "runtime_unavailable", "error": "collaborative agent unavailable"}
+        try:
+            result = self.collab.perform_task(payload)
+            self.runtime_components["collaboration_health"] = "ok"
+            return result if isinstance(result, dict) else {"status": "ok", "result": result}
+        except Exception as exc:
+            self.runtime_components["collaboration_health"] = f"error ({type(exc).__name__})"
+            return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
     def _compute_scores(self, evaluation: Dict[str, Any], safety: Dict[str, Any], alignment: Dict[str, Any]) -> Dict[str, float]:
         def score_from_payload(payload: Dict[str, Any], fallback: float = 0.6) -> float:
@@ -739,8 +761,15 @@ class AutopublisherWindow(QMainWindow):
         self.fleet_text.setPlainText("\n".join(lines))
 
     def _return_home(self) -> None:
-        main_path = Path(__file__).resolve().parents[1] / "main.py"
-        subprocess.Popen([sys.executable, str(main_path)])
+        if self.receivers(self.home_requested) > 0:
+            self.home_requested.emit()
+            return
+    
+        # Standalone fallback: only used if Autopublisher was launched directly.
+        from main import HubWindow # pyright: ignore[reportMissingImports]
+    
+        self._home_window = HubWindow()
+        self._home_window.showMaximized()
         self.close()
 
     def resizeEvent(self, event) -> None:

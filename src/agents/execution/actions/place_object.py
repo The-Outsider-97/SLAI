@@ -7,10 +7,10 @@ from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.execution_error import ActionFailureError, InvalidContextError, UnreachableTargetError
 from ..actions.base_action import ActionStatus, SoftInterrupt
 from ..actions.robot_actions import RobotAction
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Place Object Action")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class PlaceObjectAction(RobotAction):
     """
@@ -57,7 +57,7 @@ class PlaceObjectAction(RobotAction):
 
     def _validate_state(self) -> None:
         """Ensure robot is holding an object."""
-        self.object_id = self.context.get("held_object")
+        self.object_id = self.context.get("held_object", "")
         if not self.object_id:
             raise InvalidContextError(self.name, ["held_object"])
         logger.info(f"Placing object: {self.object_id}")
@@ -163,7 +163,7 @@ if __name__ == "__main__":
     print("\n=== Running Execution PLACE_OBJECT Action ===\n")
     printer.status("TEST", "Starting Execution PLACE_OBJECT Action tests", "info")
 
-    from ..utils.robot_interface import RobotInterface
+    from ..modules.robot_interface import RobotInterface
     from typing import Any, Tuple
 
     class MockRobot(RobotInterface):

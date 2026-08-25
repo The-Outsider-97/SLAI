@@ -16,23 +16,59 @@ from __future__ import annotations
 
 import hashlib
 import random
-import numpy as np
-import torch
+import numpy as np # type: ignore
+import torch # type: ignore
 
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-from src.agents.learning.learning_memory import LearningMemory, Transition
-from src.agents.learning.utils.config_loader import get_config_section, load_global_config
-from src.agents.learning.utils.neural_network import NeuralNetwork
-from logs.logger import PrettyPrinter, get_logger
+from ..planning.planning_types import Task, TaskStatus, TaskType
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.learning_error import *
+from .utils.learning_calculations import *
+from .utils.learning_helpers import *
+from .modules.neural_network import NeuralNetwork
+from .learning_memory import LearningMemory, Transition
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Recursive Self-Improvement")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 TensorLike = Union[torch.Tensor, np.ndarray, Sequence[float]]
-ExperienceLike = Union[Transition, Tuple[Any, Any, Any, Any, Any], List[Any]]
+ExperienceLike = Union[Transition, Dict[str, Any], Tuple[Any, Any, Any, Any, Any], List[Any]]
+
+
+class SkillLibrary:
+    """Stores reusable policies indexed by task ID."""
+    def __init__(self, max_size: int = 100):
+        self.max_size = max_size
+        self.skills: Dict[str, Dict[str, Any]] = {}  # task_id -> {'weights': dict, 'meta': dict}
+
+    def add(self, task_id: str, policy_weights: Dict[str, Any], meta: Optional[Dict] = None) -> None:
+        if len(self.skills) >= self.max_size:
+            # Remove oldest (FIFO)
+            oldest = next(iter(self.skills))
+            del self.skills[oldest]
+        self.skills[task_id] = {'weights': policy_weights, 'meta': meta or {}}
+
+    def get(self, task_id: str) -> Optional[Dict[str, Any]]:
+        return self.skills.get(task_id)
+
+    def find_most_similar(self, task_embedding: np.ndarray) -> Optional[Tuple[str, float]]:
+        """Return (task_id, cosine_similarity) of the most similar stored task."""
+        if not self.skills:
+            return None
+        best_id = None
+        best_sim = -1.0
+        for tid, data in self.skills.items():
+            emb = data['meta'].get('embedding')
+            if emb is not None:
+                sim = np.dot(task_embedding, emb) / (np.linalg.norm(emb) + 1e-8)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_id = tid
+        return (best_id, best_sim) if best_id else None
 
 
 class RSIAgent:
@@ -149,6 +185,19 @@ class RSIAgent:
         self.total_episodes = 0
         self.policy_net = self.q_network  # compatibility with surrounding sub-agent checks
 
+        # Task invention & skill library
+        self.task_memory: Dict[str, Task] = {}
+        self.skill_library = SkillLibrary(max_size=100)
+        self.current_task: Optional[Task] = None
+        self.task_success_history: List[bool] = []
+        
+        # Config parameters (add defaults to rsi_config)
+        self.task_invention_interval = int(self.rsi_config.get("task_invention_interval", 500))
+        self.skill_transfer_threshold = float(self.rsi_config.get("skill_transfer_threshold", 0.7))
+        self.min_task_difficulty = float(self.rsi_config.get("min_task_difficulty", 0.0))
+        self.max_task_difficulty = float(self.rsi_config.get("max_task_difficulty", 1.0))
+        self.difficulty_step = float(self.rsi_config.get("difficulty_step", 0.1))
+
         logger.info(
             "RSIAgent initialised | id=%s state=%s actions=%s gamma=%.4f lr=%.6f epsilon=%.4f",
             self.agent_id,
@@ -205,15 +254,18 @@ class RSIAgent:
 
     def _state_to_tensor(self, state: TensorLike) -> torch.Tensor:
         if isinstance(state, torch.Tensor):
-            tensor = state.detach().clone().to(dtype=torch.float32)
-        else:
+            tensor = state.detach().clone().to(dtype=torch.float32) # type: ignore
+        elif isinstance(state, (np.ndarray, np.generic)):
             tensor = torch.as_tensor(state, dtype=torch.float32)
-
+        else:
+            # Sequence[float] (list, tuple)
+            tensor = torch.as_tensor(state, dtype=torch.float32)
+    
         if tensor.ndim == 0:
             tensor = tensor.unsqueeze(0)
         elif tensor.ndim > 1:
             tensor = tensor.reshape(-1)
-
+    
         if tensor.numel() != self.state_size:
             raise ValueError(
                 f"State size mismatch. Expected {self.state_size}, got {int(tensor.numel())}."
@@ -257,6 +309,55 @@ class RSIAgent:
             return float(np.clip(reward, low, high))
         raise ValueError("reward_clip must be None, a scalar, or a 2-tuple/list.")
 
+    # ------------------------------------------------------------------
+    # Task Invention Method
+    # ------------------------------------------------------------------
+    def invent_next_task(self, current_performance: float) -> Task:
+        """
+        Generate a new task slightly harder than the hardest solved task.
+        Uses difficulty as a scalar; environment must interpret it via task.description.
+        """
+        if not self.task_memory:
+            # First task: default (assume environment provides a base task)
+            default_task = Task(name="default", task_type=TaskType.ABSTRACT)
+            setattr(default_task, 'difficulty', 0.0)
+            setattr(default_task, 'solved', True)
+            self.task_memory[default_task.id] = default_task
+            return default_task
+    
+        solved_tasks = [t for t in self.task_memory.values() if getattr(t, 'solved', False)]
+        if not solved_tasks:
+            easiest = min(self.task_memory.values(), key=lambda t: getattr(t, 'difficulty', 0.0))
+            return easiest
+        
+        hardest_solved = max(solved_tasks, key=lambda t: getattr(t, 'difficulty', 0.0))
+        new_difficulty = min(self.max_task_difficulty,
+                             hardest_solved.difficulty + self.difficulty_step) # type: ignore
+    
+        # Generate description based on difficulty – customize for your environment
+        description = self._generate_task_description(new_difficulty)
+    
+        new_task = Task(
+            name=f"task_{len(self.task_memory)}",
+            task_type=TaskType.ABSTRACT,
+            description=description,
+        )
+        setattr(new_task, 'difficulty', new_difficulty)
+        setattr(new_task, 'solved', False)
+        self.task_memory[new_task.id] = new_task
+        logger.info("Invented new task: %s (difficulty=%.2f)", new_task.id, new_task.difficulty) # type: ignore
+        return new_task
+    
+    def _generate_task_description(self, difficulty: float) -> Dict[str, Any]:
+        """
+        Convert difficulty (0..1) into environment‑specific kwargs.
+        Example for SLAIEnv: shrink goal radius, increase required precision.
+        """
+        # Example: goal radius shrinks from 1.0 (easy) to 0.1 (hard)
+        goal_radius = max(0.1, 1.0 - difficulty * 0.9)
+        # Max steps increases with difficulty
+        max_steps = int(100 + difficulty * 400)
+        return {"goal_radius": goal_radius, "max_steps": max_steps}
     # ------------------------------------------------------------------
     # Q-network value estimation
     # ------------------------------------------------------------------
@@ -639,57 +740,58 @@ class RSIAgent:
         avg_reward = float(rewards.mean().item()) if rewards.numel() else 0.0
         return avg_reward, loss
 
-    def train_episode(
-        self,
-        env: Any = None,
-        max_steps: Optional[int] = None,
-    ) -> Tuple[float, float]:
+    def train_episode(self, env: Any, task: Optional[Task] = None,
+                      max_steps: Optional[int] = None) -> Tuple[float, float]:
         """Train for a full environment episode or a replay-only update if no env is available."""
         env = env or self.env
         if env is None:
             return self._optimise_from_batch()
 
-        state = self._extract_state(env.reset())
+        # Reset with task if provided
+        if task is not None:
+            # Prefer to_env_kwargs if exists, else use description dict
+            reset_kwargs = getattr(task, 'to_env_kwargs', lambda: task.description)()
+            state = self._extract_state(env.reset(options=reset_kwargs))
+        else:
+            state = self._extract_state(env.reset())
+    
         done = False
         episode_reward = 0.0
-        losses: List[float] = []
+        losses = []
         step_count = 0
         step_limit = max_steps if max_steps is not None else self.max_steps_per_episode
-        state_sequence: List[np.ndarray] = []
-
+        state_sequence = []
+        info = {}
+    
         while not done:
             if step_limit is not None and step_count >= int(step_limit):
                 break
-
+    
             state_tensor = self._state_to_tensor(state)
             state_sequence.append(state_tensor.detach().cpu().numpy())
-            action = self.act(state_tensor, state_sequence=state_sequence[-self.rsi_period :], explore=True)
-            next_state, reward, terminated, truncated, _ = self._safe_step(env, action)
+            action = self.act(state_tensor, state_sequence=state_sequence[-self.rsi_period:], explore=True)
+            next_state, reward, terminated, truncated, info = self._safe_step(env, action)
             done = bool(terminated or truncated)
-
+    
             self.remember(state, action, reward, next_state, done)
             self.total_env_steps += 1
             episode_reward += float(reward)
             step_count += 1
-
+    
             if len(self.memory) >= self.min_replay_size:
-                _avg_reward, loss = self._optimise_from_batch()
+                _, loss = self._optimise_from_batch()
                 if loss:
                     losses.append(float(loss))
-
+    
             state = next_state
-
+    
         self.total_episodes += 1
         self.performance_history.append(float(episode_reward))
-        self.last_train_episode_metrics = {
-            "episode_reward": float(episode_reward),
-            "avg_loss": float(np.mean(losses)) if losses else 0.0,
-            "min_loss": float(np.min(losses)) if losses else 0.0,
-            "max_loss": float(np.max(losses)) if losses else 0.0,
-            "steps": int(step_count),
-            "epsilon": float(self.epsilon),
-        }
-        return float(episode_reward), (float(np.mean(losses)) if losses else 0.0)
+    
+        # Store episode result for task tracking
+        self.finalize_episode(episode_reward, info)
+    
+        return float(episode_reward), float(np.mean(losses)) if losses else 0.0
 
     def learn_step(self, experience_batch: Iterable[ExperienceLike]) -> Tuple[float, float]:
         for exp in experience_batch:
@@ -748,27 +850,40 @@ class RSIAgent:
 
     def _load_training_state(self) -> bool:
         state = self.learning_memory.get("last_checkpoint")
-        if not state:
+        if not state or not isinstance(state, dict):
             return False
-
-        self.q_network.load_checkpoint(state["q_network"])
-        self.target_network.load_checkpoint(state["target_network"])
-        self.performance_history = deque(state.get("performance_history", []), maxlen=self.performance_window)
+    
+        q_network_state = state.get("q_network")
+        if q_network_state:
+            self.q_network.load_checkpoint(q_network_state)
+        target_network_state = state.get("target_network")
+        if target_network_state:
+            self.target_network.load_checkpoint(target_network_state)
+    
+        perf_history = state.get("performance_history")
+        if isinstance(perf_history, list):
+            self.performance_history = deque(perf_history, maxlen=self.performance_window)
+    
         hyperparameters = state.get("hyperparameters", {})
-        self.epsilon = float(hyperparameters.get("epsilon", self.epsilon))
-        self.learning_rate = float(hyperparameters.get("learning_rate", self.learning_rate))
-        self.gamma = float(hyperparameters.get("gamma", self.gamma))
-        self.rsi_period = int(hyperparameters.get("rsi_period", self.rsi_period))
-        self.baseline_performance = hyperparameters.get("baseline_performance", self.baseline_performance)
+        if isinstance(hyperparameters, dict):
+            self.epsilon = float(hyperparameters.get("epsilon", self.epsilon))
+            self.learning_rate = float(hyperparameters.get("learning_rate", self.learning_rate))
+            self.gamma = float(hyperparameters.get("gamma", self.gamma))
+            self.rsi_period = int(hyperparameters.get("rsi_period", self.rsi_period))
+            self.baseline_performance = hyperparameters.get("baseline_performance", self.baseline_performance)
+    
         self.update_counter = int(state.get("update_counter", self.update_counter))
         self.total_env_steps = int(state.get("total_env_steps", self.total_env_steps))
         self.total_gradient_steps = int(state.get("total_gradient_steps", self.total_gradient_steps))
         self.total_episodes = int(state.get("total_episodes", self.total_episodes))
         self.current_epoch = int(state.get("epoch", -1)) + 1
+    
         replay_memory = state.get("replay_memory", [])
-        self.memory.clear()
-        for item in replay_memory[-self.memory_capacity :]:
-            self.memory.append(self._coerce_transition(item))
+        if isinstance(replay_memory, list):
+            self.memory.clear()
+            for item in replay_memory[-self.memory_capacity:]:
+                self.memory.append(self._coerce_transition(item))
+    
         self.q_network.optimizer.learning_rate = self.learning_rate
         return True
 
@@ -1007,6 +1122,9 @@ class RSIAgent:
             raise ValueError("evaluation_interval must be positive.")
 
         self.env = env
+        if self.current_task is None:
+            self.current_task = self.invent_next_task(0.0)
+            logger.info("Initial task set: %s", self.current_task.name)
         if self.learning_memory.get("last_checkpoint"):
             self._load_training_state()
             logger.info("Resuming RSI training from checkpoint state.")
@@ -1017,7 +1135,9 @@ class RSIAgent:
                 epoch_losses: List[float] = []
 
                 for _ in range(episodes_per_epoch):
-                    episode_reward, episode_loss = self.train_episode(env=env, max_steps=max_steps_per_episode)
+                    episode_reward, episode_loss = self.train_episode(
+                        env=env, task=self.current_task, max_steps=max_steps_per_episode
+                    )
                     epoch_rewards.append(float(episode_reward))
                     epoch_losses.append(float(episode_loss))
 
@@ -1068,6 +1188,18 @@ class RSIAgent:
                 self._adapt_learning_rate(avg_reward, avg_volatility)
                 self.current_epoch = epoch + 1
 
+                if (epoch + 1) % self.task_invention_interval == 0:
+                    # Evaluate current performance on the current task
+                    recent_rewards = list(self.performance_history)[-10:] if self.performance_history else [0]
+                    avg_perf = np.mean(recent_rewards)
+                    if avg_perf > self.improvement_threshold:   # or any progress signal
+                        new_task = self.invent_next_task(avg_perf)
+                        self.current_task = new_task
+                        # Try to transfer a skill for the new task
+                        self.try_transfer_skill(new_task)
+                        # Reset environment with new task (will take effect next episode)
+                        logger.info("Switching to new task: %s", new_task.name)
+
             logger.info("RSI training completed successfully")
             self.last_training_summary = self.get_training_summary()
             return self.last_training_summary
@@ -1113,14 +1245,76 @@ class RSIAgent:
         }
         self.learning_memory.set("rsi_agent_last_eval", evaluation)
         return {"status": "success", "evaluation": evaluation}
-
-
-__all__ = ["RSIAgent"]
+    
+    def try_transfer_skill(self, task: Task) -> bool:
+        """Attempt to load a policy from the skill library that matches the new task."""
+        if not self.skill_library.skills:
+            return False
+    
+        # Compute embedding from task description (flatten numeric values)
+        flat = [v for v in task.description.values() if isinstance(v, (int, float))] # type: ignore
+        if not flat:
+            return False
+        embedding = np.array(flat, dtype=np.float32)
+        embedding /= (np.linalg.norm(embedding) + 1e-8)
+    
+        best_id, similarity = self.skill_library.find_most_similar(embedding) or (None, 0.0)
+        if similarity >= self.skill_transfer_threshold:
+            skill = self.skill_library.get(best_id) # type: ignore
+            if skill:
+                self.q_network.set_weights(skill['weights'])
+                self.target_network.set_weights(skill['weights'])
+                logger.info("Transferred skill from task %s (similarity=%.3f)", best_id, similarity)
+                return True
+        return False
+    
+    def _check_task_solved(self, episode_reward: float, info: Dict[str, Any]) -> bool:
+        """Determine if the current task was solved. Override as needed."""
+        # Prefer environment's own signal
+        if info.get('task_completed', False):
+            return True
+        # Fallback: reward threshold (e.g., 95% of max possible)
+        max_reward = getattr(self.env, 'max_reward_per_episode', None)
+        if max_reward is not None:
+            return episode_reward >= 0.95 * max_reward
+        return False
+    
+    def finalize_episode(self, episode_reward: float, info: Dict[str, Any]) -> None:
+        """Called after each episode to update task status and store skills."""
+        if self.current_task is None:
+            return
+    
+        solved = self._check_task_solved(episode_reward, info)
+        if solved and not getattr(self.current_task, 'solved', False):
+            setattr(self.current_task, 'solved', True)
+            setattr(self.current_task, 'solved_at_episode', self.total_episodes)
+            # Store the policy that solved it as a reusable skill
+            embedding = self._compute_task_embedding(self.current_task)
+            self.skill_library.add(
+                task_id=self.current_task.id,
+                policy_weights=self.q_network.get_weights(),
+                meta={'embedding': embedding}
+            )
+            logger.info("Task %s solved! Stored as skill.", self.current_task.id)
+    
+        self.task_success_history.append(solved)
+    
+    def _compute_task_embedding(self, task: Task) -> np.ndarray:
+        """Create a simple embedding from task description (override for better features)."""
+        desc = task.description
+        if not isinstance(desc, dict):
+            return np.zeros(8, dtype=np.float32)
+        flat = [v for v in desc.values() if isinstance(v, (int, float))]
+        if not flat:
+            return np.zeros(8, dtype=np.float32)
+        emb = np.array(flat, dtype=np.float32)
+        norm = np.linalg.norm(emb)
+        return emb / (norm + 1e-8)
 
 
 if __name__ == "__main__":
     print("\n=== Running Recursive Self-Improvement Smoke Test ===\n")
-    from src.agents.learning.slaienv import SLAIEnv
+    from .slaienv import SLAIEnv
 
     env = SLAIEnv(state_dim=4, action_dim=3)
     agent = RSIAgent(state_size=4, action_size=3, agent_id="rsi_smoke", env=env)

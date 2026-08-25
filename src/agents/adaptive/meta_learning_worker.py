@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pickle
 import random
-import numpy as np
-import torch
+import numpy as np # type: ignore
+import torch # type: ignore
 
 from pathlib import Path
 from datetime import datetime
@@ -12,12 +12,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.adaptive_errors import *
+from .utils.adaptive_helpers import *
 from .adaptive_memory import MultiModalMemory
-from src.tuning.networks.bayesian_neural_network import BayesianNeuralNetwork
-from logs.logger import get_logger, PrettyPrinter
+from src.tuning.networks.bayesian_neural_network import BayesianNeuralNetwork # pyright: ignore[reportMissingImports]
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Meta Learning Worker")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class MetaLearningWorker:
@@ -304,7 +305,8 @@ class MetaLearningWorker:
         """Store hyperparameter configuration and its performance."""
         normalized_hyperparams = self._normalize_hyperparams(hyperparams)
 
-        if not isinstance(performance, (int, float, np.number)) or not np.isfinite(performance):
+        # if not isinstance(performance, (int, float, np.number)) or not np.isfinite(performance):
+        if not is_finite_number(performance):
             raise InvalidValueError(
                 "performance must be a finite numeric value.",
                 component="meta_learning",
@@ -353,9 +355,9 @@ class MetaLearningWorker:
         candidates = self._generate_candidates()
         candidate_array = np.vstack([self._hyperparams_to_array(c) for c in candidates])
 
-        means, stds = self.bnn.predict(candidate_array, num_samples=self.prediction_samples)
-        means = np.asarray(means, dtype=np.float64).reshape(-1)
-        stds = np.asarray(stds, dtype=np.float64).reshape(-1)
+        distribution = self.bnn.predict_distribution(candidate_array, num_samples=self.prediction_samples)
+        means = np.asarray(distribution["mean"], dtype=np.float64).reshape(-1)
+        stds = np.asarray(distribution["epistemic_std"], dtype=np.float64).reshape(-1)
 
         y_reference = self._denormalize_targets(y, normalization) if self.normalize_targets else y
         means_reference = self._denormalize_targets(means, normalization) if self.normalize_targets else means
@@ -377,7 +379,7 @@ class MetaLearningWorker:
         means = np.asarray(means, dtype=np.float64)
         improvement = means - best_observed - self.exploration_factor
 
-        from scipy.stats import norm  # aligned with the original module pattern
+        from scipy.stats import norm  # type: ignore # aligned with the original module pattern
 
         z = improvement / stds
         ei = improvement * norm.cdf(z) + stds * norm.pdf(z)
@@ -444,7 +446,8 @@ class MetaLearningWorker:
         valid_rewards = []
         for metric in metrics.values():
             value = metric.get("recent_reward")
-            if isinstance(value, (int, float, np.number)) and np.isfinite(value):
+            # if isinstance(value, (int, float, np.number)) and np.isfinite(value):
+            if value is not None and is_finite_number(value):
                 valid_rewards.append(float(value))
 
         if not valid_rewards:
@@ -581,7 +584,6 @@ class MetaLearningWorker:
             validation_data=validation_data,
             early_stopping_patience=self.early_stopping_patience,
             min_delta=self.min_delta,
-            verbose=False,
         )
         self.last_training_summary = history
         return history
@@ -601,7 +603,8 @@ class MetaLearningWorker:
                     details={"required": self.hyperparam_names},
                 )
             value = hyperparams[name]
-            if not isinstance(value, (int, float, np.number)) or not np.isfinite(value):
+            # if not isinstance(value, (int, float, np.number)) or not np.isfinite(value):
+            if not is_finite_number(value):
                 raise InvalidValueError(
                     f"Hyperparameter '{name}' must be a finite numeric value.",
                     component="meta_learning",
@@ -722,7 +725,7 @@ class MetaLearningWorker:
             "hyperparameter_space": self.hyperparameter_space,
             "last_training_summary": self.last_training_summary,
             "last_suggestion": self.last_suggestion,
-            "bnn_state": self.bnn.to_serializable_dict(include_history=True),
+            "bnn_state": self.bnn.state_dict(),
         }
 
     def import_state(self, state: Mapping[str, Any]) -> None:
@@ -736,22 +739,7 @@ class MetaLearningWorker:
 
         bnn_state = state.get("bnn_state")
         if isinstance(bnn_state, Mapping):
-            self.bnn = BayesianNeuralNetwork(
-                layer_sizes=bnn_state["layer_sizes"],
-                learning_rate=float(bnn_state.get("learning_rate", self.bnn.learning_rate)),
-                prior_mu=float(bnn_state.get("prior_mu", self.bnn.prior_mu)),
-                prior_logvar=float(bnn_state.get("prior_logvar", self.bnn.prior_logvar)),
-                random_state=bnn_state.get("random_state", self.random_state),
-                logvar_clip_range=tuple(bnn_state.get("logvar_clip_range", [-8.0, 4.0])),
-                gradient_clip_norm=bnn_state.get("gradient_clip_norm"),
-                weight_init_scale=float(bnn_state.get("weight_init_scale", 1.0)),
-                hidden_activation=str(bnn_state.get("hidden_activation", "relu")),
-                likelihood_std=float(bnn_state.get("likelihood_std", 1.0)),
-                min_variance=float(bnn_state.get("min_variance", 1e-6)),
-                stability_epsilon=float(bnn_state.get("stability_epsilon", 1e-8)),
-                leaky_relu_slope=float(bnn_state.get("leaky_relu_slope", 0.01)),
-            )
-            self.bnn._load_from_payload(bnn_state, validate_shapes=True)
+            self.bnn.load_state_dict(bnn_state)
 
     def save_checkpoint(self, path: str) -> Path:
         output_path = Path(path)
@@ -817,7 +805,7 @@ if __name__ == "__main__":
             self.critic_optimizer = torch.optim.Adam([self.critic_param], lr=self.learning_rate)
             self._recent_rewards = [0.1, 0.2, 0.3, 0.4, 0.5]
 
-        def get_performance_metrics(self) -> Dict[str, float]:
+        def get_performance_metrics(self) -> Dict[str, int | str | float]:
             rewards = list(self._recent_rewards)
             avg_reward = float(np.mean(rewards))
             return {

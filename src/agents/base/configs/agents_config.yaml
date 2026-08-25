@@ -1,5 +1,279 @@
 sensitive_attributes: ["gender", "age_group", "race", "education_level"]
 
+issue_database:
+    host: 'localhost'
+    port: 5432
+    database: 'ai_issues'
+    user: 'user'
+    password: ''
+
+operations_notification:
+    email:
+        enabled: true
+        from: "ai-agent@yourdomain.com"
+        to: "ops@yourdomain.com"
+        subject: "URGENT: AI System Hazard"
+        smtp_host: "smtp.yourdomain.com"
+        smtp_port: 587
+        username: "ai-agent"
+        password: "secure-password"
+        use_tls: true
+
+    webhook:
+        enabled: true
+        url: "https://hooks.slack.com/services/..."
+
+    external_logging:
+        enabled: true
+        url: "https://logging-service.yourdomain.com/ingest"
+
+
+benchmark_budgets:
+    enabled: true
+    enforce: true
+    warmup_iterations: 5
+    measurement_iterations: 40
+    contracts:
+      - name: config.cached_load
+        max_p95_latency_ms: 10.0
+        max_peak_memory_mb: 16.0
+      - name: runtime.scope_identity
+        max_p95_latency_ms: 5.0
+        max_peak_memory_mb: 4.0
+      - name: runtime.status_snapshot
+        max_p95_latency_ms: 5.0
+        max_peak_memory_mb: 4.0
+
+
+autonomous_control_loop:
+  enabled: true
+  max_cycles: 3
+  max_cycle_seconds: 45.0
+  max_run_seconds: 120.0
+  require_safety_approval: true
+  require_explicit_execution_task: true
+  stop_on_stage_error: true
+  publish_events: true
+  event_channel: "autonomy.events"
+  latest_state_key: "autonomy:control_loop:latest"
+
+
+agent_factory:
+    enabled: true
+    auto_register_default_agents: true
+    default_version: "2.2.0"
+    strict_base_agent_subclass: false
+    use_instance_cache: true
+    cache_agent_instances: true
+    cache_imports: true
+    cache_constructor_signatures: true
+    construction_failure_threshold: 3
+    construction_circuit_capacity: 1024
+    circuit_base_cooldown_seconds: 5.0
+    circuit_max_cooldown_seconds: 300.0
+    allow_runtime_config_override: true
+    allow_unknown_constructor_kwargs: false
+    create_dependencies: true
+    probe_torch_runtime: true
+    block_torch_required_when_unavailable: true
+    enable_out_of_process_fallback: true
+    publish_observability_events: true
+    record_creation_history: true
+    creation_history_size: 100
+    diagnostics_import_check: true
+    diagnostics_constructor_check: true
+    routing_max_metric_age_seconds: 30.0
+    routing_require_metrics: false
+    routing_require_fresh_metrics: false
+    routing_allow_degraded: true
+    routing_weights:
+      capability: 0.25
+      health: 0.20
+      availability: 0.15
+      latency: 0.10
+      errors: 0.10
+      load: 0.08
+      freshness: 0.07
+      preference: 0.05
+    adaptation_auto_apply: false
+    adaptation_proposal_history_size: 100
+    discovery_enabled: false
+    discovery_packages: []
+    required_action_methods:
+      - predict
+      - get_action
+      - act
+      - perform_task
+      - execute
+    native_failure_patterns:
+      - winerror 1114
+      - c10.dll
+      - torch_cuda.dll
+      - cuda error
+    aliases:
+      web: browser
+      obs: observability
+      net: network
+      collaboration: collaborative
+      collaborative_agent: collaborative
+      reader_agent: reader
+      language_agent: language
+      knowledge_agent: knowledge
+      privacy_agent: privacy
+      quality_agent: quality
+      safety_agent: safety
+      observability_agent: observability
+      reasoning_agent: reasoning
+      evaluation_agent: evaluation
+    out_of_process_fallback_agents:
+      - adaptive
+      - alignment
+      - evaluation
+      - knowledge
+      - language
+      - learning
+      - perception
+      - planning
+      - reasoning
+      - safety
+    dependency_profiles:
+      collaborative:
+        torch_required: false
+        notes: "Task coordination, policy, and delegation are torch-free."
+      browser:
+        torch_required: false
+        notes: "Selenium/browser stack only."
+      planning:
+        torch_required: false
+        notes: "Core planning is torch-free; perception heads are optional."
+      knowledge:
+        torch_required: false
+        notes: "SBERT/transformers are optional; TF-IDF path can run without torch."
+      reasoning:
+        torch_required: false
+        notes: "Rule/probabilistic reasoning core does not require torch."
+      language:
+        torch_required: false
+        notes: "Lightweight language mode available without torch."
+      evaluation:
+        torch_required: false
+        notes: "Core evaluation works without deep anomaly torch module."
+      observability:
+        torch_required: false
+        notes: "Observability orchestration is telemetry-first and torch-free."
+      network:
+        torch_required: false
+        notes: "Network transport/routing/reliability stack is torch-free."
+      safety:
+        torch_required: false
+        notes: "Safety policy checks run without torch."
+      privacy:
+        torch_required: false
+        notes: "Privacy policy checks are rule/config driven and torch-free."
+      quality:
+        torch_required: false
+        notes: "Document/data quality gates are dependency-light and torch-free by default."
+      learning:
+        torch_required: true
+        notes: "RL/meta-learning pipelines require torch."
+      alignment:
+        torch_required: true
+        notes: "Value embedding model is torch-based."
+      adaptive:
+        torch_required: true
+        notes: "Adaptive RL workers are torch-based."
+      perception:
+        torch_required: true
+        notes: "Perception encoder/decoder stack is torch-based."
+    agent_specs:
+      adaptive:
+        module_path: src.agents.adaptive_agent
+        class_name: AdaptiveAgent
+        capabilities: [adaptation, policy_adaptation, runtime_optimization]
+      alignment:
+        module_path: src.agents.alignment_agent
+        class_name: AlignmentAgent
+        capabilities: [alignment, value_alignment, ethical_assessment]
+      browser:
+        module_path: src.agents.browser_agent
+        class_name: BrowserAgent
+        capabilities: [browser_automation, web_navigation, web_interaction]
+      collaborative:
+        module_path: src.agents.collaborative_agent
+        class_name: CollaborativeAgent
+        capabilities: [coordination, safety_assessment, shared_memory, task_delegation, collaboration_management]
+        constraints:
+          orchestration_scope: task_coordination
+          factory_authority: false
+          registry_authority: false
+        metadata:
+          orchestration_role: domain_orchestrator
+      evaluation:
+        module_path: src.agents.evaluation_agent
+        class_name: EvaluationAgent
+        capabilities: [evaluation, performance_assessment, anomaly_detection]
+      execution:
+        module_path: src.agents.execution_agent
+        class_name: ExecutionAgent
+        capabilities: [execution, action_selection, task_execution]
+      handler:
+        module_path: src.agents.handler_agent
+        class_name: HandlerAgent
+        capabilities: [failure_handling, recovery, escalation]
+      knowledge:
+        module_path: src.agents.knowledge_agent
+        class_name: KnowledgeAgent
+        capabilities: [knowledge_retrieval, knowledge_management, semantic_search]
+      language:
+        module_path: src.agents.language_agent
+        class_name: LanguageAgent
+        capabilities: [language_understanding, language_generation, text_processing]
+      learning:
+        module_path: src.agents.learning_agent
+        class_name: LearningAgent
+        capabilities: [learning, reinforcement_learning, model_adaptation]
+      network:
+        module_path: src.agents.network_agent
+        class_name: NetworkAgent
+        capabilities: [networking, message_routing, transport]
+      observability:
+        module_path: src.agents.observability_agent
+        class_name: ObservabilityAgent
+        capabilities: [observability, telemetry, monitoring]
+      perception:
+        module_path: src.agents.perception_agent
+        class_name: PerceptionAgent
+        capabilities: [perception, sensor_processing, representation_learning]
+      planning:
+        module_path: src.agents.planning_agent
+        class_name: PlanningAgent
+        capabilities: [planning, task_planning, scheduling]
+      privacy:
+        module_path: src.agents.privacy_agent
+        class_name: PrivacyAgent
+        capabilities: [privacy, data_protection, privacy_assessment]
+      qnn:
+        module_path: src.agents.qnn_agent
+        class_name: QNNAgent
+        capabilities: [quantum_state_simulation, quantum_circuit_inference, quantum_circuit_training, quantum_state_evaluation]
+      quality:
+        module_path: src.agents.quality_agent
+        class_name: QualityAgent
+        capabilities: [quality_assessment, validation, data_quality]
+      reader:
+        module_path: src.agents.reader_agent
+        class_name: ReaderAgent
+        capabilities: [document_reading, information_extraction, parsing]
+      reasoning:
+        module_path: src.agents.reasoning_agent
+        class_name: ReasoningAgent
+        capabilities: [reasoning, inference, decision_support]
+      safety:
+        module_path: src.agents.safety_agent
+        class_name: SafetyAgent
+        capabilities: [safety, risk_assessment, policy_enforcement]
+
+
 base_agent:
     defer_initialization: true
     memory_profile: low
@@ -31,6 +305,7 @@ base_agent:
     shared_memory_event_key_prefix: agent_events
     warm_start_key_prefix: warm_state
     retraining_flag_key_prefix: retraining_flag
+
 
 adaptive_agent:
   state_dim: 10
@@ -85,6 +360,7 @@ adaptive_agent:
   skills: {}
   handlers: {}
   env: {}
+
 
 alignment_agent:
   safety_buffer: 0.10
@@ -155,51 +431,62 @@ evaluation_agent:
     risk_adaptation: {}
     autonomous_tasks:
         - id: "nav_test"
-    type: "navigation"
-    path: [[0,0], [1,1], [2,2]]
-    optimal_path: [[0,0], [2,2]]
-    completion_time: 10.0
-    energy_consumed: 100
-    collisions: 0
-    success: true
+          type: "navigation"
+          path: [[0, 0], [1, 1], [2, 2]]
+          optimal_path: [[0, 0], [2, 2]]
+          completion_time: 10.0
+          energy_consumed: 100
+          collisions: 0
+          success: true
 
-issue_database:
-    host: 'localhost'
-    port: 5432
-    database: 'ai_issues'
-    user: 'user'
-    password: ''
-
-operations_notification:
-    email:
-        enabled: true
-        from: "ai-agent@yourdomain.com"
-        to: "ops@yourdomain.com"
-        subject: "URGENT: AI System Hazard"
-        smtp_host: "smtp.yourdomain.com"
-        smtp_port: 587
-        username: "ai-agent"
-        password: "secure-password"
-        use_tls: true
-
-    webhook:
-        enabled: true
-        url: "https://hooks.slack.com/services/..."
-
-    external_logging:
-        enabled: true
-        url: "https://logging-service.yourdomain.com/ingest"
 
 execution_agent: {}
 
+
 handler_agent:
-    max_retries: 2
-    circuit_breaker_threshold: 5
-    cooldown_seconds: 30
-    failure_budget_window_seconds: 300
-    checkpoint_max_age_seconds: 600
-    telemetry_buffer_size: 1000
-    evaluator_hooks_enabled: true
+  enabled: true
+  enable_recovery: true
+  enable_observability: true
+  enable_learning_loop: true
+  enable_escalation: true
+  enable_lightweight_fallback: true
+  checkpoint_max_age_seconds: 600
+  telemetry_buffer_size: 1000
+  postmortem_buffer_size: 1000
+  max_strategy_exceptions: 3
+  default_failure_source: handler_agent
+  fallback_strategy: runtime
+  recovery_strategy_order:
+    - network
+    - timeout
+    - memory
+    - runtime
+    - dependency
+    - resource
+    - unicode
+  honor_retry_delay: false
+  publish_last_execution_to_shared_memory: true
+  publish_status_to_shared_memory: true
+  shared_last_result_key: handler:agent:last_execution
+  shared_status_key: handler:agent:status
+
+  include_result_payload: true
+  include_failed_checkpoint_state: false
+
+  error_policy:
+    name: handler_agent.default
+    expose_internal_messages: false
+    include_context_in_public: false
+    include_context_in_telemetry: true
+    include_traceback_in_internal: false
+    allow_critical_retry: false
+    max_message_chars: 500
+    max_context_depth: 4
+    max_context_items: 50
+    max_sequence_items: 20
+    max_string_chars: 500
+    redaction_text: "[REDACTED]"
+
 
 knowledge_agent:
     source: "local_files"
@@ -225,7 +512,9 @@ knowledge_agent:
     safety_check_callback: foodie_security.validate_action
     max_workers: 8
 
+
 language_agent: {}
+
 
 learning_agent:
     rl_algorithm: null
@@ -256,8 +545,15 @@ learning_agent:
         max_task_pool: 50
         max_history: 500
 
+
 network_agent:
     max_delivery_attempts: 3
+    default_retry_profile: "default"
+    queue_retry_profile: "queue_backpressure"
+    retry_profile_by_channel:
+        queue: "queue_backpressure"
+        amqp: "queue_backpressure"
+        kafka: "queue_backpressure"
     retry_sleep_enabled: False
     max_retry_sleep_ms: 1500
     default_receive_timeout_ms: 5000
@@ -268,6 +564,7 @@ network_agent:
     history_shared_key:
         network_agent: "history"
     max_history: 200
+
 
 observability_agent:
     enabled: true
@@ -317,6 +614,7 @@ observability_agent:
         safety_agent_names: ["safety", "safety_agent", "SafetyAgent"]
         evaluation_agent_names: ["evaluation", "evaluation_agent", "EvaluationAgent"]
 
+
 perception_agent:
     device: "cpu"
     embed_dim: 512
@@ -332,9 +630,24 @@ perception_agent:
     mse_weight: 1.0     # for hybrid loss
     contrastive_weight: 1.0  # for hybrid loss
 
+
 planning_agent: {}
 
+
 privacy_agent: {}
+
+
+qnn_agent:
+  num_qubits: 4
+  num_quantum_layers: 2
+  learning_rate: 0.01
+  seed: 42
+  entanglement: linear
+  loss: state_fidelity
+  gradient_method: parameter_shift
+  finite_difference_step: 1.0e-6
+  gradient_clip_norm: 5.0
+
 
 quality_agent:
     enabled: true
@@ -380,28 +693,106 @@ quality_agent:
         error_key_prefix: quality_agent.error
         event_channel: quality.events
 
+
 reader_agent:
-    default_output_format: "txt"
-    output_dir: "output/reader"
-    max_concurrency: 4
-    enable_cache: true
-    recovery_min_quality_score: 0.55
+  enabled: true
+  output_dir: output/reader
+  default_output_format: txt
+  max_concurrency: 4
+  fail_fast: false
+  dedupe_files: true
+
+  # Recovery trigger owned by the agent orchestration layer.
+  # Actual RecoveryEngine thresholds/policy remain in reader_config.yaml.
+  auto_recover_low_quality: true
+  low_quality_threshold: 0.55
+
+  # Result shaping. Keep full content out of normal agent responses/checkpoints unless requested.
+  include_documents_by_default: false
+  include_content_by_default: false
+  max_result_documents: 50
+  use_shared_cache: true
+  cache_ttl_seconds: 0
+  cache_key_prefix: reader_agent.cache
+  cache_parse_results: true
+  cache_recovery_results: true
+
+  # SharedMemory-backed checkpoints and observability.
+  write_checkpoints: true
+  checkpoint_key_prefix: reader_agent.checkpoint
+  checkpoint_index_key: reader_agent.checkpoints
+  max_checkpoint_index_entries: 250
+  redact_checkpoints: true
+  publish_events: true
+  event_channel: reader.events
+  result_key_prefix: reader_agent.result
+  summary_key_prefix: reader_agent.summary
+  error_key_prefix: reader_agent.error
+
+  # Error behavior. Set raise_on_pipeline_error=true when you want BaseAgent's issue
+  # recovery envelope to receive exceptions instead of structured Reader error results.
+  raise_on_pipeline_error: false
+  include_debug_errors: false
+  include_traceback_errors: false
+
+  # Transient operation retry policy used around parser/recovery/conversion calls.
+  retry_max_attempts: 2
+  retry_base_delay_seconds: 0.15
+  retry_max_delay_seconds: 2.0
+  retry_backoff_factor: 2.0
+  retry_jitter_ratio: 0.10
+
 
 reasoning_agent:
-    learning_rate: 0.01
-    exploration_rate: 0.1
-    tuple_key: ["subject", "predicate", "object"]
-    hypothesis_graph:
-        nodes: {}
-        edges: {}
-        confedence: 0.0
-    language_config_path: "src/agents/language/configs/language_config.yaml"
-    knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
-    glove_path: "data/embeddings/glove.6B.200d.json"
-    ner_tag: None
-    embedding: None
-    decay: 0.8
-    max_iterations: 100
+  learning_rate: 0.05
+  exploration_rate: 0.1
+  tuple_key:
+  - subject
+  - predicate
+  - object
+  hypothesis_graph:
+    nodes: {}
+    edges: {}
+    confidence: 0.0
+  decay: 0.95
+  knowledge_db: src/agents/knowledge/templates/knowledge_db.json
+  glove_path: data/embeddings/glove.6B.200d.json
+  ner_tag: None
+  embedding: None
+  max_iterations: 20
+  contradiction_threshold: 0.25
+  redundancy_margin: 0.05
+  large_kb_threshold: 500
+  low_confidence_threshold: 0.4
+  max_action_results: 20
+  max_chain_depth: 4
+  max_react_steps: 5
+  max_trace_items: 250
+  enable_shared_memory_publish: true
+  enable_knowledge_persistence: true
+  enable_memory_logging: true
+  enable_probabilistic_fallback: true
+  auto_register_builtin_rules: true
+  strict_fact_validation: true
+  human_intervention_key: human_intervention_requests
+  knowledge_memory_key: reasoning_agent:knowledge_base
+  last_validation_key: reasoning_agent:last_validated_fact
+  reasoning_trace_topic: reasoning_trace
+  memory_event_tag: reasoning_agent
+  memory_event_priority: 0.75
+  strategy_default: deduction
+  reasoning_type_aliases:
+    deductive: deduction
+    inductive: induction
+    abductive: abduction
+    causal: cause_effect
+    cause-and-effect: cause_effect
+    decomposition: decompositional
+    analytical: analogical
+    analitical: analogical
+  builtin_rule_weights:
+    identity_rule: 1.0
+    transitive_rule: 0.8
 
 
 safety_agent:
@@ -546,4 +937,3 @@ safety_agent:
   safety_policies: []
   formal_specs: {}
   fault_tree_config: {}
-

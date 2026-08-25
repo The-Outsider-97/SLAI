@@ -11,8 +11,8 @@ import json
 import os
 import threading
 import time
-import requests
-import yaml
+import requests # type: ignore
+import yaml # type: ignore
 
 from collections import OrderedDict, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,19 +21,21 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from difflib import SequenceMatcher
 
 try:  # Optional dependency in some environments.
-    import psycopg2
-    from psycopg2 import sql
+    import psycopg2 # type: ignore
+    from psycopg2 import sql # type: ignore
 except Exception:  # pragma: no cover - exercised in dependency-light environments.
     psycopg2 = None
     sql = None
 
-from src.agents.knowledge.utils.config_loader import load_global_config, get_config_section
-from src.agents.knowledge.knowledge_memory import KnowledgeMemory
-from src.agents.knowledge.utils.rule_engine import RuleEngine
-from logs.logger import PrettyPrinter, get_logger
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.knowledge_helpers import *
+from .utils.knowledge_errors import *
+from .modules.rule_engine import RuleEngine
+from .knowledge_memory import KnowledgeMemory
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Synchronizer")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class KnowledgeSynchronizer:
@@ -41,8 +43,8 @@ class KnowledgeSynchronizer:
 
     def __init__(
         self,
-        knowledge_memory: Optional[KnowledgeMemory] = None,
-        rule_engine: Optional[RuleEngine] = None,
+        knowledge_memory = None,
+        rule_engine = None,
         autostart: bool = False,
     ):
         self.config = load_global_config()
@@ -65,8 +67,8 @@ class KnowledgeSynchronizer:
         external_config = get_config_section("external_sources")
         self.external_config = self._normalize_external_sources(external_config)
 
-        self.knowledge_memory = knowledge_memory if knowledge_memory is not None else KnowledgeMemory()
-        self.rule_engine = rule_engine if rule_engine is not None else RuleEngine()
+        self.rule_engine = rule_engine or RuleEngine()
+        self.knowledge_memory = knowledge_memory or KnowledgeMemory()
 
         self.version_history: "OrderedDict[str, deque]" = OrderedDict()
         self.sync_lock = threading.Lock()
@@ -295,7 +297,8 @@ class KnowledgeSynchronizer:
             logger.warning(f"Rule-based conflict resolution failed for key='{key}': {exc}")
             return self._resolve_by_timestamp(key, *versions)
 
-        best_version_key = max(inferred, key=lambda candidate: inferred[candidate], default=None)
+        inferred_dict = inferred if isinstance(inferred, dict) else (inferred[0] if inferred else {})
+        best_version_key = max(inferred_dict, key=lambda candidate: inferred_dict.get(candidate, 0), default=None) if inferred_dict else None
         if best_version_key and best_version_key.startswith("version_"):
             try:
                 version_index = int(best_version_key.split("_")[-1])
@@ -328,8 +331,14 @@ class KnowledgeSynchronizer:
     def _sync_memory_with_external(self) -> Dict[str, int]:
         """Synchronize core memory with external knowledge sources."""
         stats = {"memory_updates": 0, "memory_conflicts": 0}
-        external_data, external_stats = self._fetch_external_data(include_stats=True)
-        stats.update(external_stats)
+        result = self._fetch_external_data(include_stats=True)
+        external_data, external_stats = result  # type: ignore
+        if isinstance(external_stats, dict):
+            stats.update(external_stats)
+
+        if not isinstance(external_data, dict):
+            logger.warning("external_data is not a dict: %s", type(external_data))
+            return stats
 
         for key, external_value in external_data.items():
             memory_rows = self.knowledge_memory.recall(key=key)
@@ -348,7 +357,7 @@ class KnowledgeSynchronizer:
 
     def _sync_rule_engine(self) -> Dict[str, int]:
         """Refresh rule engine with latest rules."""
-        stats = {"rules_loaded": 0, "errors": 0}
+        stats: Dict[str, int] = {"rules_loaded": 0, "errors": 0}
         try:
             self.rule_engine.load_all_sectors()
             stats["rules_loaded"] = len(getattr(self.rule_engine, "rules", []))
@@ -361,11 +370,11 @@ class KnowledgeSynchronizer:
     def _sync_with_external_sources(self) -> Dict[str, int]:
         """Synchronize with configured external knowledge sources."""
         _, stats = self._fetch_external_data(include_stats=True)
-        return stats
+        return stats # type: ignore
 
     def _fetch_external_data(
         self, include_stats: bool = False
-    ) -> Tuple[Dict[str, dict], Dict[str, int]] | Dict[str, dict]:
+    ) -> Tuple[Dict[str, dict], Dict[str, int]] | Dict[str, dict] | Tuple[Dict[str, dict], Dict[str, int]]:
         """Fetch and merge knowledge entries from configured external sources."""
         merged_data: Dict[str, dict] = {}
         stats = {
@@ -535,25 +544,31 @@ class KnowledgeSynchronizer:
 
         raise ValueError(f"Unknown source type: {source_type}")
 
-    def _resolve_path(self, path: str) -> Path:
-        candidate = Path(path)
-        if candidate.is_absolute() and candidate.exists():
-            return candidate
-
+    def _resolve_path(self, value: str) -> Path:
+        path = Path(value)
+    
+        if path.is_absolute() and path.exists():
+            return path
+    
+        candidates: List[Path] = []
+    
         config_path = self.config.get("__config_path__")
-        search_roots: List[Path] = [Path.cwd()]
         if config_path:
-            config_root = Path(config_path).resolve().parent
-            search_roots.extend([config_root, config_root.parent])
-        module_root = Path(__file__).resolve().parent
-        search_roots.extend([module_root, module_root.parent, module_root.parent.parent])
-
-        for root in search_roots:
-            resolved = (root / path).resolve()
-            if resolved.exists():
-                return resolved
-
-        return candidate
+            candidates.extend(
+                config_relative_candidates(
+                    path,
+                    Path(str(config_path)),
+                )
+            )
+    
+        candidates.append(Path.cwd() / path)
+    
+        module_dir = Path(__file__).resolve().parent
+        candidates.append(module_dir / path)
+        candidates.append(module_dir.parent.parent.parent / path)
+    
+        existing = first_existing_path(candidates)
+        return existing if existing is not None else path
 
     def _fetch_from_file(self, path: str) -> dict:
         """Fetch data from local file source."""
@@ -628,8 +643,9 @@ class KnowledgeSynchronizer:
                     continue
 
                 if not isinstance(value, dict):
-                    value = {"text": str(value)}
-                value.setdefault("metadata", {})
+                    value = {"text": str(value), "metadata": {}}
+                elif "metadata" not in value:
+                    value["metadata"] = {}
                 value["metadata"].setdefault("timestamp", time.time())
                 value["metadata"].setdefault("confidence", 0.5)
                 processed[str(key)] = value

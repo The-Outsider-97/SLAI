@@ -1,0 +1,1 @@
+"""DocuMaster package module."""

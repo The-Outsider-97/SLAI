@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from io import BytesIO
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from src.utils.interpretability import InterpretabilityHelper  # pyright: ignore[reportMissingImports]
+from ..base.utils.interpretability import InterpretabilityHelper
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.safety_helpers import *
 from .utils.security_error import *

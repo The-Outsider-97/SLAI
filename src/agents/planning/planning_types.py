@@ -1,298 +1,668 @@
 """
-Planning Types – Core data structures for planning, scheduling, and safety.
+Planning Types – Core data structures for planning, scheduling, memory, safety,
+and execution orchestration.
 
-Includes:
-- `Any`: a typed container with constraints (academic style).
-- Enums: TaskStatus, TaskType.
-- Dataclasses for resources, constraints, snapshots, etc.
-- The main `Task` class with full lifecycle support.
+This module defines the canonical type contract used by the planning subsystem:
+resource profiles, temporal constraints, safety reports, plan snapshots, runtime
+adjustments, and the Task work unit.  It intentionally keeps the existing public
+API shape while adding stricter validation, safer serialisation, lifecycle
+helpers, and config-driven defaults.
 """
 
+from __future__ import annotations
+
 import copy
-import os
 import time
-import yaml, json
 
+from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
-from dataclasses import dataclass, field
-from typing import Any as AnyType, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any as AnyType, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from src.agents.planning.utils.planning_errors import (AdjustmentError, ReplanningError, TemporalViolation,
-                                                SafetyMarginError, ResourceViolation, AcademicPlanningError)
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.planning_errors import * # type: ignore
+from .utils.planning_helpers import * # type: ignore
+from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Types")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Module configuration
+# -----------------------------------------------------------------------------
+def _planning_types_config() -> Dict[str, AnyType]:
+    """Load the planning_types config section without changing config handling."""
+    config = load_global_config()
+    section = get_config_section("planning_types", config=config, default={})
+    return deep_update(
+        {
+            "validation_level": "strict",
+            "type_checks": "enabled",
+            "default_task_name": "Planning Task",
+            "default_task_version": "1.0",
+            "default_owner": "system",
+            "default_duration": 300.0,
+            "default_estimated_duration": 0.0,
+            "default_cost": 1.0,
+            "default_priority": 1,
+            "default_max_retries": 3,
+            "default_success_threshold": 0.9,
+            "relative_time_threshold_seconds": 1_000_000_000,
+            "max_progress": 1.0,
+            "allowed_criticalities": ["low", "medium", "high", "critical"],
+            "allowed_adjustments": ["modify_task", "add_task", "remove_task"],
+            "default_safety_margins": {
+                "gpu_buffer": 0.15,
+                "ram_buffer": 0.20,
+                "min_task_duration": 30,
+                "max_concurrent": 5,
+                "time_buffer": 120,
+            },
+        },
+        section,
+    )
+
+
+def _is_strict_validation() -> bool:
+    level = str(_planning_types_config().get("validation_level", "strict")).lower()
+    return level in {"strict", "enabled", "true", "1"}
+
+
+def _now() -> float:
+    return time.time()
+
+
+# -----------------------------------------------------------------------------
 # Any – typed container with constraints
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 class Any:
     """
-    Universal value container with academic rigor, implementing concepts from:
-    - Pierce's 'Types and Programming Languages' (type system foundations)
-    - Reynolds' 'Polymorphism is Not Set-Theoretic' (parametricity)
-    - Wadler's 'Theorems for Free!' (generic operations)
+    Universal value container with runtime constraints.
 
-    Provides strict typing while allowing controlled flexibility.
+    Constraint values may be Python types, callable predicates, or string domain
+    tags. Callable constraints are validated at runtime but are represented by
+    name during serialisation because arbitrary functions cannot be safely
+    reconstructed from JSON.
     """
-    __slots__ = ('_value', '_type', '_constraints')
-    
-    def __init__(self, value: object, constraints: tuple = ()):
-        """
-        Initialize with value and optional academic constraints:
-        - Type constraints: (int, float) - Value constraints: (lambda x: x > 0,) - Domain constraints: ('physical', 'temporal')
-        """
+
+    __slots__ = ("_value", "_type", "_constraints")
+
+    def __init__(self, value: object, constraints: Tuple[AnyType, ...] = ()) -> None:
+        require_type(constraints, tuple, "constraints")
         self._value = value
         self._type = type(value)
         self._constraints = constraints
-        
-        # Validate constraints at initialization
         self._validate(constraints)
 
     @property
-    def value(self):
+    def value(self) -> object:
         return self._value
 
     @property
-    def type(self):
+    def type(self) -> type:
         return self._type
 
-    def _validate(self, constraints: tuple):
-        """Apply constraint checking using Hoare logic principles."""
+    @property
+    def constraints(self) -> Tuple[AnyType, ...]:
+        return self._constraints
+
+    def _validate(self, constraints: Tuple[AnyType, ...]) -> None:
         for constraint in constraints:
             if isinstance(constraint, type):
                 if not isinstance(self._value, constraint):
-                    raise TypeError(
-                        f"Value {self._value} violates type constraint {constraint}"
+                    raise AcademicPlanningError(
+                        f"Value {self._value!r} violates type constraint {constraint.__name__}"
                     )
             elif isinstance(constraint, str):
-                # Domain tags are checked externally
                 continue
             elif callable(constraint):
-                if not constraint(self._value):
-                    raise ValueError(
-                        f"Value {self._value} violates predicate constraint"
+                try:
+                    valid = bool(constraint(self._value))
+                except Exception as exc:
+                    raise AcademicPlanningError(
+                        f"Constraint {getattr(constraint, '__name__', 'anonymous')} raised: {exc}"
+                    ) from exc
+                if not valid:
+                    raise AcademicPlanningError(
+                        f"Value {self._value!r} violates predicate constraint "
+                        f"{getattr(constraint, '__name__', 'anonymous')}"
                     )
             else:
-                raise AcademicPlanningError(
-                    f"Invalid constraint type: {type(constraint)}"
-                )
+                raise AcademicPlanningError(f"Invalid constraint type: {type(constraint).__name__}")
 
     def is_compatible(self, other: "Any") -> bool:
-        """
-        Structural compatibility check using Mitchell's subtype theory.
-        Returns True if:
-        1. Types are compatible (via inheritance)
-        2. All constraints of 'other' are satisfied by self
-        """
-        return issubclass(self._type, other.type) and all(
-            c(self.value) for c in other.constraints if callable(c)
-        )
+        require_type(other, Any, "other")
+        if not issubclass(self._type, other.type):
+            return False
+        for constraint in other.constraints:
+            if callable(constraint):
+                try:
+                    if not constraint(self.value):
+                        return False
+                except Exception:
+                    return False
+        return True
 
-    def constrain(self, new_constraints: tuple) -> "Any":
-        """Create new Any instance with additional constraints."""
+    def constrain(self, new_constraints: Tuple[AnyType, ...]) -> "Any":
+        require_type(new_constraints, tuple, "new_constraints")
         return Any(self._value, self._constraints + new_constraints)
 
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, Any):
-            return self.value == other.value
-        return self.value == other
-
-    def __repr__(self) -> str:
-        return f"Any<{self._type.__name__}>({self._value})"
-
-    def to_json(self) -> dict:
-        """Serialization using Pierce's recursive type encoding."""
+    def to_json(self) -> Dict[str, AnyType]:
         return {
             "value": self._value,
             "type": self._type.__name__,
             "constraints": [
-                c.__name__ if callable(c) else c for c in self._constraints
+                c.__name__ if isinstance(c, type) else getattr(c, "__name__", c)
+                for c in self._constraints
             ],
         }
 
     @classmethod
-    def from_json(cls, data: dict) -> "Any":
-        """Deserialization with runtime type reconstruction."""
-        type_map = {
-            t.__name__: t for t in (int, float, str, bool, list, dict)
-        }
-        value = data["value"]
-        constraints = []
-
-        for c in data["constraints"]:
-            if c in type_map:
-                constraints.append(type_map[c])
-            elif c in ("physical", "temporal"):
-                constraints.append(c)
+    def from_json(cls, data: Dict[str, AnyType]) -> "Any":
+        require_type(data, dict, "data")
+        type_map = {t.__name__: t for t in (int, float, str, bool, list, dict, tuple)}
+        constraints: List[AnyType] = []
+        for item in data.get("constraints", []):
+            if item in type_map:
+                constraints.append(type_map[item])
+            elif isinstance(item, str):
+                constraints.append(item)
             else:
-                raise AcademicPlanningError(f"Unreconstructible constraint: {c}")
+                raise AcademicPlanningError(f"Unreconstructible constraint: {item!r}")
+        return cls(data.get("value"), tuple(constraints))
 
-        return cls(value, tuple(constraints))
-
-    def __add__(self, other: "Any") -> "Any":
-        """Additive operation with type conservation rules."""
+    def __add__(self, other: object) -> "Any":
         if not isinstance(other, Any):
             other = Any(other)
-
-        if self.type != other.type:
-            raise AcademicPlanningError("Additive type mismatch")
-
-        return Any(self.value + other.value, self._constraints)
+        if self.type is not other.type:
+            raise AcademicPlanningError(
+                f"Additive type mismatch: {self.type.__name__} != {other.type.__name__}"
+            )
+        return Any(self.value + other.value, self._constraints)  # type: ignore[operator]
 
     def __radd__(self, other: object) -> "Any":
         return self.__add__(other)
 
+    def __eq__(self, other: object) -> bool:
+        return self.value == (other.value if isinstance(other, Any) else other)
 
-# -------------------------------------------------------------------------
+    def __repr__(self) -> str:
+        return f"Any<{self._type.__name__}>({self._value!r})"
+
+
+# -----------------------------------------------------------------------------
 # Type aliases
-# -------------------------------------------------------------------------
-WorldState = Tuple[Tuple[str, Any], ...]  # Immutable state representation
-MethodSignature = Tuple[str, int]  # (task_name, method_index)
-TemporalRelation = Tuple["Task", "Task", str]  # (task_a, task_b, relation type)
+# -----------------------------------------------------------------------------
+WorldState = Tuple[Tuple[str, AnyType], ...]
+MethodSignature = Tuple[str, int]
+TemporalRelation = Tuple["Task", "Task", str]
 MemoKey = Tuple[MethodSignature, WorldState]
-PlanStep = Tuple[int, "Task", MethodSignature]  # (step_id, task, method_used)
+PlanStep = Tuple[int, "Task", MethodSignature]
 
 
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Enums
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 class TaskStatus(Enum):
-    """Represents the execution status of a task."""
-
     PENDING = 0
     EXECUTING = 1
     SUCCESS = 2
     FAILED = 3
+    CANCELLED = 4
+    BLOCKED = 5
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in {TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.CANCELLED}
 
 
 class TaskType(Enum):
-    """Differentiates between primitive actions and abstract goals."""
-
     PRIMITIVE = 0
     ABSTRACT = 1
+    COMPOSITE = 2
 
 
-# -------------------------------------------------------------------------
-# Dataclasses for resources, constraints, etc.
-# -------------------------------------------------------------------------
+def _coerce_enum(value: AnyType, enum_cls: type[Enum], field_name: str) -> Enum:
+    if isinstance(value, enum_cls):
+        return value
+    if isinstance(value, str):
+        key = value.upper()
+        if key in enum_cls.__members__:
+            return enum_cls[key]
+    if isinstance(value, int):
+        try:
+            return enum_cls(value)
+        except ValueError:
+            pass
+    raise PlanningConfigError(
+        f"Invalid {field_name}: {value!r}",
+        config_key=field_name,
+        config_section="planning_types",
+        expected_type=f"{enum_cls.__name__} member",
+    )
+
+
+# -----------------------------------------------------------------------------
+# Resource and safety dataclasses
+# -----------------------------------------------------------------------------
 @dataclass
 class ResourceProfile:
-    gpu: int = 0
-    ram: int = 0  # In GB
+    gpu: float = 0.0
+    ram: float = 0.0
     specialized_hardware: List[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        self.gpu = float(self.gpu or 0.0)
+        self.ram = float(self.ram or 0.0)
+        require_non_negative(self.gpu, "resource_profile.gpu")
+        require_non_negative(self.ram, "resource_profile.ram")
+        if self.specialized_hardware is None:
+            self.specialized_hardware = []
+        require_type(self.specialized_hardware, list, "resource_profile.specialized_hardware")
+        self.specialized_hardware = list(dict.fromkeys(str(hw) for hw in self.specialized_hardware if hw))
+
     def count_requirements(self) -> int:
-        return len(self.__dict__)
+        return int(self.gpu > 0) + int(self.ram > 0) + len(self.specialized_hardware)
+
+    def to_dict(self) -> Dict[str, AnyType]:
+        return {
+            "gpu": self.gpu,
+            "ram": self.ram,
+            "specialized_hardware": list(self.specialized_hardware),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, AnyType]]) -> "ResourceProfile":
+        if data is None:
+            return cls()
+        require_type(data, dict, "resource_profile")
+        return cls(
+            gpu=float(data.get("gpu", 0.0) or 0.0),
+            ram=float(data.get("ram", 0.0) or 0.0),
+            specialized_hardware=list(data.get("specialized_hardware", []) or []),
+        )
+
+    def fits_within(self, available: "ClusterResources") -> bool:
+        require_type(available, ClusterResources, "available")
+        if self.gpu > available.gpu_total or self.ram > available.ram_total:
+            return False
+        return set(self.specialized_hardware).issubset(set(available.specialized_hardware_available))
+
+    def __add__(self, other: "ResourceProfile") -> "ResourceProfile":
+        require_type(other, ResourceProfile, "other")
+        return ResourceProfile(
+            gpu=self.gpu + other.gpu,
+            ram=self.ram + other.ram,
+            specialized_hardware=list(dict.fromkeys(self.specialized_hardware + other.specialized_hardware)),
+        )
+
+    def __sub__(self, other: "ResourceProfile") -> "ResourceProfile":
+        require_type(other, ResourceProfile, "other")
+        return ResourceProfile(
+            gpu=max(0.0, self.gpu - other.gpu),
+            ram=max(0.0, self.ram - other.ram),
+            specialized_hardware=[hw for hw in self.specialized_hardware if hw not in set(other.specialized_hardware)],
+        )
 
 
 @dataclass
 class ClusterResources:
-    gpu_total: int = 0
-    ram_total: int = 0
+    gpu_total: float = 0.0
+    ram_total: float = 0.0
     specialized_hardware_available: List[str] = field(default_factory=list)
     current_allocations: Dict[str, ResourceProfile] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.gpu_total = float(self.gpu_total or 0.0)
+        self.ram_total = float(self.ram_total or 0.0)
+        require_non_negative(self.gpu_total, "cluster_resources.gpu_total")
+        require_non_negative(self.ram_total, "cluster_resources.ram_total")
+        self.specialized_hardware_available = list(
+            dict.fromkeys(str(hw) for hw in (self.specialized_hardware_available or []) if hw)
+        )
+        self.current_allocations = {
+            str(k): (v if isinstance(v, ResourceProfile) else ResourceProfile.from_dict(v))
+            for k, v in dict(self.current_allocations or {}).items()
+        }
+
+    def allocated_totals(self) -> ResourceProfile:
+        total = ResourceProfile()
+        for profile in self.current_allocations.values():
+            total = total + profile
+        return total
+
+    def available_profile(self) -> ResourceProfile:
+        allocated = self.allocated_totals()
+        return ResourceProfile(
+            gpu=max(0.0, self.gpu_total - allocated.gpu),
+            ram=max(0.0, self.ram_total - allocated.ram),
+            specialized_hardware=[
+                hw for hw in self.specialized_hardware_available
+                if hw not in set(allocated.specialized_hardware)
+            ],
+        )
+
+    def can_allocate(self, requirements: ResourceProfile) -> bool:
+        return requirements.fits_within(
+            ClusterResources(
+                gpu_total=self.available_profile().gpu,
+                ram_total=self.available_profile().ram,
+                specialized_hardware_available=self.available_profile().specialized_hardware,
+            )
+        )
+
+    def allocate(self, task_id: str, requirements: ResourceProfile) -> None:
+        validate_task_id(task_id, "cluster_allocation")
+        if not self.can_allocate(requirements):
+            available = self.available_profile()
+            raise ResourceAcquisitionError(
+                f"Insufficient resources for task {task_id}",
+                resource_type="cluster",
+                requested=requirements.to_dict(),
+                available=available.to_dict(),
+                task_id=task_id,
+            )
+        self.current_allocations[task_id] = copy.deepcopy(requirements)
+
+    def release(self, task_id: str) -> ResourceProfile:
+        validate_task_id(task_id, "cluster_release")
+        return self.current_allocations.pop(task_id, ResourceProfile())
+
+    def to_dict(self) -> Dict[str, AnyType]:
+        return {
+            "gpu_total": self.gpu_total,
+            "ram_total": self.ram_total,
+            "specialized_hardware_available": list(self.specialized_hardware_available),
+            "current_allocations": {
+                task_id: profile.to_dict() for task_id, profile in self.current_allocations.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, AnyType]]) -> "ClusterResources":
+        if data is None:
+            return cls()
+        require_type(data, dict, "cluster_resources")
+        return cls(
+            gpu_total=float(data.get("gpu_total", 0.0) or 0.0),
+            ram_total=float(data.get("ram_total", 0.0) or 0.0),
+            specialized_hardware_available=list(data.get("specialized_hardware_available", []) or []),
+            current_allocations={
+                str(k): ResourceProfile.from_dict(v)
+                for k, v in dict(data.get("current_allocations", {}) or {}).items()
+            },
+        )
 
 
 @dataclass
 class RepairCandidate:
-    """Represents a candidate solution for repairing a failed plan."""
-
     strategy: str
     repaired_plan: List["Task"]
     estimated_cost: float
     risk_assessment: Dict[str, AnyType]
 
+    def __post_init__(self) -> None:
+        require_non_empty(self.strategy, "repair_candidate.strategy")
+        require_non_negative(float(self.estimated_cost), "repair_candidate.estimated_cost")
+        require_type(self.risk_assessment, dict, "repair_candidate.risk_assessment")
+
+    def to_dict(self) -> Dict[str, AnyType]:
+        return {
+            "strategy": self.strategy,
+            "repaired_plan": [t.to_dict() if hasattr(t, "to_dict") else str(t) for t in self.repaired_plan],
+            "estimated_cost": self.estimated_cost,
+            "risk_assessment": copy.deepcopy(self.risk_assessment),
+        }
+
 
 @dataclass
 class Adjustment:
-    """Data structure for plan adjustment requests."""
-
-    type: str  # 'modify_task', 'add_task', 'remove_task'
+    type: str
     task_id: Optional[str] = None
     task: Optional["Task"] = None
     updates: Optional[Dict[str, AnyType]] = None
     priority: int = 3
     cascade: bool = False
     origin: str = "api"
-    timestamp: float = field(default_factory=time.time)
+    timestamp: float = field(default_factory=_now)
     _retry_count: int = 0
+
+    def __post_init__(self) -> None:
+        cfg = _planning_types_config()
+        allowed = set(cfg.get("allowed_adjustments", ["modify_task", "add_task", "remove_task"]))
+        if self.type not in allowed:
+            raise AdjustmentError(
+                f"Unsupported adjustment type: {self.type}",
+                adjustment=self.to_dict(include_task=False),
+                conflict_details={"allowed": sorted(allowed)},
+            )
+        if self.task_id:
+            validate_task_id(self.task_id, "adjustment")
+        if self.updates is not None:
+            require_type(self.updates, dict, "adjustment.updates")
+        self.priority = int(self.priority)
+        self._retry_count = int(max(0, self._retry_count))
+
+    def to_dict(self, *, include_task: bool = True) -> Dict[str, AnyType]:
+        return {
+            "type": self.type,
+            "task_id": self.task_id,
+            "task": self.task.to_dict() if include_task and self.task is not None else None,
+            "updates": copy.deepcopy(self.updates or {}),
+            "priority": self.priority,
+            "cascade": self.cascade,
+            "origin": self.origin,
+            "timestamp": self.timestamp,
+            "_retry_count": self._retry_count,
+        }
 
 
 @dataclass
 class PerformanceMetrics:
-    """Captures system performance metrics at a point in time."""
-
-    timestamp: float = field(default_factory=time.time)
+    timestamp: float = field(default_factory=_now)
     system_load: float = 0.0
-    network_latency: float = -1.0  # ms, -1 indicates error
+    network_latency: float = -1.0
     service_health: Dict[str, str] = field(default_factory=dict)
-    plan_execution_rate: float = 0.0  # tasks/min
+    plan_execution_rate: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.timestamp = float(self.timestamp or _now())
+        self.system_load = clamp(float(self.system_load or 0.0), 0.0, 1.0)
+        self.network_latency = float(self.network_latency)
+        require_non_negative(float(self.plan_execution_rate), "performance.plan_execution_rate")
+        self.service_health = {str(k): str(v) for k, v in dict(self.service_health or {}).items()}
+
+    def to_dict(self) -> Dict[str, AnyType]:
+        return asdict(self)
 
 
 @dataclass
 class PlanSnapshot:
-    """Snapshot of current plan state."""
-
-    timestamp: float = field(default_factory=time.time)
+    timestamp: float = field(default_factory=_now)
     task_ids: List[str] = field(default_factory=list)
-    resource_utilization: Dict[str, str] = field(default_factory=dict)
+    resource_utilization: Dict[str, Union[str, float]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.timestamp = float(self.timestamp or _now())
+        self.task_ids = [str(tid) for tid in self.task_ids]
+        self.resource_utilization = dict(self.resource_utilization or {})
+
+    def to_dict(self) -> Dict[str, AnyType]:
+        return asdict(self)
 
 
 @dataclass
 class TemporalConstraints:
-    """Comprehensive temporal constraint system."""
-
     start_time: float = 0.0
     end_time: float = 0.0
     min_duration: float = 0.0
     max_duration: float = 0.0
-    dependencies: List[str] = field(default_factory=list)  # Task IDs this task depends on
-    max_wait: float = 0.0  # Max time to wait for dependencies
-    time_buffer: float = 0.0  # Buffer time after completion
-    constraints: List[Callable] = field(default_factory=list)  # Custom constraint functions
+    dependencies: List[str] = field(default_factory=list)
+    max_wait: float = 0.0
+    time_buffer: float = 0.0
+    constraints: List[Callable[[float], bool]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        for name in ("start_time", "end_time", "min_duration", "max_duration", "max_wait", "time_buffer"):
+            setattr(self, name, float(getattr(self, name) or 0.0))
+            require_non_negative(getattr(self, name), f"temporal_constraints.{name}")
+        self.dependencies = [str(dep) for dep in (self.dependencies or [])]
+        if self.min_duration and self.max_duration and self.min_duration > self.max_duration:
+            raise TemporalViolation(
+                "min_duration cannot exceed max_duration",
+                violation_type="duration",
+                constraint_details={"min_duration": self.min_duration, "max_duration": self.max_duration},
+            )
+        if self.start_time and self.end_time and self.start_time > self.end_time:
+            raise TemporalViolation(
+                "start_time cannot be after end_time",
+                violation_type="window",
+                constraint_details={"start_time": self.start_time, "end_time": self.end_time},
+            )
 
     def validate(self, current_time: float) -> bool:
-        """Check if temporal constraints are satisfied."""
-        if self.start_time > 0 and current_time < self.start_time:
+        if self.start_time > 0.0 and current_time < self.start_time:
             return False
-        if self.end_time > 0 and current_time > self.end_time:
+        if self.end_time > 0.0 and current_time > self.end_time:
             return False
-        return all(constraint(current_time) for constraint in self.constraints)
+        for constraint in self.constraints:
+            try:
+                if not constraint(current_time):
+                    return False
+            except Exception as exc:
+                raise TemporalViolation(
+                    f"Temporal constraint raised: {exc}",
+                    violation_type="custom_constraint",
+                    time_delta=0.0,
+                ) from exc
+        return True
+
+    def to_dict(self) -> Dict[str, AnyType]:
+        data = asdict(self)
+        data["constraints"] = [getattr(c, "__name__", "anonymous") for c in self.constraints]
+        return data
 
 
 @dataclass
 class SafetyViolation:
-    """Detailed safety violation report."""
-
     violation_type: str
     resource: str
     measured_value: float
     threshold: float
     task_id: str
-    timestamp: float = field(default_factory=time.time)
-    severity: str = "medium"  # low, medium, high, critical
+    timestamp: float = field(default_factory=_now)
+    severity: str = "medium"
     corrective_action: str = ""
     impact_analysis: Dict[str, AnyType] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        require_non_empty(self.violation_type, "safety_violation.violation_type")
+        require_non_empty(self.resource, "safety_violation.resource")
+        if self.task_id:
+            validate_task_id(self.task_id, "safety_violation")
+        self.measured_value = float(self.measured_value)
+        self.threshold = float(self.threshold)
+        allowed = {"low", "medium", "high", "critical"}
+        if self.severity not in allowed:
+            raise SafetyMarginError(
+                f"Invalid safety severity: {self.severity}",
+                resource_type=self.resource,
+                requested=self.measured_value,
+                available=self.threshold,
+            )
+
+    def to_dict(self) -> Dict[str, AnyType]:
+        return asdict(self)
 
 
 @dataclass
 class SafetyMargins:
-    """Configuration for safety buffers."""
-
-    gpu_buffer: float = 0.15  # 15% buffer
-    ram_buffer: float = 0.20  # 20% buffer
-    min_task_duration: int = 30  # seconds
+    gpu_buffer: float = 0.15
+    ram_buffer: float = 0.20
+    min_task_duration: float = 30.0
     max_concurrent: int = 5
-    time_buffer: int = 120  # seconds
+    time_buffer: float = 120.0
+
+    def __post_init__(self) -> None:
+        validate_probability(float(self.gpu_buffer), "safety_margins.gpu_buffer")
+        validate_probability(float(self.ram_buffer), "safety_margins.ram_buffer")
+        require_non_negative(float(self.min_task_duration), "safety_margins.min_task_duration")
+        require_positive(int(self.max_concurrent), "safety_margins.max_concurrent")
+        require_non_negative(float(self.time_buffer), "safety_margins.time_buffer")
+        self.gpu_buffer = float(self.gpu_buffer)
+        self.ram_buffer = float(self.ram_buffer)
+        self.min_task_duration = float(self.min_task_duration)
+        self.max_concurrent = int(self.max_concurrent)
+        self.time_buffer = float(self.time_buffer)
+
+    @classmethod
+    def from_config(cls, config: Optional[Dict[str, AnyType]] = None) -> "SafetyMargins":
+        cfg = config if config is not None else load_global_config()
+        safety_cfg = get_config_section("safety_margins", config=cfg, default={})
+        defaults = _planning_types_config().get("default_safety_margins", {})
+        resource_buffers = safety_cfg.get("resource_buffers", {}) if isinstance(safety_cfg, dict) else {}
+        temporal = safety_cfg.get("temporal", {}) if isinstance(safety_cfg, dict) else {}
+        return cls(
+            gpu_buffer=float(resource_buffers.get("gpu", defaults.get("gpu_buffer", 0.15))),
+            ram_buffer=float(resource_buffers.get("ram", defaults.get("ram_buffer", 0.20))),
+            min_task_duration=float(temporal.get("min_task_duration", defaults.get("min_task_duration", 30.0))),
+            max_concurrent=int(temporal.get("max_concurrent", defaults.get("max_concurrent", 5))),
+            time_buffer=float(temporal.get("time_buffer", defaults.get("time_buffer", 120.0))),
+        )
+
+    def to_dict(self) -> Dict[str, AnyType]:
+        return asdict(self)
 
 
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Utility conversion helpers
+# -----------------------------------------------------------------------------
+def to_world_state_tuple(state: Dict[str, AnyType]) -> WorldState:
+    """Return a stable immutable representation of a world-state dictionary."""
+    require_type(state, dict, "world_state")
+    items: List[Tuple[str, AnyType]] = []
+    for key, value in state.items():
+        if isinstance(value, Any):
+            value = value.value
+        try:
+            hash(value)
+            safe_value = value
+        except Exception:
+            safe_value = safe_json_dumps(value, fallback_str=str(value))
+        items.append((str(key), safe_value))
+    return tuple(sorted(items, key=lambda item: item[0]))
+
+
+def from_world_state_tuple(state: WorldState) -> Dict[str, AnyType]:
+    require_type(state, tuple, "world_state_tuple")
+    return dict(state)
+
+
+def _serialise_value(value: AnyType) -> AnyType:
+    if isinstance(value, Any):
+        return {"__planning_any__": value.to_json()}
+    if isinstance(value, Enum):
+        return value.name
+    if isinstance(value, ResourceProfile):
+        return value.to_dict()
+    if isinstance(value, ClusterResources):
+        return value.to_dict()
+    if isinstance(value, Task):
+        return value.to_dict(include_methods=False, include_children=False)
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if isinstance(value, dict):
+        return {str(k): _serialise_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_serialise_value(v) for v in value]
+    if callable(value):
+        return getattr(value, "__name__", "anonymous")
+    return value
+
+
+# -----------------------------------------------------------------------------
 # Task – the core work unit
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 class Task:
     """Represents a unit of work in the planning system."""
 
@@ -300,174 +670,403 @@ class Task:
 
     def __init__(
         self,
-        name: str = "Planning Task",
-        task_type: TaskType = TaskType.ABSTRACT,
-        **kwargs,
-    ):
-        """
-        Create a new Task.
-
-        Args:
-            name: Human-readable name.
-            task_type: PRIMITIVE or ABSTRACT.
-            **kwargs: Additional fields (see the class docstring for full list).
-        """
-        # Generate a unique ID
+        name: Optional[str] = None,
+        task_type: Union[TaskType, str, int] = TaskType.ABSTRACT,
+        **kwargs: AnyType,
+    ) -> None:
+        cfg = _planning_types_config()
         Task._id_counter += 1
-        self.id = f"task_{int(time.time()*1000)}_{Task._id_counter}"
 
-        # Basic fields
-        self.name = name
-        self.task_type = task_type
-        self.type = task_type  # alias
-        self.status = TaskStatus.PENDING
-        self.parent = None
-        self.parent_task = None
+        self.id: str = str(kwargs.pop("id", f"task_{int(time.time() * 1000)}_{Task._id_counter}"))
+        if not is_valid_task_id(self.id):
+            raise PlanningConfigError(
+                f"Invalid task id: {self.id!r}",
+                config_key="task.id",
+                config_section="planning_types",
+                expected_type="valid task id",
+            )
+
+        self.name: str = str(name if name is not None else cfg.get("default_task_name", "Planning Task"))
+        require_non_empty(self.name, "task.name")
+        self.task_type: TaskType = _coerce_enum(task_type, TaskType, "task_type")  # type: ignore[assignment]
+        self.type: TaskType = self.task_type
+        self.status: TaskStatus = TaskStatus.PENDING
+
+        self.parent: Optional["Task"] = None
+        self.parent_task: Optional["Task"] = None
         self.children: List["Task"] = []
         self.methods: List[List["Task"]] = []
-        self.selected_method = 0
+        self.selected_method: int = 0
+
         self.goal_state: Optional[Dict[str, AnyType]] = None
-        self.duration = 300.0
-        self.estimated_duration = 0.0
-        self.actual_duration = 0.0
-        self.cost = 1.0
-        self.is_probabilistic = False
+        self.duration: float = float(cfg.get("default_duration", 300.0))
+        self.estimated_duration: float = float(cfg.get("default_estimated_duration", 0.0))
+        self.actual_duration: float = 0.0
+        self.cost: float = float(cfg.get("default_cost", 1.0))
+        self.is_probabilistic: bool = False
         self.probabilistic_actions: List[AnyType] = []
-        self.success_threshold = 0.9
-        self.risk_score = 0.0
+        self.success_threshold: float = float(cfg.get("default_success_threshold", 0.9))
+        self.risk_score: float = 0.0
         self.dependencies: List[str] = []
         self.execution_modes: List[str] = ["full"]
-        self.description = "No description provided"
-        self.created_at = time.time()
-        self.last_updated = time.time()
-        self.owner = "system"
+        self.description: str = "No description provided"
+        self.created_at: float = _now()
+        self.creation_time: float = self.created_at
+        self.last_updated: float = self.created_at
+        self.owner: str = str(cfg.get("default_owner", "system"))
         self.required_skills: List[str] = []
-        self.progress = 0.0
+        self.progress: float = 0.0
         self.required_tools: List[str] = []
-        self.location = "unspecified"
-        self.retry_count = 0
-        self.max_retries = 3
-        self.timeout = 0.0
-        self.criticality = "medium"
-        self.category = "general"
+        self.location: str = "unspecified"
+        self.retry_count: int = 0
+        self.max_retries: int = int(cfg.get("default_max_retries", 3))
+        self.timeout: float = 0.0
+        self.criticality: str = "medium"
+        self.category: str = "general"
         self.parameters: Dict[str, AnyType] = {}
-        self.preconditions: List[Callable] = []
-        self.effects: List[Callable] = []
+        self.preconditions: List[Callable[[Dict[str, AnyType]], bool]] = []
+        self.effects: List[Callable[[Dict[str, AnyType]], None]] = []
         self.precondition_errors: List[str] = []
         self.effect_errors: List[str] = []
         self.history: List[Dict[str, AnyType]] = []
         self.context: Dict[str, AnyType] = {}
-        self.energy_consumption = 0.0
+        self.energy_consumption: float = 0.0
         self.data_requirements: Dict[str, AnyType] = {}
         self.safety_constraints: List[str] = []
         self.quality_metrics: Dict[str, float] = {}
-        self.failure_reason = ""
-        self.recovery_strategy = ""
-        self.parallelizable = False
-        self.human_interaction_required = False
-        self.verification_method = "automatic"
-        self.documentation = ""
+        self.failure_reason: str = ""
+        self.recovery_strategy: str = ""
+        self.parallelizable: bool = False
+        self.human_interaction_required: bool = False
+        self.verification_method: str = "automatic"
+        self.documentation: str = ""
         self.tags: List[str] = []
-        self.version = "1.0"
-        self.source = "internal"
-        self.expected_outcome = ""
-        self.actual_outcome = ""
+        self.version: str = str(cfg.get("default_task_version", "1.0"))
+        self.source: str = "internal"
+        self.expected_outcome: str = ""
+        self.actual_outcome: str = ""
         self.sensor_requirements: List[str] = []
         self.communication_requirements: Dict[str, AnyType] = {}
         self.environmental_constraints: Dict[str, AnyType] = {}
         self.compliance_requirements: List[str] = []
         self.optimization_metrics: List[str] = []
-        self.learning_curve = 0.0
+        self.learning_curve: float = 0.0
         self.example_goal: Optional[Dict[str, AnyType]] = None
+        self.resource_requirements: ResourceProfile = ResourceProfile()
+        self.temporal_constraints: Optional[TemporalConstraints] = None
+        self.start_time: float = 0.0
+        self.end_time: float = 0.0
+        self.deadline: float = 0.0
+        self.priority: int = int(cfg.get("default_priority", 1))
+        self.workload: float = 0.0                     # Abstract effort (e.g., story points)
+        self.urgency: int = 0                         # 0-10, separate from priority
+        self.estimated_effort: float = 0.0            # Person‑hours or effort units
+        self.actual_effort: float = 0.0
+        self.assigned_agent: Optional[str] = None
+        self.execution_node: str = "unspecified"
+        self.retry_delay: float = 1.0                 # Base delay between retries (seconds)
+        self.timeout_strategy: str = "fail"           # fail | retry | escalate
+        self.blocked_by: List[str] = []               # Resource / condition IDs blocking this task
+        self.outputs: Dict[str, AnyType] = {}         # Produced artifacts
+        self.inputs: Dict[str, AnyType] = {}          # Required inputs
+        self.validation_criteria: List[Callable[[Dict[str, AnyType]], bool]] = []
+        self.rollback_action: Optional[Callable[[Dict[str, AnyType]], None]] = None
+        self.monitoring_metrics: Dict[str, float] = {}  # Runtime measurements (e.g., peak memory)
+        self.cost_model: str = "fixed"                # fixed | linear | per_unit
+        self.resource_limits: Dict[str, float] = {}   # Per‑resource max (overrides cluster limits)
+        self.security_level: int = 0                  # 0 (public) to 10 (top secret)
+        self.environment: Dict[str, str] = {}         # Environment variable overrides
+        self.on_success: Optional[Callable[[], None]] = None
+        self.on_failure: Optional[Callable[[Exception], None]] = None
+        self.on_timeout: Optional[Callable[[], None]] = None
 
-        # Resource requirements
-        self.resource_requirements = ResourceProfile()
-
-        # Timing fields
-        self.start_time = 0.0
-        self.end_time = 0.0
-        self.deadline = 0.0
-        self.priority = 1
-
-        # Override with kwargs
         for key, value in kwargs.items():
-            if hasattr(self, key):
+            if key == "task_type":
+                self.task_type = _coerce_enum(value, TaskType, "task_type")  # type: ignore[assignment]
+                self.type = self.task_type
+            elif key == "status":
+                self.status = _coerce_enum(value, TaskStatus, "status")  # type: ignore[assignment]
+            elif key == "resource_requirements":
+                self.resource_requirements = value if isinstance(value, ResourceProfile) else ResourceProfile.from_dict(value)
+            elif key == "requirements":
+                self.resource_requirements = value if isinstance(value, ResourceProfile) else ResourceProfile.from_dict(value)
+            elif key == "temporal_constraints":
+                if value is None:
+                    self.temporal_constraints = None
+                else:
+                    self.temporal_constraints = value if isinstance(value, TemporalConstraints) else TemporalConstraints(**value)
+            elif hasattr(self, key):
                 setattr(self, key, value)
             else:
-                logger.warning(f"Ignoring unknown field '{key}' for task '{name}'")
+                logger.warning("Ignoring unknown Task field %s for task %s", key, self.name)
 
-        # Post‑initialization adjustments
         self._post_init()
 
-    def _post_init(self):
-        """Perform post‑init adjustments (e.g., time conversions)."""
-        current_time = time.time()
-
-        # Convert relative times to absolute times
-        if isinstance(self.start_time, (int, float)) and self.start_time < current_time:
-            self.start_time = current_time + self.start_time
-
-        if isinstance(self.deadline, (int, float)) and self.deadline < current_time:
-            self.deadline = current_time + self.deadline
-
-        # Set derived fields
-        if self.estimated_duration == 0.0 and self.duration > 0:
+    # ------------------------------------------------------------------
+    # Validation and lifecycle
+    # ------------------------------------------------------------------
+    def _post_init(self) -> None:
+        cfg = _planning_types_config()
+        self.task_type = _coerce_enum(self.task_type, TaskType, "task_type")  # type: ignore[assignment]
+        self.type = self.task_type
+        self.status = _coerce_enum(self.status, TaskStatus, "status")  # type: ignore[assignment]
+        self.duration = max(0.0, float(self.duration or 0.0))
+        self.estimated_duration = float(self.estimated_duration or 0.0)
+        if self.estimated_duration <= 0.0 and self.duration > 0.0:
             self.estimated_duration = self.duration
-        if self.end_time == 0.0 and self.start_time and self.duration:
-            self.end_time = self.start_time + self.duration
-
-    def copy(self) -> "Task":
-        """Create a deep copy of this task."""
-        # We use copy.deepcopy but also manually recreate children to avoid recursion.
-        new_task = Task(
-            name=self.name,
-            task_type=self.task_type,
+        self.actual_duration = max(0.0, float(self.actual_duration or 0.0))
+        self.cost = max(0.0, float(self.cost or 0.0))
+        self.priority = int(self.priority or 0)
+        self.retry_count = int(max(0, self.retry_count))
+        self.max_retries = int(max(0, self.max_retries))
+        self.progress = clamp(float(self.progress or 0.0), 0.0, float(cfg.get("max_progress", 1.0)))
+        self.success_threshold = clamp(float(self.success_threshold), 0.0, 1.0)
+        self.risk_score = clamp(float(self.risk_score or 0.0), 0.0, 1.0)
+        self.dependencies = [str(dep) for dep in (self.dependencies or [])]
+        self.execution_modes = [str(mode) for mode in (self.execution_modes or ["full"])]
+        self.tags = [str(tag) for tag in (self.tags or [])]
+        self.required_skills = [str(skill) for skill in (self.required_skills or [])]
+        self.required_tools = [str(tool) for tool in (self.required_tools or [])]
+        self.resource_requirements = (
+            self.resource_requirements
+            if isinstance(self.resource_requirements, ResourceProfile)
+            else ResourceProfile.from_dict(self.resource_requirements)
         )
-        # Copy all fields
-        for key, value in self.__dict__.items():
-            if key == "children":
-                continue  # we'll handle children separately
-            setattr(new_task, key, copy.deepcopy(value))
+        allowed_criticalities = set(cfg.get("allowed_criticalities", ["low", "medium", "high", "critical"]))
+        if self.criticality not in allowed_criticalities:
+            if _is_strict_validation():
+                raise PlanningConfigError(
+                    f"Invalid task criticality: {self.criticality}",
+                    config_key="task.criticality",
+                    config_section="planning_types",
+                    expected_type=f"one of {sorted(allowed_criticalities)}",
+                )
+            self.criticality = "medium"
 
-        # Copy children recursively
-        new_task.children = [child.copy() for child in self.children]
-        return new_task
+        self.urgency = max(0, min(10, int(self.urgency or 0)))
+        self.security_level = max(0, min(10, int(self.security_level or 0)))
+        allowed_timeout_strategies = {"fail", "retry", "escalate"}
+        if self.timeout_strategy not in allowed_timeout_strategies:
+            if _is_strict_validation():
+                raise PlanningConfigError(
+                    f"Invalid timeout_strategy: {self.timeout_strategy}",
+                    config_key="task.timeout_strategy",
+                    config_section="planning_types",
+                    expected_type=f"one of {sorted(allowed_timeout_strategies)}",
+                )
+            self.timeout_strategy = "fail"
+        allowed_cost_models = {"fixed", "linear", "per_unit"}
+        if self.cost_model not in allowed_cost_models:
+            if _is_strict_validation():
+                raise PlanningConfigError(
+                    f"Invalid cost_model: {self.cost_model}",
+                    config_key="task.cost_model",
+                    config_section="planning_types",
+                    expected_type=f"one of {sorted(allowed_cost_models)}",
+                )
+            self.cost_model = "fixed"
+
+        threshold = float(cfg.get("relative_time_threshold_seconds", 1_000_000_000))
+        now = _now()
+        for attr in ("start_time", "deadline", "end_time"):
+            value = float(getattr(self, attr, 0.0) or 0.0)
+            if 0.0 < value < threshold:
+                value = now + value
+            setattr(self, attr, value)
+        if self.end_time == 0.0 and self.start_time > 0.0 and self.duration > 0.0:
+            self.end_time = self.start_time + self.duration
+        if self.deadline and self.start_time and self.deadline < self.start_time and _is_strict_validation():
+            raise TemporalViolation(
+                "Task deadline cannot be before start_time",
+                violation_type="window",
+                task_name=self.name,
+                task_id=self.id,
+                constraint_details={"start_time": self.start_time, "deadline": self.deadline},
+            )
+        self.last_updated = _now()
+
+    def validate(self) -> None:
+        require_non_empty(self.id, "task.id")
+        validate_task_id(self.id, "task.validate")
+        require_non_empty(self.name, "task.name")
+        require_type(self.resource_requirements, ResourceProfile, "task.resource_requirements")
+        validate_probability(self.success_threshold, "task.success_threshold")
+        validate_probability(self.risk_score, "task.risk_score")
+        for dep in self.dependencies:
+            validate_task_id(dep, "task.dependencies")
+
+    def update_status(self, status: Union[TaskStatus, str, int], *, reason: str = "") -> None:
+        self.status = _coerce_enum(status, TaskStatus, "status")  # type: ignore[assignment]
+        if self.status == TaskStatus.EXECUTING and self.start_time <= 0.0:
+            self.start_time = _now()
+        if self.status.is_terminal:
+            self.end_time = _now()
+            if self.start_time > 0.0:
+                self.actual_duration = max(0.0, self.end_time - self.start_time)
+        if self.status == TaskStatus.FAILED and reason:
+            self.failure_reason = reason
+        self.history.append({"timestamp": _now(), "status": self.status.name, "reason": reason})
+        self.last_updated = _now()
+
+    def mark_success(self, outcome: str = "") -> None:
+        self.actual_outcome = outcome or self.expected_outcome
+        self.progress = 1.0
+        self.update_status(TaskStatus.SUCCESS)
+
+    def mark_failed(self, reason: str = "") -> None:
+        self.update_status(TaskStatus.FAILED, reason=reason)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status.is_terminal
+
+    @property
+    def remaining_retries(self) -> int:
+        return max(0, self.max_retries - self.retry_count)
+
+    # ------------------------------------------------------------------
+    # Composition and execution
+    # ------------------------------------------------------------------
+    def add_child(self, task: "Task") -> None:
+        require_type(task, Task, "child task")
+        task.parent = self
+        task.parent_task = self
+        self.children.append(task)
+        self.last_updated = _now()
+
+    def add_method(self, subtasks: List["Task"]) -> None:
+        require_type(subtasks, list, "subtasks")
+        for task in subtasks:
+            require_type(task, Task, "method subtask")
+        self.methods.append([task.copy() for task in subtasks])
+        self.last_updated = _now()
 
     def get_subtasks(self, method_index: Optional[int] = None) -> List["Task"]:
-        """Return a copy of the subtasks for the given method index."""
         if self.task_type == TaskType.PRIMITIVE or not self.methods:
             return []
-        idx = method_index if method_index is not None else self.selected_method
+        idx = self.selected_method if method_index is None else int(method_index)
         if 0 <= idx < len(self.methods):
             return [subtask.copy() for subtask in self.methods[idx]]
-        logger.warning(f"Invalid method index {idx} for task '{self.name}'")
+        logger.warning("Invalid method index %s for task %s", idx, self.name)
         return []
 
-    def check_preconditions(self, world_state: Dict[str, AnyType]) -> bool:
-        """Check all preconditions against the given world state."""
+    def check_preconditions(self, world_state: Dict[str, AnyType], *, raise_on_failure: bool = False) -> bool:
+        require_type(world_state, dict, "world_state")
         try:
-            return all(precond(world_state) for precond in self.preconditions)
-        except Exception as e:
-            logger.error(f"Error checking preconditions for task '{self.name}': {e}")
+            check_preconditions(world_state, self.preconditions, task_name=self.name, task_id=self.id)
+            self.precondition_errors.clear()
+            return True
+        except PreconditionViolation as exc:
+            self.precondition_errors = list(getattr(exc, "failed_conditions", []))
+            if raise_on_failure:
+                raise
+            logger.debug("Precondition failure for %s: %s", self.name, truncate_for_logging(exc))
             return False
 
-    def apply_effects(self, world_state: Dict[str, AnyType]) -> None:
-        """Apply all effects to the world state."""
+    def apply_effects(self, world_state: Dict[str, AnyType], *, raise_on_failure: bool = False) -> Dict[str, AnyType]:
+        require_type(world_state, dict, "world_state")
+        before = copy.deepcopy(world_state)
         try:
-            for effect in self.effects:
-                effect(world_state)
-        except Exception as e:
-            logger.error(f"Error applying effects for task '{self.name}': {e}")
+            result = apply_state_effects(world_state, self.effects)
+            world_state.clear()
+            world_state.update(result)
+            self.effect_errors.clear()
+            self.actual_outcome = safe_json_dumps(diff_states(before, world_state), fallback_str="effects_applied")
+            return world_state
+        except Exception as exc:
+            self.effect_errors.append(str(exc))
+            if raise_on_failure:
+                raise PostconditionViolation(
+                    f"Effects failed for task {self.name}: {exc}",
+                    task_name=self.name,
+                    task_id=self.id,
+                    expected_state=self.goal_state or {},
+                    actual_state=world_state,
+                ) from exc
+            logger.error("Error applying effects for task %s: %s", self.name, exc)
+            return world_state
+
+    # ------------------------------------------------------------------
+    # Copying and serialisation
+    # ------------------------------------------------------------------
+    def copy(self) -> "Task":
+        """Return a deep copy of this task, preserving all attributes."""
+        return copy.deepcopy(self)
+
+    clone = copy
+
+    def to_dict(
+        self,
+        *,
+        include_methods: bool = True,
+        include_children: bool = True,
+        include_callables: bool = False,
+    ) -> Dict[str, AnyType]:
+        data: Dict[str, AnyType] = {}
+        for key, value in self.__dict__.items():
+            if key in {"parent", "parent_task"}:
+                data[key] = getattr(value, "id", None) if value is not None else None
+            elif key == "children":
+                data[key] = [child.to_dict(include_methods=False, include_children=True) for child in value] if include_children else []
+            elif key == "methods":
+                data[key] = [
+                    [subtask.to_dict(include_methods=False, include_children=True) for subtask in method]
+                    for method in value
+                ] if include_methods else []
+            elif callable(value):
+                data[key] = getattr(value, "__name__", "anonymous") if include_callables else None
+            elif isinstance(value, list) and value and all(callable(v) for v in value):
+                data[key] = [getattr(v, "__name__", "anonymous") for v in value] if include_callables else []
+            else:
+                data[key] = _serialise_value(value)
+        data["task_type"] = self.task_type.name
+        data["status"] = self.status.name
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, AnyType]) -> "Task":
+        require_type(data, dict, "task data")
+        payload = copy.deepcopy(data)
+        children_payload = payload.pop("children", []) or []
+        methods_payload = payload.pop("methods", []) or []
+        payload.pop("parent", None)
+        payload.pop("parent_task", None)
+        preconditions = payload.pop("preconditions", []) or []
+        effects = payload.pop("effects", []) or []
+        
+        if preconditions or effects:
+            logger.debug(
+                "Task.from_dict: preconditions/effects cannot be restored from serialized data "
+                "(they were stored as %s / %s)", preconditions, effects
+            )
+        payload["task_type"] = payload.get("task_type", payload.get("type", TaskType.ABSTRACT))
+        task = cls(name=payload.pop("name", None), **payload)
+        task.preconditions = []
+        task.effects = []
+        task.children = [cls.from_dict(child) if isinstance(child, dict) else child for child in children_payload]
+        for child in task.children:
+            if isinstance(child, Task):
+                child.parent = task
+                child.parent_task = task
+        task.methods = [
+            [cls.from_dict(sub) if isinstance(sub, dict) else sub for sub in method]
+            for method in methods_payload
+            if isinstance(method, list)
+        ]
+        task._post_init()
+        return task
 
     @property
     def requirements(self) -> ResourceProfile:
-        """Alias for resource_requirements."""
         return self.resource_requirements
 
     @property
     def task(self) -> TaskType:
-        """Alias for task_type."""
         return self.task_type
+
+    @property
+    def age_seconds(self) -> float:
+        return max(0.0, _now() - float(self.created_at or self.creation_time or _now()))
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -476,135 +1075,80 @@ class Task:
         return isinstance(other, Task) and self.id == other.id
 
     def __repr__(self) -> str:
-        return (
-            f"Task(id='{self.id}', name='{self.name}', "
-            f"type={self.task_type.name}, status={self.status.name})"
-        )
+        return f"Task(id='{self.id}', name='{self.name}', type={self.task_type.name}, status={self.status.name})"
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "Task":
+        """Create a deep copy while breaking parent/child cycles."""
+        new_task = Task.__new__(Task)
+        # Copy all attributes except parent/children (to avoid cycles)
+        for k, v in self.__dict__.items():
+            if k in ("parent", "parent_task", "children"):
+                continue
+            new_task.__dict__[k] = copy.deepcopy(v, memo)
+        # Reset parent/children for the copy
+        new_task.parent = None
+        new_task.parent_task = None
+        new_task.children = []
+        return new_task
+
+__all__ = [
+    "Any",
+    "WorldState",
+    "MethodSignature",
+    "TemporalRelation",
+    "MemoKey",
+    "PlanStep",
+    "TaskStatus",
+    "TaskType",
+    "ResourceProfile",
+    "ClusterResources",
+    "RepairCandidate",
+    "Adjustment",
+    "PerformanceMetrics",
+    "PlanSnapshot",
+    "TemporalConstraints",
+    "SafetyViolation",
+    "SafetyMargins",
+    "Task",
+    "to_world_state_tuple",
+    "from_world_state_tuple",
+]
 
 
-# -------------------------------------------------------------------------
-# Main test (kept for demonstration)
-# -------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("\n=== Running Planning Types Test ===\n")
-    printer.status("Init", "Planning Types initialized", "success")
+    print("\n=== Running Planning Types ===\n")
+    printer.status("TEST", "Planning Types initialized", "info")
 
-    planning = Task()
-    print(planning)
+    margins = SafetyMargins.from_config()
+    assert margins.max_concurrent > 0
 
-    print("\n=== Kitchen Planning Simulation ===")
+    req = ResourceProfile(gpu=1, ram=2, specialized_hardware=["tensor_core"])
+    cluster = ClusterResources(gpu_total=2, ram_total=8, specialized_hardware_available=["tensor_core"])
+    assert req.fits_within(cluster)
+    cluster.allocate("task_alloc", req)
+    assert cluster.available_profile().gpu == 1
+    cluster.release("task_alloc")
 
-    # Create world state with initial conditions
-    world_state = {
-        "vegetables_chopped": Any(False, (bool,)),
-        "stove_on": Any(False, (bool, lambda x: x in [True, False])),
-        "ingredients_available": Any(["tomato", "onion", "garlic"], (list,)),
-        "meal_cooked": Any("pending", (str,)),
-    }
-
-    # ----- Create Primitive Tasks -----
-    def precondition_chop_vegetables(state):
-        return state["ingredients_available"].value
-
-    def effect_chop_vegetables(state):
-        state["vegetables_chopped"]._value = True
-
-    chop_veggies = Task(
-        name="ChopVegetables",
+    state = {"ready": True, "done": False}
+    task = Task(
+        name="SmokeTask",
         task_type=TaskType.PRIMITIVE,
-        preconditions=[precondition_chop_vegetables],
-        effects=[effect_chop_vegetables],
-        cost=2.0,
+        resource_requirements=req,
+        preconditions=[lambda s: s.get("ready") is True],
+        effects=[lambda s: s.update({"done": True})],
+        deadline=3600,
     )
+    assert task.check_preconditions(state)
+    task.apply_effects(state)
+    task.mark_success("done")
+    assert state["done"] is True and task.status == TaskStatus.SUCCESS
 
-    # ----- Create Abstract Task with Multiple Methods -----
-    def precondition_cook_meal(state):
-        return state["vegetables_chopped"].value
+    restored = Task.from_dict(task.to_dict(include_callables=False))
+    assert restored.id == task.id and restored.requirements.gpu == 1
+    ws = to_world_state_tuple(state)
+    assert from_world_state_tuple(ws)["done"] is True
 
-    def effect_cook_meal(state):
-        state["meal_cooked"]._value = "ready"
+    wrapped = Any(5, (int, lambda x: x > 0))
+    assert wrapped.is_compatible(Any(1, (int,)))
 
-    # Method 1: Standard cooking flow
-    cook_stove = Task(
-        name="CookOnStove",
-        task_type=TaskType.PRIMITIVE,
-        preconditions=[lambda s: s["stove_on"].value],
-        effects=[lambda s: s.update({"stove_on": Any(False)})],
-        cost=3.0,
-    )
-
-    # Method 2: Alternative cooking method
-    microwave = Task(
-        name="UseMicrowave",
-        task_type=TaskType.PRIMITIVE,
-        preconditions=[lambda s: len(s["ingredients_available"].value) >= 2],
-        cost=2.5,
-    )
-
-    cook_meal = Task(
-        name="CookMeal",
-        task_type=TaskType.ABSTRACT,
-        methods=[[chop_veggies, cook_stove], [chop_veggies, microwave]],
-        preconditions=[precondition_cook_meal],
-        effects=[effect_cook_meal],
-        cost=5.0,
-    )
-
-    # ----- Test Execution Flow -----
-    def print_state():
-        print("\nCurrent World State:")
-        for k, v in world_state.items():
-            print(f"- {k}: {v.value} (Type: {v.type.__name__})")
-
-    print("\n=== Initial State ===")
-    print_state()
-
-    # Test constraint validation
-    try:
-        invalid_task = Task(
-            name="InvalidTask", task_type="invalid_type"  # should be TaskType enum
-        )
-    except Exception as e:
-        print(f"\nConstraint Validation Error: {e}")
-
-    # Test task decomposition
-    print("\nTesting Meal Preparation:")
-    try:
-        print(f"Main task: {cook_meal}")
-        print("Attempting method 0:")
-        subtasks = cook_meal.get_subtasks(method_index=0)
-        for i, task in enumerate(subtasks, 1):
-            print(f"Step {i}: {task.name}")
-            if task.check_preconditions(world_state):
-                print("  Preconditions met - executing...")
-                task.apply_effects(world_state)
-                task.status = TaskStatus.SUCCESS
-            else:
-                print(f"  Preconditions failed for {task.name}")
-
-        print_state()
-    except AcademicPlanningError as e:
-        print(f"Planning Error: {e}")
-    except Exception as e:
-        print(f"General Error: {e}")
-
-    # Test JSON serialization/deserialization
-    print("\nTesting Any Serialization:")
-    try:
-        original = Any(42, (int, lambda x: x > 0))
-        json_data = original.to_json()
-        reconstructed = Any.from_json(json_data)
-        print(f"Original: {original} | Reconstructed: {reconstructed}")
-    except AcademicPlanningError as e:
-        print(f"Serialization Error: {e}")
-
-    # Test type mismatch error
-    print("\nTesting Type Safety:")
-    try:
-        num = Any(5, (int,))
-        text = Any("hello", (str,))
-        result = num + text  # Should raise AcademicPlanningError
-    except AcademicPlanningError as e:
-        print(f"Caught expected type error: {e}")
-
-    print("\n=== Simulation Complete ===")
+    print("\n=== Test ran successfully ===\n")

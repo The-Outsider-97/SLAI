@@ -36,7 +36,7 @@ rule_engine:
   min_rule_confidence: 0.6
   slow_rule_threshold: 0.5
   rule_sources:
-    - "src/agents/knowledge/templates/scientific_rules.json"  # "src/agents/knowledge/rules/physics_rules.yaml"
+    - "src/agents/knowledge/templates/scientific_rules.json"
     - "src/agents/knowledge/templates/civic_rules.json"
   rules_dir: "src/agents/knowledge/templates/"
   save_inferred: true
@@ -87,32 +87,32 @@ knowledge_cache:
   shingle_size: 4
 
 knowledge_monitor:
-  enabled: True                  # Master switch for monitoring system
-  check_interval: 3600          # Seconds between checks (1 hour)
-  allowed_academic_domains:     # Approved academic domains
+  enabled: True
+  check_interval: 3600
+  allowed_academic_domains:
     - "arxiv.org"
     - "springer.com"
     - "ieee.org"
     - "sciencedirect.com"
     - "nature.com"
     - "jstor.org"
-  academic_source_paths:        # Paths to academic source databases
+  academic_source_paths:
     - "data/academic_sources.yaml"
     - "data/approved_datasets.json"
-  max_source_age: 5             # Maximum allowed age of sources (years)
+  max_source_age: 5
   enable_data_integrity_checks: True
-  violation_policy: "alert"       # Options: log, quarantine, alert
-  auto_flush_on_alert: True       # Automatic cache cleanup during critical alerts
+  violation_policy: "alert"
+  auto_flush_on_alert: True
   severity_thresholds:
-    critical: 3                   # Severity level for emergency response
+    critical: 3
     high: 2
     medium: 1
   cross_component_validation: True
   system_impact_analysis: True
-  verification_level: "strict"  # strict/moderate/lenient
-  crossref_checking: True        # Enable DOI validation via CrossRef API
-  plagiarism_threshold: 0.85    # Text similarity threshold for plagiarism checks
-  auto_archive_outdated: false  # Automatically archive outdated sources
+  verification_level: "strict"
+  crossref_checking: True
+  plagiarism_threshold: 0.85
+  auto_archive_outdated: false
 
 runtime_health:
   degraded_after_seconds: 30
@@ -151,11 +151,11 @@ external_sources:
 
 ontology_manager:
   use_ontology_expansion: True
-  knowledge_ontology_path: "src/agents/knowledge/utils/knowledge_ontology.db"
+  knowledge_ontology_path: "agents/knowledge/utils/knowledge_ontology.db"
   conflict_resolution: "semantic"  # timestamp|confidence|semantic|governance
   auto_quarantine: True
-  output_path: "src/agents/knowledge/export/ontology.ttl"
-  version_dir: "src/agents/knowledge/export/"
+  output_path: "agents/knowledge/export/ontology.ttl"
+  version_dir: "agents/knowledge/export/"
 
 graph_database:
   type: "rdflib"   # or "neo4j"

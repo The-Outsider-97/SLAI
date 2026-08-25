@@ -1,53 +1,247 @@
+from __future__ import annotations
+
+__version__ = "2.2.0"
+
+"""
+SLAI Agent Factory
+
+Production-ready factory/orchestrator for SLAI agent construction.
+
+Responsibilities
+----------------
+- load agent-specific factory configuration from agents_config.yaml;
+- register validated agent metadata through the factory-core registry;
+- resolve aliases, versions, dependency order, and constructor requirements;
+- create and cache agent instances with lifecycle/diagnostic tracking;
+- integrate with factory cache, factory observability, metrics adaptation, and
+  out-of-process isolation without owning their internal subsystem configs;
+- keep broad research/reasoning loops outside the factory boundary.
+
+The factory intentionally keeps local project imports direct. Agent
+implementations are loaded dynamically from registered metadata because dynamic
+resolution is the purpose of this module, not an optional import workaround.
+"""
+
 import importlib
 import inspect
+import uuid
 
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import RLock
+from typing import Any, Deque, Dict, Iterable, Mapping, MutableMapping, Optional, Sequence, Tuple, Type, cast
 
-from . import __version__ 
-
-from .base.utils.main_config_loader import load_global_config
-from .factory.agent_meta_data import AgentMetaData, AgentRegistry
-from .factory.out_of_process_agent import OutOfProcessAgentProxy
-from .factory.reasoner import BasicZeroReasoner
-from .base_agent import BaseAgent
-from logs.logger import get_logger, PrettyPrinter
-
-if TYPE_CHECKING:
-    from .factory.metrics_adapter import MetricsAdapter
+from .factory.agent_meta_data import *
+from .factory.factory_cache import *
+from .factory.factory_obs import *
+from .factory.metrics_adapter import *
+from .factory.out_of_process_agent import *
+from .factory.utils.factory_errors import *
+from .factory.utils.factory_helpers import *
+from .runtime_contracts import *
+from ..utils.configuration import bind_config
+from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Agent Factory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
+
+_AGENTS_CONFIG = bind_config(
+    Path(__file__).resolve().parent / "base" / "configs" / "agents_config.yaml"
+)
+
+
+@dataclass(slots=True)
+class AgentCreationRecord:
+    """Compact lifecycle/audit record for one factory creation attempt."""
+
+    agent_type: str
+    status: str
+    duration_ms: float
+    version: Optional[str] = None
+    implementation: str = "in_process"
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "agent_type": self.agent_type,
+            "status": self.status,
+            "duration_ms": self.duration_ms,
+            "version": self.version,
+            "implementation": self.implementation,
+            "error": self.error,
+            "metadata": safe_serialize(self.metadata, redact=True),
+        }
+
+
+@dataclass(slots=True)
+class ManagedAgentRecord:
+    """Factory-owned runtime record for one exact definition and scope."""
+
+    identity: AgentRuntimeIdentity
+    instance: Any
+    status: RuntimeStatus = field(default_factory=RuntimeStatus)
+    implementation: str = "in_process"
+
+    def snapshot(self) -> Dict[str, Any]:
+        payload = self.status.snapshot(self.identity)
+        instance_status = getattr(self.instance, "runtime_status", None)
+        if callable(instance_status):
+            try:
+                agent_payload = instance_status()
+            except Exception as exc:
+                agent_payload = {
+                    "status": "degraded",
+                    "health": "degraded",
+                    "degraded_channels": ["telemetry"],
+                    "degradations": [
+                        {
+                            "channel": "telemetry",
+                            "operation": "runtime_status",
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    ],
+                }
+            payload["agent"] = agent_payload
+            agent_health = str(agent_payload.get("health", "healthy")) # type: ignore
+            if agent_health == "unavailable" or (
+                agent_health == "degraded" and payload.get("health") == "healthy"
+            ):
+                payload["health"] = agent_health
+                payload["status"] = agent_health
+        payload["implementation"] = self.implementation
+        return payload
+
+
+@dataclass(slots=True)
+class AgentFactoryConfig:
+    """Resolved AgentFactory policy from agents_config.yaml."""
+
+    enabled: bool = True
+    auto_register_default_agents: bool = True
+    strict_base_agent_subclass: bool = False
+    enforce_runtime_contracts: bool = True
+    use_instance_cache: bool = True
+    cache_agent_instances: bool = True
+    cache_imports: bool = True
+    cache_constructor_signatures: bool = True
+    allow_runtime_config_override: bool = True
+    allow_unknown_constructor_kwargs: bool = False
+    create_dependencies: bool = True
+    block_torch_required_when_unavailable: bool = True
+    enable_out_of_process_fallback: bool = True
+    publish_observability_events: bool = True
+    record_creation_history: bool = True
+    creation_history_size: int = 100
+    diagnostics_import_check: bool = True
+    diagnostics_constructor_check: bool = True
+    discovery_enabled: bool = False
+    discovery_packages: Tuple[str, ...] = ()
+    required_action_methods: Tuple[str, ...] = ("predict", "get_action", "act", "perform_task", "execute")
+    native_failure_patterns: Tuple[str, ...] = ("winerror 1114", "c10.dll", "torch_cuda.dll", "cuda error")
+    out_of_process_fallback_agents: Tuple[str, ...] = ()
+    default_version: str = __version__
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AgentFactoryConfig":
+        payload = normalize_payload(data)
+        history_size = ensure_positive_int(int(payload.get("creation_history_size", 100)), "agent_factory.creation_history_size")
+
+        def _tuple_of_strings(key: str, default: Tuple[str, ...] = ()) -> Tuple[str, ...]:
+            raw = payload.get(key, default)
+            if raw in (None, ""):
+                return tuple()
+            if isinstance(raw, str):
+                return (raw,)
+            if not isinstance(raw, Sequence):
+                raise InvalidFactoryConfigurationError(
+                    f"agent_factory.{key} must be a sequence of strings",
+                    context={"actual_type": type(raw).__name__, "key": key},
+                    component="agent_factory",
+                    operation="load_config",
+                )
+            return tuple(require_non_empty_string(item, f"agent_factory.{key}[]") for item in raw)
+
+        return cls(
+            enabled=bool(payload.get("enabled", True)),
+            auto_register_default_agents=bool(payload.get("auto_register_default_agents", True)),
+            strict_base_agent_subclass=bool(payload.get("strict_base_agent_subclass", False)),
+            enforce_runtime_contracts=bool(payload.get("enforce_runtime_contracts", True)),
+            use_instance_cache=bool(payload.get("use_instance_cache", True)),
+            cache_agent_instances=bool(payload.get("cache_agent_instances", True)),
+            cache_imports=bool(payload.get("cache_imports", True)),
+            cache_constructor_signatures=bool(payload.get("cache_constructor_signatures", True)),
+            allow_runtime_config_override=bool(payload.get("allow_runtime_config_override", True)),
+            allow_unknown_constructor_kwargs=bool(payload.get("allow_unknown_constructor_kwargs", False)),
+            create_dependencies=bool(payload.get("create_dependencies", True)),
+            block_torch_required_when_unavailable=bool(payload.get("block_torch_required_when_unavailable", True)),
+            enable_out_of_process_fallback=bool(payload.get("enable_out_of_process_fallback", True)),
+            publish_observability_events=bool(payload.get("publish_observability_events", True)),
+            record_creation_history=bool(payload.get("record_creation_history", True)),
+            creation_history_size=history_size,
+            diagnostics_import_check=bool(payload.get("diagnostics_import_check", True)),
+            diagnostics_constructor_check=bool(payload.get("diagnostics_constructor_check", True)),
+            discovery_enabled=bool(payload.get("discovery_enabled", False)),
+            discovery_packages=_tuple_of_strings("discovery_packages"),
+            required_action_methods=_tuple_of_strings("required_action_methods", ("predict", "get_action", "act", "perform_task", "execute")),
+            native_failure_patterns=tuple(pattern.lower() for pattern in _tuple_of_strings("native_failure_patterns", ("winerror 1114", "c10.dll", "torch_cuda.dll", "cuda error"))),
+            out_of_process_fallback_agents=_tuple_of_strings("out_of_process_fallback_agents"),
+            default_version=str(payload.get("default_version", __version__)),
+        )
+
 
 class AgentFactory:
+    """Production-ready dynamic factory for SLAI agent orchestration.
+
+    The factory is the integration point for the factory-core registry,
+    factory-runtime metrics adapter, factory-isolation out-of-process proxy,
+    factory cache, and factory observability. It does not own the internal
+    configuration of those subsystems; their settings remain in
+    ``src/agents/factory/configs/factory_config.yaml``.
     """
-    A dynamic, adaptive factory for creating and managing agents.
-    It uses a metadata registry for dynamic agent loading and a metrics
-    adapter for runtime configuration tuning.
-    """
-    _agent_specs: Dict[str, Dict[str, str]] = {
-        'adaptive': {'module_path': 'src.agents.adaptive_agent', 'class_name': 'AdaptiveAgent'},
-        'alignment': {'module_path': 'src.agents.alignment_agent', 'class_name': 'AlignmentAgent'},
-        'browser': {'module_path': 'src.agents.browser_agent', 'class_name': 'BrowserAgent'},
-        'evaluation': {'module_path': 'src.agents.evaluation_agent', 'class_name': 'EvaluationAgent'},
-        'execution': {'module_path': 'src.agents.execution_agent', 'class_name': 'ExecutionAgent'},
-        'handler': {'module_path': 'src.agents.handler_agent', 'class_name': 'HandlerAgent'},
-        'knowledge': {'module_path': 'src.agents.knowledge_agent', 'class_name': 'KnowledgeAgent'},
-        'language': {'module_path': 'src.agents.language_agent', 'class_name': 'LanguageAgent'},
-        'learning': {'module_path': 'src.agents.learning_agent', 'class_name': 'LearningAgent'},
-        'perception': {'module_path': 'src.agents.perception_agent', 'class_name': 'PerceptionAgent'},
-        'planning': {'module_path': 'src.agents.planning_agent', 'class_name': 'PlanningAgent'},
-        'reader': {'module_path': 'src.agents.reader_agent', 'class_name': 'ReaderAgent'},
-        'reasoning': {'module_path': 'src.agents.reasoning_agent', 'class_name': 'ReasoningAgent'},
-        'safety': {'module_path': 'src.agents.safety_agent', 'class_name': 'SafetyAgent'},
-        'observability': {'module_path': 'src.agents.observability_agent', 'class_name': 'ObservabilityAgent'},
-        'network': {'module_path': 'src.agents.network_agent', 'class_name': 'NetworkAgent'},
+
+    DEFAULT_AGENT_SPECS: Dict[str, Dict[str, Any]] = {
+        "adaptive": {"module_path": "src.agents.adaptive_agent", "class_name": "AdaptiveAgent"},
+        "alignment": {"module_path": "src.agents.alignment_agent", "class_name": "AlignmentAgent"},
+        "browser": {"module_path": "src.agents.browser_agent", "class_name": "BrowserAgent"},
+        "evaluation": {"module_path": "src.agents.evaluation_agent", "class_name": "EvaluationAgent"},
+        "execution": {"module_path": "src.agents.execution_agent", "class_name": "ExecutionAgent"},
+        "handler": {"module_path": "src.agents.handler_agent", "class_name": "HandlerAgent"},
+        "knowledge": {"module_path": "src.agents.knowledge_agent", "class_name": "KnowledgeAgent"},
+        "language": {"module_path": "src.agents.language_agent", "class_name": "LanguageAgent"},
+        "learning": {"module_path": "src.agents.learning_agent", "class_name": "LearningAgent"},
+        "network": {"module_path": "src.agents.network_agent", "class_name": "NetworkAgent"},
+        "observability": {"module_path": "src.agents.observability_agent", "class_name": "ObservabilityAgent"},
+        "perception": {"module_path": "src.agents.perception_agent", "class_name": "PerceptionAgent"},
+        "planning": {"module_path": "src.agents.planning_agent", "class_name": "PlanningAgent"},
+        "privacy": {"module_path": "src.agents.privacy_agent", "class_name": "PrivacyAgent"},
+        "qnn": {"module_path": "src.agents.qnn_agent", "class_name": "QNNAgent"},
+        "quality": {"module_path": "src.agents.quality_agent", "class_name": "QualityAgent"},
+        "reader": {"module_path": "src.agents.reader_agent", "class_name": "ReaderAgent"},
+        "reasoning": {"module_path": "src.agents.reasoning_agent", "class_name": "ReasoningAgent"},
+        "safety": {"module_path": "src.agents.safety_agent", "class_name": "SafetyAgent"},
     }
-    _agent_aliases: Dict[str, str] = {
+
+    DEFAULT_ALIASES: Dict[str, str] = {
         "web": "browser",
         "obs": "observability",
         "net": "network",
+
+        "reader_agent": "reader",
+        "language_agent": "language",
+        "knowledge_agent": "knowledge",
+        "privacy_agent": "privacy",
+        "quality_agent": "quality",
+        "safety_agent": "safety",
+        "observability_agent": "observability",
+        "reasoning_agent": "reasoning",
+        "evaluation_agent": "evaluation",
     }
-    _agent_dependency_profiles: Dict[str, Dict[str, Any]] = {
+
+    DEFAULT_DEPENDENCY_PROFILES: Dict[str, Dict[str, Any]] = {
         "browser": {"torch_required": False, "notes": "Selenium/browser stack only."},
         "planning": {"torch_required": False, "notes": "Core planning is torch-free; perception heads are optional."},
         "knowledge": {"torch_required": False, "notes": "SBERT/transformers are optional; TF-IDF path can run without torch."},
@@ -57,55 +251,468 @@ class AgentFactory:
         "observability": {"torch_required": False, "notes": "Observability orchestration is telemetry-first and torch-free."},
         "network": {"torch_required": False, "notes": "Network transport/routing/reliability stack is torch-free."},
         "safety": {"torch_required": False, "notes": "Safety policy checks run without torch."},
+        "privacy": {"torch_required": False, "notes": "Privacy policy checks are rule/config driven and torch-free."},
+        "quality": {"torch_required": False, "notes": "Document/data quality gates are dependency-light and torch-free by default."},
         "learning": {"torch_required": True, "notes": "RL/meta-learning pipelines require torch."},
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
         "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
         "perception": {"torch_required": True, "notes": "Perception encoder/decoder stack is torch-based."},
     }
-    _out_of_process_fallback_agents = {
-        "adaptive",
-        "alignment",
-        "evaluation",
-        "knowledge",
-        "language",
-        "learning",
-        "perception",
-        "planning",
-        "reasoning",
-        "safety",
+
+    DEFAULT_QOS_PROFILES: Dict[str, Dict[str, Any]] = {
+        "default": {"latency_tier": "standard", "availability_target": 0.99, "error_budget": 0.01},
+        "observability": {"latency_tier": "low", "availability_target": 0.999, "error_budget": 0.001},
+        "safety": {"latency_tier": "high", "availability_target": 0.999, "error_budget": 0.001},
+        "network": {"latency_tier": "low", "availability_target": 0.995, "error_budget": 0.005},
     }
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """
-        Initializes the AgentFactory with global and optional runtime configurations.
+    def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
+        self.global_config = _AGENTS_CONFIG.load()
+        if not isinstance(self.global_config, MutableMapping):
+            raise InvalidFactoryConfigurationError(
+                "agents_config.yaml must load into a mapping",
+                context={"actual_type": type(self.global_config).__name__},
+                component="agent_factory",
+                operation="load_global_config",
+            )
 
-        Args:
-            config (Optional[Dict[str, Any]]): A dictionary for runtime configuration
-                                               overrides.
-        """
-        self.global_config = load_global_config()
+        self.agent_factory_config: Dict[str, Any] = dict(
+            _AGENTS_CONFIG.section("agent_factory", config=self.global_config) or {}
+        )
         if config:
-            self.global_config.update(config)
+            overrides = normalize_payload(config)
+            nested_overrides = normalize_payload(overrides.get("agent_factory")) if isinstance(overrides.get("agent_factory"), Mapping) else overrides
+            self.agent_factory_config.update(nested_overrides)
+            self.global_config.update(overrides)
 
-        self._metrics_adapter: Optional["MetricsAdapter"] = None
-        self.metrics_adapter_status: str = "not_initialized"
+        self.settings = AgentFactoryConfig.from_mapping(self.agent_factory_config)
+        if not self.settings.enabled:
+            raise FactoryConfigurationError(
+                "AgentFactory is disabled by configuration",
+                component="agent_factory",
+                operation="initialize",
+            )
+
+        self._lock = RLock()
+        self._runtime_status = RuntimeStatus()
         self.registry = AgentRegistry()
+        cache_signature = inspect.signature(FactoryCache)
+        if "name" in cache_signature.parameters:
+            self.cache: FactoryCache[str, Any] = FactoryCache(name="agent_factory")
+        else:
+            self.cache = FactoryCache()
+        self.observability = FactoryObservability()
+        self._metrics_adapter: Optional[MetricsAdapter] = None
+        self.metrics_adapter_status = "not_initialized"
+
+        self.active_agents: Dict[str, Any] = {}
+        self._runtime_records: Dict[str, ManagedAgentRecord] = {}
+        self._runtime_history: Deque[Dict[str, Any]] = deque(maxlen=self.settings.creation_history_size)
         self.unavailable_agents: Dict[str, str] = {}
+        self._import_cache: Dict[str, Any] = {}
+        self._constructor_signature_cache: Dict[Type[Any], Dict[str, Any]] = {}
+        self.creation_history: Deque[AgentCreationRecord] = deque(maxlen=self.settings.creation_history_size)
         self._torch_probe = self._probe_torch_runtime()
 
-        self.active_agents: Dict[str, BaseAgent] = {}
-        for name, spec in self._agent_specs.items():
-            self.registry.register(AgentMetaData(
-                name=name,
-                module_path=spec["module_path"],
-                class_name=spec["class_name"],
-                version=__version__,
-                dependencies=[]
-            ))
+        self._agent_specs = self._load_agent_specs()
+        self._agent_aliases = self._load_aliases()
+        self._agent_dependency_profiles = self._load_dependency_profiles()
+        self._out_of_process_fallback_agents = self._load_oopa_fallback_agents()
 
-        logger.info("Agent Factory initialized with dynamic registry and metrics adapter.")
+        if self.settings.auto_register_default_agents:
+            self.register_default_agents()
+        if self.settings.discovery_enabled:
+            self.discover_agents()
+
+        self._transition_factory_lifecycle(RuntimeLifecycle.ACTIVE)
+        self._record_event("factory.initialized", {"registered_agents": len(self.registry.agents)})
+        logger.info("Agent Factory initialized with %s registered agents", len(self.registry.agents))
+
+    def _transition_factory_lifecycle(self, lifecycle: RuntimeLifecycle | str) -> RuntimeLifecycle:
+        try:
+            return self._runtime_status.transition(lifecycle)
+        except (ValueError, RuntimeContractViolation) as exc:
+            raise AgentLifecycleError(
+                "Invalid AgentFactory lifecycle transition",
+                component="agent_factory",
+                operation="transition_lifecycle",
+                context={
+                    "current": self._runtime_status.lifecycle.value,
+                    "requested": str(lifecycle),
+                },
+                cause=exc,
+            ) from exc
+
+    def _mark_runtime_degraded(
+        self,
+        channel: str,
+        operation: str,
+        error: BaseException | str,
+        *,
+        retryable: bool = True,
+    ) -> None:
+        record = self._runtime_status.mark_degraded(
+            channel,
+            operation,
+            error,
+            retryable=retryable,
+        )
+        if record.occurrences == 1:
+            logger.warning(
+                "AgentFactory %s operation '%s' is degraded: %s",
+                channel,
+                operation,
+                error,
+            )
+
+    def _mark_runtime_recovered(self, channel: str, operation: str) -> None:
+        self._runtime_status.mark_recovered(channel, operation)
+
+    def _cache_get(self, key: str, default: Any = None) -> Any:
+        try:
+            value = self.cache.get(key, default)
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.get", exc)
+            return default
+        self._mark_runtime_recovered("persistence", "cache.get")
+        return value
+
+    def _cache_set(self, key: str, value: Any, *, metadata: Optional[Mapping[str, Any]] = None) -> bool:
+        try:
+            self.cache.set(key, value, metadata=metadata)
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.set", exc)
+            return False
+        self._mark_runtime_recovered("persistence", "cache.set")
+        return True
+
+    def _cache_delete(self, key: str) -> bool:
+        try:
+            deleted = self.cache.delete(key)
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.delete", exc)
+            return False
+        self._mark_runtime_recovered("persistence", "cache.delete")
+        return deleted
+
+    def _cache_clear(self) -> bool:
+        try:
+            self.cache.clear()
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.clear", exc)
+            return False
+        self._mark_runtime_recovered("persistence", "cache.clear")
+        return True
+
+    # ------------------------------------------------------------------
+    # Config loading and registration
+    # ------------------------------------------------------------------
+    def _load_agent_specs(self) -> Dict[str, Dict[str, Any]]:
+        configured = self.agent_factory_config.get("agent_specs") or self.agent_factory_config.get("default_agent_specs")
+        specs = dict(self.DEFAULT_AGENT_SPECS)
+        if configured:
+            if not isinstance(configured, Mapping):
+                raise InvalidFactoryConfigurationError(
+                    "agent_factory.agent_specs must be a mapping",
+                    context={"actual_type": type(configured).__name__},
+                    component="agent_factory",
+                    operation="load_agent_specs",
+                )
+            for name, spec in configured.items():
+                agent_name = validate_agent_name(name)
+                spec_payload = dict(require_mapping(spec, f"agent_factory.agent_specs[{agent_name}]", allow_empty=False))
+                specs[agent_name] = spec_payload
+        return specs
+
+    def _load_aliases(self) -> Dict[str, str]:
+        aliases = dict(self.DEFAULT_ALIASES)
+        configured = self.agent_factory_config.get("aliases") or self.agent_factory_config.get("agent_aliases") or {}
+        if not isinstance(configured, Mapping):
+            raise InvalidFactoryConfigurationError(
+                "agent_factory.aliases must be a mapping",
+                context={"actual_type": type(configured).__name__},
+                component="agent_factory",
+                operation="load_aliases",
+            )
+        for alias, target in configured.items():
+            aliases[validate_agent_name(str(alias))] = validate_agent_name(str(target))
+        return aliases
+
+    def _load_dependency_profiles(self) -> Dict[str, Dict[str, Any]]:
+        profiles = {name: dict(profile) for name, profile in self.DEFAULT_DEPENDENCY_PROFILES.items()}
+        configured = self.agent_factory_config.get("dependency_profiles") or {}
+        if not isinstance(configured, Mapping):
+            raise InvalidFactoryConfigurationError(
+                "agent_factory.dependency_profiles must be a mapping",
+                context={"actual_type": type(configured).__name__},
+                component="agent_factory",
+                operation="load_dependency_profiles",
+            )
+        for name, profile in configured.items():
+            profiles[validate_agent_name(str(name))] = dict(require_mapping(profile, f"dependency_profiles[{name}]"))
+        return profiles
+
+    def _load_oopa_fallback_agents(self) -> Tuple[str, ...]:
+        configured = self.settings.out_of_process_fallback_agents
+        if configured:
+            return tuple(validate_agent_name(name) for name in configured)
+        defaults = (
+            "adaptive",
+            "alignment",
+            "browser",
+            "evaluation",
+            "execution",
+            "handler",
+            "knowledge",
+            "language",
+            "learning",
+            "network",
+            "observability",
+            "perception",
+            "planning",
+            "privacy",
+            "qnn",
+            "quality",
+            "reader",
+            "reasoning",
+            "safety",
+        )
+        return defaults
+
+    def _standardized_metadata_payload(self, spec: Mapping[str, Any], name: str, version: str) -> Dict[str, Any]:
+        profile = dict(self._agent_dependency_profiles.get(name, {}))
+        constraints = dict(spec.get("constraints") or {})
+        if "torch_required" not in constraints:
+            constraints["torch_required"] = bool(profile.get("torch_required", False))
+
+        qos_source = dict(self.DEFAULT_QOS_PROFILES.get("default", {}))
+        qos_source.update(self.DEFAULT_QOS_PROFILES.get(name, {}))
+        qos_source.update(dict(spec.get("qos") or {}))
+
+        capabilities = tuple(str(item).strip() for item in (spec.get("capabilities") or ()) if str(item).strip())
+        metadata_payload = dict(spec.get("metadata") or {})
+        metadata_payload.update(
+            {
+                "registration_standard": "slai.agent_factory.metadata.v1",
+                "agent_type": name,
+                "version": version,
+                "capabilities": list(capabilities),
+                "constraints": constraints,
+                "qos": qos_source,
+            }
+        )
+        return metadata_payload
+
+    def _score_health_candidate(self, agent_type: str, metrics: Mapping[str, Any]) -> float:
+        payload = dict(metrics.get(agent_type, {})) if isinstance(metrics.get(agent_type), Mapping) else {}
+        if not payload:
+            return 0.0
+        health = coerce_number(payload.get("health_score", 1.0), field_name=f"{agent_type}.health_score")
+        latency_penalty = coerce_number(payload.get("latency_ms", 0.0), field_name=f"{agent_type}.latency_ms") / 1000.0
+        error_penalty = coerce_number(payload.get("error_rate", 0.0), field_name=f"{agent_type}.error_rate")
+        saturation_penalty = coerce_number(payload.get("load", 0.0), field_name=f"{agent_type}.load")
+        return health - latency_penalty - error_penalty - (0.25 * saturation_penalty)
+
+    def route_agent(self, candidates: Sequence[str], metrics: Mapping[str, Any], *, create_if_missing: bool = True, shared_memory: Any = None, **kwargs: Any) -> Any:
+        started_ms = monotonic_ms()
+        normalized = [self.normalize_agent_type(candidate) for candidate in candidates]
+        available = [
+            name
+            for name in normalized
+            if self._get_metadata(name).identity not in self.unavailable_agents
+        ]
+        if not available:
+            raise AgentSelectionError(
+                "No routable agents available",
+                component="agent_factory",
+                operation="route_agent",
+                context={"candidates": list(normalized), "unavailable": dict(self.unavailable_agents)},
+            )
+
+        scored = sorted(((candidate, self._score_health_candidate(candidate, metrics)) for candidate in available), key=lambda item: item[1], reverse=True)
+        selected, score = scored[0]
+        self._record_event("agent.route.selected", {"selected": selected, "score": score, "candidates": available})
+
+        self._profile_hot_path("factory.routing", started_ms, selected=selected, candidates=available, create_if_missing=create_if_missing)
+        if create_if_missing:
+            return self.create(selected, shared_memory=shared_memory, **kwargs)
+        return selected
+
+    def _metadata_constructor_kwargs(self, spec: Mapping[str, Any], name: str) -> Dict[str, Any]:
+        require_required_keys(spec, ("module_path", "class_name"), payload_name=f"agent_specs[{name}]")
+        version = str(spec.get("version") or self.settings.default_version or __version__)
+        payload = {
+            "name": name,
+            "module_path": spec["module_path"],
+            "class_name": spec["class_name"],
+            "version": version,
+            "dependencies": list(spec.get("dependencies", ()) or ()),
+            "required_params": tuple(spec.get("required_params", ()) or ()),
+            "description": spec.get("description", ""),
+            "author": spec.get("author", "SLAI"),
+            "capabilities": tuple(spec.get("capabilities", ()) or ()),
+            "metadata": self._standardized_metadata_payload(spec, name, version),
+        }
+        # Newer AgentMetaData versions accept richer fields; older versions do not.
+        for optional_key in ("tags", "status", "capabilities", "lifecycle", "metadata"):
+            if optional_key in spec:
+                payload[optional_key] = spec[optional_key]
+
+        signature = inspect.signature(AgentMetaData)
+        accepted = set(signature.parameters.keys())
+        return {key: value for key, value in payload.items() if key in accepted}
+
+    def register_default_agents(self) -> None:
+        for name, spec in self._agent_specs.items():
+            metadata = AgentMetaData(**self._metadata_constructor_kwargs(spec, name))
+            self.register_agent(metadata, overwrite=True)
+
+    def register_agent(self, metadata: AgentMetaData, *, overwrite: bool = True) -> AgentMetaData:
+        if not isinstance(metadata, AgentMetaData):
+            raise FactoryTypeError(
+                "Can only register objects of type AgentMetaData",
+                context={"actual_type": type(metadata).__name__},
+                component="agent_factory",
+                operation="register_agent",
+            )
+        with self._lock:
+            previous: Optional[AgentMetaData] = None
+            original_lifecycle = metadata.lifecycle
+            try:
+                previous = self.registry.get(metadata.name, version=metadata.version)
+            except (AgentNotRegisteredError, AgentVersionUnavailableError):
+                pass
+            try:
+                if metadata.lifecycle == "retired":
+                    raise AgentLifecycleError(
+                        "Retired agent metadata cannot be registered",
+                        component="agent_factory",
+                        operation="register_agent",
+                        context={"definition_id": metadata.identity},
+                    )
+                metadata.with_lifecycle("registered")
+                signature = inspect.signature(self.registry.register)
+                if "overwrite" in signature.parameters:
+                    registered = self.registry.register(metadata, overwrite=overwrite)
+                else:
+                    registered = self.registry.register(metadata)
+            except FactoryError:
+                metadata.lifecycle = original_lifecycle
+                raise
+            except Exception as exc:
+                metadata.lifecycle = original_lifecycle
+                raise FactoryRegistryError(
+                    message=f"Failed to register agent '{getattr(metadata, 'name', 'unknown')}'",
+                    component="agent_factory",
+                    operation="register_agent",
+                    context={"agent_name": getattr(metadata, "name", None)},
+                    cause=exc,
+                ) from exc
+
+            if previous is not None and previous is not metadata:
+                self.release(previous.name, version=str(previous.version))
+                previous.with_lifecycle("retired")
+                self.unavailable_agents.pop(previous.identity, None)
+                for key in list(self.unavailable_agents):
+                    if key.startswith(f"{previous.identity}#"):
+                        self.unavailable_agents.pop(key, None)
+            self._cache_set(f"metadata:{metadata.identity}", metadata)
+            self._record_event("agent.registered", {"agent_type": metadata.name, "version": metadata.version})
+            return registered if isinstance(registered, AgentMetaData) else metadata
+
+    def unregister_agent(self, agent_type: str, *, version: Optional[str] = None) -> AgentMetaData:
+        normalized = self.normalize_agent_type(agent_type)
+        with self._lock:
+            if not hasattr(self.registry, "unregister"):
+                raise FactoryRegistryError(
+                    "Current AgentRegistry does not support unregister",
+                    component="agent_factory",
+                    operation="unregister_agent",
+                    context={"agent_type": normalized},
+                )
+            removed = self.registry.unregister(normalized, version=version)  # type: ignore[attr-defined]
+            self.release(normalized, version=str(removed.version))
+            self.unavailable_agents.pop(removed.identity, None)
+            for key in list(self.unavailable_agents):
+                if key.startswith(f"{removed.identity}#"):
+                    self.unavailable_agents.pop(key, None)
+            self._cache_delete(f"metadata:{removed.identity}")
+            removed.with_lifecycle("retired")
+            self._record_event(
+                "agent.unregistered",
+                {"agent_type": normalized, "version": removed.version, "definition_id": removed.identity},
+            )
+            return removed
+
+    def discover_agents(self, packages: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, Any]]:
+        """Discover BaseAgent subclasses from configured packages.
+
+        Discovery is intentionally opt-in because importing all agent modules may
+        trigger optional dependencies. It registers discovered metadata only when
+        imports succeed.
+        """
+        discovered: Dict[str, Dict[str, Any]] = {}
+        base_agent_cls = self._base_agent_class()
+        package_names = tuple(packages or self.settings.discovery_packages)
+        for package_name in package_names:
+            package = importlib.import_module(package_name)
+            for _, obj in inspect.getmembers(package):
+                if inspect.isclass(obj) and issubclass(obj, base_agent_cls) and obj is not base_agent_cls:
+                    name = obj.__name__.removesuffix("Agent").lower()
+                    spec = {"module_path": obj.__module__, "class_name": obj.__name__, "version": self.settings.default_version}
+                    metadata = AgentMetaData(**self._metadata_constructor_kwargs(spec, name))
+                    self.register_agent(metadata, overwrite=True)
+                    discovered[name] = spec
+        self._record_event("agent.discovery.completed", {"count": len(discovered)})
+        return discovered
+
+    # ------------------------------------------------------------------
+    # Agent resolution and construction
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _base_agent_class() -> Type[Any]:
+        """Import BaseAgent only for operations that require subclass checks."""
+
+        from .base_agent import BaseAgent
+
+        return BaseAgent
+
+    def normalize_agent_type(self, agent_type: str) -> str:
+        name = validate_agent_name(agent_type, max_length=128)
+        resolved = self._agent_aliases.get(name, name)
+        if resolved != name:
+            logger.info("Resolved agent alias '%s' -> '%s'", name, resolved)
+        return resolved
+
+    def _get_metadata(self, agent_type: str, version: Optional[str] = None) -> AgentMetaData:
+        started_ms = monotonic_ms()
+        normalized = self.normalize_agent_type(agent_type)
+        try:
+            metadata = self.registry.get(normalized, version=version)
+        except FactoryError:
+            raise
+        except KeyError as exc:
+            raise AgentNotRegisteredError(
+                f"Agent '{normalized}' is not registered",
+                component="agent_factory",
+                operation="get_metadata",
+                context={"agent_type": normalized, "version": version, "registered_agents": self.get_registered_agent_types()},
+                cause=exc,
+            ) from exc
+        except Exception as exc:
+            raise AgentSelectionError(
+                message=f"Failed to select agent metadata for '{normalized}'",
+                component="agent_factory",
+                operation="get_metadata",
+                context={"agent_type": normalized, "version": version},
+                cause=exc,
+            ) from exc
+        self._profile_hot_path("factory.metadata_lookup", started_ms, agent_type=normalized, version=version)
+        return metadata
 
     def _probe_torch_runtime(self) -> Dict[str, str]:
+        if not bool(self.agent_factory_config.get("probe_torch_runtime", True)):
+            return {"status": "disabled"}
         try:
             torch_module = importlib.import_module("torch")
             return {
@@ -117,281 +724,928 @@ class AgentFactory:
             return {"status": "unavailable", "error": f"{type(exc).__name__}: {exc}"}
 
     def get_agent_dependency_report(self, agent_type: str) -> Dict[str, Any]:
-        normalized = self._agent_aliases.get(agent_type, agent_type)
+        normalized = self.normalize_agent_type(agent_type)
         profile = dict(self._agent_dependency_profiles.get(normalized, {}))
+        profile.setdefault("torch_required", False)
         profile["agent_type"] = normalized
-        profile["torch_probe"] = self._torch_probe
+        profile["torch_probe"] = dict(self._torch_probe)
         return profile
 
-    def _get_metrics_adapter(self) -> "MetricsAdapter":
-        if self._metrics_adapter is not None:
-            return self._metrics_adapter
+    @staticmethod
+    def _runtime_unavailable_key(metadata: AgentMetaData, scope_id: str) -> str:
+        return f"{metadata.identity}#{scope_id}"
+
+    def _ensure_agent_available(self, metadata: AgentMetaData, scope_id: str) -> None:
+        agent_type = metadata.name
+        definition_id = metadata.identity
+        runtime_key = self._runtime_unavailable_key(metadata, scope_id)
+        unavailable_key = next(
+            (key for key in (definition_id, runtime_key) if key in self.unavailable_agents),
+            None,
+        )
+        if unavailable_key is not None:
+            reason = self.unavailable_agents[unavailable_key]
+            raise AgentInitializationError(
+                f"Agent runtime '{unavailable_key}' is marked unavailable: {reason}",
+                component="agent_factory",
+                operation="ensure_agent_available",
+                context={
+                    "agent_type": agent_type,
+                    "definition_id": definition_id,
+                    "scope_id": scope_id,
+                    "reason": reason,
+                },
+            )
+        profile = self.get_agent_dependency_report(agent_type)
+        if (
+            self.settings.block_torch_required_when_unavailable
+            and profile.get("torch_required")
+            and self._torch_probe.get("status") != "available"
+        ):
+            reason = f"torch required by design; torch runtime unavailable ({self._torch_probe.get('error', 'unknown')})"
+            self.unavailable_agents[definition_id] = reason
+            raise AgentInitializationError(
+                reason,
+                component="agent_factory",
+                operation="ensure_agent_available",
+                context={"agent_type": agent_type, "definition_id": definition_id, "profile": profile},
+            )
+
+    def _resolve_dependency_order(
+        self,
+        agent_type: str,
+        *,
+        version: Optional[str] = None,
+    ) -> Tuple[str, ...]:
         try:
-            metrics_adapter_module = importlib.import_module("src.agents.factory.metrics_adapter")
-            metrics_adapter_cls = getattr(metrics_adapter_module, "MetricsAdapter")
-            self._metrics_adapter = metrics_adapter_cls()
-            self.metrics_adapter_status = "initialized"
-            return self._metrics_adapter
+            load_order = tuple(
+                self.registry.resolve_dependency_tree(agent_type, version=version)
+            )
+        except FactoryError:
+            raise
         except Exception as exc:
-            self.metrics_adapter_status = f"failed ({type(exc).__name__}: {exc})"
-            raise RuntimeError(
-                f"Failed to initialize MetricsAdapter from src.agents.factory.metrics_adapter: {type(exc).__name__}: {exc}"
+            raise DependencyResolutionError(
+                message=f"Failed to resolve dependencies for '{agent_type}'",
+                component="agent_factory",
+                operation="resolve_dependency_order",
+                context={"agent_type": agent_type},
+                cause=exc,
+            ) from exc
+        return load_order
+
+    def _resolve_agent_class(self, metadata: AgentMetaData) -> Type[Any]:
+        module_path = validate_module_path(metadata.module_path)
+        class_name = validate_class_name(metadata.class_name)
+        cache_key = f"module:{module_path}"
+        try:
+            module = self._cache_get(cache_key) if self.settings.cache_imports else None
+            if module is None:
+                module = self._import_cache.get(module_path)
+            if module is None:
+                module = importlib.import_module(module_path)
+                self._import_cache[module_path] = module
+                if self.settings.cache_imports:
+                    self._cache_set(cache_key, module)
+            agent_cls = getattr(module, class_name)
+        except ModuleNotFoundError as exc:
+            raise AgentModuleImportError(
+                f"Agent module '{module_path}' could not be imported",
+                component="agent_factory",
+                operation="resolve_agent_class",
+                context={"module_path": module_path, "class_name": class_name},
+                cause=exc,
+            ) from exc
+        except ImportError as exc:
+            raise AgentModuleImportError(
+                message=f"Agent module import failed for '{module_path}'",
+                component="agent_factory",
+                operation="resolve_agent_class",
+                context={"module_path": module_path, "class_name": class_name},
+                cause=exc,
+            ) from exc
+        except AttributeError as exc:
+            raise AgentClassResolutionError(
+                f"Agent class '{class_name}' not found in '{module_path}'",
+                component="agent_factory",
+                operation="resolve_agent_class",
+                context={"module_path": module_path, "class_name": class_name},
+                cause=exc,
+            ) from exc
+        except Exception as exc:
+            if self._is_native_dependency_failure(exc):
+                raise
+            raise FactoryResolutionError(
+                message=f"Failed to resolve agent class '{class_name}' from '{module_path}'",
+                component="agent_factory",
+                operation="resolve_agent_class",
+                context={"module_path": module_path, "class_name": class_name},
+                cause=exc,
             ) from exc
 
-    def discover_agents(self):
-        agents_module = importlib.import_module(__package__)
-
-        for _, obj in inspect.getmembers(agents_module):
-            if inspect.isclass(obj) and issubclass(obj, BaseAgent) and obj is not BaseAgent:
-                name = obj.__name__.lower()
-                self._agent_specs[name] = {
-                    "module_path": obj.__module__,
-                    "class_name": obj.__name__,
-                }
-
-    def register_agent(self, metadata: AgentMetaData):
-        """
-        Registers an agent's metadata, making it available for creation.
-        """
-        if not isinstance(metadata, AgentMetaData):
-            raise TypeError("Can only register objects of type AgentMetaData.")
-
-        if metadata.name in self.registry.agents:
-            logger.warning(f"Agent '{metadata.name}' is already registered. Overwriting metadata.")
-
-        self.registry.register(metadata)
-        logger.info(f"Registered agent: '{metadata.name}' (version {metadata.version})")
-
-    def create(self, agent_type: str, shared_memory: Any, **kwargs: Any) -> BaseAgent:
-        """
-        Creates an instance of a specified agent.
-
-        This method retrieves the appropriate configuration for the agent type,
-        merges it with any runtime arguments, and instantiates the agent class.
-
-        Args:
-            agent_type (str): The type of agent to create (e.g., 'planning', 'learning').
-            shared_memory (Any): The shared memory object to be used by the agent.
-            **kwargs (Any): Additional keyword arguments to be passed to the agent's
-                            constructor, which may include agent-specific dependencies
-                            like 'env' for the LearningAgent.
-
-        Returns:
-            BaseAgent: An instance of the requested agent.
-
-        Raises:
-            ValueError: If the requested agent_type is unknown.
-            TypeError: If the arguments provided do not match the agent's constructor signature.
-        """
-        normalized_type = self._agent_aliases.get(agent_type, agent_type)
-        if normalized_type != agent_type:
-            logger.info("Resolved agent alias '%s' -> '%s'", agent_type, normalized_type)
-        agent_type = normalized_type
-        printer.status("CREATE", f"Request to create agent of type: '{agent_type}'")
-
-        # 1: Check the cache first. If agent already exists, return it.
-        if agent_type in self.active_agents:
-            logger.info(f"Returning cached instance of agent: '{agent_type}'")
-            return self.active_agents[agent_type]
-        if agent_type in self.unavailable_agents:
-            reason = self.unavailable_agents[agent_type]
-            logger.info("Skipping creation for unavailable agent '%s' (cached): %s", agent_type, reason)
-            raise RuntimeError(f"Agent '{agent_type}' unavailable: {reason}")
-
-        if agent_type not in self.registry.agents:
-            logger.error(f"Unknown agent type requested: '{agent_type}'. Ensure it is registered first.")
-            raise ValueError(f"Unknown agent type requested: '{agent_type}'")
-
-        profile = self.get_agent_dependency_report(agent_type)
-        if profile.get("torch_required") and self._torch_probe.get("status") != "available":
-            reason = f"torch required by design; torch runtime unavailable ({self._torch_probe.get('error', 'unknown')})"
-            self.unavailable_agents[agent_type] = reason
-            raise RuntimeError(reason)
-
-        # Resolve dependency order
-        load_order = self.registry.resolve_dependency_tree(agent_type)
-        logger.info(f"Dependency-aware creation order for '{agent_type}': {load_order}")
-
-        # 2: Make the dependency loop functional by recursively calling create.
-        for dep_name in load_order[:-1]: # All but the last one (the target agent)
-            if dep_name not in self.active_agents:
-                self.create(dep_name, shared_memory)
-
-        metadata = self.registry.agents[agent_type]
-        try:
-            # Dynamically import the module and get the class
-            module = importlib.import_module(metadata.module_path)
-            agent_class = getattr(module, metadata.class_name)
-        except Exception as e:
-            message = f"{type(e).__name__}: {e}"
-            lowered = message.lower()
-            is_native_dll_failure = "winerror 1114" in lowered or "c10.dll" in lowered
-            if is_native_dll_failure and agent_type in self._out_of_process_fallback_agents:
-                logger.warning(
-                    "Agent '%s' failed in-process due to native dependency load issue; "
-                    "switching to out-of-process proxy. Error: %s",
-                    agent_type,
-                    message,
-                )
-                proxy = OutOfProcessAgentProxy(
-                    agent_type=agent_type,
-                    module_path=metadata.module_path,
-                    class_name=metadata.class_name,
-                    init_error=message,
-                )
-                self.active_agents[agent_type] = proxy
-                return proxy
-            self.unavailable_agents[agent_type] = f"{type(e).__name__}: {e}"
-            logger.error(f"Failed to load agent class '{metadata.class_name}' from '{metadata.module_path}': {e}", exc_info=True)
-            raise ImportError(f"Could not load agent class for '{agent_type}'.") from e
-
-        # 3: Get the agent-specific configuration and merge with runtime config overrides
-        agent_config_key = f"{agent_type}_agent"
-        agent_config = dict(self.global_config.get(agent_config_key, {}))
-        runtime_config_override = kwargs.get("config")
-        if isinstance(runtime_config_override, dict):
-            agent_config.update(runtime_config_override)
-
-        try:
-            constructor_params = inspect.signature(agent_class.__init__).parameters
-            accepts_var_kwargs = any(
-                param.kind == inspect.Parameter.VAR_KEYWORD
-                for param in constructor_params.values()
+        if self.settings.strict_base_agent_subclass and not issubclass(agent_cls, self._base_agent_class()):
+            raise AgentClassResolutionError(
+                f"Agent class '{class_name}' must inherit BaseAgent",
+                component="agent_factory",
+                operation="resolve_agent_class",
+                context={"module_path": module_path, "class_name": class_name, "actual_type": str(agent_cls)},
             )
-            constructor_args = {}
+        return agent_cls
 
-            if "shared_memory" in constructor_params:
-                constructor_args["shared_memory"] = shared_memory
-            if "agent_factory" in constructor_params:
-                constructor_args["agent_factory"] = self
-            if "config" in constructor_params:
-                constructor_args["config"] = agent_config
+    def _is_native_dependency_failure(self, exc: BaseException) -> bool:
+        message = f"{type(exc).__name__}: {exc}".lower()
+        return any(pattern in message for pattern in self.settings.native_failure_patterns)
 
-            for key, value in kwargs.items():
-                if key == "config":
-                    continue
-                if key in constructor_params or accepts_var_kwargs:
-                    constructor_args[key] = value
-                else:
-                    logger.debug(f"Skipping unsupported arg '{key}' for {agent_type} agent")
-            
-            agent_instance = agent_class(**constructor_args)
-            logger.info(f"Successfully created instance of agent: '{agent_type}'")
-            
-            # Cache the newly created agent before returning it.
-            self.active_agents[agent_type] = agent_instance
+    def _should_use_oopa_fallback(self, agent_type: str, exc: BaseException) -> bool:
+        return (
+            self.settings.enable_out_of_process_fallback
+            and agent_type in set(self._out_of_process_fallback_agents)
+            and self._is_native_dependency_failure(exc)
+        )
 
-            required_methods = ['predict', 'get_action', 'act', 'perform_task', 'execute']
-            if not any(hasattr(agent_instance, method) for method in required_methods):
-                logger.warning(
-                    f"Agent '{agent_type}' does not expose standard action methods "
-                    f"({', '.join(required_methods)})."
+    def _create_oopa_proxy(self, agent_type: str, metadata: AgentMetaData, exc: BaseException) -> OutOfProcessAgentProxy:
+        proxy = OutOfProcessAgentProxy(
+            agent_type=agent_type,
+            module_path=metadata.module_path,
+            class_name=metadata.class_name,
+            init_error=f"{type(exc).__name__}: {exc}",
+        )
+        self.degraded_count = getattr(self, "degraded_count", 0) + 1
+        self._record_event("agent.oopa_fallback", {"agent_type": agent_type, "error": str(exc)})
+        return proxy
+
+    def _activate_oopa_fallback(
+        self,
+        agent_type: str,
+        metadata: AgentMetaData,
+        scope_id: str,
+        exc: BaseException,
+        started_ms: float,
+    ) -> OutOfProcessAgentProxy:
+        """Create and register a degraded stateless-isolation proxy."""
+
+        proxy = self._create_oopa_proxy(agent_type, metadata, exc)
+        record = self._store_instance(
+            metadata,
+            proxy,
+            scope_id,
+            lifecycle=RuntimeLifecycle.DEGRADED,
+            implementation="out_of_process_proxy",
+        )
+        record.status.mark_degraded("runtime", "out_of_process_fallback", exc)
+        self._record_creation(
+            agent_type,
+            "degraded",
+            started_ms,
+            metadata,
+            implementation="out_of_process_proxy",
+            error=str(exc),
+        )
+        return proxy
+
+    def _get_constructor_signature(self, agent_cls: Type[Any]) -> Dict[str, Any]:
+        cache_key = f"signature:{agent_cls.__module__}.{agent_cls.__name__}"
+        cached = self._cache_get(cache_key) if self.settings.cache_constructor_signatures else None
+        if cached is not None:
+            return dict(cached)
+        cached = self._constructor_signature_cache.get(agent_cls)
+        if cached is not None:
+            return cached
+
+        params = inspect.signature(agent_cls.__init__).parameters
+        accepts_var_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+        signature_meta = {"params": params, "accepts_var_kwargs": accepts_var_kwargs}
+        self._constructor_signature_cache[agent_cls] = signature_meta
+        if self.settings.cache_constructor_signatures:
+            self._cache_set(cache_key, signature_meta)
+        return signature_meta
+
+    def _agent_config_for(self, agent_type: str, runtime_override: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        config_key = f"{agent_type}_agent"
+        agent_config = normalize_payload(self.global_config.get(config_key))
+        if runtime_override is not None:
+            if not self.settings.allow_runtime_config_override:
+                raise FactoryConfigurationError(
+                    "Runtime config overrides are disabled for AgentFactory",
+                    component="agent_factory",
+                    operation="agent_config_for",
+                    context={"agent_type": agent_type},
                 )
-                
-            return agent_instance
+            agent_config.update(normalize_payload(runtime_override))
+        return agent_config
 
-        except TypeError as e:
-            self.unavailable_agents[agent_type] = f"TypeError: {e}"
-            logger.error(
-                f"Failed to create agent '{agent_type}' due to a TypeError. "
-                f"Check if the constructor signature matches the provided arguments. Error: {e}"
+    def _build_constructor_args(
+        self,
+        agent_type: str,
+        agent_cls: Type[Any],
+        shared_memory: Any,
+        agent_config: Mapping[str, Any],
+        kwargs: Mapping[str, Any],
+        *,
+        required_params: Sequence[str] = (),
+    ) -> Dict[str, Any]:
+        signature_meta = self._get_constructor_signature(agent_cls)
+        constructor_params = signature_meta["params"]
+        accepts_var_kwargs = bool(signature_meta["accepts_var_kwargs"])
+        constructor_args: Dict[str, Any] = {}
+
+        if "shared_memory" in constructor_params:
+            constructor_args["shared_memory"] = shared_memory
+        if "agent_factory" in constructor_params:
+            constructor_args["agent_factory"] = self
+        if "config" in constructor_params:
+            constructor_args["config"] = dict(agent_config)
+
+        unsupported = []
+        for key, value in kwargs.items():
+            if key in {"config", "version"}:
+                continue
+            if key in constructor_params or accepts_var_kwargs or self.settings.allow_unknown_constructor_kwargs:
+                constructor_args[key] = value
+            else:
+                unsupported.append(key)
+
+        if unsupported:
+            logger.debug("Skipping unsupported constructor args for %s: %s", agent_type, unsupported)
+        missing_required = sorted(
+            parameter
+            for parameter in required_params
+            if parameter not in constructor_args or constructor_args[parameter] is None
+        )
+        if missing_required:
+            raise AgentConstructionError(
+                f"Required constructor parameters are missing for agent '{agent_type}'",
+                component="agent_factory",
+                operation="build_constructor_args",
+                context={
+                    "agent_type": agent_type,
+                    "missing_required_params": missing_required,
+                    "provided_params": sorted(constructor_args),
+                },
             )
-            raise
-        except Exception as e:
-            self.unavailable_agents[agent_type] = f"{type(e).__name__}: {e}"
-            logger.error(f"An unexpected error occurred while creating agent '{agent_type}': {e}", exc_info=True)
-            raise
+        return constructor_args
 
-    def get_registered_agent_types(self) -> list[str]:
-        return sorted(self.registry.agents.keys())
+    def _verify_action_surface(self, agent_type: str, instance: Any) -> None:
+        if not self.settings.required_action_methods:
+            return
+        callable_methods = tuple(
+            method
+            for method in self.settings.required_action_methods
+            if callable(getattr(instance, method, None))
+        )
+        if callable_methods:
+            return
+        message = (
+            f"Agent '{agent_type}' must expose at least one callable action method "
+            f"({', '.join(self.settings.required_action_methods)})"
+        )
+        if self.settings.enforce_runtime_contracts:
+            raise AgentConstructionError(
+                message,
+                component="agent_factory",
+                operation="verify_runtime_contract",
+                context={
+                    "agent_type": agent_type,
+                    "instance_type": type(instance).__name__,
+                    "required_action_methods": list(self.settings.required_action_methods),
+                },
+            )
+        logger.warning(message)
 
-    def inspect_registered_agents(self) -> Dict[str, Dict[str, Any]]:
+    @staticmethod
+    def _runtime_scope(
+        shared_memory: Any,
+        agent_config: Mapping[str, Any],
+        kwargs: Mapping[str, Any],
+    ) -> str:
+        scope_kwargs = {key: value for key, value in kwargs.items() if key not in {"config", "version"}}
+        return build_runtime_scope_id(
+            shared_memory=shared_memory,
+            config=agent_config,
+            constructor_kwargs=scope_kwargs,
+        )
+
+    def _record_for_cache_key(self, cache_key: str) -> Optional[ManagedAgentRecord]:
+        record = self._runtime_records.get(cache_key)
+        if record is not None:
+            return record
+        cached = self._cache_get(cache_key) if self.settings.cache_agent_instances else None
+        if not isinstance(cached, ManagedAgentRecord):
+            return None
+        if cached.status.lifecycle not in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
+            self._cache_delete(cache_key)
+            return None
+        self._runtime_records[cache_key] = cached
+        self.active_agents[cached.identity.agent_type] = cached.instance
+        return cached
+
+    def create(self, agent_type: str, shared_memory: Any = None, **kwargs: Any) -> Any:
+        """Create or retrieve an agent instance by registered agent type.
+
+        The method preserves backward compatibility with the original factory
+        while using the improved registry, cache, error, observability, metrics,
+        and isolation subsystems.
         """
-        Inspects all registered agents for metadata consistency, import integrity, and instantiability.
-    
-        Returns:
-            Dict[str, Dict[str, Any]]: A dictionary keyed by agent name with diagnostic info.
-        """
-        diagnostics = {}
-    
-        for name, metadata in self.registry.agents.items():
-            info = {
-                "status": "OK",
+        started_ms = monotonic_ms()
+        normalized = self.normalize_agent_type(agent_type)
+        version = kwargs.get("version")
+        self._record_counter("create.requested")
+
+        with self._lock:
+            if self._runtime_status.lifecycle not in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
+                raise FactoryStateError(
+                    "AgentFactory cannot create agents outside an active lifecycle",
+                    component="agent_factory",
+                    operation="create",
+                    context={"lifecycle": self._runtime_status.lifecycle.value},
+                )
+
+            metadata = self._get_metadata(normalized, version=version)
+            agent_config = self._agent_config_for(normalized, kwargs.get("config"))
+            scope_id = self._runtime_scope(shared_memory, agent_config, kwargs)
+            cache_key = f"instance:{metadata.identity}:{scope_id}"
+
+            if self.settings.use_instance_cache:
+                cached_record = self._record_for_cache_key(cache_key)
+                if cached_record is not None:
+                    self._record_counter("create.cache_hit")
+                    self._record_event(
+                        "agent.cache_hit",
+                        {
+                            "agent_type": normalized,
+                            "definition_id": metadata.identity,
+                            "scope_id": scope_id,
+                            "instance_id": cached_record.identity.instance_id,
+                        },
+                    )
+                    return cached_record.instance
+
+            self._ensure_agent_available(metadata, scope_id)
+
+            try:
+                if self.settings.create_dependencies:
+                    for dependency in self._resolve_dependency_order(
+                        normalized,
+                        version=str(metadata.version),
+                    )[:-1]:
+                        self.create(dependency, shared_memory)
+
+                try:
+                    agent_cls = self._resolve_agent_class(metadata)
+                except Exception as exc:
+                    if self._should_use_oopa_fallback(normalized, exc):
+                        return self._activate_oopa_fallback(
+                            normalized, metadata, scope_id, exc, started_ms
+                        )
+                    raise
+
+                constructor_args = self._build_constructor_args(
+                    normalized,
+                    agent_cls,
+                    shared_memory,
+                    agent_config,
+                    kwargs,
+                    required_params=metadata.required_params,
+                )
+                try:
+                    instance = agent_cls(**constructor_args)
+                except Exception as exc:
+                    if self._should_use_oopa_fallback(normalized, exc):
+                        return self._activate_oopa_fallback(
+                            normalized, metadata, scope_id, exc, started_ms
+                        )
+                    raise
+                try:
+                    self._verify_action_surface(normalized, instance)
+                    record = self._store_instance(metadata, instance, scope_id)
+                except Exception:
+                    self._close_unmanaged_instance(instance, metadata.identity)
+                    raise
+                self.unavailable_agents.pop(metadata.identity, None)
+                self.unavailable_agents.pop(self._runtime_unavailable_key(metadata, scope_id), None)
+                self._record_creation(normalized, "ok", started_ms, metadata)
+                self._record_counter("create.succeeded")
+                logger.info(
+                    "Successfully created agent '%s' definition=%s instance=%s",
+                    normalized,
+                    metadata.identity,
+                    record.identity.instance_id,
+                )
+                return instance
+
+            except FactoryError as exc:
+                unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
+                if not exc.retryable:
+                    self.unavailable_agents[unavailable_key] = exc.summary()
+                self._record_counter("create.failed")
+                self._record_creation(normalized, "error", started_ms, metadata, error=str(exc))
+                exc.log()
+                raise
+            except TypeError as exc:
+                error = AgentConstructionError(
+                    message=f"Constructor arguments failed for agent '{normalized}'",
+                    component="agent_factory",
+                    operation="create",
+                    context={"agent_type": normalized, "class_name": metadata.class_name},
+                    cause=exc,
+                )
+                unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
+                if not error.retryable:
+                    self.unavailable_agents[unavailable_key] = error.summary()
+                self._record_counter("create.failed")
+                self._record_creation(normalized, "error", started_ms, metadata, error=str(error))
+                raise error from exc
+            except Exception as exc:
+                error = AgentInitializationError(
+                    message=f"Failed to initialize agent '{normalized}'",
+                    component="agent_factory",
+                    operation="create",
+                    context={"agent_type": normalized, "module_path": metadata.module_path, "class_name": metadata.class_name},
+                    cause=exc,
+                )
+                unavailable_key = self._runtime_unavailable_key(metadata, scope_id)
+                if not error.retryable:
+                    self.unavailable_agents[unavailable_key] = error.summary()
+                self._record_counter("create.failed")
+                self._record_creation(normalized, "error", started_ms, metadata, error=str(error))
+                raise error from exc
+
+    def create_agent(self, agent_type: str, shared_memory: Any = None, **kwargs: Any) -> Any:
+        return self.create(agent_type, shared_memory=shared_memory, **kwargs)
+
+    def get_agent(self, agent_type: str, shared_memory: Any = None, **kwargs: Any) -> Any:
+        return self.create(agent_type, shared_memory=shared_memory, **kwargs)
+
+    def _close_unmanaged_instance(self, instance: Any, definition_id: str) -> None:
+        for method_name in ("shutdown", "close", "stop"):
+            method = getattr(instance, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method()
+            except Exception as exc:
+                self._mark_runtime_degraded("lifecycle", "unmanaged_instance.close", exc, retryable=False)
+                logger.warning("Unable to close rejected agent definition '%s': %s", definition_id, exc)
+            break
+
+    def _store_instance(
+        self,
+        metadata: AgentMetaData,
+        instance: Any,
+        scope_id: str,
+        *,
+        lifecycle: RuntimeLifecycle = RuntimeLifecycle.ACTIVE,
+        implementation: str = "in_process",
+    ) -> ManagedAgentRecord:
+        instance_id = str(getattr(instance, "agent_id", "") or f"{metadata.name}:{uuid.uuid4().hex[:12]}")
+        if any(record.identity.instance_id == instance_id for record in self._runtime_records.values()):
+            raise AgentLifecycleError(
+                "Constructed agent instance identity is already active",
+                component="agent_factory",
+                operation="store_instance",
+                context={"definition_id": metadata.identity, "instance_id": instance_id},
+            )
+
+        identity = AgentRuntimeIdentity(
+            agent_type=metadata.name,
+            version=str(metadata.version),
+            instance_id=instance_id,
+            scope_id=scope_id,
+        )
+        bind_identity = getattr(instance, "bind_runtime_identity", None)
+        if bind_identity is not None:
+            if not callable(bind_identity):
+                raise AgentLifecycleError(
+                    "Agent bind_runtime_identity attribute must be callable",
+                    component="agent_factory",
+                    operation="bind_runtime_identity",
+                    context={"definition_id": metadata.identity, "instance_id": instance_id},
+                )
+            bind_identity(identity)
+
+        record = ManagedAgentRecord(identity=identity, instance=instance, implementation=implementation)
+        record.status.transition(lifecycle)
+        transition_instance = getattr(instance, "transition_runtime_lifecycle", None)
+        if transition_instance is not None:
+            if not callable(transition_instance):
+                raise AgentLifecycleError(
+                    "Agent transition_runtime_lifecycle attribute must be callable",
+                    component="agent_factory",
+                    operation="activate_instance",
+                    context={"definition_id": metadata.identity, "instance_id": instance_id},
+                )
+            transition_instance(lifecycle)
+
+        self._runtime_records[identity.cache_key] = record
+        self.active_agents[metadata.name] = instance
+        if self.settings.cache_agent_instances:
+            self._cache_set(
+                identity.cache_key,
+                record,
+                metadata={"definition_id": metadata.identity, "instance_id": instance_id},
+            )
+        return record
+
+    # ------------------------------------------------------------------
+    # Metrics adaptation and diagnostics
+    # ------------------------------------------------------------------
+    def _get_metrics_adapter(self) -> MetricsAdapter:
+        if self._metrics_adapter is not None:
+            return self._metrics_adapter
+        self._metrics_adapter = MetricsAdapter()
+        self.metrics_adapter_status = "initialized"
+        return self._metrics_adapter
+
+    def run_adaptation_cycle(self, metrics: Mapping[str, Any], agent_types: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+        """Process runtime metrics and apply factory-managed adjustments."""
+        targets = tuple(self.normalize_agent_type(name) for name in (agent_types or self.get_registered_agent_types()))
+        if not targets:
+            raise MetricsValidationError(
+                "At least one agent type is required for adaptation",
+                component="agent_factory",
+                operation="run_adaptation_cycle",
+            )
+        started_ms = monotonic_ms()
+        try:
+            adapter = self._get_metrics_adapter()
+            if hasattr(adapter, "process_metrics_result"):
+                result = adapter.process_metrics_result(dict(metrics), list(targets))
+                adjustments = dict(result.bounded_adjustments) if hasattr(result, "bounded_adjustments") else result
+            else:
+                adjustments = adapter.process_metrics(dict(metrics), list(targets))
+
+            applied_updates: Dict[str, Any] = {}
+            if hasattr(adapter, "update_factory_config"):
+                applied_updates = adapter.update_factory_config(  # type: ignore
+                    self,
+                    adjustments, # type: ignore
+                    agent_types=targets,
+                )
+
+            safe_adjustments = safe_serialize(adjustments, redact=True)
+            safe_updates = safe_serialize(applied_updates, redact=True)
+            self._cache_set("adaptation:latest", safe_adjustments)
+            self._record_counter("adaptation.succeeded")
+            self._record_timing("adaptation.duration_ms", started_ms)
+            self._record_event(
+                "adaptation.completed",
+                {
+                    "agent_types": targets,
+                    "adjustments": safe_adjustments,
+                    "applied_updates": safe_updates,
+                },
+            )
+            return {
+                "status": "ok" if applied_updates else "no_op",
+                "agent_types": list(targets),
+                "adjustments": safe_adjustments,
+                "applied_updates": safe_updates,
+            }
+        except FactoryError:
+            self._record_counter("adaptation.failed")
+            raise
+        except Exception as exc:
+            self._record_counter("adaptation.failed")
+            raise MetricsAdapterError(
+                message="AgentFactory adaptation cycle failed",
+                component="agent_factory",
+                operation="run_adaptation_cycle",
+                context={"agent_types": targets},
+                cause=exc,
+            ) from exc
+
+    def inspect_registered_agents(self, *, import_check: Optional[bool] = None, constructor_check: Optional[bool] = None) -> Dict[str, Dict[str, Any]]:
+        import_check = self.settings.diagnostics_import_check if import_check is None else import_check
+        constructor_check = self.settings.diagnostics_constructor_check if constructor_check is None else constructor_check
+        diagnostics: Dict[str, Dict[str, Any]] = {}
+        for name, metadata in sorted(self.registry.agents.items()):
+            info: Dict[str, Any] = {
+                "status": "ok",
                 "module_path": metadata.module_path,
                 "class_name": metadata.class_name,
                 "version": metadata.version,
-                "issues": []
+                "dependencies": list(getattr(metadata, "dependencies", []) or []),
+                "issues": [],
             }
-    
-            try:
-                module = importlib.import_module(metadata.module_path)
-                cls = getattr(module, metadata.class_name)
-    
-                if not issubclass(cls, BaseAgent):
-                    info["status"] = "Warning"
-                    info["issues"].append("Class is not a subclass of BaseAgent.")
-    
-                # Check constructor signature
-                expected_args = {"shared_memory", "agent_factory", "config"}
-                ctor_args = set(cls.__init__.__code__.co_varnames)
-                missing = expected_args - ctor_args
-    
-                if missing:
-                    info["status"] = "Warning"
-                    info["issues"].append(f"Missing constructor args: {missing}")
-    
-            except (ImportError, AttributeError) as e:
-                info["status"] = "Error"
-                info["issues"].append(f"Import or attribute error: {e}")
-    
+            unavailable_reasons = [
+                reason
+                for identity, reason in self.unavailable_agents.items()
+                if identity == metadata.identity or identity.startswith(f"{metadata.identity}#")
+            ]
+            if unavailable_reasons:
+                info["status"] = "unavailable"
+                info["issues"].extend(unavailable_reasons)
+
+            if import_check:
+                try:
+                    cls = self._resolve_agent_class(metadata)
+                    if self.settings.strict_base_agent_subclass and not issubclass(cls, self._base_agent_class()):
+                        info["status"] = "warning"
+                        info["issues"].append("Class is not a BaseAgent subclass.")
+                    if constructor_check:
+                        signature_meta = self._get_constructor_signature(cls)
+                        params = set(signature_meta["params"].keys())
+                        expected = {"shared_memory", "agent_factory", "config"}
+                        missing = sorted(expected - params)
+                        if missing and not signature_meta["accepts_var_kwargs"]:
+                            info["status"] = "warning"
+                            info["issues"].append(f"Constructor does not declare optional standard args: {missing}")
+                except Exception as exc:
+                    info["status"] = "error"
+                    info["issues"].append(f"{type(exc).__name__}: {exc}")
             diagnostics[name] = info
-    
         printer.pretty("Agent Diagnostics", diagnostics, "debug")
         return diagnostics
 
-    def run_adaptation_cycle(self, metrics: Dict[str, Any], agent_types: list[str]):
-        """
-        Processes metrics through the adapter and applies adjustments to the global config.
-        This affects the configuration of subsequently created agents.
-        """
-        logger.info("Running adaptation cycle based on new metrics...")
+    def health_check(self) -> Dict[str, Any]:
+        registry_size = len(getattr(self.registry, "agents", {}))
+        active_instances = {
+            cache_key: record.snapshot()
+            for cache_key, record in sorted(self._runtime_records.items())
+        }
+        active_size = len(active_instances)
+        unavailable_size = len(self.unavailable_agents)
+        degraded_instances = [
+            cache_key
+            for cache_key, runtime in active_instances.items()
+            if runtime.get("health") != "healthy"
+        ]
 
-        # 1. Process metrics to get adjustments
-        adjustments = self._get_metrics_adapter().process_metrics(metrics, agent_types)
-        printer.pretty("Generated Adjustments", adjustments, "info")
+        try:
+            cache_health = self.cache.stats() if hasattr(self.cache, "stats") else {}
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "cache.stats", exc)
+            cache_health = {"status": "degraded", "error": f"{type(exc).__name__}: {exc}"}
+        else:
+            self._mark_runtime_recovered("persistence", "cache.stats")
 
-        # 2. Apply adjustments to the factory's global configuration
-        for key, adj_value_tensor in adjustments.items():
-            adj_value = adj_value_tensor.item()
-            
-            # Example logic: "fairness_adjustment" -> adapt "risk_threshold"
-            if "fairness_adjustment" in key:
-                # Decrease risk threshold if fairness error is high (positive adjustment)
-                target_param = 'risk_threshold'
-                for agent_name in self.registry.agents.keys():
-                    config_key = f"{agent_name}_agent"
-                    if config_key in self.global_config and target_param in self.global_config[config_key]:
-                        current_val = self.global_config[config_key][target_param]
-                        # Apply adjustment defensively
-                        new_val = max(0.01, current_val - adj_value * 0.1)
-                        self.global_config[config_key][target_param] = new_val
-                        logger.info(f"Adapted '{config_key}.{target_param}' from {current_val:.3f} to {new_val:.3f}")
+        try:
+            observability_health = self.observability.snapshot() if hasattr(self.observability, "snapshot") else {}
+        except Exception as exc:
+            self._mark_runtime_degraded("telemetry", "observability.snapshot", exc)
+            observability_health = {"status": "degraded", "error": f"{type(exc).__name__}: {exc}"}
+        else:
+            self._mark_runtime_recovered("telemetry", "observability.snapshot")
 
-            # Example logic: "performance_adjustment" -> adapt "learning_rate"
-            if "performance_adjustment" in key:
-                # Decrease learning rate if performance error is high (positive adjustment)
-                target_param = 'learning_rate'
-                for agent_name in self.registry.agents.keys():
-                    config_key = f"{agent_name}_agent"
-                    if config_key in self.global_config and target_param in self.global_config[config_key]:
-                        current_val = self.global_config[config_key][target_param]
-                        # Apply adjustment defensively
-                        new_val = max(1e-6, current_val * (1 - adj_value * 0.05))
-                        self.global_config[config_key][target_param] = new_val
-                        logger.info(f"Adapted '{config_key}.{target_param}' from {current_val:.4f} to {new_val:.4f}")
+        factory_runtime = self._runtime_status.snapshot()
+        is_unavailable = factory_runtime["health"] == "unavailable"
+        is_degraded = bool(
+            unavailable_size
+            or degraded_instances
+            or factory_runtime["health"] == "degraded"
+        )
+        aggregate_health = "unavailable" if is_unavailable else ("degraded" if is_degraded else "healthy")
+        status = "ok" if aggregate_health == "healthy" else aggregate_health
+        payload = {
+            "status": status,
+            "health": aggregate_health,
+            "lifecycle": factory_runtime["lifecycle"],
+            "registered_agents": registry_size,
+            "active_agents": active_size,
+            "unavailable_agents": unavailable_size,
+            "degraded_instances": degraded_instances,
+            "runtime": factory_runtime,
+            "active_instances": active_instances,
+            "metrics_adapter_status": self.metrics_adapter_status,
+            "torch_probe": dict(self._torch_probe),
+            "cache": cache_health,
+            "observability": observability_health,
+        }
+        self._record_event("factory.health_check", payload)
+        refreshed_runtime = self._runtime_status.snapshot()
+        payload["runtime"] = refreshed_runtime
+        if refreshed_runtime["health"] != "healthy":
+            payload["health"] = refreshed_runtime["health"]
+            payload["status"] = "unavailable" if refreshed_runtime["health"] == "unavailable" else "degraded"
+        return payload
 
-        logger.info("Adaptation cycle complete. Global config updated.")
+    def snapshot(self, *, include_agents: bool = False) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "version": __version__,
+            "settings": safe_serialize(self.agent_factory_config, redact=True),
+            "health": self.health_check(),
+            "registered_agent_types": self.get_registered_agent_types(),
+            "active_agent_types": sorted(self.active_agents.keys()),
+            "active_instance_identities": self.get_active_instance_identities(),
+            "unavailable_agents": dict(self.unavailable_agents),
+            "creation_history": [record.to_dict() for record in self.creation_history],
+            "runtime_history": list(self._runtime_history),
+        }
+        if include_agents:
+            payload["agents"] = self.inspect_registered_agents(import_check=False, constructor_check=False)
+        return payload
 
-    def validate_with_azr(self, fact_tuple):
-        self.bzr = BasicZeroReasoner()
-        return 0.0
+    # ------------------------------------------------------------------
+    # Lifecycle and utility methods
+    # ------------------------------------------------------------------
+    def get_registered_agent_types(self) -> list[str]:
+        return sorted(str(name) for name in getattr(self.registry, "agents", {}).keys())
+
+    def get_active_agent_types(self) -> list[str]:
+        return sorted(self.active_agents.keys())
+
+    def get_active_instance_identities(self) -> list[Dict[str, str]]:
+        return [
+            record.identity.to_dict()
+            for _, record in sorted(self._runtime_records.items())
+        ]
+
+    def get(self, agent_type: str, default: Any = None) -> Any:
+        normalized = self.normalize_agent_type(agent_type)
+        return self.active_agents.get(normalized, default)
+
+    def _transition_managed_record(self, record: ManagedAgentRecord, lifecycle: RuntimeLifecycle) -> None:
+        try:
+            record.status.transition(lifecycle)
+            transition_instance = getattr(record.instance, "transition_runtime_lifecycle", None)
+            if transition_instance is not None:
+                if not callable(transition_instance):
+                    raise RuntimeContractViolation("transition_runtime_lifecycle must be callable")
+                transition_instance(lifecycle)
+        except Exception as exc:
+            raise AgentLifecycleError(
+                "Managed agent lifecycle transition failed",
+                component="agent_factory",
+                operation="transition_managed_record",
+                context={
+                    "definition_id": record.identity.definition_id,
+                    "instance_id": record.identity.instance_id,
+                    "requested": lifecycle.value,
+                },
+                cause=exc,
+            ) from exc
+
+    def _release_record(self, cache_key: str, record: ManagedAgentRecord) -> None:
+        try:
+            self._transition_managed_record(record, RuntimeLifecycle.STOPPING)
+            for method_name in ("shutdown", "close", "stop"):
+                method = getattr(record.instance, method_name, None)
+                if callable(method):
+                    method()
+                    break
+            self._transition_managed_record(record, RuntimeLifecycle.STOPPED)
+        except Exception as exc:
+            record.status.mark_degraded("lifecycle", "release", exc, retryable=False)
+            try:
+                record.status.transition(RuntimeLifecycle.FAILED)
+            except RuntimeContractViolation:
+                pass
+            self._mark_runtime_degraded("lifecycle", "agent.release", exc, retryable=False)
+        finally:
+            self._runtime_history.append(record.snapshot())
+            self._runtime_records.pop(cache_key, None)
+            self._cache_delete(cache_key)
+
+    def _refresh_legacy_active_agent(self, agent_type: str) -> None:
+        remaining = [
+            record.instance
+            for record in self._runtime_records.values()
+            if record.identity.agent_type == agent_type
+        ]
+        if remaining:
+            self.active_agents[agent_type] = remaining[-1]
+        else:
+            self.active_agents.pop(agent_type, None)
+
+    def release(self, agent_type: str, *, version: Optional[str] = None) -> bool:
+        normalized = self.normalize_agent_type(agent_type)
+        selected = [
+            (cache_key, record)
+            for cache_key, record in self._runtime_records.items()
+            if record.identity.agent_type == normalized
+            and (version is None or record.identity.version == str(version))
+        ]
+        for cache_key, record in selected:
+            self._release_record(cache_key, record)
+        self._refresh_legacy_active_agent(normalized)
+        if selected:
+            self._record_event(
+                "agent.released",
+                {
+                    "agent_type": normalized,
+                    "version": version,
+                    "released_instances": [record.identity.instance_id for _, record in selected],
+                },
+            )
+        return bool(selected)
+
+    def clear_active_agents(self) -> None:
+        for cache_key, record in list(self._runtime_records.items()):
+            self._release_record(cache_key, record)
+        self.active_agents.clear()
+        self._record_event("agent.active_cleared", {})
+
+    def reset_unavailable(self, agent_type: Optional[str] = None, *, version: Optional[str] = None) -> None:
+        if agent_type is None:
+            self.unavailable_agents.clear()
+            self._record_event("agent.unavailable_cleared", {})
+            return
+        normalized = self.normalize_agent_type(agent_type)
+        identity_prefix = f"{normalized}@{version}" if version is not None else f"{normalized}@"
+        if version is None:
+            keys = [key for key in self.unavailable_agents if key.startswith(identity_prefix)]
+        else:
+            keys = [
+                key
+                for key in self.unavailable_agents
+                if key == identity_prefix or key.startswith(f"{identity_prefix}#")
+            ]
+        for definition_id in keys:
+            self.unavailable_agents.pop(definition_id, None)
+        self._record_event("agent.unavailable_reset", {"agent_type": normalized, "version": version})
+
+    def shutdown(self) -> None:
+        if self._runtime_status.lifecycle == RuntimeLifecycle.STOPPED:
+            return
+        self._transition_factory_lifecycle(RuntimeLifecycle.STOPPING)
+        self.clear_active_agents()
+        self._cache_clear()
+        self._record_event("factory.shutdown", {})
+        self._transition_factory_lifecycle(RuntimeLifecycle.STOPPED)
+        logger.info("Agent Factory shutdown complete")
+
+    def _record_creation(
+        self,
+        agent_type: str,
+        status: str,
+        started_ms: float,
+        metadata: AgentMetaData,
+        *,
+        implementation: str = "in_process",
+        error: Optional[str] = None,
+    ) -> None:
+        duration_ms = max(0.0, monotonic_ms() - started_ms)
+        if self.settings.record_creation_history:
+            self.creation_history.append(
+                AgentCreationRecord(
+                    agent_type=agent_type,
+                    status=status,
+                    duration_ms=duration_ms,
+                    version=str(metadata.version) if metadata.version is not None else None,
+                    implementation=implementation,
+                    error=error,
+                    metadata={"module_path": metadata.module_path, "class_name": metadata.class_name},
+                )
+            )
+        self._record_timing("create.duration_ms", started_ms)
+        self._record_event(
+            "agent.creation",
+            {"agent_type": agent_type, "status": status, "duration_ms": duration_ms, "implementation": implementation, "error": error},
+        )
+
+    def _profile_hot_path(self, path: str, started_ms: float, **extra: Any) -> None:
+        payload = {"path": path, "duration_ms": max(0.0, monotonic_ms() - started_ms), **{k: v for k, v in extra.items() if v is not None}}
+        self._record_event("factory.hot_path_profile", payload)
+
+    def _record_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        if self.settings.publish_observability_events:
+            try:
+                self.observability.record_event(event_type, dict(payload))
+            except Exception as exc:
+                self._mark_runtime_degraded("telemetry", "observability.record_event", exc)
+            else:
+                self._mark_runtime_recovered("telemetry", "observability.record_event")
+
+    def _record_counter(self, name: str, value: int = 1) -> None:
+        if self.settings.publish_observability_events:
+            try:
+                self.observability.inc(name, value)
+            except Exception as exc:
+                self._mark_runtime_degraded("telemetry", "observability.counter", exc)
+            else:
+                self._mark_runtime_recovered("telemetry", "observability.counter")
+
+    def _record_timing(self, name: str, started_ms: float) -> None:
+        if self.settings.publish_observability_events:
+            try:
+                self.observability.observe_timing(name, max(0.0, monotonic_ms() - started_ms))
+            except Exception as exc:
+                self._mark_runtime_degraded("telemetry", "observability.timing", exc)
+            else:
+                self._mark_runtime_recovered("telemetry", "observability.timing")
+
+
+if __name__ == "__main__":
+    print("\n=== Running  Agent factory ===\n")
+    printer.status("TEST", " Agent factory initialized", "info")
+
+    factory = AgentFactory()
+    registered = factory.get_registered_agent_types()
+    assert registered, "AgentFactory should register default agents"
+    assert "browser" in registered, "Browser agent should be registered by default"
+
+    alias_report = factory.get_agent_dependency_report("web")
+    assert alias_report["agent_type"] == "browser"
+
+    diagnostics = factory.inspect_registered_agents(import_check=False, constructor_check=False)
+    assert "browser" in diagnostics
+
+    health = factory.health_check()
+    assert health["registered_agents"] == len(registered)
+
+    snapshot = factory.snapshot(include_agents=True)
+    assert snapshot["registered_agent_types"] == registered
+
+    factory.reset_unavailable()
+    factory.clear_active_agents()
+
+    print("\n=== Test ran successfully ===\n")

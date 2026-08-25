@@ -5,6 +5,9 @@ from .adaptive_risk import (RiskAdaptation, HazardBayesianState, RiskObservation
                             _coerce_probability, _require_non_negative_int)
 from .autonomous_evaluator import AutonomousEvaluator, TaskMetrics, AutonomousEvaluationSummary, TaskEvaluationRecord
 from .behavioral_validator import BehavioralValidator, BehavioralTestCase, FailureMode, TestExecutionRecord
+from .efficiency_evaluator import EfficiencyHistoryRecord, BaselineComparison, EfficiencyEvaluationResult, EfficiencyEvaluator
+from .performance_budget_evaluator import BudgetContract, ContractCheckResult, PerformanceBudgetEvaluator
+from .performance_evaluator import BaselineComparison, ThresholdAssessment, PerformanceEvaluationResult, PerformanceEvaluator
 from .resource_utilization_evaluator import ResourceUtilizationEvaluator, ResourceSnapshot, ResourceEvaluationResult
 from .safety_evaluator import SafetyIncidentMetrics, SafetyEvaluationResult, SafetyEvaluator
 from .statistical_evaluator import StatisticalEvaluationResult, StatisticalEvaluator
@@ -38,6 +41,19 @@ __all__ = [
     "BehavioralTestCase",
     "FailureMode",
     "TestExecutionRecord",
+    # Efficiency
+    "EfficiencyHistoryRecord",
+    "BaselineComparison",
+    "EfficiencyEvaluationResult",
+    "EfficiencyEvaluator",
+    # performance budget evaluator
+    "BudgetContract",
+    "ContractCheckResult",
+    "PerformanceBudgetEvaluator",
+    # performance_evaluator
+    "ThresholdAssessment",
+    "PerformanceEvaluationResult",
+    "PerformanceEvaluator",
     # Resource Utilization Evaluator
     "ResourceUtilizationEvaluator",
     "ResourceSnapshot",

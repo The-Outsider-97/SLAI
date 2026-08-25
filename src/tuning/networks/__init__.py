@@ -1,10 +1,11 @@
-from .bayesian_neural_network import BayesianNeuralNetwork, BNNTrainingHistory
-from .grid_neural_network import GridNeuralNetwork, GNNTrainingHistory
+from .bayesian_neural_network import *
+from .dense_neural_network import *
+
+from .bayesian_neural_network import __all__ as _bnn_exports
+from .dense_neural_network import __all__ as _dnn_exports
 
 
 __all__ = [
-    "BayesianNeuralNetwork",
-    "BNNTrainingHistory",
-    "GridNeuralNetwork",
-    "GNNTrainingHistory",
-]
+    *_bnn_exports,
+    *_dnn_exports,
+] # type: ignore

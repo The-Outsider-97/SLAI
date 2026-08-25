@@ -1,0 +1,635 @@
+{
+  "schema_version": "1.0",
+  "registry": {
+    "name": "SLAI Approved Dataset Registry",
+    "purpose": "Governed allowlist of datasets suitable for research, evaluation, or model development when the conditions recorded for each entry are satisfied.",
+    "maintained_by": "SLAI project maintainers",
+    "last_reviewed": "2026-08-19",
+    "review_interval_days": 180,
+    "review_due": "2027-02-15",
+    "approval_semantics": {
+      "approved": "May be used for the recorded purposes after version, integrity, attribution, and privacy checks are completed.",
+      "approved_with_conditions": "May be used only when every recorded condition and upstream term is satisfied.",
+      "approved_for_noncommercial_research": "May be used only for non-commercial research under the provider's current terms.",
+      "no_license_override": "Registry inclusion never overrides copyright, database rights, privacy law, contractual terms, or component-level licenses.",
+      "machine_enforcement": false
+    },
+    "minimum_ingestion_controls": [
+      "Pin an immutable dataset version, release, commit, or snapshot date.",
+      "Record the canonical source URI and retrieval timestamp.",
+      "Verify provider checksums when published; otherwise compute and store SHA-256 after download.",
+      "Retain the upstream license and citation files with the local dataset manifest.",
+      "Run malware, archive traversal, schema, duplicate, and corruption checks before ingestion.",
+      "Perform privacy and sensitive-attribute review before using human-originated content.",
+      "Keep evaluation sets isolated from training and retrieval corpora.",
+      "Document filtering, transformations, exclusions, and derived-data lineage."
+    ],
+    "prohibited_global_uses": [
+      "Unreviewed biometric identification or surveillance.",
+      "Automated high-stakes decisions without domain validation and human governance.",
+      "Re-identification, deanonymization, or inference of sensitive traits about individuals.",
+      "Training on evaluation test splits when benchmark validity must be preserved.",
+      "Redistribution when the upstream license or component licenses do not permit it."
+    ]
+  },
+  "domains": [],
+  "papers": [],
+  "datasets": [
+    {
+      "name": "UCI Adult",
+      "version": "1.0; provider record DOI 10.24432/C5XW20",
+      "source": "https://archive.ics.uci.edu/dataset/2/adult",
+      "metadata": {
+        "provider": "UCI Machine Learning Repository",
+        "category": "tabular benchmark",
+        "modalities": ["tabular"],
+        "tasks": ["binary classification", "fairness auditing", "data-quality evaluation"],
+        "license": {"identifier": "CC BY 4.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.24432/C5XW20"},
+        "approval": {
+          "status": "approved_with_conditions",
+          "approved_uses": ["controlled research", "pipeline tests", "fairness-method evaluation"],
+          "conditions": ["Preserve attribution.", "Treat demographic fields as sensitive attributes.", "Do not use as a normative representation of populations or income outcomes."]
+        },
+        "governance": {
+          "human_data": true,
+          "sensitive_attributes": ["age", "sex", "race", "marital status", "nationality-related field"],
+          "privacy_risk": "moderate",
+          "known_limitations": ["Historical and geographically specific data.", "Category and label choices can encode structural bias."]
+        },
+        "integrity": {"version_pin_required": true, "provider_checksum_required_if_available": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "UCI Iris",
+      "version": "1.0; provider record DOI 10.24432/C56C76",
+      "source": "https://archive.ics.uci.edu/dataset/53/iris",
+      "metadata": {
+        "provider": "UCI Machine Learning Repository",
+        "category": "tabular benchmark",
+        "modalities": ["tabular"],
+        "tasks": ["multiclass classification", "clustering", "pipeline smoke testing"],
+        "license": {"identifier": "CC BY 4.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.24432/C56C76"},
+        "approval": {
+          "status": "approved",
+          "approved_uses": ["education", "unit tests", "classical ML baselines"],
+          "conditions": ["Preserve attribution.", "Do not present performance on this small dataset as evidence of production generalization."]
+        },
+        "governance": {"human_data": false, "privacy_risk": "low", "known_limitations": ["Very small and simple benchmark.", "Not representative of modern deployment conditions."]},
+        "integrity": {"version_pin_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "UCI Wine Quality",
+      "version": "1.0; provider record DOI 10.24432/C56S3T",
+      "source": "https://archive.ics.uci.edu/dataset/186/wine+quality",
+      "metadata": {
+        "provider": "UCI Machine Learning Repository",
+        "category": "tabular benchmark",
+        "modalities": ["tabular"],
+        "tasks": ["regression", "ordinal classification", "feature analysis"],
+        "license": {"identifier": "CC BY 4.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.24432/C56S3T"},
+        "approval": {
+          "status": "approved",
+          "approved_uses": ["education", "pipeline validation", "classical ML benchmarking"],
+          "conditions": ["Preserve attribution.", "Document whether red, white, or combined subsets are used."]
+        },
+        "governance": {"human_data": false, "privacy_risk": "low", "known_limitations": ["Sensory quality labels are subjective.", "Samples cover specific Portuguese wines."]},
+        "integrity": {"version_pin_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "UCI Human Activity Recognition Using Smartphones",
+      "version": "1.0; provider record DOI 10.24432/C54S4K",
+      "source": "https://archive.ics.uci.edu/dataset/240/human+activity+recognition+using+smartphones",
+      "metadata": {
+        "provider": "UCI Machine Learning Repository",
+        "category": "sensor time-series benchmark",
+        "modalities": ["accelerometer", "gyroscope", "tabular features"],
+        "tasks": ["activity classification", "sensor-fusion evaluation"],
+        "license": {"identifier": "CC BY 4.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.24432/C54S4K"},
+        "approval": {
+          "status": "approved_with_conditions",
+          "approved_uses": ["research", "sensor pipeline evaluation", "non-clinical activity recognition"],
+          "conditions": ["Preserve subject-level train/test separation.", "Do not infer health status or identity.", "Do not claim representativeness beyond the recorded cohort and protocol."]
+        },
+        "governance": {"human_data": true, "sensitive_attributes": ["motion traces", "subject identifier"], "privacy_risk": "moderate", "known_limitations": ["Small controlled cohort.", "Fixed smartphone placement and scripted activities."]},
+        "integrity": {"version_pin_required": true, "split_integrity_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Fashion-MNIST",
+      "version": "1.0",
+      "source": "https://github.com/zalandoresearch/fashion-mnist",
+      "metadata": {
+        "provider": "Zalando Research",
+        "category": "computer-vision benchmark",
+        "modalities": ["grayscale image", "class label"],
+        "tasks": ["image classification", "pipeline smoke testing"],
+        "license": {"identifier": "MIT", "scope_note": "Verify repository and dataset terms at the pinned commit."},
+        "citation": {"doi": "10.48550/arXiv.1708.07747"},
+        "approval": {"status": "approved", "approved_uses": ["education", "unit tests", "vision baselines"], "conditions": ["Pin the repository release or commit.", "Retain license and citation."]},
+        "governance": {"human_data": false, "privacy_risk": "low", "known_limitations": ["Low-resolution, centered product images.", "Not representative of unconstrained vision."]},
+        "integrity": {"version_pin_required": true, "official_file_hashes_or_local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "SQuAD 2.0",
+      "version": "2.0",
+      "source": "https://rajpurkar.github.io/SQuAD-explorer/",
+      "metadata": {
+        "provider": "Stanford NLP Group",
+        "category": "natural-language benchmark",
+        "modalities": ["text", "question-answer annotation"],
+        "tasks": ["extractive question answering", "unanswerability detection"],
+        "license": {"identifier": "CC BY-SA 4.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.1806.03822"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["evaluation", "research", "QA pipeline testing"], "conditions": ["Preserve the official split.", "Prevent test contamination.", "Comply with share-alike and attribution requirements."]},
+        "governance": {"human_data": true, "privacy_risk": "low", "known_limitations": ["Wikipedia-derived passages.", "Extractive format is narrower than open-domain QA.", "Annotation artifacts may support shortcuts."]},
+        "integrity": {"version_pin_required": true, "split_integrity_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "TyDi QA",
+      "version": "1.0",
+      "source": "https://github.com/google-research-datasets/tydiqa",
+      "metadata": {
+        "provider": "Google Research",
+        "category": "multilingual natural-language benchmark",
+        "modalities": ["text", "question-answer annotation"],
+        "tasks": ["multilingual question answering", "information retrieval"],
+        "languages": ["Arabic", "Bengali", "English", "Finnish", "Indonesian", "Japanese", "Korean", "Russian", "Swahili", "Telugu"],
+        "license": {"identifier": "Apache-2.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2003.05002"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["multilingual evaluation", "QA research"], "conditions": ["Preserve language and split metadata.", "Report per-language results.", "Do not infer cross-cultural parity from aggregate scores."]},
+        "governance": {"human_data": true, "privacy_risk": "low", "known_limitations": ["Language coverage is finite.", "Wikipedia and annotation processes introduce language-specific biases."]},
+        "integrity": {"version_pin_required": true, "split_integrity_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "GSM8K",
+      "version": "1.0",
+      "source": "https://github.com/openai/grade-school-math",
+      "metadata": {
+        "provider": "OpenAI",
+        "category": "reasoning benchmark",
+        "modalities": ["text", "worked solution"],
+        "tasks": ["grade-school mathematical reasoning", "answer generation"],
+        "license": {"identifier": "MIT", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2110.14168"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["evaluation", "reasoning research"], "conditions": ["Keep test data out of training and retrieval indexes.", "Use exact-answer normalization documented with the evaluation."]},
+        "governance": {"human_data": false, "privacy_risk": "low", "known_limitations": ["Narrow problem style and grade level.", "Potential benchmark contamination in widely trained models."]},
+        "integrity": {"version_pin_required": true, "split_integrity_required": true, "contamination_check_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "HumanEval",
+      "version": "1.0",
+      "source": "https://github.com/openai/human-eval",
+      "metadata": {
+        "provider": "OpenAI",
+        "category": "code-generation benchmark",
+        "modalities": ["Python source", "natural-language specification", "unit tests"],
+        "tasks": ["code generation", "functional correctness evaluation"],
+        "license": {"identifier": "MIT", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2107.03374"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["sandboxed evaluation", "code-model research"], "conditions": ["Execute generated code only in an isolated sandbox.", "Keep tests outside model context unless the protocol explicitly permits them.", "Check contamination."]},
+        "governance": {"human_data": false, "privacy_risk": "low", "security_risk": "high when executing generated code", "known_limitations": ["Small Python-only benchmark.", "pass@k is sensitive to sampling and execution policy."]},
+        "integrity": {"version_pin_required": true, "split_integrity_required": true, "contamination_check_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "MMLU",
+      "version": "1.0; pinned repository commit required",
+      "source": "https://github.com/hendrycks/test",
+      "metadata": {
+        "provider": "MMLU authors",
+        "category": "multitask knowledge benchmark",
+        "modalities": ["text", "multiple-choice annotation"],
+        "tasks": ["knowledge evaluation", "few-shot evaluation"],
+        "license": {"identifier": "MIT", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2009.03300"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["evaluation", "benchmark-comparison research"], "conditions": ["Pin the exact commit and subject set.", "Keep test questions out of training and retrieval.", "Report prompting and scoring protocol."]},
+        "governance": {"human_data": false, "privacy_risk": "low", "known_limitations": ["Multiple-choice accuracy is not a complete measure of competence.", "Question quality and subject coverage vary.", "Contamination risk is material."]},
+        "integrity": {"version_pin_required": true, "contamination_check_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "MATH",
+      "version": "1.0; pinned repository commit required",
+      "source": "https://github.com/hendrycks/math",
+      "metadata": {
+        "provider": "MATH benchmark authors",
+        "category": "mathematical reasoning benchmark",
+        "modalities": ["text", "mathematical notation", "worked solution"],
+        "tasks": ["competition-mathematics problem solving", "solution generation"],
+        "license": {"identifier": "MIT", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2103.03874"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["evaluation", "reasoning research"], "conditions": ["Keep test problems out of training and retrieval.", "Document answer parsing and equivalence rules.", "Check contamination."]},
+        "governance": {"human_data": false, "privacy_risk": "low", "known_limitations": ["Competition-style problems are not representative of all mathematical reasoning.", "Automated equivalence checking can mis-score valid answers."]},
+        "integrity": {"version_pin_required": true, "contamination_check_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "TruthfulQA",
+      "version": "1.0; pinned repository commit required",
+      "source": "https://github.com/sylinrl/TruthfulQA",
+      "metadata": {
+        "provider": "TruthfulQA authors",
+        "category": "truthfulness benchmark",
+        "modalities": ["text", "reference answers", "labels"],
+        "tasks": ["truthfulness evaluation", "misconception resistance"],
+        "license": {"identifier": "Apache-2.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2109.07958"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["evaluation", "factuality research"], "conditions": ["Pin the evaluator and scoring protocol.", "Do not equate benchmark score with general truthfulness.", "Keep evaluation items isolated."]},
+        "governance": {"human_data": false, "privacy_risk": "low", "known_limitations": ["Reference judgments can be incomplete or time-sensitive.", "Automated judge behavior can affect scores."]},
+        "integrity": {"version_pin_required": true, "contamination_check_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "BIG-bench",
+      "version": "1.0; pinned repository commit and task subset required",
+      "source": "https://github.com/google/BIG-bench",
+      "metadata": {
+        "provider": "BIG-bench collaboration",
+        "category": "collaborative multitask benchmark",
+        "modalities": ["text", "structured task metadata"],
+        "tasks": ["capability evaluation", "reasoning evaluation", "behavioral analysis"],
+        "license": {"identifier": "Apache-2.0", "scope_note": "Confirm task-level assets and third-party material."},
+        "citation": {"doi": "10.48550/arXiv.2206.04615"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["evaluation", "benchmark-method research"], "conditions": ["Record exact task subset and commit.", "Review task-level licenses and sensitive content.", "Prevent test contamination."]},
+        "governance": {"human_data": false, "privacy_risk": "variable by task", "known_limitations": ["Tasks vary substantially in quality and construct validity.", "Aggregate results can obscure task-specific failures."]},
+        "integrity": {"version_pin_required": true, "task_manifest_required": true, "contamination_check_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "OpenAssistant Conversations Dataset (OASST1)",
+      "version": "2023-04-12 release; dataset revision pin required",
+      "source": "https://huggingface.co/datasets/OpenAssistant/oasst1",
+      "metadata": {
+        "provider": "LAION OpenAssistant contributors",
+        "category": "conversation and preference dataset",
+        "modalities": ["multilingual text", "conversation tree", "quality labels"],
+        "tasks": ["instruction tuning", "preference modeling", "dialogue research"],
+        "license": {"identifier": "Apache-2.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2304.07327"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["research", "instruction tuning after filtering"], "conditions": ["Pin the dataset revision.", "Run PII, toxicity, secrets, and prompt-injection filtering.", "Respect contributor and language-specific risks."]},
+        "governance": {"human_data": true, "sensitive_content_possible": true, "privacy_risk": "moderate", "known_limitations": ["Crowdsourced content varies in quality.", "May contain personal data, unsafe instructions, bias, or factual errors."]},
+        "integrity": {"version_pin_required": true, "content_filter_manifest_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Databricks Dolly 15k",
+      "version": "1.0; pinned repository commit required",
+      "source": "https://github.com/databrickslabs/dolly/tree/master/data",
+      "metadata": {
+        "provider": "Databricks",
+        "category": "instruction-tuning dataset",
+        "modalities": ["English text", "instruction-response pairs"],
+        "tasks": ["instruction tuning", "dialogue prototyping"],
+        "license": {"identifier": "CC BY-SA 3.0", "verification_required_at_download": true},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["research", "instruction-tuning experiments"], "conditions": ["Comply with attribution and share-alike terms.", "Pin the exact data file commit.", "Run quality, privacy, and unsafe-content screening."]},
+        "governance": {"human_data": true, "privacy_risk": "low to moderate", "known_limitations": ["Small, English-language, employee-authored corpus.", "Not representative of broad user distributions."]},
+        "integrity": {"version_pin_required": true, "content_filter_manifest_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Wikipedia XML Dumps",
+      "version": "rolling; exact language edition and dump date required",
+      "source": "https://dumps.wikimedia.org/",
+      "metadata": {
+        "provider": "Wikimedia Foundation",
+        "category": "encyclopedic text corpus",
+        "modalities": ["wikitext", "XML metadata", "revision history depending on dump type"],
+        "tasks": ["retrieval corpus construction", "language modeling", "knowledge extraction"],
+        "license": {"identifier": "CC BY-SA and GFDL for text, subject to page-level and media-specific terms", "verification_required_at_download": true},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["research", "retrieval", "knowledge-base construction"], "conditions": ["Pin language, dump type, and date.", "Preserve attribution and share-alike obligations.", "Review embedded media and third-party content separately.", "Apply PII and biography-of-living-person safeguards."]},
+        "governance": {"human_data": true, "sensitive_content_possible": true, "privacy_risk": "moderate", "known_limitations": ["Coverage and quality vary by language and topic.", "Open editing introduces temporal errors and systemic bias."]},
+        "integrity": {"version_pin_required": true, "provider_checksum_required": true, "snapshot_manifest_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Wikidata JSON Dumps",
+      "version": "rolling weekly; exact dump date required",
+      "source": "https://www.wikidata.org/wiki/Wikidata:Database_download",
+      "metadata": {
+        "provider": "Wikimedia Foundation and Wikidata community",
+        "category": "structured knowledge graph",
+        "modalities": ["JSON", "RDF depending on selected dump"],
+        "tasks": ["knowledge graph construction", "entity linking", "retrieval", "reasoning evaluation"],
+        "license": {"identifier": "CC0 1.0 for structured data, subject to linked-source rights", "verification_required_at_download": true},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["research", "retrieval", "knowledge graph services"], "conditions": ["Pin dump format and date.", "Retain provenance references.", "Do not assume linked external content inherits CC0.", "Apply living-person and sensitive-attribute safeguards."]},
+        "governance": {"human_data": true, "sensitive_attributes_possible": true, "privacy_risk": "moderate", "known_limitations": ["Community-edited statements can be incomplete, disputed, or stale.", "Ontology and coverage are uneven."]},
+        "integrity": {"version_pin_required": true, "provider_checksum_required": true, "snapshot_manifest_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Dolma",
+      "version": "1.7; exact dataset revision and mixture required",
+      "source": "https://huggingface.co/datasets/allenai/dolma",
+      "metadata": {
+        "provider": "Allen Institute for AI",
+        "category": "large-scale language-model pretraining corpus",
+        "modalities": ["text", "code"],
+        "tasks": ["language-model pretraining", "data curation research"],
+        "license": {"identifier": "ODC-By 1.0 for the dataset release; source-component rights remain applicable", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2402.00159"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["controlled research", "pretraining after legal and safety review"], "conditions": ["Pin revision and component mixture.", "Retain source-level provenance.", "Run copyright, PII, secrets, malware, toxicity, and duplication controls.", "Do not assume the dataset license clears underlying content rights."]},
+        "governance": {"human_data": true, "sensitive_content_possible": true, "privacy_risk": "high", "known_limitations": ["Internet-scale data contains bias, duplication, personal data, unsafe content, and uncertain rights."]},
+        "integrity": {"version_pin_required": true, "component_manifest_required": true, "provider_checksum_required_if_available": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "RedPajama-Data-V2",
+      "version": "V2; exact snapshot and quality-signal subset required",
+      "source": "https://github.com/togethercomputer/RedPajama-Data",
+      "metadata": {
+        "provider": "Together AI and RedPajama contributors",
+        "category": "large-scale web corpus",
+        "modalities": ["web text", "quality annotations"],
+        "tasks": ["language-model pretraining", "data filtering research"],
+        "license": {"identifier": "Repository and metadata terms plus source-content licenses", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2411.12372"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["controlled research", "pretraining after legal review"], "conditions": ["Pin Common Crawl snapshots and processing commit.", "Retain document-level quality and provenance signals.", "Apply copyright, PII, secrets, harmful-content, and duplication filters.", "Audit downstream redistribution rights."]},
+        "governance": {"human_data": true, "sensitive_content_possible": true, "privacy_risk": "high", "known_limitations": ["Web-scale source content has heterogeneous rights and quality.", "Automated quality signals can encode bias."]},
+        "integrity": {"version_pin_required": true, "component_manifest_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "FineWeb",
+      "version": "2024 release; exact Hugging Face revision and subset required",
+      "source": "https://huggingface.co/datasets/HuggingFaceFW/fineweb",
+      "metadata": {
+        "provider": "Hugging Face",
+        "category": "filtered web corpus",
+        "modalities": ["web text", "provenance metadata"],
+        "tasks": ["language-model pretraining", "data-quality research"],
+        "license": {"identifier": "ODC-By 1.0 for dataset packaging; underlying content rights remain applicable", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2406.17557"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["controlled research", "pretraining after legal and privacy review"], "conditions": ["Pin revision and subset.", "Retain provenance metadata.", "Run PII, secrets, copyright, harmful-content, and duplication controls.", "Document all additional filtering."]},
+        "governance": {"human_data": true, "sensitive_content_possible": true, "privacy_risk": "high", "known_limitations": ["Filtering does not eliminate all low-quality, biased, private, unsafe, or rights-constrained content."]},
+        "integrity": {"version_pin_required": true, "component_manifest_required": true, "provider_checksum_required_if_available": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "COCO 2017",
+      "version": "2017",
+      "source": "https://cocodataset.org/#download",
+      "metadata": {
+        "provider": "COCO Consortium",
+        "category": "computer-vision benchmark",
+        "modalities": ["image", "object annotation", "segmentation mask", "caption"],
+        "tasks": ["object detection", "segmentation", "captioning", "keypoint estimation"],
+        "license": {"identifier": "CC BY 4.0 for annotations; images retain their individual Flickr licenses", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.1405.0312"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["research", "benchmark evaluation", "vision prototyping"], "conditions": ["Retain annotation attribution.", "Respect image-level licenses and removal requests.", "Keep official evaluation splits isolated.", "Review depictions of people and sensitive contexts."]},
+        "governance": {"human_data": true, "biometric_content_possible": true, "privacy_risk": "moderate", "known_limitations": ["Geographic, cultural, class, and annotation biases.", "Labels are incomplete representations of image content."]},
+        "integrity": {"version_pin_required": true, "provider_checksum_required_if_available": true, "split_integrity_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Open Images V7",
+      "version": "V7",
+      "source": "https://storage.googleapis.com/openimages/web/index.html",
+      "metadata": {
+        "provider": "Google Open Images",
+        "category": "large-scale computer-vision dataset",
+        "modalities": ["image", "bounding box", "segmentation", "relationship and localized narrative annotations"],
+        "tasks": ["classification", "detection", "segmentation", "visual relationship learning"],
+        "license": {"identifier": "CC BY 4.0 for annotations; image licenses and attribution are recorded per image", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.1811.00982"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["research", "vision benchmarking"], "conditions": ["Retain image-level attribution and license metadata.", "Honor removed or unavailable images.", "Review human depictions and sensitive labels."]},
+        "governance": {"human_data": true, "biometric_content_possible": true, "privacy_risk": "moderate", "known_limitations": ["Web-image selection and annotation biases.", "Class ontology is not exhaustive."]},
+        "integrity": {"version_pin_required": true, "asset_manifest_required": true, "split_integrity_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Segment Anything 1 Billion Masks (SA-1B)",
+      "version": "1.0",
+      "source": "https://ai.meta.com/datasets/segment-anything-downloads/",
+      "metadata": {
+        "provider": "Meta AI",
+        "category": "segmentation pretraining dataset",
+        "modalities": ["licensed image", "segmentation mask"],
+        "tasks": ["segmentation pretraining", "segmentation research"],
+        "license": {"identifier": "SA-1B Dataset Research License", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2304.02643"},
+        "approval": {"status": "approved_for_noncommercial_research", "approved_uses": ["non-commercial segmentation research under provider terms"], "conditions": ["Accept and retain the current provider license.", "Do not use outside the authorized research scope.", "Review images containing people or sensitive scenes.", "Do not redistribute unless explicitly permitted."]},
+        "governance": {"human_data": true, "biometric_content_possible": true, "privacy_risk": "moderate", "known_limitations": ["Automatically generated masks may contain errors.", "Image distribution and geographic coverage are not uniform."]},
+        "integrity": {"version_pin_required": true, "provider_checksum_required_if_available": true, "asset_manifest_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "ImageNet ILSVRC 2012",
+      "version": "ILSVRC2012",
+      "source": "https://www.image-net.org/challenges/LSVRC/2012/",
+      "metadata": {
+        "provider": "ImageNet and ILSVRC organizers",
+        "category": "computer-vision benchmark",
+        "modalities": ["image", "class label", "bounding box for selected tasks"],
+        "tasks": ["image classification", "object localization", "transfer-learning evaluation"],
+        "license": {"identifier": "ImageNet terms of access; image copyrights remain with original owners", "verification_required_at_download": true},
+        "citation": {"doi": "10.1007/s11263-015-0816-y"},
+        "approval": {"status": "approved_for_noncommercial_research", "approved_uses": ["non-commercial research and benchmark evaluation under ImageNet terms"], "conditions": ["Use authorized credentials and access route.", "Do not redistribute images.", "Retain synset and split metadata.", "Review person-related classes and offensive taxonomy concerns."]},
+        "governance": {"human_data": true, "biometric_content_possible": true, "privacy_risk": "moderate", "known_limitations": ["Taxonomy, label, geographic, and web-source biases.", "Some labels and person categories have known ethical concerns."]},
+        "integrity": {"version_pin_required": true, "official_archive_hash_or_local_sha256_required": true, "split_integrity_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "LibriSpeech ASR Corpus",
+      "version": "release 12-12-2020",
+      "source": "https://www.openslr.org/12",
+      "metadata": {
+        "provider": "OpenSLR",
+        "category": "speech recognition corpus",
+        "modalities": ["audio", "transcript", "speaker metadata"],
+        "tasks": ["automatic speech recognition", "speech representation learning"],
+        "license": {"identifier": "CC BY 4.0", "verification_required_at_download": true},
+        "citation": {"doi": "10.1109/ICASSP.2015.7178964"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["speech research", "ASR evaluation", "representation learning"], "conditions": ["Preserve attribution.", "Keep official splits.", "Do not use speaker identity for biometric identification.", "Report demographic and domain limitations."]},
+        "governance": {"human_data": true, "voice_biometric_content": true, "privacy_risk": "moderate", "known_limitations": ["Read English audiobook speech differs from spontaneous and conversational speech.", "Speaker and accent coverage is limited."]},
+        "integrity": {"version_pin_required": true, "provider_checksum_required": true, "split_integrity_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Mozilla Common Voice Corpus 17.0",
+      "version": "17.0",
+      "source": "https://commonvoice.mozilla.org/en/datasets",
+      "metadata": {
+        "provider": "Mozilla Common Voice community",
+        "category": "multilingual speech corpus",
+        "modalities": ["audio", "sentence transcript", "optional demographic metadata"],
+        "tasks": ["automatic speech recognition", "multilingual speech research", "accent robustness evaluation"],
+        "license": {"identifier": "CC0 1.0 for the corpus release; verify current dataset terms", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.1912.06670"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["speech research", "multilingual evaluation"], "conditions": ["Pin language, release, and validated split.", "Treat voices and demographics as sensitive human data.", "Do not perform speaker identification or re-identification.", "Respect contributor withdrawal mechanisms and current terms."]},
+        "governance": {"human_data": true, "voice_biometric_content": true, "sensitive_attributes_possible": true, "privacy_risk": "high", "known_limitations": ["Volunteer and device selection bias.", "Language and accent coverage varies substantially.", "Validated status does not guarantee transcript or audio quality."]},
+        "integrity": {"version_pin_required": true, "language_manifest_required": true, "provider_checksum_required_if_available": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "FSD50K",
+      "version": "1.0; Zenodo record 4060432",
+      "source": "https://zenodo.org/records/4060432",
+      "metadata": {
+        "provider": "Music Technology Group, Universitat Pompeu Fabra",
+        "category": "sound-event dataset",
+        "modalities": ["audio", "multi-label sound-event annotation"],
+        "tasks": ["sound-event classification", "audio representation learning"],
+        "license": {"identifier": "Dataset metadata and individual clips use Creative Commons terms; verify each clip license", "verification_required_at_download": true},
+        "citation": {"doi": "10.5281/zenodo.4060432"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["audio research", "sound-event evaluation"], "conditions": ["Retain clip-level license and attribution metadata.", "Exclude clips whose license is incompatible with the intended use.", "Review speech and potentially sensitive recordings."]},
+        "governance": {"human_data_possible": true, "voice_biometric_content_possible": true, "privacy_risk": "moderate", "known_limitations": ["Class imbalance and noisy web-contributed audio.", "Clip licenses are heterogeneous."]},
+        "integrity": {"version_pin_required": true, "provider_checksum_required": true, "clip_license_manifest_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Open X-Embodiment Dataset",
+      "version": "2023 release; component dataset revisions required",
+      "source": "https://robotics-transformer-x.github.io/",
+      "metadata": {
+        "provider": "Open X-Embodiment collaboration",
+        "category": "cross-embodiment robot-learning collection",
+        "modalities": ["robot observation", "image", "action", "language annotation depending on component"],
+        "tasks": ["robot policy pretraining", "cross-embodiment transfer", "imitation learning"],
+        "license": {"identifier": "Per-component dataset licenses; software and conversion tooling have separate terms", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2310.08864"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["robot-learning research using individually approved components"], "conditions": ["Create a component-level license manifest before download.", "Exclude components incompatible with the intended use.", "Preserve embodiment, calibration, action-space, and provenance metadata.", "Validate policies in simulation and controlled hardware environments before deployment."]},
+        "governance": {"human_data_possible": true, "physical_safety_risk": "high", "privacy_risk": "variable by component", "known_limitations": ["Heterogeneous embodiments, control frequencies, schemas, tasks, and collection quality.", "Cross-embodiment normalization can hide important differences."]},
+        "integrity": {"version_pin_required": true, "component_manifest_required": true, "component_license_manifest_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "BridgeData V2",
+      "version": "V2; pinned release required",
+      "source": "https://rail-berkeley.github.io/bridgedata/",
+      "metadata": {
+        "provider": "Berkeley Robot Learning Lab and collaborators",
+        "category": "real-world robot-manipulation dataset",
+        "modalities": ["robot observation", "image", "action", "task description"],
+        "tasks": ["imitation learning", "robot policy fine-tuning", "generalization evaluation"],
+        "license": {"identifier": "Verify the current BridgeData V2 dataset license and component terms before use", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2308.12952"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["controlled robot-learning research"], "conditions": ["Pin release and conversion tooling.", "Retain task, environment, camera, and robot calibration metadata.", "Perform license review before commercial use or redistribution.", "Validate learned policies under hardware safety constraints."]},
+        "governance": {"human_data_possible": true, "physical_safety_risk": "high", "privacy_risk": "low to moderate", "known_limitations": ["Centered on particular low-cost robot hardware and collection environments.", "Demonstration quality and task frequency are non-uniform."]},
+        "integrity": {"version_pin_required": true, "trajectory_manifest_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "CALVIN ABC-D",
+      "version": "ABC-D benchmark release; pinned commit required",
+      "source": "https://github.com/mees/calvin",
+      "metadata": {
+        "provider": "CALVIN authors",
+        "category": "simulated long-horizon robot-learning benchmark",
+        "modalities": ["simulated image", "proprioception", "action", "language instruction"],
+        "tasks": ["long-horizon manipulation", "language-conditioned policy learning", "benchmark evaluation"],
+        "license": {"identifier": "MIT for repository code; verify dataset assets and simulator dependencies separately", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.2112.03227"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["simulation research", "robot-policy evaluation"], "conditions": ["Pin repository commit, dataset split, simulator, and dependency versions.", "Preserve the official evaluation protocol.", "Do not treat simulated success as physical safety evidence."]},
+        "governance": {"human_data": false, "physical_safety_risk": "low in simulation and high if transferred to hardware", "privacy_risk": "low", "known_limitations": ["Simulation-to-real gap.", "Task and scene distributions are constrained."]},
+        "integrity": {"version_pin_required": true, "environment_lock_required": true, "split_integrity_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "KITTI Vision Benchmark Suite",
+      "version": "task-specific 2012/2015 release; exact archive required",
+      "source": "https://www.cvlibs.net/datasets/kitti/",
+      "metadata": {
+        "provider": "Karlsruhe Institute of Technology and Toyota Technological Institute at Chicago",
+        "category": "autonomous-driving benchmark",
+        "modalities": ["camera", "LiDAR", "GPS/IMU", "calibration", "task annotations"],
+        "tasks": ["stereo", "optical flow", "odometry", "object detection", "tracking", "road segmentation"],
+        "license": {"identifier": "KITTI non-commercial research terms; verify task-specific download terms", "verification_required_at_download": true},
+        "citation": {"doi": "10.1177/0278364913491297"},
+        "approval": {"status": "approved_for_noncommercial_research", "approved_uses": ["non-commercial perception and localization research"], "conditions": ["Use only under current KITTI terms.", "Do not redistribute restricted archives.", "Pin task, split, calibration, and archive.", "Do not treat benchmark accuracy as road-safety validation."]},
+        "governance": {"human_data": true, "faces_and_plates_possible": true, "physical_safety_risk": "high for downstream deployment", "privacy_risk": "moderate", "known_limitations": ["Limited geography, weather, sensor setup, and traffic distribution.", "Historical sensor suite differs from current production systems."]},
+        "integrity": {"version_pin_required": true, "calibration_manifest_required": true, "split_integrity_required": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "nuScenes",
+      "version": "v1.0",
+      "source": "https://www.nuscenes.org/nuscenes",
+      "metadata": {
+        "provider": "Motional",
+        "category": "autonomous-driving dataset",
+        "modalities": ["camera", "LiDAR", "radar", "GPS/IMU", "3D annotations", "maps"],
+        "tasks": ["3D detection", "tracking", "prediction", "segmentation", "sensor fusion"],
+        "license": {"identifier": "nuScenes dataset terms; verify current version and commercial restrictions", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.1903.11027"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["perception and prediction research under provider terms"], "conditions": ["Accept current provider terms.", "Pin release, split, map, and devkit versions.", "Protect faces, plates, location traces, and scene metadata.", "Do not treat offline metrics as deployment safety evidence."]},
+        "governance": {"human_data": true, "faces_and_plates_possible": true, "location_data": true, "physical_safety_risk": "high", "privacy_risk": "moderate", "known_limitations": ["Limited cities, weather, sensor configuration, and collection policy.", "Long-tail road events remain sparse."]},
+        "integrity": {"version_pin_required": true, "devkit_pin_required": true, "calibration_manifest_required": true, "split_integrity_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "Waymo Open Dataset - Perception",
+      "version": "v1.4.3; exact component release required",
+      "source": "https://waymo.com/open/",
+      "metadata": {
+        "provider": "Waymo",
+        "category": "autonomous-driving dataset",
+        "modalities": ["camera", "LiDAR", "calibration", "3D annotations", "maps depending on component"],
+        "tasks": ["3D detection", "tracking", "segmentation", "sensor fusion"],
+        "license": {"identifier": "Waymo Dataset License Agreement", "verification_required_at_download": true},
+        "citation": {"doi": "10.48550/arXiv.1912.04838"},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["research expressly permitted by current Waymo terms"], "conditions": ["Accept and archive the applicable license version.", "Pin component, release, split, and tooling.", "Do not redistribute restricted data.", "Protect human and location information.", "Do not infer production safety from benchmark performance."]},
+        "governance": {"human_data": true, "faces_and_plates_possible": true, "location_data": true, "physical_safety_risk": "high", "privacy_risk": "moderate", "known_limitations": ["Collection geography and fleet sensors constrain generalization.", "Benchmark labels cannot cover every safety-relevant condition."]},
+        "integrity": {"version_pin_required": true, "tooling_pin_required": true, "calibration_manifest_required": true, "provider_checksum_required_if_available": true},
+        "last_reviewed": "2026-08-19"
+      }
+    },
+    {
+      "name": "NASA C-MAPSS Jet Engine Simulated Data",
+      "version": "original C-MAPSS simulated-data release; archive hash required",
+      "source": "https://data.nasa.gov/dataset/cmapss-jet-engine-simulated-data",
+      "metadata": {
+        "provider": "NASA",
+        "category": "predictive-maintenance time-series dataset",
+        "modalities": ["multivariate simulated sensor time series", "operating conditions", "run-to-failure labels"],
+        "tasks": ["remaining useful life estimation", "anomaly detection", "predictive-maintenance research"],
+        "license": {"identifier": "U.S. Government/NASA data terms; verify record-specific terms and attribution guidance", "verification_required_at_download": true},
+        "approval": {"status": "approved_with_conditions", "approved_uses": ["research", "education", "prognostics pipeline evaluation"], "conditions": ["Pin the archive and subset identifiers.", "Retain NASA attribution and record metadata.", "State clearly that data are simulated.", "Do not use benchmark performance alone for maintenance decisions on real equipment."]},
+        "governance": {"human_data": false, "physical_safety_risk": "high if used for real maintenance decisions", "privacy_risk": "low", "known_limitations": ["Simulated engines and degradation modes.", "Domain transfer to real fleets requires independent validation."]},
+        "integrity": {"version_pin_required": true, "subset_manifest_required": true, "provider_checksum_required_if_available": true, "local_sha256_required": true},
+        "last_reviewed": "2026-08-19"
+      }
+    }
+  ]
+}

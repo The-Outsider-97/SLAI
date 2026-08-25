@@ -8,57 +8,71 @@ This module is intentionally thin and relies on protocol contracts defined in
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
-from typing import Any, Dict, Optional, Sequence
 
-from src.agents.knowledge.governor import Governor
-from src.agents.knowledge.interfaces import (
-    ActionExecutor,
-    CacheStore,
-    ComplianceService,
-    MemoryStore,
-    MonitorService,
-    OrchestratorHealth,
-    RuleService,
-    SyncService,
-)
-from src.agents.knowledge.knowledge_cache import KnowledgeCache
-from src.agents.knowledge.knowledge_memory import KnowledgeMemory
-from src.agents.knowledge.knowledge_monitor import KnowledgeMonitor
-from src.agents.knowledge.knowledge_sync import KnowledgeSynchronizer
-from src.agents.knowledge.perform_action import PerformAction
-from src.agents.knowledge.utils.rule_engine import RuleEngine
-from logs.logger import get_logger, PrettyPrinter
+from dataclasses import asdict
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+from .governor import Governor
+from .knowledge_cache import KnowledgeCache
+from .knowledge_memory import KnowledgeMemory
+from .knowledge_monitor import KnowledgeMonitor
+from .knowledge_sync import KnowledgeSynchronizer
+from .perform_action import PerformAction
+from .utils.knowledge_errors import *
+from .utils.knowledge_helpers import *
+from .modules.rule_engine import RuleEngine
+from .modules.interfaces import *  # type: ignore
+from .modules.inference_result import InferenceResult, InferenceTrace
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("KnowledgeOrchestrator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class KnowledgeOrchestrator:
     """Production-oriented orchestrator for knowledge subsystem components."""
 
-    def __init__(
-        self,
-        agent: Optional[Any] = None,
-        memory: Optional[MemoryStore] = None,
-        cache: Optional[CacheStore] = None,
-        rule_engine: Optional[RuleService] = None,
-        governor: Optional[ComplianceService] = None,
-        synchronizer: Optional[SyncService] = None,
-        monitor: Optional[MonitorService] = None,
-        action_executor: Optional[ActionExecutor] = None,
-        lazy_start: bool = True,
-    ) -> None:
+    def __init__(self, agent: Optional[Any] = None,
+                memory: Optional[MemoryStore] = None,
+                cache: Optional[CacheStore] = None,
+                rule_engine: Optional[RuleService] = None,
+                governor: Optional[ComplianceService] = None,
+                synchronizer: Optional[SyncService] = None,
+                monitor: Optional[MonitorService] = None,
+                action_executor: Optional[ActionExecutor] = None,
+                lazy_start: bool = True,
+                create_governor= None,
+                manage_memory=None,
+                manage_synchronizer=None,
+                manage_monitor=None,) -> None:
         self.agent = agent
 
         # Dependency injection with practical defaults
-        self.memory: MemoryStore = memory or KnowledgeMemory()
-        self.cache: CacheStore = cache or KnowledgeCache()
-        self.rule_engine: RuleService = rule_engine or RuleEngine()
-        self.governor: ComplianceService = governor or Governor(knowledge_agent=agent)
-        self.synchronizer: SyncService = synchronizer or KnowledgeSynchronizer()
-        self.monitor: MonitorService = monitor or KnowledgeMonitor(agent=agent)
-        self.action_executor: ActionExecutor = action_executor or PerformAction()
+        self.memory = memory or KnowledgeMemory()
+        self.cache = cache or KnowledgeCache()
+        self.rule_engine = rule_engine or RuleEngine()
+        
+        self.governor = governor or Governor(
+            knowledge_agent=agent,
+            knowledge_memory=self.memory,
+            rule_engine=self.rule_engine,
+        )
+        
+        self.synchronizer = synchronizer or KnowledgeSynchronizer(
+            knowledge_memory=self.memory,
+            rule_engine=self.rule_engine,
+        )
+        
+        self.action_executor = action_executor or PerformAction(
+            knowledge_memory=self.memory,
+        )
+        self.monitor = monitor or KnowledgeMonitor(
+            agent=agent,
+            cache=self.cache,
+            rule_engine=self.rule_engine,
+            governor=self.governor,
+            action_executor=self.action_executor,
+        )
 
         self._started = False
         self._started_at: Optional[float] = None
@@ -102,10 +116,85 @@ class KnowledgeOrchestrator:
 
         # Persist memory if implementation exposes shutdown
         if hasattr(self.memory, "shutdown"):
-            self.memory.shutdown()
+            self.memory.shutdown()  # type: ignore[attr-defined]
 
         self._started = False
         logger.info("KnowledgeOrchestrator stopped")
+
+    def infer(
+        self,
+        knowledge_base: Mapping[Any, Any],
+        *,
+        sector: Optional[str] = None,
+        smart: bool = True,
+        trace: bool = False,
+        persist: bool = False,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> InferenceResult:
+        """Run Knowledge inference through the configured RuleService.
+    
+        Persistence is optional and remains an orchestration responsibility.
+    
+        When persistence is requested, tracing is automatically enabled so
+        persisted inferred facts retain rule provenance.
+        """
+        result = self.rule_engine.infer(
+            knowledge_base,
+            sector=sector,
+            smart=smart,
+            trace=trace or persist,
+        )
+    
+        if persist:
+            self._persist_inference_result(
+                result,
+                context=context,
+            )
+    
+        return result
+
+    def _persist_inference_result(
+        self,
+        result: InferenceResult,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist inferred facts using the configured MemoryStore."""
+    
+        traces_by_fact: Dict[Any, List[Dict[str, Any]]] = {}
+    
+        for trace in result.traces:
+            traces_by_fact.setdefault(
+                trace.fact,
+                [],
+            ).append(
+                {
+                    "confidence": trace.confidence,
+                    "rule": trace.rule,
+                    "source": trace.source,
+                    "sector": trace.sector,
+                }
+            )
+    
+        for fact, confidence in result.facts.items():
+            metadata: Dict[str, Any] = {
+                "type": "inferred_fact",
+                "confidence": float(confidence),
+                "source": "rule_engine",
+                "sector": result.sector,
+            }
+    
+            provenance = traces_by_fact.get(fact)
+    
+            if provenance:
+                metadata["provenance"] = provenance
+    
+            self.memory.update(
+                key=f"inferred:{safe_hash(fact)}",
+                value=fact,
+                metadata=metadata,
+                context=context,
+            )
 
     def sync(self, components: Optional[Sequence[str]] = None) -> Dict[str, int]:
         """Run an explicit synchronization pass."""
@@ -128,7 +217,7 @@ class KnowledgeOrchestrator:
 
     def execute_actions(self, docs: Sequence[Dict[str, Any]]) -> Any:
         """Execute action pipeline for extracted action directives."""
-        return self.action_executor.from_knowledge(docs)
+        return self.action_executor.from_knowledge(list(docs))
 
     def health(self) -> Dict[str, Any]:
         """Return a normalized health/status payload."""

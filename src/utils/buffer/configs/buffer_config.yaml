@@ -20,9 +20,31 @@ validation:
   allow_none_next_state: false
   max_abs_reward: null
 
+  # Optional stricter production controls.
+  allow_none_agent_id: true
+  allow_none_action: true
+  allow_nan_reward: false
+  allow_inf_reward: false
+
+  # Input compatibility.
+  allow_mapping_transition: true
+  coerce_reward_to_float: true
+  coerce_numpy_scalars: true
+  coerce_done_from_int: false
+  coerce_done_from_string: false
+
+  # Optional shape guard for array-like state payloads.
+  require_state_next_state_shape_match: false
+
+  # Batch diagnostics.
+  max_report_errors: 100
+  keep_normalized_batch: true
+
 segment_tree:
-  capacity: 100000
+  capacity: 1024
   dtype: float32
+  epsilon: 1.0e-12
+  allow_zero_mass: false
 
 sequence_replay:
   capacity: 100000
@@ -32,19 +54,109 @@ sequence_replay:
   pad_value: 0.0
   seed: null
 
+  # Sampling behavior.
+  include_current_episode: true
+  allow_partial_sequences: false
+  sample_with_replacement: true
+
+  # Production lock handling.
+  lock_timeout_seconds: 5.0
+
+  # Batch ingestion diagnostics.
+  max_extend_errors: 100
+  track_episode_stats: true
+
+  # Shared persistence integration.
+  persistence_enabled: true
+  checkpoint_schema_version: sequence_replay_buffer.v1
+  checkpoint_component_name: sequence_replay_buffer
+
 eviction:
-  policy: fifo
-  age_weight: 0.7
-  reward_weight: 0.3
+  policy: least_surprise
+
+  # FIFOEviction:
+  #   policy: fifo
+  # LeastSurpriseEviction:
+  # Keeps high-TD-error / rare / high-priority learning signals.
+  td_error_weight: 0.55
+  rarity_weight: 0.30
+  priority_weight: 0.10
+  least_surprise_reward_weight: 0.05
+  # AgeRewardHybridEviction:
+  # Keeps newer and higher-reward/high-priority samples under capacity pressure.
+  age_weight: 0.70
+  reward_weight: 0.30
+  # Shared optional scoring controls.
+  terminal_bonus: 0.05
+  protected_bonus: 1000000.0
+  tie_breaker: oldest
+
+persistence:
+  enabled: true
+  default_directory: checkpoints/buffer
+
+  # Stable shared checkpoint schema.
+  schema_version: buffer_checkpoint.v1
+
+  # Serializer:
+  # - pickle supports Python/numpy/deque-heavy buffer state.
+  # - json is available for JSON-safe state only.
+  serializer: pickle
+  allow_pickle: true
+
+  # Storage envelope.
+  compression: gzip
+  compression_level: 6
+  atomic_writes: true
+  create_directories: true
+  checksum_algorithm: sha256
+
+  # Encryption is intentionally hook-based.
+  # Provide encrypt_hook/decrypt_hook to BufferCheckpointIO when enabled.
+  encryption_enabled: false
+  encryption_mode: hook
+  require_encryption_hook: false
+
+  # Integration / compatibility.
+  lock_timeout_seconds: 5.0
+  allow_legacy_npz: true
+  strict_schema_version: false
 
 telemetry:
   enabled: true
   log_interval: 200
 
+  # Bounded recent-window history for percentile diagnostics.
+  max_observations_per_metric: 512
+  keep_observation_history: true
+
+  # Slow operation and lock contention tracking.
+  slow_operation_threshold_seconds: 0.25
+  lock_contention_threshold_seconds: 0.001
+  emit_slow_operation_logs: true
+
+  # Rejection-rate rolling window.
+  rejection_rate_window: 1000
+
+  # Strict metric name/value validation through buffer_errors.py.
+  strict_metric_validation: true
+
 nstep:
   n_step: 3
   gamma: 0.99
   clear_on_terminal: true
+
+  # Production terminal handling.
+  flush_on_terminal: true
+
+  # Lock / diagnostics.
+  lock_timeout_seconds: 5.0
+  max_report_errors: 100
+
+  # Shared persistence integration.
+  persistence_enabled: true
+  checkpoint_schema_version: nstep_buffer.v1
+  checkpoint_component_name: nstep_buffer
 
 reservoir:
   capacity: 100000
@@ -64,3 +176,25 @@ network_buffer:
   max_per_key_inflight: 0
   max_dequeue_batch: 64
   fairness_weights: {}
+
+
+prioritized_replay:
+  capacity: 100000
+  alpha: 0.6
+  beta: 0.4
+  beta_increment_per_sample: 0.0
+  epsilon: 1.0e-6
+  initial_priority: 1.0
+  priority_clip_min: 1.0e-6
+  priority_clip_max: null
+  sample_with_replacement: true
+  return_dict: true
+  seed: null
+
+  # Production lock handling.
+  lock_timeout_seconds: 5.0
+
+  # Shared persistence integration.
+  persistence_enabled: true
+  checkpoint_schema_version: prioritized_replay_buffer.v1
+  checkpoint_component_name: prioritized_replay_buffer

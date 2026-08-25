@@ -1,1215 +1,1274 @@
+"""Mean-field variational Bayesian neural network for SLAI tuning.
+
+This NumPy implementation follows Bayes-by-Backprop with reparameterized
+Gaussian posteriors and a closed-form Gaussian KL term.  It supports the same
+supervised task families as ``DenseNeuralNetwork`` while adding Monte Carlo
+predictive uncertainty.  Configuration, training, prediction, and mutable
+state are explicit; the module does not load global configuration or write
+artifacts at import or runtime.
+"""
+
 from __future__ import annotations
 
-import json
+import copy
 import math
 import numpy as np
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from statistics import NormalDist
+from typing import Any
 
-from ..utils.config_loader import get_config_section, load_global_config
-from ..utils.tuning_error import (TuningOptimizationError, TuningPersistenceError,
-                           TuningConfigError, safe_serialize, wrap_exception,
-                           TuningErrorContext, error_boundary, raise_for_condition,
-                           TuningEvaluationError, TuningValidationError)
-from logs.logger import PrettyPrinter, get_logger
+from ..utils.tuning_errors import *
+from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Bayesian Neural Network")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
 
 Array = np.ndarray
 
 
-@dataclass(slots=True)
-class BNNTrainingHistory:
-    """Structured training history for fit() runs."""
+def _finite_float(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.number)):
+        raise TuningConfigError(f"{name} must be numeric.")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise TuningConfigError(f"{name} must be finite.")
+    return numeric
 
-    epochs: List[int] = field(default_factory=list)
-    train_elbo: List[float] = field(default_factory=list)
-    train_kl: List[float] = field(default_factory=list)
-    train_log_likelihood: List[float] = field(default_factory=list)
-    validation_elbo: List[float] = field(default_factory=list)
-    validation_kl: List[float] = field(default_factory=list)
-    validation_log_likelihood: List[float] = field(default_factory=list)
-    gradient_norm: List[float] = field(default_factory=list)
-    best_epoch: Optional[int] = None
-    best_validation_elbo: Optional[float] = None
+
+def _sigmoid(values: Array) -> Array:
+    positive = values >= 0
+    result = np.empty_like(values, dtype=float)
+    result[positive] = 1.0 / (1.0 + np.exp(-values[positive]))
+    exponent = np.exp(values[~positive])
+    result[~positive] = exponent / (1.0 + exponent)
+    return result
+
+
+def _softmax(values: Array) -> Array:
+    shifted = values - np.max(values, axis=1, keepdims=True)
+    exponent = np.exp(shifted)
+    return exponent / np.sum(exponent, axis=1, keepdims=True)
+
+
+def _softplus(values: Array) -> Array:
+    return np.log1p(np.exp(-np.abs(values))) + np.maximum(values, 0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class BayesianNetworkConfig:
+    task_type: str = "regression"
+    learning_rate: float = 5.0e-3
+    prior_mu: float = 0.0
+    prior_logvar: float = 0.0
+    posterior_rho_init: float = -3.0
+    likelihood_std: float = 1.0
+    hidden_activation: str = "relu"
+    leaky_relu_slope: float = 0.01
+    weight_init_scale: float = 0.75
+    gradient_clip_norm: float | None = 5.0
+    beta1: float = 0.9
+    beta2: float = 0.999
+    adam_epsilon: float = 1.0e-8
+    prediction_threshold: float = 0.5
+    stability_epsilon: float = 1.0e-8
+    random_state: int | None = None
+
+    def __post_init__(self) -> None:
+        task = str(self.task_type).strip().casefold()
+        if task not in {
+            "regression",
+            "binary_classification",
+            "multiclass_classification",
+        }:
+            raise TuningConfigError(
+                "task_type must be regression, binary_classification, or "
+                "multiclass_classification."
+            )
+        object.__setattr__(self, "task_type", task)
+        activation = str(self.hidden_activation).strip().casefold()
+        if activation not in {"relu", "tanh", "leaky_relu"}:
+            raise TuningConfigError(
+                "hidden_activation must be relu, tanh, or leaky_relu."
+            )
+        object.__setattr__(self, "hidden_activation", activation)
+        positive = {
+            "learning_rate": self.learning_rate,
+            "likelihood_std": self.likelihood_std,
+            "leaky_relu_slope": self.leaky_relu_slope,
+            "weight_init_scale": self.weight_init_scale,
+            "adam_epsilon": self.adam_epsilon,
+            "stability_epsilon": self.stability_epsilon,
+        }
+        for name, raw_value in positive.items():
+            value = _finite_float(raw_value, name)
+            if value <= 0:
+                raise TuningConfigError(f"{name} must be positive.")
+            object.__setattr__(self, name, value)
+        for name in ("prior_mu", "prior_logvar", "posterior_rho_init"):
+            object.__setattr__(
+                self, name, _finite_float(getattr(self, name), name)
+            )
+        try:
+            prior_variance = math.exp(self.prior_logvar)
+        except OverflowError as exc:
+            raise TuningConfigError("prior_logvar produces an invalid variance.") from exc
+        if not math.isfinite(prior_variance) or prior_variance <= 0:
+            raise TuningConfigError("prior_logvar produces an invalid variance.")
+        for name in ("beta1", "beta2", "prediction_threshold"):
+            value = _finite_float(getattr(self, name), name)
+            if not 0 < value < 1:
+                raise TuningConfigError(f"{name} must be within (0, 1).")
+            object.__setattr__(self, name, value)
+        if self.gradient_clip_norm is not None:
+            clip = _finite_float(self.gradient_clip_norm, "gradient_clip_norm")
+            if clip <= 0:
+                raise TuningConfigError("gradient_clip_norm must be positive.")
+            object.__setattr__(self, "gradient_clip_norm", clip)
+        if self.random_state is not None and (
+            isinstance(self.random_state, bool)
+            or not isinstance(self.random_state, (int, np.integer))
+        ):
+            raise TuningConfigError("random_state must be an integer or None.")
+        if self.random_state is not None:
+            object.__setattr__(self, "random_state", int(self.random_state))
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "BayesianNetworkConfig":
+        if not isinstance(config, Mapping):
+            raise TuningConfigError("bnn configuration must be a mapping.")
+        known = set(cls.__dataclass_fields__)
+        unknown = set(config) - known - {"training", "prediction", "monitoring"}
+        if unknown:
+            raise TuningConfigError(
+                "Unknown Bayesian-network configuration fields.",
+                details={"unknown_fields": sorted(str(item) for item in unknown)},
+            )
+        return cls(**{name: config[name] for name in known if name in config})
+
+
+@dataclass(slots=True)
+class BayesianTrainingHistory:
+    epochs: list[int] = field(default_factory=list)
+    training_negative_elbo: list[float] = field(default_factory=list)
+    validation_negative_elbo: list[float] = field(default_factory=list)
+    training_data_loss: list[float] = field(default_factory=list)
+    kl_per_observation: list[float] = field(default_factory=list)
+    gradient_norm: list[float] = field(default_factory=list)
+    best_epoch: int | None = None
+    best_validation_negative_elbo: float | None = None
     stopped_early: bool = False
     total_steps: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "epochs": list(self.epochs),
-            "train_elbo": list(self.train_elbo),
-            "train_kl": list(self.train_kl),
-            "train_log_likelihood": list(self.train_log_likelihood),
-            "validation_elbo": list(self.validation_elbo),
-            "validation_kl": list(self.validation_kl),
-            "validation_log_likelihood": list(self.validation_log_likelihood),
+            "training_negative_elbo": list(self.training_negative_elbo),
+            "validation_negative_elbo": list(self.validation_negative_elbo),
+            "training_data_loss": list(self.training_data_loss),
+            "kl_per_observation": list(self.kl_per_observation),
             "gradient_norm": list(self.gradient_norm),
             "best_epoch": self.best_epoch,
-            "best_validation_elbo": self.best_validation_elbo,
+            "best_validation_negative_elbo": (
+                self.best_validation_negative_elbo
+            ),
             "stopped_early": self.stopped_early,
             "total_steps": self.total_steps,
         }
 
 
 class BayesianNeuralNetwork:
-    """Fully-connected Bayesian neural network with diagonal Gaussian posteriors.
+    """Fully connected mean-field Bayesian network trained by variational ELBO."""
 
-    This implementation remains NumPy-only for portability, while providing the
-    operational safeguards expected in production code: typed failures,
-    numerically safer optimization, configuration-driven defaults, structured
-    persistence, and richer training / prediction APIs.
-    """
-
-    MODEL_FORMAT_VERSION = "1.0.0"
-    SUPPORTED_HIDDEN_ACTIVATIONS = frozenset({"relu", "tanh", "leaky_relu"})
+    STATE_SCHEMA_VERSION = 1
+    CONSTRUCTOR_PARAMETER_NAMES = frozenset(BayesianNetworkConfig.__dataclass_fields__)
+    FIT_PARAMETER_NAMES = frozenset(
+        {
+            "epochs",
+            "batch_size",
+            "num_samples",
+            "validation_num_samples",
+            "shuffle",
+            "early_stopping_patience",
+            "min_delta",
+            "restore_best_weights",
+        }
+    )
 
     def __init__(
         self,
         layer_sizes: Sequence[int],
-        learning_rate: Optional[float] = None,
-        prior_mu: Optional[float] = None,
-        prior_logvar: Optional[float] = None,
-        random_state: Optional[int] = None,
-        logvar_clip_range: Optional[Tuple[float, float]] = None,
-        gradient_clip_norm: Optional[float] = None,
-        weight_init_scale: Optional[float] = None,
-        hidden_activation: Optional[str] = None,
-        likelihood_std: Optional[float] = None,
-        min_variance: Optional[float] = None,
-        stability_epsilon: Optional[float] = None,
-        leaky_relu_slope: Optional[float] = None,
+        config: BayesianNetworkConfig | Mapping[str, Any] | None = None,
+        **overrides: Any,
     ) -> None:
-        self.config = load_global_config() or {}
-        self.bnn_config = get_config_section("bnn") or {}
-
-        self.layer_sizes = [int(v) for v in layer_sizes]
-        self.learning_rate = float(self._resolve_setting("learning_rate", learning_rate, 0.01))
-        self.prior_mu = float(self._resolve_setting("prior_mu", prior_mu, 0.0))
-        self.prior_logvar = float(self._resolve_setting("prior_logvar", prior_logvar, 0.0))
-        self.random_state = self._resolve_setting("random_state", random_state, None)
-        self.logvar_clip_range = self._resolve_logvar_clip_range(logvar_clip_range)
-        self.gradient_clip_norm = self._resolve_optional_positive_float(
-            "gradient_clip_norm", gradient_clip_norm, 5.0, allow_none=True
-        )
-        self.weight_init_scale = self._resolve_optional_positive_float(
-            "weight_init_scale", weight_init_scale, 1.0, allow_none=False
-        )
-        self.hidden_activation = str(self._resolve_setting("hidden_activation", hidden_activation, "relu")).strip().lower()
-        self.likelihood_std = self._resolve_optional_positive_float(
-            "likelihood_std", likelihood_std, 1.0, allow_none=False
-        )
-        self.min_variance = self._resolve_optional_positive_float(
-            "min_variance", min_variance, 1e-6, allow_none=False
-        )
-        self.stability_epsilon = self._resolve_optional_positive_float(
-            "stability_epsilon", stability_epsilon, 1e-8, allow_none=False
-        )
-        self.leaky_relu_slope = self._resolve_optional_positive_float(
-            "leaky_relu_slope", leaky_relu_slope, 0.01, allow_none=False
-        )
-
-        self._validate_init_args()
-
-        self.num_layers = len(self.layer_sizes) - 1
-        self.rng = np.random.default_rng(self.random_state)
-        self.training_steps = 0
-        self.last_gradient_norm: Optional[float] = None
-        self.last_metrics: Dict[str, float] = {}
-
-        self.weights_mu: List[Array] = []
-        self.weights_logvar: List[Array] = []
-        self.biases_mu: List[Array] = []
-        self.biases_logvar: List[Array] = []
-        self._initialize_variational_parameters()
-        self._validate_parameter_shapes()
-        self._assert_all_parameters_finite(operation="post_initialization")
-
-    def _resolve_setting(self, key: str, explicit: Any, default: Any) -> Any:
-        if explicit is not None:
-            return explicit
-        return self.bnn_config.get(key, default)
-
-    def _resolve_optional_positive_float(
-        self,
-        key: str,
-        explicit: Optional[float],
-        default: float,
-        *,
-        allow_none: bool,
-    ) -> Optional[float]:
-        value = self._resolve_setting(key, explicit, default)
-        if value is None:
-            return None if allow_none else float(default)
-        return float(value)
-
-    def _resolve_logvar_clip_range(self, explicit: Optional[Tuple[float, float]]) -> Tuple[float, float]:
-        value = explicit if explicit is not None else self.bnn_config.get("logvar_clip_range", [-8.0, 4.0])
-        if isinstance(value, list):
-            value = tuple(value)
-        return tuple(value)  # type: ignore[return-value]
-
-    def _context(self, operation: str, **kwargs: Any) -> TuningErrorContext:
-        return TuningErrorContext(
-            component="BayesianNeuralNetwork",
-            operation=operation,
-            strategy="variational_inference",
-            model_type="bayesian_neural_network",
-            random_state=self.random_state,
-            config_path=str(self.config.get("__config_path__", "")) or None,
-            parameters={
-                "layer_sizes": list(self.layer_sizes),
-                "learning_rate": self.learning_rate,
-                "hidden_activation": self.hidden_activation,
-                **{key: value for key, value in kwargs.items() if value is not None},
-            },
-        )
-
-    def _validate_init_args(self) -> None:
-        context = self._context("__init__")
-        raise_for_condition(
-            len(self.layer_sizes) < 2,
-            "layer_sizes must include at least input and output dimensions.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"layer_sizes": self.layer_sizes},
-        )
-        raise_for_condition(
-            any(size <= 0 for size in self.layer_sizes),
-            "All layer sizes must be positive integers.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"layer_sizes": self.layer_sizes},
-        )
-        raise_for_condition(
-            not math.isfinite(self.learning_rate) or self.learning_rate <= 0.0,
-            "learning_rate must be a positive finite float.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"learning_rate": self.learning_rate},
-        )
-        raise_for_condition(
-            self.hidden_activation not in self.SUPPORTED_HIDDEN_ACTIVATIONS,
-            "hidden_activation must be one of: relu, tanh, leaky_relu.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={
-                "hidden_activation": self.hidden_activation,
-                "supported_values": sorted(self.SUPPORTED_HIDDEN_ACTIVATIONS),
-            },
-        )
-        raise_for_condition(
-            not (isinstance(self.logvar_clip_range, tuple) and len(self.logvar_clip_range) == 2),
-            "logvar_clip_range must be a two-item tuple or list.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"logvar_clip_range": safe_serialize(self.logvar_clip_range)},
-        )
-        logvar_min, logvar_max = self.logvar_clip_range
-        raise_for_condition(
-            not math.isfinite(logvar_min) or not math.isfinite(logvar_max) or logvar_min >= logvar_max,
-            "logvar_clip_range must contain finite values with min < max.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"logvar_clip_range": list(self.logvar_clip_range)},
-        )
-        for field_name, value in {
-            "prior_mu": self.prior_mu,
-            "prior_logvar": self.prior_logvar,
-            "weight_init_scale": self.weight_init_scale,
-            "likelihood_std": self.likelihood_std,
-            "min_variance": self.min_variance,
-            "stability_epsilon": self.stability_epsilon,
-            "leaky_relu_slope": self.leaky_relu_slope,
-        }.items():
-            raise_for_condition(
-                value is None or not math.isfinite(float(value)),
-                f"{field_name} must be finite.",
-                error_cls=TuningConfigError,
-                context=context,
-                details={field_name: value},
-            )
-        raise_for_condition(
-            self.weight_init_scale is None or self.weight_init_scale <= 0.0,
-            "weight_init_scale must be strictly positive.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"weight_init_scale": self.weight_init_scale},
-        )
-        raise_for_condition(
-            self.likelihood_std is None or self.likelihood_std <= 0.0,
-            "likelihood_std must be strictly positive.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"likelihood_std": self.likelihood_std},
-        )
-        raise_for_condition(
-            self.min_variance is None or self.min_variance <= 0.0,
-            "min_variance must be strictly positive.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"min_variance": self.min_variance},
-        )
-        raise_for_condition(
-            self.stability_epsilon is None or self.stability_epsilon <= 0.0,
-            "stability_epsilon must be strictly positive.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"stability_epsilon": self.stability_epsilon},
-        )
-        raise_for_condition(
-            self.leaky_relu_slope is None or self.leaky_relu_slope <= 0.0,
-            "leaky_relu_slope must be strictly positive.",
-            error_cls=TuningConfigError,
-            context=context,
-            details={"leaky_relu_slope": self.leaky_relu_slope},
-        )
-        if self.gradient_clip_norm is not None:
-            raise_for_condition(
-                not math.isfinite(self.gradient_clip_norm) or self.gradient_clip_norm <= 0.0,
-                "gradient_clip_norm must be a positive finite float when provided.",
-                error_cls=TuningConfigError,
-                context=context,
-                details={"gradient_clip_norm": self.gradient_clip_norm},
-            )
-        if self.random_state is not None:
-            raise_for_condition(
-                not isinstance(self.random_state, (int, np.integer)),
-                "random_state must be an integer or None.",
-                error_cls=TuningConfigError,
-                context=context,
-                details={"random_state": self.random_state},
-            )
-
-    def _initial_weight_scale(self, fan_in: int) -> float:
-        if self.hidden_activation == "relu":
-            base = math.sqrt(2.0 / fan_in)
-        elif self.hidden_activation == "leaky_relu":
-            negative_slope = float(self.leaky_relu_slope)
-            base = math.sqrt(2.0 / ((1.0 + negative_slope**2) * fan_in))
+        self.layer_sizes = self._validate_layer_sizes(layer_sizes)
+        if config is None:
+            self.config = BayesianNetworkConfig(**overrides)
         else:
-            base = math.sqrt(1.0 / fan_in)
-        return base * float(self.weight_init_scale)
+            base = (
+                config
+                if isinstance(config, BayesianNetworkConfig)
+                else BayesianNetworkConfig.from_mapping(config)
+            )
+            if overrides:
+                payload = {
+                    name: getattr(base, name)
+                    for name in BayesianNetworkConfig.__dataclass_fields__
+                }
+                payload.update(overrides)
+                self.config = BayesianNetworkConfig(**payload)
+            else:
+                self.config = base
+        self._validate_task_output()
+        self.rng = np.random.default_rng(self.config.random_state)
+        self.training_steps = 0
+        self.last_gradient_norm: float | None = None
+        self.last_metrics: dict[str, float] = {}
+        self.tuning_fit_parameters: dict[str, Any] = {}
+        self.weight_mu: list[Array] = []
+        self.weight_rho: list[Array] = []
+        self.bias_mu: list[Array] = []
+        self.bias_rho: list[Array] = []
+        self._initialize_parameters()
+        self._initialize_optimizer_state()
 
-    def _initialize_variational_parameters(self) -> None:
-        try:
-            initial_logvar = max(self.logvar_clip_range[0], math.log(max(float(self.min_variance), 1e-6)))
-            for layer_idx in range(self.num_layers):
-                fan_in = self.layer_sizes[layer_idx]
-                fan_out = self.layer_sizes[layer_idx + 1]
-                scale = self._initial_weight_scale(fan_in)
+    @staticmethod
+    def _validate_layer_sizes(layer_sizes: Sequence[int]) -> tuple[int, ...]:
+        if isinstance(layer_sizes, (str, bytes)):
+            raise TuningConfigError("layer_sizes must be a sequence of integers.")
+        values = tuple(layer_sizes)
+        if len(values) < 2:
+            raise TuningConfigError(
+                "layer_sizes must include input and output dimensions."
+            )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, np.integer))
+            or int(value) <= 0
+            for value in values
+        ):
+            raise TuningConfigError("Every layer size must be a positive integer.")
+        return tuple(int(value) for value in values)
 
-                self.weights_mu.append(
-                    self.rng.normal(loc=0.0, scale=scale, size=(fan_in, fan_out)).astype(float)
+    def _validate_task_output(self) -> None:
+        output_dim = self.layer_sizes[-1]
+        if self.config.task_type == "binary_classification" and output_dim != 1:
+            raise TuningConfigError(
+                "Binary classification requires an output dimension of 1."
+            )
+        if self.config.task_type == "multiclass_classification" and output_dim < 2:
+            raise TuningConfigError(
+                "Multiclass classification requires at least two outputs."
+            )
+
+    def _initialize_parameters(self) -> None:
+        for fan_in, fan_out in zip(
+            self.layer_sizes[:-1], self.layer_sizes[1:], strict=True
+        ):
+            if self.config.hidden_activation in {"relu", "leaky_relu"}:
+                scale = math.sqrt(2.0 / fan_in)
+            else:
+                scale = math.sqrt(1.0 / fan_in)
+            scale *= self.config.weight_init_scale
+            self.weight_mu.append(
+                self.rng.normal(0.0, scale, size=(fan_in, fan_out)).astype(float)
+            )
+            self.weight_rho.append(
+                np.full(
+                    (fan_in, fan_out), self.config.posterior_rho_init, dtype=float
                 )
-                self.weights_logvar.append(np.full((fan_in, fan_out), initial_logvar, dtype=float))
-                self.biases_mu.append(np.zeros(fan_out, dtype=float))
-                self.biases_logvar.append(np.full(fan_out, initial_logvar, dtype=float))
-        except Exception as exc:  # noqa: BLE001
-            raise wrap_exception(
-                exc,
-                message="Failed to initialize Bayesian neural network variational parameters.",
-                error_cls=TuningConfigError,
-                context=self._context("initialize_parameters"),
-                details={"layer_sizes": self.layer_sizes},
-            ) from exc
+            )
+            self.bias_mu.append(np.zeros((1, fan_out), dtype=float))
+            self.bias_rho.append(
+                np.full((1, fan_out), self.config.posterior_rho_init, dtype=float)
+            )
+        self._assert_finite_parameters("initialization")
+
+    def _initialize_optimizer_state(self) -> None:
+        self._adam_m = {
+            name: [np.zeros_like(item) for item in values]
+            for name, values in self._parameter_collections().items()
+        }
+        self._adam_v = {
+            name: [np.zeros_like(item) for item in values]
+            for name, values in self._parameter_collections().items()
+        }
+
+    def _parameter_collections(self) -> dict[str, list[Array]]:
+        return {
+            "weight_mu": self.weight_mu,
+            "weight_rho": self.weight_rho,
+            "bias_mu": self.bias_mu,
+            "bias_rho": self.bias_rho,
+        }
 
     def _activation(self, values: Array) -> Array:
-        if self.hidden_activation == "relu":
-            return np.maximum(0.0, values)
-        if self.hidden_activation == "tanh":
+        if self.config.hidden_activation == "relu":
+            return np.maximum(values, 0.0)
+        if self.config.hidden_activation == "tanh":
             return np.tanh(values)
-        return np.where(values > 0.0, values, self.leaky_relu_slope * values)
+        return np.where(
+            values > 0.0, values, self.config.leaky_relu_slope * values
+        )
 
-    def _activation_derivative(self, pre_activation: Array) -> Array:
-        if self.hidden_activation == "relu":
-            return (pre_activation > 0.0).astype(float)
-        if self.hidden_activation == "tanh":
-            activated = np.tanh(pre_activation)
+    def _activation_derivative(self, values: Array) -> Array:
+        if self.config.hidden_activation == "relu":
+            return (values > 0.0).astype(float)
+        if self.config.hidden_activation == "tanh":
+            activated = np.tanh(values)
             return 1.0 - activated**2
-        derivative = np.ones_like(pre_activation, dtype=float)
-        derivative[pre_activation <= 0.0] = self.leaky_relu_slope
-        return derivative
+        return np.where(values > 0.0, 1.0, self.config.leaky_relu_slope)
 
-    def _posterior_std(self, logvar: Array) -> Array:
-        clipped = np.clip(logvar, *self.logvar_clip_range)
-        variance = np.exp(clipped)
-        return np.sqrt(np.maximum(variance, self.min_variance))
-
-    def _likelihood_variance(self) -> float:
-        return max(float(self.likelihood_std) ** 2, float(self.min_variance))
-
-    def _shape_string(self, value: Array) -> str:
-        return "x".join(str(dim) for dim in value.shape)
-
-    def _assert_finite_array(self, value: Array, *, name: str, operation: str) -> None:
-        if not np.isfinite(value).all():
-            raise TuningEvaluationError(
-                f"Non-finite values detected in {name} during {operation}.",
-                context=self._context(operation),
-                details={
-                    "name": name,
-                    "shape": self._shape_string(np.asarray(value)),
-                },
-            )
-
-    def _assert_all_parameters_finite(self, *, operation: str) -> None:
-        for collection_name, collection in {
-            "weights_mu": self.weights_mu,
-            "weights_logvar": self.weights_logvar,
-            "biases_mu": self.biases_mu,
-            "biases_logvar": self.biases_logvar,
-        }.items():
-            for layer_idx, parameter in enumerate(collection):
-                self._assert_finite_array(
-                    np.asarray(parameter, dtype=float),
-                    name=f"{collection_name}[{layer_idx}]",
-                    operation=operation,
+    def _sample_parameters(
+        self, rng: np.random.Generator
+    ) -> tuple[
+        list[Array],
+        list[Array],
+        dict[str, list[Array]],
+        dict[str, list[Array]],
+    ]:
+        samples: dict[str, list[Array]] = {}
+        epsilons: dict[str, list[Array]] = {}
+        for location_name, rho_name in (
+            ("weight_mu", "weight_rho"),
+            ("bias_mu", "bias_rho"),
+        ):
+            locations = getattr(self, location_name)
+            rhos = getattr(self, rho_name)
+            sampled: list[Array] = []
+            noises: list[Array] = []
+            for location, rho in zip(locations, rhos, strict=True):
+                epsilon = rng.normal(size=location.shape)
+                sigma = np.maximum(
+                    _softplus(rho), self.config.stability_epsilon
                 )
+                sampled.append(location + sigma * epsilon)
+                noises.append(epsilon)
+            samples[location_name] = sampled
+            epsilons[rho_name] = noises
+        return (
+            samples["weight_mu"],
+            samples["bias_mu"],
+            samples,
+            epsilons,
+        )
 
-    def _validate_forward_inputs(self, x: Array, weights: Sequence[Array], biases: Sequence[Array]) -> Array:
-        x_array = np.asarray(x, dtype=float)
-        raise_for_condition(
-            x_array.ndim != 2,
-            "x must be a 2D array of shape (batch_size, input_dim).",
-            error_cls=TuningValidationError,
-            context=self._context("forward_validation"),
-            details={"x_shape": list(x_array.shape)},
-        )
-        raise_for_condition(
-            x_array.shape[1] != self.layer_sizes[0],
-            "Input feature dimension mismatch.",
-            error_cls=TuningValidationError,
-            context=self._context("forward_validation"),
-            details={"expected_input_dim": self.layer_sizes[0], "received_input_dim": int(x_array.shape[1])},
-        )
-        raise_for_condition(
-            len(weights) != self.num_layers or len(biases) != self.num_layers,
-            "weights and biases must match network layer count.",
-            error_cls=TuningValidationError,
-            context=self._context("forward_validation"),
-            details={"expected_layers": self.num_layers, "weights_layers": len(weights), "bias_layers": len(biases)},
-        )
-        for layer_idx in range(self.num_layers):
-            expected_weight_shape = (self.layer_sizes[layer_idx], self.layer_sizes[layer_idx + 1])
-            expected_bias_shape = (self.layer_sizes[layer_idx + 1],)
-            raise_for_condition(
-                np.asarray(weights[layer_idx]).shape != expected_weight_shape,
-                f"Invalid weight shape at layer {layer_idx}.",
-                error_cls=TuningValidationError,
-                context=self._context("forward_validation"),
-                details={"expected_shape": list(expected_weight_shape), "received_shape": list(np.asarray(weights[layer_idx]).shape)},
+    def _forward_with_parameters(
+        self, x: Array, weights: Sequence[Array], biases: Sequence[Array]
+    ) -> tuple[Array, tuple[list[Array], list[Array]]]:
+        activations = [x]
+        pre_activations: list[Array] = []
+        current = x
+        for index, (weight, bias) in enumerate(
+            zip(weights, biases, strict=True)
+        ):
+            pre_activation = current @ weight + bias
+            pre_activations.append(pre_activation)
+            current = (
+                pre_activation
+                if index == len(weights) - 1
+                else self._activation(pre_activation)
             )
-            raise_for_condition(
-                np.asarray(biases[layer_idx]).shape != expected_bias_shape,
-                f"Invalid bias shape at layer {layer_idx}.",
-                error_cls=TuningValidationError,
-                context=self._context("forward_validation"),
-                details={"expected_shape": list(expected_bias_shape), "received_shape": list(np.asarray(biases[layer_idx]).shape)},
+            activations.append(current)
+        if not np.isfinite(current).all():
+            raise TuningEvaluationError("Forward pass produced non-finite values.")
+        return current, (activations, pre_activations)
+
+    def _data_loss_and_gradient(
+        self, logits: Array, targets: Array
+    ) -> tuple[float, Array]:
+        count = logits.shape[0]
+        if self.config.task_type == "regression":
+            variance = self.config.likelihood_std**2
+            residual = logits - targets
+            constant = math.log(2.0 * math.pi * variance)
+            loss = 0.5 * float(
+                np.mean(
+                    np.sum(residual**2 / variance + constant, axis=1)
+                )
             )
-        self._assert_finite_array(x_array, name="x", operation="forward_validation")
-        return x_array
-
-    def _validate_training_batch(self, x: Array, y: Array, *, operation: str) -> Tuple[Array, Array]:
-        x_batch = np.asarray(x, dtype=float)
-        y_batch = np.asarray(y, dtype=float)
-
-        raise_for_condition(
-            x_batch.ndim != 2,
-            "x_batch must be a 2D array.",
-            error_cls=TuningValidationError,
-            context=self._context(operation),
-            details={"x_shape": list(x_batch.shape)},
+            return loss, residual / (variance * count)
+        if self.config.task_type == "binary_classification":
+            loss = float(np.mean(np.logaddexp(0.0, logits) - targets * logits))
+            return loss, (_sigmoid(logits) - targets) / count
+        probabilities = _softmax(logits)
+        loss = -float(
+            np.mean(
+                np.sum(
+                    targets
+                    * np.log(
+                        np.maximum(probabilities, self.config.stability_epsilon)
+                    ),
+                    axis=1,
+                )
+            )
         )
-        if y_batch.ndim == 1:
-            y_batch = y_batch.reshape(-1, 1)
-        raise_for_condition(
-            y_batch.ndim != 2,
-            "y_batch must be a 1D or 2D array.",
-            error_cls=TuningValidationError,
-            context=self._context(operation),
-            details={"y_shape": list(y_batch.shape)},
-        )
-        raise_for_condition(
-            x_batch.shape[0] != y_batch.shape[0],
-            "x_batch and y_batch must have matching sample counts.",
-            error_cls=TuningValidationError,
-            context=self._context(operation),
-            details={"x_rows": int(x_batch.shape[0]), "y_rows": int(y_batch.shape[0])},
-        )
-        raise_for_condition(
-            x_batch.shape[1] != self.layer_sizes[0],
-            "Input feature dimension mismatch.",
-            error_cls=TuningValidationError,
-            context=self._context(operation),
-            details={"expected_input_dim": self.layer_sizes[0], "received_input_dim": int(x_batch.shape[1])},
-        )
-        raise_for_condition(
-            y_batch.shape[1] != self.layer_sizes[-1],
-            "Target feature dimension mismatch.",
-            error_cls=TuningValidationError,
-            context=self._context(operation),
-            details={"expected_target_dim": self.layer_sizes[-1], "received_target_dim": int(y_batch.shape[1])},
-        )
-        self._assert_finite_array(x_batch, name="x_batch", operation=operation)
-        self._assert_finite_array(y_batch, name="y_batch", operation=operation)
-        return x_batch, y_batch
+        return loss, (probabilities - targets) / count
 
-    def _validate_sample_count(self, num_samples: int, *, operation: str) -> int:
-        sample_count = int(num_samples)
-        raise_for_condition(
-            sample_count < 1,
-            "num_samples must be >= 1.",
-            error_cls=TuningValidationError,
-            context=self._context(operation),
-            details={"num_samples": num_samples},
-        )
-        return sample_count
-
-    def _resolve_dataset_size(self, dataset_size: Optional[int], batch_size: int, *, operation: str) -> int:
-        resolved = int(dataset_size) if dataset_size is not None else int(batch_size)
-        raise_for_condition(
-            resolved < batch_size,
-            "dataset_size must be >= current batch size.",
-            error_cls=TuningValidationError,
-            context=self._context(operation),
-            details={"dataset_size": resolved, "batch_size": batch_size},
-        )
-        return resolved
-
-    def _sample_parameters_with_noise(self) -> Tuple[List[Array], List[Array], List[Array], List[Array]]:
-        sampled_weights: List[Array] = []
-        sampled_biases: List[Array] = []
-        epsilons_w: List[Array] = []
-        epsilons_b: List[Array] = []
-
-        for layer_idx in range(self.num_layers):
-            eps_w = self.rng.standard_normal(self.weights_mu[layer_idx].shape)
-            eps_b = self.rng.standard_normal(self.biases_mu[layer_idx].shape)
-            std_w = self._posterior_std(self.weights_logvar[layer_idx])
-            std_b = self._posterior_std(self.biases_logvar[layer_idx])
-
-            sampled_weights.append(self.weights_mu[layer_idx] + eps_w * std_w)
-            sampled_biases.append(self.biases_mu[layer_idx] + eps_b * std_b)
-            epsilons_w.append(eps_w)
-            epsilons_b.append(eps_b)
-
-        return sampled_weights, sampled_biases, epsilons_w, epsilons_b
-
-    def sample_parameters(self) -> Tuple[List[Array], List[Array]]:
-        sampled_weights, sampled_biases, _, _ = self._sample_parameters_with_noise()
-        return sampled_weights, sampled_biases
-
-    @error_boundary(
-        error_cls=TuningEvaluationError,
-        message="Bayesian neural network forward pass failed.",
-        context_builder=lambda exc, args, kwargs: args[0]._context("forward") if args else None,
-        detail_builder=lambda exc, args, kwargs: {"error": exc.__class__.__name__},
-    )
-    def forward(
+    def _sample_gradients(
         self,
-        x: Array,
-        weights: Optional[Sequence[Array]] = None,
-        biases: Optional[Sequence[Array]] = None,
-        *,
-        return_cache: bool = False,
-    ) -> Array | Tuple[Array, List[Array], List[Array]]:
-        weights_seq = list(weights if weights is not None else self.weights_mu)
-        biases_seq = list(biases if biases is not None else self.biases_mu)
-        x_array = self._validate_forward_inputs(x, weights_seq, biases_seq)
+        output_gradient: Array,
+        cache: tuple[list[Array], list[Array]],
+        sampled_weights: Sequence[Array],
+    ) -> tuple[list[Array], list[Array]]:
+        activations, pre_activations = cache
+        weight_gradients: list[Array] = [np.empty(0)] * len(sampled_weights)
+        bias_gradients: list[Array] = [np.empty(0)] * len(sampled_weights)
+        delta = output_gradient
+        for index in range(len(sampled_weights) - 1, -1, -1):
+            weight_gradients[index] = activations[index].T @ delta
+            bias_gradients[index] = np.sum(delta, axis=0, keepdims=True)
+            if index > 0:
+                delta = delta @ sampled_weights[index].T
+                delta *= self._activation_derivative(pre_activations[index - 1])
+        return weight_gradients, bias_gradients
 
-        activation = x_array
-        activations: List[Array] = [x_array]
-        pre_activations: List[Array] = []
-
-        for layer_idx in range(self.num_layers - 1):
-            z = activation @ np.asarray(weights_seq[layer_idx], dtype=float) + np.asarray(biases_seq[layer_idx], dtype=float)
-            pre_activations.append(z)
-            activation = self._activation(z)
-            activations.append(activation)
-
-        outputs = activation @ np.asarray(weights_seq[-1], dtype=float) + np.asarray(biases_seq[-1], dtype=float)
-        self._assert_finite_array(outputs, name="outputs", operation="forward")
-
-        if return_cache:
-            return outputs, activations, pre_activations
-        return outputs
-
-    def _kl_divergence(self, mu: Array, logvar: Array) -> float:
-        prior_var = max(math.exp(self.prior_logvar), float(self.min_variance))
-        clipped_logvar = np.clip(logvar, *self.logvar_clip_range)
-        variance = np.maximum(np.exp(clipped_logvar), self.min_variance)
-        divergence = 0.5 * np.sum(
-            (variance + (mu - self.prior_mu) ** 2) / prior_var
-            - 1.0
-            + (self.prior_logvar - clipped_logvar)
-        )
-        return float(divergence)
-
-    def _total_kl_divergence(self) -> float:
-        total = 0.0
-        for layer_idx in range(self.num_layers):
-            total += self._kl_divergence(self.weights_mu[layer_idx], self.weights_logvar[layer_idx])
-            total += self._kl_divergence(self.biases_mu[layer_idx], self.biases_logvar[layer_idx])
-        return float(total)
-
-    def _estimate_expected_log_likelihood(self, x: Array, y: Array, num_samples: int) -> float:
-        likelihood_variance = self._likelihood_variance()
-        batch_size = x.shape[0]
-        total = 0.0
-        for _ in range(num_samples):
-            sampled_weights, sampled_biases = self.sample_parameters()
-            outputs = self.forward(x, sampled_weights, sampled_biases)
-            residual = y - outputs
-            total += float(-0.5 * np.sum((residual**2) / likelihood_variance))
-        return total / (num_samples * batch_size)
-
-    @error_boundary(
-        error_cls=TuningEvaluationError,
-        message="Failed to evaluate Bayesian neural network ELBO.",
-        context_builder=lambda exc, args, kwargs: args[0]._context("elbo") if args else None,
-        detail_builder=lambda exc, args, kwargs: {"num_samples": kwargs.get("num_samples", args[3] if len(args) > 3 else 1)},
-    )
-    def elbo(
-        self,
-        x: Array,
-        y: Array,
-        num_samples: int = 1,
-        *,
-        dataset_size: Optional[int] = None,
-    ) -> Tuple[float, float]:
-        x_batch, y_batch = self._validate_training_batch(x, y, operation="elbo")
-        sample_count = self._validate_sample_count(num_samples, operation="elbo")
-        resolved_dataset_size = self._resolve_dataset_size(dataset_size, x_batch.shape[0], operation="elbo")
-
-        kl_divergence = self._total_kl_divergence()
-        log_likelihood = self._estimate_expected_log_likelihood(x_batch, y_batch, sample_count)
-        elbo_value = log_likelihood - (kl_divergence / resolved_dataset_size)
-        return float(elbo_value), float(kl_divergence)
-
-    @error_boundary(
-        error_cls=TuningEvaluationError,
-        message="Failed to evaluate Bayesian neural network metrics.",
-        context_builder=lambda exc, args, kwargs: args[0]._context("evaluate") if args else None,
-    )
-    def evaluate(
-        self,
-        x: Array,
-        y: Array,
-        num_samples: int = 20,
-        *,
-        dataset_size: Optional[int] = None,
-    ) -> Dict[str, float]:
-        x_batch, y_batch = self._validate_training_batch(x, y, operation="evaluate")
-        sample_count = self._validate_sample_count(num_samples, operation="evaluate")
-        resolved_dataset_size = self._resolve_dataset_size(dataset_size, x_batch.shape[0], operation="evaluate")
-
-        predictive_mean, predictive_std = self.predict(x_batch, num_samples=sample_count)
-        residual = y_batch - predictive_mean
-        mse = float(np.mean(residual**2))
-        rmse = float(math.sqrt(mse))
-        mean_predictive_std = float(np.mean(predictive_std))
-        elbo_value, kl_divergence = self.elbo(
-            x_batch,
-            y_batch,
-            num_samples=sample_count,
-            dataset_size=resolved_dataset_size,
-        )
-        metrics = {
-            "elbo": float(elbo_value),
-            "kl_divergence": float(kl_divergence),
-            "log_likelihood": float(elbo_value + kl_divergence / resolved_dataset_size),
-            "mse": mse,
-            "rmse": rmse,
-            "mean_predictive_std": mean_predictive_std,
-        }
-        self.last_metrics = dict(metrics)
-        return metrics
-
-    def _compute_gradients(
+    def _negative_elbo_and_gradients(
         self,
         x: Array,
         y: Array,
         *,
-        num_samples: int,
         dataset_size: int,
-    ) -> Dict[str, List[Array]]:
-        gradients: Dict[str, List[Array]] = {
-            "weights_mu": [np.zeros_like(w, dtype=float) for w in self.weights_mu],
-            "weights_logvar": [np.zeros_like(w, dtype=float) for w in self.weights_logvar],
-            "biases_mu": [np.zeros_like(b, dtype=float) for b in self.biases_mu],
-            "biases_logvar": [np.zeros_like(b, dtype=float) for b in self.biases_logvar],
+        num_samples: int,
+    ) -> tuple[float, float, float, dict[str, list[Array]]]:
+        gradients = {
+            name: [np.zeros_like(item) for item in values]
+            for name, values in self._parameter_collections().items()
         }
-
-        batch_size = x.shape[0]
-        likelihood_variance = self._likelihood_variance()
-        prior_variance = max(math.exp(self.prior_logvar), float(self.min_variance))
-
+        data_loss = 0.0
         for _ in range(num_samples):
-            sampled_weights, sampled_biases, epsilons_w, epsilons_b = self._sample_parameters_with_noise()
-            outputs, activations, pre_activations = self.forward(
-                x,
-                sampled_weights,
-                sampled_biases,
-                return_cache=True,
+            sampled_weights, sampled_biases, _samples, epsilons = (
+                self._sample_parameters(self.rng)
             )
-
-            delta = (y - outputs) / (likelihood_variance * batch_size * num_samples)
-            self._assert_finite_array(delta, name="delta", operation="gradient_computation")
-
-            for layer_idx in range(self.num_layers - 1, -1, -1):
-                local_activation = activations[layer_idx]
-                d_w = local_activation.T @ delta
-                d_b = np.sum(delta, axis=0)
-
-                std_w = self._posterior_std(self.weights_logvar[layer_idx])
-                std_b = self._posterior_std(self.biases_logvar[layer_idx])
-
-                gradients["weights_mu"][layer_idx] += d_w
-                gradients["weights_logvar"][layer_idx] += d_w * epsilons_w[layer_idx] * 0.5 * std_w
-                gradients["biases_mu"][layer_idx] += d_b
-                gradients["biases_logvar"][layer_idx] += d_b * epsilons_b[layer_idx] * 0.5 * std_b
-
-                if layer_idx > 0:
-                    delta = (delta @ sampled_weights[layer_idx].T) * self._activation_derivative(pre_activations[layer_idx - 1])
-
-        kl_scale = 1.0 / dataset_size
-        for layer_idx in range(self.num_layers):
-            variance_w = np.maximum(np.exp(np.clip(self.weights_logvar[layer_idx], *self.logvar_clip_range)), self.min_variance)
-            variance_b = np.maximum(np.exp(np.clip(self.biases_logvar[layer_idx], *self.logvar_clip_range)), self.min_variance)
-
-            gradients["weights_mu"][layer_idx] -= kl_scale * (self.weights_mu[layer_idx] - self.prior_mu) / prior_variance
-            gradients["weights_logvar"][layer_idx] -= kl_scale * 0.5 * (variance_w / prior_variance - 1.0)
-            gradients["biases_mu"][layer_idx] -= kl_scale * (self.biases_mu[layer_idx] - self.prior_mu) / prior_variance
-            gradients["biases_logvar"][layer_idx] -= kl_scale * 0.5 * (variance_b / prior_variance - 1.0)
-
-        self._assert_gradient_finiteness(gradients)
-        return gradients
-
-    def _assert_gradient_finiteness(self, gradients: Mapping[str, Sequence[Array]]) -> None:
-        for gradient_name, gradient_values in gradients.items():
-            for layer_idx, gradient in enumerate(gradient_values):
-                self._assert_finite_array(
-                    np.asarray(gradient, dtype=float),
-                    name=f"{gradient_name}[{layer_idx}]",
-                    operation="gradient_validation",
+            logits, cache = self._forward_with_parameters(
+                x, sampled_weights, sampled_biases
+            )
+            sample_loss, output_gradient = self._data_loss_and_gradient(logits, y)
+            weight_gradient, bias_gradient = self._sample_gradients(
+                output_gradient, cache, sampled_weights
+            )
+            data_loss += sample_loss
+            for index in range(len(self.weight_mu)):
+                gradients["weight_mu"][index] += weight_gradient[index]
+                gradients["bias_mu"][index] += bias_gradient[index]
+                gradients["weight_rho"][index] += (
+                    weight_gradient[index]
+                    * epsilons["weight_rho"][index]
+                    * _sigmoid(self.weight_rho[index])
                 )
+                gradients["bias_rho"][index] += (
+                    bias_gradient[index]
+                    * epsilons["bias_rho"][index]
+                    * _sigmoid(self.bias_rho[index])
+                )
+        data_loss /= num_samples
+        for values in gradients.values():
+            for item in values:
+                item /= num_samples
 
-    def _global_gradient_norm(self, gradients: Mapping[str, Sequence[Array]]) -> float:
-        squared_norm = 0.0
-        for gradient_values in gradients.values():
-            for gradient in gradient_values:
-                squared_norm += float(np.sum(np.asarray(gradient, dtype=float) ** 2))
-        return float(math.sqrt(max(squared_norm, 0.0)))
+        kl_value = 0.0
+        prior_variance = math.exp(self.config.prior_logvar)
+        prior_std = math.sqrt(prior_variance)
+        for location_name, rho_name in (
+            ("weight_mu", "weight_rho"),
+            ("bias_mu", "bias_rho"),
+        ):
+            locations = getattr(self, location_name)
+            rhos = getattr(self, rho_name)
+            for index, (location, rho) in enumerate(
+                zip(locations, rhos, strict=True)
+            ):
+                sigma = np.maximum(
+                    _softplus(rho), self.config.stability_epsilon
+                )
+                kl_value += float(
+                    np.sum(
+                        np.log(prior_std / sigma)
+                        + (
+                            sigma**2
+                            + (location - self.config.prior_mu) ** 2
+                        )
+                        / (2.0 * prior_variance)
+                        - 0.5
+                    )
+                )
+                location_gradient = (
+                    location - self.config.prior_mu
+                ) / prior_variance
+                sigma_gradient = -1.0 / sigma + sigma / prior_variance
+                gradients[location_name][index] += location_gradient / dataset_size
+                gradients[rho_name][index] += (
+                    sigma_gradient * _sigmoid(rho) / dataset_size
+                )
+        kl_per_observation = kl_value / dataset_size
+        negative_elbo = data_loss + kl_per_observation
+        if not all(
+            math.isfinite(value)
+            for value in (negative_elbo, data_loss, kl_per_observation)
+        ):
+            raise TuningEvaluationError("Variational objective became non-finite.")
+        return negative_elbo, data_loss, kl_per_observation, gradients
 
-    def _clip_gradients(self, gradients: Dict[str, List[Array]]) -> float:
-        gradient_norm = self._global_gradient_norm(gradients)
-        if self.gradient_clip_norm is not None and gradient_norm > self.gradient_clip_norm:
-            scale = self.gradient_clip_norm / (gradient_norm + self.stability_epsilon)
-            for gradient_name, gradient_values in gradients.items():
-                gradients[gradient_name] = [gradient * scale for gradient in gradient_values]
-            gradient_norm = self._global_gradient_norm(gradients)
-        self.last_gradient_norm = gradient_norm
-        return gradient_norm
-
-    @error_boundary(
-        error_cls=TuningOptimizationError,
-        message="Bayesian neural network training step failed.",
-        context_builder=lambda exc, args, kwargs: args[0]._context("train_step") if args else None,
-    )
-    def train_step(
-        self,
-        x_batch: Array,
-        y_batch: Array,
-        num_samples: int = 1,
-        *,
-        dataset_size: Optional[int] = None,
-    ) -> Tuple[float, float]:
-        x_valid, y_valid = self._validate_training_batch(x_batch, y_batch, operation="train_step")
-        sample_count = self._validate_sample_count(num_samples, operation="train_step")
-        resolved_dataset_size = self._resolve_dataset_size(dataset_size, x_valid.shape[0], operation="train_step")
-
-        gradients = self._compute_gradients(
-            x_valid,
-            y_valid,
-            num_samples=sample_count,
-            dataset_size=resolved_dataset_size,
+    def _clip_gradients(self, gradients: Mapping[str, Sequence[Array]]) -> float:
+        norm = math.sqrt(
+            sum(
+                float(np.sum(item**2))
+                for values in gradients.values()
+                for item in values
+            )
         )
-        gradient_norm = self._clip_gradients(gradients)
+        if not math.isfinite(norm):
+            raise TuningEvaluationError("Gradient norm is non-finite.")
+        clip = self.config.gradient_clip_norm
+        if clip is not None and norm > clip:
+            scale = clip / max(norm, self.config.stability_epsilon)
+            for values in gradients.values():
+                for item in values:
+                    item *= scale
+        self.last_gradient_norm = norm
+        return norm
 
-        for layer_idx in range(self.num_layers):
-            self.weights_mu[layer_idx] += self.learning_rate * gradients["weights_mu"][layer_idx]
-            self.weights_logvar[layer_idx] += self.learning_rate * gradients["weights_logvar"][layer_idx]
-            self.biases_mu[layer_idx] += self.learning_rate * gradients["biases_mu"][layer_idx]
-            self.biases_logvar[layer_idx] += self.learning_rate * gradients["biases_logvar"][layer_idx]
-
-            self.weights_logvar[layer_idx] = np.clip(self.weights_logvar[layer_idx], *self.logvar_clip_range)
-            self.biases_logvar[layer_idx] = np.clip(self.biases_logvar[layer_idx], *self.logvar_clip_range)
-
+    def _apply_adam(self, gradients: Mapping[str, Sequence[Array]]) -> None:
         self.training_steps += 1
-        self._assert_all_parameters_finite(operation="post_train_step")
+        correction1 = 1.0 - self.config.beta1**self.training_steps
+        correction2 = 1.0 - self.config.beta2**self.training_steps
+        parameters = self._parameter_collections()
+        for name, values in parameters.items():
+            for index, parameter in enumerate(values):
+                gradient = gradients[name][index]
+                self._adam_m[name][index] = (
+                    self.config.beta1 * self._adam_m[name][index]
+                    + (1.0 - self.config.beta1) * gradient
+                )
+                self._adam_v[name][index] = (
+                    self.config.beta2 * self._adam_v[name][index]
+                    + (1.0 - self.config.beta2) * gradient**2
+                )
+                first = self._adam_m[name][index] / correction1
+                second = self._adam_v[name][index] / correction2
+                parameter -= self.config.learning_rate * first / (
+                    np.sqrt(second) + self.config.adam_epsilon
+                )
+        self._assert_finite_parameters("optimizer_step")
 
-        elbo_value, kl_value = self.elbo(
-            x_valid,
-            y_valid,
-            num_samples=max(1, min(sample_count, 5)),
-            dataset_size=resolved_dataset_size,
-        )
-        self.last_metrics = {
-            "elbo": float(elbo_value),
-            "kl_divergence": float(kl_value),
-            "gradient_norm": float(gradient_norm),
-        }
-        return float(elbo_value), float(kl_value)
-
-    def _resolve_training_defaults(
-        self,
-        *,
-        epochs: Optional[int],
-        batch_size: Optional[int],
-        num_samples: Optional[int],
-        shuffle: Optional[bool],
-        early_stopping_patience: Optional[int],
-        min_delta: Optional[float],
-    ) -> Dict[str, Any]:
-        training_cfg = self.bnn_config.get("training", {}) if isinstance(self.bnn_config.get("training", {}), Mapping) else {}
-        resolved = {
-            "epochs": int(training_cfg.get("epochs", 100) if epochs is None else epochs),
-            "batch_size": int(training_cfg.get("batch_size", 32) if batch_size is None else batch_size),
-            "num_samples": int(training_cfg.get("num_samples", 3) if num_samples is None else num_samples),
-            "shuffle": bool(training_cfg.get("shuffle", True) if shuffle is None else shuffle),
-            "early_stopping_patience": (
-                training_cfg.get("early_stopping_patience", 10)
-                if early_stopping_patience is None
-                else early_stopping_patience
-            ),
-            "min_delta": float(training_cfg.get("min_delta", 1e-4) if min_delta is None else min_delta),
-        }
-        return resolved
-
-    @error_boundary(
-        error_cls=TuningOptimizationError,
-        message="Bayesian neural network fit() failed.",
-        context_builder=lambda exc, args, kwargs: args[0]._context("fit") if args else None,
-    )
     def fit(
         self,
-        x_train: Array,
-        y_train: Array,
+        x_train: Any,
+        y_train: Any,
         *,
-        epochs: Optional[int] = None,
-        batch_size: Optional[int] = None,
-        num_samples: Optional[int] = None,
-        shuffle: Optional[bool] = None,
-        validation_data: Optional[Tuple[Array, Array]] = None,
-        early_stopping_patience: Optional[int] = None,
-        min_delta: Optional[float] = None,
-        verbose: bool = False,
-    ) -> Dict[str, Any]:
-        train_x, train_y = self._validate_training_batch(x_train, y_train, operation="fit")
-        defaults = self._resolve_training_defaults(
-            epochs=epochs,
-            batch_size=batch_size,
-            num_samples=num_samples,
-            shuffle=shuffle,
-            early_stopping_patience=early_stopping_patience,
-            min_delta=min_delta,
+        validation_data: tuple[Any, Any] | None = None,
+        epochs: int = 100,
+        batch_size: int = 64,
+        num_samples: int = 3,
+        validation_num_samples: int = 10,
+        shuffle: bool = True,
+        early_stopping_patience: int | None = 10,
+        min_delta: float = 0.0,
+        restore_best_weights: bool = True,
+    ) -> dict[str, Any]:
+        x = self._validate_features(x_train, "x_train")
+        y = self._prepare_targets(y_train, len(x), "y_train")
+        options = self._validate_fit_options(
+            epochs,
+            batch_size,
+            num_samples,
+            validation_num_samples,
+            shuffle,
+            early_stopping_patience,
+            min_delta,
+            restore_best_weights,
         )
-
-        raise_for_condition(
-            defaults["epochs"] < 1,
-            "epochs must be >= 1.",
-            error_cls=TuningValidationError,
-            context=self._context("fit"),
-            details={"epochs": defaults["epochs"]},
-        )
-        raise_for_condition(
-            defaults["batch_size"] < 1,
-            "batch_size must be >= 1.",
-            error_cls=TuningValidationError,
-            context=self._context("fit"),
-            details={"batch_size": defaults["batch_size"]},
-        )
-        raise_for_condition(
-            defaults["num_samples"] < 1,
-            "num_samples must be >= 1.",
-            error_cls=TuningValidationError,
-            context=self._context("fit"),
-            details={"num_samples": defaults["num_samples"]},
-        )
-        raise_for_condition(
-            defaults["min_delta"] < 0.0,
-            "min_delta must be >= 0.",
-            error_cls=TuningValidationError,
-            context=self._context("fit"),
-            details={"min_delta": defaults["min_delta"]},
-        )
-
-        val_x: Optional[Array] = None
-        val_y: Optional[Array] = None
+        validation: tuple[Array, Array] | None = None
         if validation_data is not None:
-            val_x, val_y = self._validate_training_batch(
-                validation_data[0],
-                validation_data[1],
-                operation="fit_validation_data",
-            )
-
-        history = BNNTrainingHistory()
-        best_state: Optional[Dict[str, Any]] = None
-        best_validation_elbo = -math.inf
-        patience_counter = 0
-        num_rows = train_x.shape[0]
-
-        for epoch in range(1, defaults["epochs"] + 1):
-            indices = np.arange(num_rows)
-            if defaults["shuffle"]:
-                self.rng.shuffle(indices)
-            shuffled_x = train_x[indices]
-            shuffled_y = train_y[indices]
-
-            epoch_elbos: List[float] = []
-            epoch_kls: List[float] = []
-            epoch_grad_norms: List[float] = []
-
-            for start in range(0, num_rows, defaults["batch_size"]):
-                end = min(start + defaults["batch_size"], num_rows)
-                batch_x = shuffled_x[start:end]
-                batch_y = shuffled_y[start:end]
-                elbo_value, kl_value = self.train_step(
-                    batch_x,
-                    batch_y,
-                    num_samples=defaults["num_samples"],
-                    dataset_size=num_rows,
+            if not isinstance(validation_data, tuple) or len(validation_data) != 2:
+                raise TuningValidationError(
+                    "validation_data must be an (x_validation, y_validation) tuple."
                 )
-                epoch_elbos.append(float(elbo_value))
-                epoch_kls.append(float(kl_value))
-                epoch_grad_norms.append(float(self.last_gradient_norm or 0.0))
-                history.total_steps += 1
-
-            train_metrics = self.evaluate(
-                train_x,
-                train_y,
-                num_samples=max(5, defaults["num_samples"]),
-                dataset_size=num_rows,
+            validation_x = self._validate_features(
+                validation_data[0], "x_validation"
             )
+            validation_y = self._prepare_targets(
+                validation_data[1], len(validation_x), "y_validation"
+            )
+            validation = (validation_x, validation_y)
+        elif early_stopping_patience is not None:
+            raise TuningValidationError(
+                "early_stopping_patience requires validation_data."
+            )
+
+        history = BayesianTrainingHistory()
+        best_state: dict[str, Any] | None = None
+        best_loss = math.inf
+        epochs_without_improvement = 0
+        indices = np.arange(len(x))
+
+        for epoch in range(1, options["epochs"] + 1):
+            if options["shuffle"]:
+                self.rng.shuffle(indices)
+            negative_elbo_total = 0.0
+            data_loss_total = 0.0
+            kl_total = 0.0
+            observed = 0
+            gradient_norms: list[float] = []
+            for start in range(0, len(x), options["batch_size"]):
+                batch_indices = indices[start : start + options["batch_size"]]
+                negative_elbo, data_loss, kl, gradients = (
+                    self._negative_elbo_and_gradients(
+                        x[batch_indices],
+                        y[batch_indices],
+                        dataset_size=len(x),
+                        num_samples=options["num_samples"],
+                    )
+                )
+                gradient_norms.append(self._clip_gradients(gradients))
+                self._apply_adam(gradients)
+                batch_count = len(batch_indices)
+                negative_elbo_total += negative_elbo * batch_count
+                data_loss_total += data_loss * batch_count
+                kl_total += kl * batch_count
+                observed += batch_count
 
             history.epochs.append(epoch)
-            history.train_elbo.append(float(train_metrics["elbo"]))
-            history.train_kl.append(float(train_metrics["kl_divergence"]))
-            history.train_log_likelihood.append(float(train_metrics["log_likelihood"]))
-            history.gradient_norm.append(float(np.mean(epoch_grad_norms) if epoch_grad_norms else 0.0))
-
-            if val_x is not None and val_y is not None:
-                validation_metrics = self.evaluate(
-                    val_x,
-                    val_y,
-                    num_samples=max(5, defaults["num_samples"]),
-                    dataset_size=val_x.shape[0],
+            history.training_negative_elbo.append(
+                float(negative_elbo_total / observed)
+            )
+            history.training_data_loss.append(float(data_loss_total / observed))
+            history.kl_per_observation.append(float(kl_total / observed))
+            history.gradient_norm.append(float(np.mean(gradient_norms)))
+            if validation is not None:
+                validation_loss = self._negative_elbo_value(
+                    *validation,
+                    dataset_size=len(x),
+                    num_samples=options["validation_num_samples"],
                 )
-                current_val_elbo = float(validation_metrics["elbo"])
-                history.validation_elbo.append(current_val_elbo)
-                history.validation_kl.append(float(validation_metrics["kl_divergence"]))
-                history.validation_log_likelihood.append(float(validation_metrics["log_likelihood"]))
-
-                if current_val_elbo > best_validation_elbo + defaults["min_delta"]:
-                    best_validation_elbo = current_val_elbo
-                    history.best_validation_elbo = current_val_elbo
+                history.validation_negative_elbo.append(validation_loss)
+                if validation_loss < best_loss - options["min_delta"]:
+                    best_loss = validation_loss
                     history.best_epoch = epoch
-                    patience_counter = 0
-                    best_state = self.to_serializable_dict(include_history=False)
+                    history.best_validation_negative_elbo = validation_loss
+                    best_state = self.state_dict()
+                    epochs_without_improvement = 0
                 else:
-                    patience_counter += 1
-                    if defaults["early_stopping_patience"] is not None and patience_counter >= int(
-                        defaults["early_stopping_patience"]
-                    ):
-                        history.stopped_early = True
-                        break
-            else:
-                history.validation_elbo.append(float("nan"))
-                history.validation_kl.append(float("nan"))
-                history.validation_log_likelihood.append(float("nan"))
+                    epochs_without_improvement += 1
+                patience = options["early_stopping_patience"]
+                if patience is not None and epochs_without_improvement >= patience:
+                    history.stopped_early = True
+                    break
 
-            if verbose:
-                logger.info(
-                    "BNN epoch %s/%s | train_elbo=%.6f | train_kl=%.6f | grad_norm=%.6f",
-                    epoch,
-                    defaults["epochs"],
-                    history.train_elbo[-1],
-                    history.train_kl[-1],
-                    history.gradient_norm[-1],
-                )
-
-        if history.stopped_early and best_state is not None:
-            self._load_from_payload(best_state, validate_shapes=True)
-
+        executed_steps = self.training_steps
+        if best_state is not None and options["restore_best_weights"]:
+            self.load_state_dict(best_state)
+        history.total_steps = executed_steps
+        self.last_metrics = self.evaluate(
+            x, y, targets_prepared=True, num_samples=options["validation_num_samples"]
+        )
         return history.to_dict()
 
-    @error_boundary(
-        error_cls=TuningEvaluationError,
-        message="Bayesian neural network prediction failed.",
-        context_builder=lambda exc, args, kwargs: args[0]._context("predict") if args else None,
-    )
-    def predict(self, x: Array, num_samples: int = 100) -> Tuple[Array, Array]:
-        x_array = np.asarray(x, dtype=float)
-        raise_for_condition(
-            x_array.ndim != 2,
-            "x must be a 2D array of shape (batch_size, input_dim).",
-            error_cls=TuningValidationError,
-            context=self._context("predict"),
-            details={"x_shape": list(x_array.shape)},
+    def fit_for_tuning(
+        self,
+        x_train: Any,
+        y_train: Any,
+        x_validation: Any,
+        y_validation: Any,
+    ) -> dict[str, Any]:
+        """Apply the explicit fit options captured by ``from_tuning_params``."""
+
+        return self.fit(
+            x_train,
+            y_train,
+            validation_data=(x_validation, y_validation),
+            **dict(self.tuning_fit_parameters),
         )
-        raise_for_condition(
-            x_array.shape[1] != self.layer_sizes[0],
-            "Input feature dimension mismatch.",
-            error_cls=TuningValidationError,
-            context=self._context("predict"),
-            details={"expected_input_dim": self.layer_sizes[0], "received_input_dim": int(x_array.shape[1])},
-        )
-        sample_count = self._validate_sample_count(num_samples, operation="predict")
-        self._assert_finite_array(x_array, name="x", operation="predict")
 
-        predictions = []
-        for _ in range(sample_count):
-            sampled_weights, sampled_biases = self.sample_parameters()
-            predictions.append(self.forward(x_array, sampled_weights, sampled_biases))
-
-        stacked = np.stack(predictions, axis=0)
-        self._assert_finite_array(stacked, name="prediction_stack", operation="predict")
-        return np.mean(stacked, axis=0), np.std(stacked, axis=0)
-
-    @error_boundary(
-        error_cls=TuningEvaluationError,
-        message="Bayesian neural network predictive interval computation failed.",
-        context_builder=lambda exc, args, kwargs: args[0]._context("predict_interval") if args else None,
-    )
-    def predict_interval(
+    def _negative_elbo_value(
         self,
         x: Array,
+        y: Array,
         *,
-        num_samples: int = 200,
+        dataset_size: int,
+        num_samples: int,
+    ) -> float:
+        data_losses: list[float] = []
+        for _ in range(num_samples):
+            weights, biases, _samples, _epsilons = self._sample_parameters(self.rng)
+            logits, _ = self._forward_with_parameters(x, weights, biases)
+            data_loss, _ = self._data_loss_and_gradient(logits, y)
+            data_losses.append(data_loss)
+        kl = self._kl_divergence() / dataset_size
+        value = float(np.mean(data_losses) + kl)
+        if not math.isfinite(value):
+            raise TuningEvaluationError("Validation negative ELBO is non-finite.")
+        return value
+
+    def _kl_divergence(self) -> float:
+        prior_variance = math.exp(self.config.prior_logvar)
+        prior_std = math.sqrt(prior_variance)
+        total = 0.0
+        for location_name, rho_name in (
+            ("weight_mu", "weight_rho"),
+            ("bias_mu", "bias_rho"),
+        ):
+            for location, rho in zip(
+                getattr(self, location_name), getattr(self, rho_name), strict=True
+            ):
+                sigma = np.maximum(
+                    _softplus(rho), self.config.stability_epsilon
+                )
+                total += float(
+                    np.sum(
+                        np.log(prior_std / sigma)
+                        + (
+                            sigma**2
+                            + (location - self.config.prior_mu) ** 2
+                        )
+                        / (2.0 * prior_variance)
+                        - 0.5
+                    )
+                )
+        return total
+
+    def predict_distribution(
+        self,
+        x: Any,
+        *,
+        num_samples: int = 100,
+        seed: int | None = None,
         lower_quantile: float = 0.05,
         upper_quantile: float = 0.95,
-    ) -> Dict[str, Array]:
-        raise_for_condition(
-            not 0.0 <= lower_quantile < upper_quantile <= 1.0,
-            "Quantiles must satisfy 0 <= lower < upper <= 1.",
-            error_cls=TuningValidationError,
-            context=self._context("predict_interval"),
-            details={"lower_quantile": lower_quantile, "upper_quantile": upper_quantile},
+    ) -> dict[str, Array]:
+        features = self._validate_features(x, "x")
+        self._validate_prediction_options(
+            num_samples, lower_quantile, upper_quantile
         )
-        x_array = np.asarray(x, dtype=float)
-        sample_count = self._validate_sample_count(num_samples, operation="predict_interval")
-
-        predictions = []
-        for _ in range(sample_count):
-            sampled_weights, sampled_biases = self.sample_parameters()
-            predictions.append(self.forward(x_array, sampled_weights, sampled_biases))
-
-        stacked = np.stack(predictions, axis=0)
-        return {
-            "mean": np.mean(stacked, axis=0),
-            "std": np.std(stacked, axis=0),
-            "lower": np.quantile(stacked, lower_quantile, axis=0),
-            "upper": np.quantile(stacked, upper_quantile, axis=0),
+        rng = np.random.default_rng(
+            self.config.random_state if seed is None else seed
+        )
+        predictions: list[Array] = []
+        for _ in range(num_samples):
+            weights, biases, _samples, _epsilons = self._sample_parameters(rng)
+            logits, _ = self._forward_with_parameters(features, weights, biases)
+            if self.config.task_type == "binary_classification":
+                predictions.append(_sigmoid(logits))
+            elif self.config.task_type == "multiclass_classification":
+                predictions.append(_softmax(logits))
+            else:
+                predictions.append(logits)
+        samples = np.stack(predictions, axis=0)
+        mean = np.mean(samples, axis=0)
+        epistemic_std = np.std(samples, axis=0, ddof=0)
+        result = {
+            "mean": mean,
+            "epistemic_std": epistemic_std,
+            "lower": np.quantile(samples, lower_quantile, axis=0),
+            "upper": np.quantile(samples, upper_quantile, axis=0),
         }
+        if self.config.task_type == "regression":
+            predictive_std = np.sqrt(
+                epistemic_std**2 + self.config.likelihood_std**2
+            )
+            normal = NormalDist()
+            result["predictive_std"] = predictive_std
+            result["predictive_lower"] = mean + normal.inv_cdf(
+                lower_quantile
+            ) * predictive_std
+            result["predictive_upper"] = mean + normal.inv_cdf(
+                upper_quantile
+            ) * predictive_std
+        return result
 
-    def to_serializable_dict(self, *, include_history: bool = True) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "model_type": "BayesianNeuralNetwork",
-            "model_format_version": self.MODEL_FORMAT_VERSION,
-            "layer_sizes": list(self.layer_sizes),
-            "learning_rate": self.learning_rate,
-            "prior_mu": self.prior_mu,
-            "prior_logvar": self.prior_logvar,
-            "random_state": self.random_state,
-            "logvar_clip_range": list(self.logvar_clip_range),
-            "gradient_clip_norm": self.gradient_clip_norm,
-            "weight_init_scale": self.weight_init_scale,
-            "hidden_activation": self.hidden_activation,
-            "likelihood_std": self.likelihood_std,
-            "min_variance": self.min_variance,
-            "stability_epsilon": self.stability_epsilon,
-            "leaky_relu_slope": self.leaky_relu_slope,
-            "training_steps": self.training_steps,
-            "weights_mu": [weights.tolist() for weights in self.weights_mu],
-            "weights_logvar": [weights.tolist() for weights in self.weights_logvar],
-            "biases_mu": [bias.tolist() for bias in self.biases_mu],
-            "biases_logvar": [bias.tolist() for bias in self.biases_logvar],
-            "config_path": self.config.get("__config_path__"),
-        }
-        if include_history and self.last_metrics:
-            payload["last_metrics"] = dict(self.last_metrics)
-        return payload
+    def predict_proba(
+        self, x: Any, *, num_samples: int = 100, seed: int | None = None
+    ) -> Array:
+        if self.config.task_type == "regression":
+            raise TuningValidationError(
+                "predict_proba is unavailable for regression."
+            )
+        return self.predict_distribution(
+            x, num_samples=num_samples, seed=seed
+        )["mean"]
 
-    @error_boundary(
-        error_cls=TuningPersistenceError,
-        message="Failed to persist Bayesian neural network model.",
-        context_builder=lambda exc, args, kwargs: args[0]._context("save") if args else None,
-        detail_builder=lambda exc, args, kwargs: {"output": kwargs.get("filename", args[1] if len(args) > 1 else None)},
-    )
-    def save(self, filename: str) -> None:
-        output_path = Path(filename)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = self.to_serializable_dict(include_history=True)
+    def predict(
+        self, x: Any, *, num_samples: int = 100, seed: int | None = None
+    ) -> Array:
+        mean = self.predict_distribution(
+            x, num_samples=num_samples, seed=seed
+        )["mean"]
+        if self.config.task_type == "regression":
+            return mean[:, 0] if mean.shape[1] == 1 else mean
+        if self.config.task_type == "binary_classification":
+            return (
+                mean[:, 0] >= self.config.prediction_threshold
+            ).astype(int)
+        return np.argmax(mean, axis=1)
 
-        with output_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-
-    def _load_from_payload(self, payload: Mapping[str, Any], *, validate_shapes: bool) -> None:
-        try:
-            self.weights_mu = [np.asarray(weights, dtype=float) for weights in payload["weights_mu"]]
-            self.weights_logvar = [np.asarray(weights, dtype=float) for weights in payload["weights_logvar"]]
-            self.biases_mu = [np.asarray(bias, dtype=float) for bias in payload["biases_mu"]]
-            self.biases_logvar = [np.asarray(bias, dtype=float) for bias in payload["biases_logvar"]]
-            self.training_steps = int(payload.get("training_steps", self.training_steps))
-            self.last_metrics = {
-                str(key): float(value)
-                for key, value in dict(payload.get("last_metrics", {})).items()
-                if isinstance(value, (int, float))
+    def evaluate(
+        self,
+        x: Any,
+        y: Any,
+        *,
+        targets_prepared: bool = False,
+        num_samples: int = 100,
+        seed: int | None = None,
+    ) -> dict[str, float]:
+        features = self._validate_features(x, "x")
+        targets = (
+            np.asarray(y, dtype=float)
+            if targets_prepared
+            else self._prepare_targets(y, len(features), "y")
+        )
+        distribution = self.predict_distribution(
+            features, num_samples=num_samples, seed=seed
+        )
+        mean = distribution["mean"]
+        if self.config.task_type == "regression":
+            residual = mean - targets
+            variance = np.maximum(
+                distribution["predictive_std"] ** 2,
+                self.config.stability_epsilon,
+            )
+            metrics = {
+                "mse": float(np.mean(residual**2)),
+                "rmse": float(math.sqrt(np.mean(residual**2))),
+                "mae": float(np.mean(np.abs(residual))),
+                "predictive_nll": 0.5
+                * float(
+                    np.mean(
+                        np.log(2.0 * math.pi * variance)
+                        + residual**2 / variance
+                    )
+                ),
+                "mean_epistemic_std": float(
+                    np.mean(distribution["epistemic_std"])
+                ),
             }
-            if validate_shapes:
-                self._validate_parameter_shapes()
-            self._assert_all_parameters_finite(operation="load")
-        except KeyError as exc:
-            raise TuningPersistenceError(
-                "Serialized BNN payload is missing required fields.",
-                context=self._context("load"),
-                details={"missing_key": str(exc)},
-                cause=exc,
+        elif self.config.task_type == "binary_classification":
+            probabilities = np.maximum(
+                np.minimum(mean, 1.0 - self.config.stability_epsilon),
+                self.config.stability_epsilon,
+            )
+            predictions = (
+                probabilities >= self.config.prediction_threshold
+            ).astype(float)
+            metrics = {
+                "accuracy": float(np.mean(predictions == targets)),
+                "log_loss": -float(
+                    np.mean(
+                        targets * np.log(probabilities)
+                        + (1.0 - targets) * np.log(1.0 - probabilities)
+                    )
+                ),
+                "brier": float(np.mean((probabilities - targets) ** 2)),
+                "mean_epistemic_std": float(
+                    np.mean(distribution["epistemic_std"])
+                ),
+            }
+        else:
+            probabilities = np.maximum(mean, self.config.stability_epsilon)
+            truth = np.argmax(targets, axis=1)
+            metrics = {
+                "accuracy": float(np.mean(np.argmax(mean, axis=1) == truth)),
+                "log_loss": -float(
+                    np.mean(np.sum(targets * np.log(probabilities), axis=1))
+                ),
+                "mean_epistemic_std": float(
+                    np.mean(distribution["epistemic_std"])
+                ),
+            }
+        if not all(math.isfinite(value) for value in metrics.values()):
+            raise TuningEvaluationError("Evaluation produced non-finite metrics.")
+        self.last_metrics = metrics
+        return dict(metrics)
+
+    def state_dict(self) -> dict[str, Any]:
+        parameters = self._parameter_collections()
+        return {
+            "schema_version": self.STATE_SCHEMA_VERSION,
+            "layer_sizes": list(self.layer_sizes),
+            "config": self.get_config(),
+            **{
+                name: [item.copy() for item in values]
+                for name, values in parameters.items()
+            },
+            "adam_m": {
+                name: [item.copy() for item in values]
+                for name, values in self._adam_m.items()
+            },
+            "adam_v": {
+                name: [item.copy() for item in values]
+                for name, values in self._adam_v.items()
+            },
+            "training_steps": self.training_steps,
+            "last_gradient_norm": self.last_gradient_norm,
+            "last_metrics": dict(self.last_metrics),
+            "tuning_fit_parameters": dict(self.tuning_fit_parameters),
+            "rng_state": copy.deepcopy(self.rng.bit_generator.state),
+        }
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        if not isinstance(state, Mapping):
+            raise TuningValidationError("state must be a mapping.")
+        schema_version = state.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != self.STATE_SCHEMA_VERSION
+        ):
+            raise TuningValidationError("Unsupported Bayesian-network state schema.")
+        if tuple(state.get("layer_sizes", ())) != self.layer_sizes:
+            raise TuningValidationError("State layer sizes do not match the model.")
+        raw_config = state.get("config")
+        if not isinstance(raw_config, Mapping) or dict(raw_config) != self.get_config():
+            raise TuningValidationError("State configuration does not match the model.")
+        reference = self._parameter_collections()
+        loaded: dict[str, list[Array]] = {}
+        for name, expected_values in reference.items():
+            loaded[name] = self._load_array_collection(
+                state.get(name), expected_values, name
+            )
+        adam_m = state.get("adam_m")
+        adam_v = state.get("adam_v")
+        if not isinstance(adam_m, Mapping) or not isinstance(adam_v, Mapping):
+            raise TuningValidationError("State is missing Adam optimizer state.")
+        loaded_adam_m = {
+            name: self._load_array_collection(
+                adam_m.get(name), expected, f"adam_m.{name}"
+            )
+            for name, expected in reference.items()
+        }
+        loaded_adam_v = {
+            name: self._load_array_collection(
+                adam_v.get(name), expected, f"adam_v.{name}"
+            )
+            for name, expected in reference.items()
+        }
+        steps = state.get("training_steps", 0)
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+            raise TuningValidationError("training_steps must be a non-negative integer.")
+        raw_gradient_norm = state.get("last_gradient_norm")
+        try:
+            gradient_norm = (
+                None if raw_gradient_norm is None else float(raw_gradient_norm)
+            )
+        except (TypeError, ValueError) as exc:
+            raise TuningValidationError("last_gradient_norm is invalid.") from exc
+        if gradient_norm is not None and (
+            not math.isfinite(gradient_norm) or gradient_norm < 0
+        ):
+            raise TuningValidationError("last_gradient_norm is invalid.")
+        raw_metrics = state.get("last_metrics", {})
+        if not isinstance(raw_metrics, Mapping):
+            raise TuningValidationError("last_metrics must be a mapping.")
+        try:
+            last_metrics = {
+                str(name): float(value) for name, value in raw_metrics.items()
+            }
+        except (TypeError, ValueError) as exc:
+            raise TuningValidationError(
+                "last_metrics must contain numeric values."
             ) from exc
-        except Exception as exc:  # noqa: BLE001
-            raise wrap_exception(
-                exc,
-                message="Failed to restore Bayesian neural network weights from payload.",
-                error_cls=TuningPersistenceError,
-                context=self._context("load"),
-                details={"payload_keys": list(payload.keys())},
+        if not all(math.isfinite(value) for value in last_metrics.values()):
+            raise TuningValidationError("last_metrics contains non-finite values.")
+        fit_parameters = state.get("tuning_fit_parameters", {})
+        if not isinstance(fit_parameters, Mapping) or any(
+            name not in self.FIT_PARAMETER_NAMES for name in fit_parameters
+        ):
+            raise TuningValidationError("tuning_fit_parameters is invalid.")
+        loaded_fit_parameters = dict(fit_parameters)
+        rng_state = state.get("rng_state")
+        if not isinstance(rng_state, Mapping):
+            raise TuningValidationError("State is missing rng_state.")
+        loaded_rng_state = copy.deepcopy(dict(rng_state))
+        test_rng = np.random.default_rng()
+        try:
+            test_rng.bit_generator.state = loaded_rng_state
+        except (TypeError, ValueError) as exc:
+            raise TuningValidationError("rng_state is invalid.") from exc
+
+        # Commit only after every state component has been validated.  This
+        # preserves the current posterior if a checkpoint is malformed.
+        for name, values in loaded.items():
+            setattr(self, name, values)
+        self._adam_m = loaded_adam_m
+        self._adam_v = loaded_adam_v
+        self.training_steps = steps
+        self.last_gradient_norm = gradient_norm
+        self.last_metrics = last_metrics
+        self.tuning_fit_parameters = loaded_fit_parameters
+        self.rng.bit_generator.state = loaded_rng_state
+
+    @staticmethod
+    def _load_array_collection(
+        raw: Any, expected: Sequence[Array], name: str
+    ) -> list[Array]:
+        if not isinstance(raw, Sequence) or len(raw) != len(expected):
+            raise TuningValidationError(f"Invalid state collection {name!r}.")
+        try:
+            values = [np.asarray(item, dtype=float).copy() for item in raw]
+        except (TypeError, ValueError) as exc:
+            raise TuningValidationError(
+                f"State collection {name!r} must be numeric."
             ) from exc
+        if any(
+            item.shape != reference.shape
+            for item, reference in zip(values, expected, strict=True)
+        ):
+            raise TuningValidationError(
+                f"State collection {name!r} has incompatible shapes."
+            )
+        if any(not np.isfinite(item).all() for item in values):
+            raise TuningValidationError(
+                f"State collection {name!r} contains non-finite values."
+            )
+        return values
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            name: getattr(self.config, name)
+            for name in BayesianNetworkConfig.__dataclass_fields__
+        }
 
     @classmethod
-    @error_boundary(
-        error_cls=TuningPersistenceError,
-        message="Failed to load Bayesian neural network model.",
-        detail_builder=lambda exc, args, kwargs: {"filename": kwargs.get("filename", args[1] if len(args) > 1 else args[0] if args else None)},
-    )
-    def load(cls, filename: str) -> "BayesianNeuralNetwork":
-        input_path = Path(filename)
-        with input_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-
-        raise_for_condition(
-            payload.get("model_type") not in {None, "BayesianNeuralNetwork"},
-            "Serialized file does not contain a BayesianNeuralNetwork payload.",
-            error_cls=TuningPersistenceError,
-            context=TuningErrorContext(
-                component="BayesianNeuralNetwork",
-                operation="load",
-                strategy="variational_inference",
-                model_type="bayesian_neural_network",
-                output_path=str(input_path),
-            ),
-            details={"model_type": payload.get("model_type")},
+    def from_tuning_params(
+        cls,
+        *,
+        input_dim: int,
+        output_dim: int,
+        parameters: Mapping[str, Any],
+        base_config: Mapping[str, Any] | BayesianNetworkConfig | None = None,
+        seed: int | None = None,
+    ) -> "BayesianNeuralNetwork":
+        if not isinstance(parameters, Mapping):
+            raise TuningConfigError("parameters must be a mapping.")
+        allowed = {
+            "hidden_layer_sizes",
+            *cls.CONSTRUCTOR_PARAMETER_NAMES,
+            *cls.FIT_PARAMETER_NAMES,
+        }
+        unknown = set(parameters) - allowed
+        if unknown:
+            raise TuningConfigError(
+                "Unknown Bayesian-network tuning parameters.",
+                details={"unknown_parameters": sorted(str(item) for item in unknown)},
+            )
+        hidden = cls.parse_hidden_layer_sizes(
+            parameters.get("hidden_layer_sizes")
         )
-
+        if base_config is None:
+            config_values: dict[str, Any] = {}
+        elif isinstance(base_config, BayesianNetworkConfig):
+            config_values = {
+                name: getattr(base_config, name)
+                for name in BayesianNetworkConfig.__dataclass_fields__
+            }
+        else:
+            config_values = {
+                name: value
+                for name, value in base_config.items()
+                if name in BayesianNetworkConfig.__dataclass_fields__
+            }
+        config_values.update(
+            {
+                name: value
+                for name, value in parameters.items()
+                if name in cls.CONSTRUCTOR_PARAMETER_NAMES
+            }
+        )
+        if seed is not None:
+            config_values["random_state"] = seed
         model = cls(
-            layer_sizes=payload["layer_sizes"],
-            learning_rate=float(payload.get("learning_rate", 0.01)),
-            prior_mu=float(payload.get("prior_mu", 0.0)),
-            prior_logvar=float(payload.get("prior_logvar", 0.0)),
-            random_state=payload.get("random_state"),
-            logvar_clip_range=tuple(payload.get("logvar_clip_range", [-8.0, 4.0])),
-            gradient_clip_norm=payload.get("gradient_clip_norm"),
-            weight_init_scale=float(payload.get("weight_init_scale", 1.0)),
-            hidden_activation=str(payload.get("hidden_activation", "relu")),
-            likelihood_std=float(payload.get("likelihood_std", 1.0)),
-            min_variance=float(payload.get("min_variance", 1e-6)),
-            stability_epsilon=float(payload.get("stability_epsilon", 1e-8)),
-            leaky_relu_slope=float(payload.get("leaky_relu_slope", 0.01)),
+            (int(input_dim), *hidden, int(output_dim)),
+            BayesianNetworkConfig(**config_values),
         )
-        model._load_from_payload(payload, validate_shapes=True)
+        training_defaults = (
+            base_config.get("training", {})
+            if isinstance(base_config, Mapping)
+            else {}
+        )
+        if training_defaults is not None and not isinstance(
+            training_defaults, Mapping
+        ):
+            raise TuningConfigError("bnn.training must be a mapping.")
+        model.tuning_fit_parameters = {
+            name: value
+            for name, value in dict(training_defaults or {}).items()
+            if name in cls.FIT_PARAMETER_NAMES
+        }
+        model.tuning_fit_parameters.update(
+            {
+                name: value
+                for name, value in parameters.items()
+                if name in cls.FIT_PARAMETER_NAMES
+            }
+        )
         return model
 
-    def _validate_parameter_shapes(self) -> None:
-        if not (
-            len(self.weights_mu)
-            == len(self.weights_logvar)
-            == len(self.biases_mu)
-            == len(self.biases_logvar)
-            == self.num_layers
-        ):
-            raise TuningPersistenceError(
-                "Parameter collections contain inconsistent layer counts.",
-                context=self._context("validate_parameter_shapes"),
-                details={
-                    "weights_mu": len(self.weights_mu),
-                    "weights_logvar": len(self.weights_logvar),
-                    "biases_mu": len(self.biases_mu),
-                    "biases_logvar": len(self.biases_logvar),
-                    "expected_num_layers": self.num_layers,
-                },
+    @staticmethod
+    def parse_hidden_layer_sizes(value: Any) -> tuple[int, ...]:
+        if isinstance(value, str):
+            parts = [item.strip() for item in value.split(",") if item.strip()]
+            values = tuple(int(item) for item in parts)
+        elif isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+            values = (int(value),)
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            values = tuple(int(item) for item in value)
+        else:
+            raise TuningConfigError(
+                "hidden_layer_sizes must be an integer, comma-delimited string, "
+                "or sequence of integers."
             )
+        if not values or any(item <= 0 for item in values):
+            raise TuningConfigError(
+                "hidden_layer_sizes must contain positive integers."
+            )
+        return values
 
-        for layer_idx in range(self.num_layers):
-            expected_weight_shape = (self.layer_sizes[layer_idx], self.layer_sizes[layer_idx + 1])
-            expected_bias_shape = (self.layer_sizes[layer_idx + 1],)
-            if self.weights_mu[layer_idx].shape != expected_weight_shape or self.weights_logvar[layer_idx].shape != expected_weight_shape:
-                raise TuningPersistenceError(
-                    f"Invalid weight shape at layer {layer_idx}.",
-                    context=self._context("validate_parameter_shapes"),
-                    details={
-                        "layer_idx": layer_idx,
-                        "expected_shape": list(expected_weight_shape),
-                        "weights_mu_shape": list(self.weights_mu[layer_idx].shape),
-                        "weights_logvar_shape": list(self.weights_logvar[layer_idx].shape),
-                    },
-                )
-            if self.biases_mu[layer_idx].shape != expected_bias_shape or self.biases_logvar[layer_idx].shape != expected_bias_shape:
-                raise TuningPersistenceError(
-                    f"Invalid bias shape at layer {layer_idx}.",
-                    context=self._context("validate_parameter_shapes"),
-                    details={
-                        "layer_idx": layer_idx,
-                        "expected_shape": list(expected_bias_shape),
-                        "biases_mu_shape": list(self.biases_mu[layer_idx].shape),
-                        "biases_logvar_shape": list(self.biases_logvar[layer_idx].shape),
-                    },
-                )
+    def _validate_features(self, values: Any, name: str) -> Array:
+        try:
+            array = np.asarray(values, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise TuningValidationError(f"{name} must be numeric.") from exc
+        if array.ndim != 2 or array.shape[1] != self.layer_sizes[0]:
+            raise TuningValidationError(
+                f"{name} must have shape (samples, {self.layer_sizes[0]})."
+            )
+        if len(array) < 1 or not np.isfinite(array).all():
+            raise TuningValidationError(
+                f"{name} must be non-empty and contain only finite values."
+            )
+        return array
 
-    def summary(self) -> Dict[str, Any]:
-        parameter_count = sum(parameter.size for parameter in self.weights_mu + self.biases_mu)
-        variational_parameter_count = sum(parameter.size for parameter in self.weights_logvar + self.biases_logvar)
+    def _prepare_targets(self, values: Any, count: int, name: str) -> Array:
+        try:
+            array = np.asarray(values)
+        except Exception as exc:
+            raise TuningValidationError(f"{name} cannot be converted to an array.") from exc
+        if array.ndim == 0 or array.shape[0] != count:
+            raise TuningValidationError(
+                f"{name} sample count differs from the feature sample count."
+            )
+        output_dim = self.layer_sizes[-1]
+        if self.config.task_type == "regression":
+            numeric = np.asarray(array, dtype=float)
+            if numeric.ndim == 1:
+                numeric = numeric.reshape(-1, 1)
+            if numeric.ndim != 2 or numeric.shape[1] != output_dim:
+                raise TuningValidationError(
+                    f"{name} must have {output_dim} regression output column(s)."
+                )
+            result = numeric
+        elif self.config.task_type == "binary_classification":
+            numeric = np.asarray(array, dtype=float).reshape(-1, 1)
+            if not np.isin(numeric, (0.0, 1.0)).all():
+                raise TuningValidationError(
+                    f"{name} must contain binary labels 0 and 1."
+                )
+            result = numeric
+        else:
+            if array.ndim == 2 and array.shape[1] == output_dim:
+                numeric = np.asarray(array, dtype=float)
+                if not np.allclose(np.sum(numeric, axis=1), 1.0) or np.any(
+                    numeric < 0
+                ):
+                    raise TuningValidationError(
+                        f"{name} one-hot targets are invalid."
+                    )
+                result = numeric
+            else:
+                labels = np.asarray(array).reshape(-1)
+                if not np.issubdtype(labels.dtype, np.integer):
+                    raise TuningValidationError(
+                        f"{name} multiclass labels must be integers."
+                    )
+                labels = labels.astype(int)
+                if np.any(labels < 0) or np.any(labels >= output_dim):
+                    raise TuningValidationError(
+                        f"{name} labels must be within [0, {output_dim - 1}]."
+                    )
+                result = np.eye(output_dim, dtype=float)[labels]
+        if not np.isfinite(result).all():
+            raise TuningValidationError(f"{name} contains non-finite values.")
+        return result
+
+    @staticmethod
+    def _validate_fit_options(
+        epochs: Any,
+        batch_size: Any,
+        num_samples: Any,
+        validation_num_samples: Any,
+        shuffle: Any,
+        patience: Any,
+        min_delta: Any,
+        restore: Any,
+    ) -> dict[str, Any]:
+        for name, value in {
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "num_samples": num_samples,
+            "validation_num_samples": validation_num_samples,
+        }.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise TuningValidationError(f"{name} must be a positive integer.")
+        if not isinstance(shuffle, bool) or not isinstance(restore, bool):
+            raise TuningValidationError(
+                "shuffle and restore_best_weights must be bool values."
+            )
+        if patience is not None and (
+            isinstance(patience, bool)
+            or not isinstance(patience, int)
+            or patience < 1
+        ):
+            raise TuningValidationError(
+                "early_stopping_patience must be a positive integer or None."
+            )
+        delta = _finite_float(min_delta, "min_delta")
+        if delta < 0:
+            raise TuningValidationError("min_delta must be non-negative.")
         return {
-            "model_type": "BayesianNeuralNetwork",
-            "layer_sizes": list(self.layer_sizes),
-            "num_layers": self.num_layers,
-            "parameter_count": int(parameter_count),
-            "variational_parameter_count": int(variational_parameter_count),
-            "learning_rate": self.learning_rate,
-            "prior_mu": self.prior_mu,
-            "prior_logvar": self.prior_logvar,
-            "hidden_activation": self.hidden_activation,
-            "likelihood_std": self.likelihood_std,
-            "gradient_clip_norm": self.gradient_clip_norm,
-            "training_steps": self.training_steps,
-            "last_metrics": dict(self.last_metrics),
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "num_samples": num_samples,
+            "validation_num_samples": validation_num_samples,
+            "shuffle": shuffle,
+            "early_stopping_patience": patience,
+            "min_delta": delta,
+            "restore_best_weights": restore,
         }
 
+    @staticmethod
+    def _validate_prediction_options(
+        num_samples: Any, lower_quantile: Any, upper_quantile: Any
+    ) -> None:
+        if (
+            isinstance(num_samples, bool)
+            or not isinstance(num_samples, int)
+            or num_samples < 2
+        ):
+            raise TuningValidationError("num_samples must be an integer >= 2.")
+        lower = _finite_float(lower_quantile, "lower_quantile")
+        upper = _finite_float(upper_quantile, "upper_quantile")
+        if not 0 < lower < upper < 1:
+            raise TuningValidationError(
+                "Prediction quantiles must satisfy 0 < lower < upper < 1."
+            )
 
-__all__ = ["BayesianNeuralNetwork", "BNNTrainingHistory"]
+    def _assert_finite_parameters(self, operation: str) -> None:
+        if any(
+            not np.isfinite(item).all()
+            for values in self._parameter_collections().values()
+            for item in values
+        ):
+            raise TuningEvaluationError(
+                "Variational parameters became non-finite.",
+                context=TuningErrorContext(
+                    component=self.__class__.__name__, operation=operation
+                ),
+            )
 
-if __name__ == "__main__":
-    print("\n=== Running BNN Test ===\n")
-    printer.status("Init", "BNN initialized", "success")
-    size = [234, 43, 130]
-    fan_in = 3
 
-    bnn = BayesianNeuralNetwork(layer_sizes=size)
-    print(bnn)
-
-    scale = bnn._initial_weight_scale(fan_in=fan_in)
-    printer.pretty("Movement Recovery", scale, "success" if scale else "error")
-
-    print("\n=== Demo test Completed ===\n")
+__all__ = [
+    "BayesianNetworkConfig",
+    "BayesianNeuralNetwork",
+    "BayesianTrainingHistory",
+]

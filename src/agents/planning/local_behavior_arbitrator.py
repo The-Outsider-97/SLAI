@@ -14,12 +14,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.planning.planning_memory import PlanningMemory
-from logs.logger import get_logger, PrettyPrinter
+from ..base.utils.main_config_loader import load_global_config, get_config_section
+from .planning_memory import PlanningMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Local Behavior Arbitrator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class BehaviorType(str, Enum):

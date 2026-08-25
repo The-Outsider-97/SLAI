@@ -1,29 +1,30 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pickle
-import hashlib
 import signal
 import sys
 import threading
-import pandas as pd
-import numpy as np
+import pandas as pd # type: ignore
+import numpy as np # type: ignore
 
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
-from scipy.stats import entropy
+from scipy.stats import entropy # type: ignore
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
-from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer
+from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer # pyright: ignore[reportMissingImports]
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.sgd_regressor import SGDRegressor
+from .modules.sgd_regressor import SGDRegressor
 from .utils.adaptive_errors import *
-from logs.logger import get_logger, PrettyPrinter
+from .utils.adaptive_helpers import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Adaptive Memory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 sys.stdout.flush()
 
@@ -281,7 +282,7 @@ class MultiModalMemory:
             return {str(k): self._sanitize_for_serialization(v) for k, v in value.items()}
         if isinstance(value, pd.DataFrame):
             return value.to_dict("records")
-        return repr(value)
+        return json_safe(value)
 
     def _restore_datetime(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -479,10 +480,10 @@ class MultiModalMemory:
     def _hash_context(self, context: Mapping[str, Any]) -> str:
         """Create a deterministic, numpy-safe, collision-resistant hash from context."""
         ensure_instance(context, Mapping, "context", component="adaptive_memory")
-        sanitized = self._sanitize_for_serialization(dict(context))
-        context_blob = json.dumps(sanitized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        context_hash = hashlib.sha256(context_blob.encode("utf-8")).hexdigest()
-        return context_hash
+        # sanitized = self._sanitize_for_serialization(dict(context))
+        # context_blob = json.dumps(sanitized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        # context_hash = hashlib.sha256(context_blob.encode("utf-8")).hexdigest()
+        return stable_context_hash(context, component="adaptive_memory")
 
     def _generate_context_hash(self, context: dict) -> str:
         """Backward-compatible context-hash helper."""
@@ -582,33 +583,71 @@ class MultiModalMemory:
         return clipped_priority
 
     def log_parameters(self, performance: float, params: Mapping[str, Any]) -> None:
-        """Track evolution of learning parameters."""
+        """
+        Record policy parameters and incrementally update their learned
+        relationship with performance.
+    
+        Parameter-impact learning belongs to this write path. Reporting
+        operations only inspect the already learned model.
+        """
         printer.status("INIT", "Parameter logger successfully initialized", "info")
-
-        if performance is None or not isinstance(performance, (int, float, np.number)) or not np.isfinite(performance):
+    
+        if (
+            performance is None
+            or not isinstance(performance, (int, float, np.number))
+            or not np.isfinite(performance)
+        ):
             raise InvalidValueError(
                 "performance must be a finite numeric value.",
                 component="adaptive_memory",
-                details={"performance": self._sanitize_for_serialization(performance)},
+                details={
+                    "performance":
+                        self._sanitize_for_serialization(
+                            performance
+                        ),
+                },
             )
+    
         ensure_instance(params, Mapping, "params", component="adaptive_memory")
-
+    
         entry = {
             "timestamp": datetime.now(),
-            "learning_rate": self._coerce_optional_float(params.get("learning_rate")),
-            "exploration_rate": self._coerce_optional_float(params.get("exploration_rate")),
-            "discount_factor": self._coerce_optional_float(params.get("discount_factor")),
-            "temperature": self._coerce_optional_float(params.get("temperature")),
+            "learning_rate":
+                self._coerce_optional_float(params.get("learning_rate")),
+            "exploration_rate":
+                self._coerce_optional_float(params.get("exploration_rate")),
+            "discount_factor":
+                self._coerce_optional_float(params.get("discount_factor")),
+            "temperature":
+                self._coerce_optional_float(params.get("temperature")),
             "performance": float(performance),
         }
-
+    
         with self._state_lock:
             self.parameter_evolution = pd.concat(
-                [self.parameter_evolution, pd.DataFrame([entry])],
+                [
+                    self.parameter_evolution,
+                    pd.DataFrame([entry]),
+                ],
                 ignore_index=True,
             )
-            if len(self.parameter_evolution) > self.max_parameter_history:
-                self.parameter_evolution = self.parameter_evolution.iloc[-self.max_parameter_history :].reset_index(drop=True)
+    
+            if (
+                len(self.parameter_evolution)
+                > self.max_parameter_history
+            ):
+                self.parameter_evolution = (
+                    self.parameter_evolution
+                    .iloc[-self.max_parameter_history:]
+                    .reset_index(drop=True)
+                )
+    
+            # Train only from the newly arrived observation.
+            # Incomplete parameter records remain valid history entries,
+            # but are not suitable for regression.
+            self._update_parameter_impact_model(
+                entry
+            )
 
     def _coerce_optional_float(self, value: Any) -> float:
         if value is None:
@@ -629,52 +668,144 @@ class MultiModalMemory:
             details={"value": value},
         )
 
-    def analyze_parameter_impact(self, window_size: Optional[int] = None) -> Dict[str, float]:
-        """Analyze relationships between parameter changes and performance."""
-        printer.status("INIT", "Parameter impact analysis successfully initialized", "info")
-
-        window = self.parameter_impact_window if window_size is None else int(window_size)
-        ensure_positive(window, "window_size", component="adaptive_memory")
-
-        if len(self.parameter_evolution) < max(2, window):
-            return {}
-
-        recent = self.parameter_evolution.iloc[-window:].copy()
-        recent = recent.dropna(subset=["learning_rate", "exploration_rate", "discount_factor", "temperature", "performance"])
-        if len(recent) < 2:
-            return {}
-
-        X = recent[["learning_rate", "exploration_rate", "discount_factor", "temperature"]].astype(float).values
-        y = recent["performance"].astype(float).values
-
+    def _update_parameter_impact_model(self, entry: Mapping[str, Any]) -> bool:
+        """
+        Incrementally update the parameter-impact model from one newly
+        logged parameter/performance observation.
+    
+        Returns
+        -------
+        bool
+            True when the observation was complete and used for learning.
+            False when one or more tracked parameters were unavailable.
+    
+        Notes
+        -----
+        Learning occurs on the write path. Reporting methods must never
+        retrain this model.
+        """
+        feature_values: List[float] = []
+    
+        for name in self.TRACKED_PARAMS:
+            value = entry.get(name)
+    
+            if value is None:
+                return False
+    
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                return False
+    
+            if not np.isfinite(numeric_value):
+                return False
+    
+            feature_values.append(numeric_value)
+    
+        performance = entry.get("performance")
+    
+        if performance is None:
+            return False
+    
         try:
-            self.parameter_impact_model.partial_fit(X, y)
+            performance_value = float(performance)
+        except (TypeError, ValueError):
+            return False
+    
+        if not np.isfinite(performance_value):
+            return False
+    
+        X = np.asarray([feature_values], dtype=np.float64)
+        y = np.asarray([performance_value], dtype=np.float64)
+    
+        try:
+            self.parameter_impact_model.partial_fit(X, y,epochs=1)
+            return True
+    
         except AdaptiveError:
             raise
+    
         except Exception as exc:
-            raise wrap_exception(
-                exc,
-                AdaptiveMemoryError,
-                "Failed to fit parameter impact model.",
-                component="adaptive_memory",
-                details={"window_size": window},
-                remediation="Inspect logged parameter history for invalid or degenerate values.",
-            ) from exc
+            raise wrap_exception(exc, AdaptiveMemoryError,
+                                 ("Failed to update parameter impact "
+                                  "model from logged parameters."),
+                                  component="adaptive_memory", details={
+                                      "tracked_params": list(self.TRACKED_PARAMS),
+                                      "feature_values": feature_values,
+                                      "performance_value": performance_value,},
+                                      remediation=(
+                                          "Inspect the logged parameter values and "
+                                          "SGD regressor configuration."),
+                                          ) from exc
 
-        coef = np.asarray(self.parameter_impact_model.coef_, dtype=np.float64)
-        if coef.shape[0] != 4:
-            raise DimensionMismatchError(
-                "Parameter impact model returned an unexpected coefficient shape.",
-                component="adaptive_memory",
-                details={"coef_shape": tuple(coef.shape)},
-            )
-
-        return {
-            "learning_rate_impact": float(coef[0]),
-            "exploration_impact": float(coef[1]),
-            "discount_impact": float(coef[2]),
-            "temperature_impact": float(coef[3]),
-        }
+    def analyze_parameter_impact(self, window_size: Optional[int] = None) -> Dict[str, float]:
+        """
+        Report the currently learned relationship between tracked policy
+        parameters and performance.
+    
+        This method is read-only with respect to the SGD model.
+    
+        `window_size` is retained for API compatibility and controls the
+        amount of recent history required for reporting. It does not cause
+        model retraining.
+        """
+        printer.status("INIT", "Parameter impact analysis successfully initialized", "info")
+    
+        window = (
+            self.parameter_impact_window
+            if window_size is None
+            else int(window_size)
+        )
+    
+        ensure_positive(window, "window_size", component="adaptive_memory")
+    
+        with self._state_lock:
+            if self.parameter_evolution.empty:
+                return {}
+    
+            recent = (
+                self.parameter_evolution
+                .iloc[-window:]
+                .copy())
+    
+            recent = recent.dropna(
+                subset=[*self.TRACKED_PARAMS, "performance"])
+    
+            # Preserve the previous requirement for more than one valid
+            # observation before presenting a relationship as meaningful.
+            if len(recent) < 2:
+                return {}
+    
+            if not self.parameter_impact_model.is_fitted:
+                return {}
+    
+            coef = self.parameter_impact_model.coef_
+    
+            if coef is None:
+                return {}
+    
+            coef_array = np.asarray(coef, dtype=np.float64)
+            expected_features = len(self.TRACKED_PARAMS)
+    
+            if coef_array.shape != (expected_features,):
+                raise DimensionMismatchError(
+                    (
+                        "Parameter impact model returned an "
+                        "unexpected coefficient shape."
+                    ),
+                    component="adaptive_memory",
+                    details={
+                        "coef_shape": tuple(coef_array.shape),
+                        "expected_shape": (expected_features,),
+                    },
+                )
+    
+            return {
+                "learning_rate_impact": float(coef_array[0]),
+                "exploration_impact": float(coef_array[1]),
+                "discount_impact": float(coef_array[2]),
+                "temperature_impact": float(coef_array[3]),
+            }
 
     def detect_drift(self, window_size: Optional[int] = None, track: bool = True) -> bool:
         """Performance-based concept drift detection using KL divergence."""
@@ -685,8 +816,8 @@ class MultiModalMemory:
             return False
 
         try:
-            recent = self.parameter_evolution["performance"].iloc[-window:].astype(float).values
-            historical = self.parameter_evolution["performance"].iloc[-2 * window : -window].astype(float).values
+            recent = np.asarray(self.parameter_evolution["performance"].iloc[-window:].astype(float).values, dtype=np.float64)
+            historical = np.asarray(self.parameter_evolution["performance"].iloc[-2 * window : -window].astype(float).values, dtype=np.float64)
 
             p = np.histogram(recent, bins=self.drift_bins)[0].astype(np.float64) + 1e-12
             q = np.histogram(historical, bins=self.drift_bins)[0].astype(np.float64) + 1e-12
@@ -721,7 +852,7 @@ class MultiModalMemory:
             return {}
         numeric_df = self.parameter_evolution.copy()
         numeric_df = numeric_df.drop(columns=["timestamp"], errors="ignore")
-        return numeric_df.describe(include="all").to_dict()
+        return {str(k): v for k, v in numeric_df.describe(include="all").to_dict().items()}
 
     def _intervention_statistics(self) -> Dict[str, Any]:
         if not self.policy_interventions:
@@ -740,7 +871,7 @@ class MultiModalMemory:
             effect_size_count=("effect_size", "count"),
             causal_impact_median=("causal_impact", "median"),
         )
-        return stats.fillna(0.0).to_dict(orient="index")
+        return {str(k): v for k, v in stats.fillna(0.0).to_dict(orient="index").items()}
 
     def _semantic_analysis(self) -> Dict[str, Any]:
         if not self.semantic:
@@ -828,7 +959,7 @@ class MultiModalMemory:
             dtype=np.float64,
         )
         y = np.array([float(performance_delta)], dtype=np.float64)
-        self.intervention_model.partial_fit(X, y)
+        self.intervention_model.partial_fit(X, y, epochs=1)
 
         coef = getattr(self.intervention_model, "coef_", None)
         if coef is not None and len(self.policy_interventions) > 0:
@@ -1233,6 +1364,8 @@ class MultiModalMemory:
                 "episodic": [self._sanitize_for_serialization(exp) for exp in self.episodic],
                 "semantic": self._serialize_semantic_store(),
                 "parameter_evolution": self._sanitize_for_serialization(self.parameter_evolution),
+                "parameter_impact_model_state": self.parameter_impact_model.export_state(),
+                "intervention_model_state": self.intervention_model.export_state(),
                 "policy_interventions": self._sanitize_for_serialization(self.policy_interventions),
                 "concept_drift_scores": self._sanitize_for_serialization(self.concept_drift_scores),
                 "reward_sum": float(self.reward_sum),
@@ -1244,6 +1377,66 @@ class MultiModalMemory:
                 "replay_buffer_entries": replay_entries,
             }
             return payload
+
+    def _rebuild_intervention_model_from_history(
+        self,
+    ) -> None:
+        """
+        Best-effort reconstruction for legacy checkpoints that contain
+        intervention records but no persisted intervention-model state.
+        """
+        self.intervention_model.reset()
+    
+        feature_rows: List[List[float]] = []
+        targets: List[float] = []
+    
+        for intervention in self.policy_interventions:
+            if not isinstance(intervention, Mapping):
+                continue
+    
+            before = intervention.get("params_before", {})
+            after = intervention.get("params_after", {})
+    
+            if not isinstance(before, Mapping):
+                continue
+    
+            if not isinstance(after, Mapping):
+                continue
+    
+            try:
+                before_lr = float(before.get("learning_rate", 0.0) or 0.0)
+                before_exploration = float(before.get("exploration_rate", 0.0) or 0.0)
+                after_lr = float(after.get("learning_rate", before_lr) or 0.0)
+                after_exploration = float(after.get("exploration_rate", before_exploration) or 0.0)
+                effect_size = float(intervention.get("effect_size", 0.0) or 0.0)
+    
+            except (TypeError, ValueError):
+                continue
+    
+            row = [
+                before_lr,
+                before_exploration,
+                after_lr - before_lr,
+                after_exploration
+                - before_exploration,
+            ]
+    
+            if not np.all(np.isfinite(row)):
+                continue
+    
+            if not np.isfinite(effect_size):
+                continue
+    
+            feature_rows.append(row)
+            targets.append(effect_size)
+
+        if not feature_rows:
+            return
+
+        X = np.asarray(feature_rows, dtype=np.float64)
+        y = np.asarray(targets, dtype=np.float64)
+
+        self.intervention_model.partial_fit(X, y, epochs=1)
 
     def import_state(self, state: Mapping[str, Any], restore_replay_buffer: bool = True) -> None:
         """Restore memory state from a serialized checkpoint payload."""
@@ -1275,6 +1468,30 @@ class MultiModalMemory:
                 self._last_drift_detected_at = self._restore_datetime(state.get("last_drift_detected_at"))
                 self._experience_counter = int(state.get("experience_counter", len(self.episodic)))
 
+                # --------------------------------------------------------------
+                # Restore learned SGD model state.
+                # --------------------------------------------------------------
+
+                parameter_model_state = state.get("parameter_impact_model_state")
+
+                if isinstance(parameter_model_state, Mapping):
+                    self.parameter_impact_model.import_state(parameter_model_state)
+                else:
+                    # Backward compatibility for checkpoints produced before the
+                    # parameter-impact model itself was persisted.
+                    self._rebuild_parameter_impact_model_from_history()
+
+                intervention_model_state = state.get("intervention_model_state")
+
+                if isinstance(intervention_model_state, Mapping):
+                    self.intervention_model.import_state(intervention_model_state)
+                else:
+                    # Best-effort migration for legacy checkpoints.
+                    self._rebuild_intervention_model_from_history()
+
+                # Keep the historical alias synchronized after either restore path.
+                self.causal_model = self.intervention_model
+
                 if restore_replay_buffer:
                     self._reset_replay_buffer_state()
                     for item in state.get("replay_buffer_entries", []):
@@ -1304,6 +1521,45 @@ class MultiModalMemory:
                 remediation="Inspect the checkpoint payload for incompatible or missing fields.",
                 cause=exc,
             ) from exc
+
+    def _rebuild_parameter_impact_model_from_history(self) -> None:
+        """
+        Reconstruct the parameter impact model from historical parameter evolution data.
+        This is a fallback for legacy checkpoints that do not contain the model state.
+        """
+        self.parameter_impact_model.reset()
+
+        if self.parameter_evolution.empty:
+            return
+
+        feature_rows: List[List[float]] = []
+        targets: List[float] = []
+
+        for _, row in self.parameter_evolution.iterrows():
+            try:
+                features = [
+                    float(row.get("learning_rate", 0.0) or 0.0),
+                    float(row.get("exploration_rate", 0.0) or 0.0),
+                    float(row.get("discount_factor", 0.0) or 0.0),
+                    float(row.get("temperature", 0.0) or 0.0),
+                ]
+                performance_delta = float(row.get("performance_delta", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+
+            if not np.all(np.isfinite(features)) or not np.isfinite(performance_delta):
+                continue
+
+            feature_rows.append(features)
+            targets.append(performance_delta)
+
+        if not feature_rows:
+            return
+
+        X = np.asarray(feature_rows, dtype=np.float64)
+        y = np.asarray(targets, dtype=np.float64)
+
+        self.parameter_impact_model.partial_fit(X, y, epochs=1)
 
     def save(self, filepath: Union[str, Path], include_replay_buffer: bool = True) -> Path:
         """Save adaptive memory state to a checkpoint file."""
@@ -1372,7 +1628,24 @@ if __name__ == "__main__":
             performance = float(0.75 + 0.1 * np.sin(i / 6.0) + rng.normal(0.0, 0.02))
             memory.log_parameters(performance=performance, params=params)
 
+        parameter_model_before_report = (pickle.dumps(
+                memory.parameter_impact_model.export_state(),
+                protocol=pickle.HIGHEST_PROTOCOL,
+            ))
         parameter_impact = memory.analyze_parameter_impact(window_size=40)
+        parameter_model_after_analysis = (pickle.dumps(
+                memory.parameter_impact_model.export_state(),
+                protocol=pickle.HIGHEST_PROTOCOL,
+            ))
+        
+        if (
+            parameter_model_before_report
+            != parameter_model_after_analysis
+        ):
+            raise AssertionError(
+                "analyze_parameter_impact() mutated the "
+                "parameter-impact SGD model."
+            )
         printer.pretty("PARAMETER IMPACT", parameter_impact, "success")
 
         print("\n* * * * * Phase 2: Experience Storage * * * * *\n")
@@ -1445,7 +1718,24 @@ if __name__ == "__main__":
             effect={"performance_delta": 0.12},
         )
         memory.consolidate()
+        model_state_before_report = pickle.dumps(
+            memory.parameter_impact_model.export_state(),
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
         report = memory.get_memory_report()
+        model_state_after_report = pickle.dumps(
+            memory.parameter_impact_model.export_state(),
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+        
+        if (
+            model_state_before_report
+            != model_state_after_report
+        ):
+            raise AssertionError(
+                "get_memory_report() mutated the "
+                "parameter-impact SGD model."
+            )
         printer.pretty("MEMORY REPORT", report, "success")
 
         print("\n* * * * * Phase 6: Export / Import / Checkpoint * * * * *\n")
@@ -1457,17 +1747,49 @@ if __name__ == "__main__":
 
         restored = MultiModalMemory()
         restored.load(checkpoint_path)
+        original_parameter_state = (memory.parameter_impact_model.export_state())
+        
+        restored_parameter_state = (restored.parameter_impact_model.export_state())
+        
+        if not np.array_equal(np.asarray(original_parameter_state["coef_"], dtype=np.float64),
+                              np.asarray(restored_parameter_state["coef_"], dtype=np.float64)):
+            raise AssertionError(
+                "Parameter-impact model coefficients "
+                "were not restored correctly."
+            )
+        
+        if (
+            original_parameter_state["t_"]
+            != restored_parameter_state["t_"]
+        ):
+            raise AssertionError("Parameter-impact model training step "
+                                 "counter was not restored correctly.")
+        
+        if (
+            original_parameter_state["n_samples_seen"]
+            != restored_parameter_state["n_samples_seen"]
+        ):
+            raise AssertionError(
+                "Parameter-impact model sample counter "
+                "was not restored correctly."
+            )
+        original_intervention_state = (memory.intervention_model.export_state())
+        restored_intervention_state = (restored.intervention_model.export_state())
+        if not np.array_equal(
+            np.asarray(original_intervention_state["coef_"], dtype=np.float64),
+            np.asarray(restored_intervention_state["coef_"], dtype=np.float64)):
+            raise AssertionError(
+                "Intervention model coefficients "
+                "were not restored correctly."
+            )
         restored_report = restored.get_memory_report()
+        printer.status("MODEL STATE", ("Adaptive Memory learned SGD models "
+                                       "restored successfully"), "success")
         printer.pretty("RESTORED SIZE", restored.size(), "success")
-        printer.pretty(
-            "RESTORED REPORT SNAPSHOT",
-            {
-                "semantic_total": restored_report["semantic_summary"]["total_concepts"],
-                "episodic_total": restored_report["sizes"]["episodic"],
-                "drift_scores": restored_report["drift_status"]["num_scores"],
-            },
-            "success",
-        )
+        printer.pretty("RESTORED REPORT SNAPSHOT",{
+            "semantic_total": restored_report["semantic_summary"]["total_concepts"],
+            "episodic_total": restored_report["sizes"]["episodic"],
+            "drift_scores": restored_report["drift_status"]["num_scores"]}, "success")
 
         print("\n=== Test ran successfully ===\n")
 

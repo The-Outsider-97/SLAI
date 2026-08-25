@@ -18,19 +18,19 @@ Real-World Use Case:
 import os
 import json
 import threading
-import numpy as np
-import joblib
-import torch
+import numpy as np # type: ignore
+import joblib # type: ignore
+import torch # type: ignore
 
 from typing import List, Any, Dict, Tuple, Optional
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
-from ...learning.utils.policy_network import PolicyNetwork
-from logs.logger import get_logger, PrettyPrinter
+from ...learning.modules.policy_network import PolicyNetwork
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Reinforcement Learning Heuristic")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class DotDict(dict):
     def __getattr__(self, item):

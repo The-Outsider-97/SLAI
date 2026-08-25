@@ -10,20 +10,23 @@ from __future__ import annotations
 
 import pickle
 import random
-import numpy as np
+import numpy as np # type: ignore
 
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, DefaultDict, Dict, List, Optional, Sequence, Tuple
 
-from src.agents.learning.learning_memory import LearningMemory, Transition
-from src.agents.learning.utils.config_loader import get_config_section, load_global_config
-from src.agents.learning.utils.rl_engine import ExplorationStrategies, QTableOptimizer, StateProcessor
-from logs.logger import PrettyPrinter, get_logger
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.learning_error import *
+from .utils.learning_calculations import *
+from .utils.learning_helpers import *
+from .modules.rl_engine import *
+from .learning_memory import LearningMemory, Transition
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Recursive Learning")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 State = Tuple[Any, ...]
 QKey = Tuple[State, Any]
@@ -68,6 +71,10 @@ class RLAgent:
     - Eligibility traces (Q(λ), accumulating traces)
     - Epsilon-greedy exploration
     """
+    q_table2: Optional[Dict[QKey, float]]  # type: ignore[assignment]
+    eligibility_traces2: Optional[DefaultDict[QKey, float]]  # type: ignore[assignment]
+    q_optimizer2: Optional[QTableOptimizer]
+
 
     def __init__(self, agent_id: str, possible_actions: List[Any], state_size: int):
         if not possible_actions:
@@ -127,6 +134,27 @@ class RLAgent:
             raise ValueError("replay_interval must be >= 0.")
         if self.hparams.replay_updates <= 0:
             raise ValueError("replay_updates must be positive.")
+        
+        self.double_q = coerce_bool(rl_config.get("double_q", False))
+        self.trace_type = str(rl_config.get("trace_type", "accumulating")).lower()
+        if self.trace_type not in ("accumulating", "replacing"):
+            raise ValueError(f"trace_type must be 'accumulating' or 'replacing', got {self.trace_type}")
+        
+        # For Double Q-learning: a second Q-table and second eligibility traces
+        if self.double_q:
+            self.q_table2: Dict[QKey, float] = {}
+            self.eligibility_traces2: DefaultDict[QKey, float] = defaultdict(float)
+            # Also a second Q-optimizer if you want to keep them separate
+            self.q_optimizer2 = QTableOptimizer(
+                batch_size=self.hparams.q_optimizer_batch_size,
+                momentum=self.hparams.q_optimizer_momentum,
+                cache_size=self.hparams.q_optimizer_cache_size,
+                learning_rate=self.learning_rate,
+            )
+        else:
+            self.q_table2 = None   # type: ignore[assignment]
+            self.eligibility_traces2 = None  # type: ignore[assignment]
+            self.q_optimizer2 = None
 
         # Mutable runtime parameters kept for compatibility with the wider SLAI stack.
         self.learning_rate = self.hparams.learning_rate
@@ -148,7 +176,7 @@ class RLAgent:
         self.q_optimizer_compression = self.hparams.q_optimizer_compression
 
         # Shared learning utilities used by the Learning Agent subagents.
-        self.state_processor = StateProcessor(
+        self.state_processor = TabularStateProcessor(
             state_size=self.state_size,
             tiling_resolution=state_processor_cfg.get("tiling_resolution"),
             num_tilings=state_processor_cfg.get("num_tilings"),
@@ -281,18 +309,38 @@ class RLAgent:
             return tuple(int(x) for x in discrete)
         return self._hashable_state(raw_state)
 
-    def _get_q_value(self, state: State, action: Any) -> float:
-        key = (state, action)
-        if key in self.q_table:
-            return float(self.q_table[key])
-        mirrored = self.q_optimizer._get_q_value(state, action)
-        return float(mirrored if mirrored is not None else self.default_q_value)
-
-    def _set_q_value(self, state: State, action: Any, value: float) -> None:
-        key = (state, action)
+    def _get_q_value(self, state: State, action: Any, table_id: int = 1) -> float:
+        """Get Q-value from the specified table (1 or 2). Defaults to table 1."""
+        if table_id == 1:
+            key = (state, action)
+            if key in self.q_table:
+                return float(self.q_table[key])
+            mirrored = self.q_optimizer._get_q_value(state, action)
+            return float(mirrored if mirrored is not None else self.default_q_value)
+        else:  # table_id == 2 (only used when double_q is True)
+            if not self.double_q:
+                # Fallback to table 1 if double Q is disabled (shouldn't happen)
+                return self._get_q_value(state, action, table_id=1)
+            key = (state, action)
+            if key in self.q_table2:
+                return float(self.q_table2[key])
+            mirrored = self.q_optimizer2._get_q_value(state, action) if self.q_optimizer2 else None
+            return float(mirrored if mirrored is not None else self.default_q_value)
+    
+    def _set_q_value(self, state: State, action: Any, value: float, table_id: int = 1) -> None:
+        """Set Q-value in the specified table (1 or 2). Defaults to table 1."""
         float_value = float(value)
-        self.q_table[key] = float_value
-        self.q_optimizer._set_q_value(state, action, float_value)
+        if table_id == 1:
+            key = (state, action)
+            self.q_table[key] = float_value
+            self.q_optimizer._set_q_value(state, action, float_value)
+        else:  # table_id == 2
+            if not self.double_q:
+                return  # Silently ignore if double Q is not enabled
+            key = (state, action)
+            self.q_table2[key] = float_value
+            if self.q_optimizer2:
+                self.q_optimizer2._set_q_value(state, action, float_value)
 
     def _compress_q_value(self, state: State, action: Any, value: float) -> None:
         if not self.q_optimizer_compression:
@@ -370,39 +418,79 @@ class RLAgent:
     # ------------------------------------------------------------------
     # Learning updates
     # ------------------------------------------------------------------
-    def _update_eligibility(self, state: State, action: Any) -> None:
-        self.eligibility_traces[(state, action)] += 1.0
-
-    def _decay_eligibility(self) -> None:
+    def _update_eligibility(self, state: State, action: Any, table_id: int = 1) -> None:
+        """Update eligibility traces for a specific table."""
+        traces = self.eligibility_traces if table_id == 1 else self.eligibility_traces2
+        if traces is None:
+            return
+        if self.trace_type == "accumulating":
+            traces[(state, action)] += 1.0
+        else:  # replacing
+            traces[(state, action)] = 1.0
+    
+    def _decay_eligibility(self, table_id: int = 1) -> None:
+        """Decay traces for a specific table, removing near‑zero entries."""
+        traces = self.eligibility_traces if table_id == 1 else self.eligibility_traces2
+        if traces is None:
+            return
         decay = self.discount_factor * self.trace_decay
-        expired: List[QKey] = []
-        for key in list(self.eligibility_traces.keys()):
-            self.eligibility_traces[key] *= decay
-            if self.eligibility_traces[key] < 1e-8:
+        expired = []
+        for key in list(traces.keys()):
+            traces[key] *= decay
+            if traces[key] < 1e-8:
                 expired.append(key)
         for key in expired:
-            del self.eligibility_traces[key]
+            del traces[key]
+    
+    def _update_q_table(self, state: State, action: Any, td_error: float, table_id: int = 1) -> None:
+        """Apply TD update to all state‑action pairs with eligibility traces."""
+        traces = self.eligibility_traces if table_id == 1 else self.eligibility_traces2
+        if traces is None:
+            return
+        for (s, a), e in list(traces.items()):
+            if e == 0.0:
+                continue
+            old_q = self._get_q_value(s, a, table_id=table_id)
+            new_q = old_q + self.learning_rate * td_error * e
+            self._set_q_value(s, a, new_q, table_id=table_id)
 
-    def learn_transition(
-        self,
-        state: Any,
-        action: Any,
-        reward: float,
-        next_state: Any,
-        done: bool,
-    ) -> Dict[str, float]:
+    def learn_transition(self, state: Any, action: Any, reward: float,
+                         next_state: Any, done: bool) -> Dict[str, float]:
+        """Q(λ) update with optional Double Q‑learning and replacing traces."""
         processed_state = self._process_state(state)
         processed_next_state = self._process_state(next_state)
         reward_value = float(reward)
         done_flag = bool(done)
-
-        current_q = self._get_q_value(processed_state, action)
-        next_best = 0.0 if done_flag else max(
-            self._get_q_value(processed_next_state, next_action) for next_action in self.possible_actions
-        )
+    
+        # ---- Current Q-value (always from primary table) ----
+        current_q = self._get_q_value(processed_state, action, table_id=1)
+    
+        # ---- Double Q‑learning target ----
+        if self.double_q and not done_flag:
+            # Choose best action using primary Q-table
+            best_action = None
+            best_q = -float('inf')
+            for a in self.possible_actions:
+                q_a = self._get_q_value(processed_next_state, a, table_id=1)
+                if q_a > best_q:
+                    best_q = q_a
+                    best_action = a
+            # Evaluate that action using secondary Q-table
+            if best_action is not None:
+                next_best = self._get_q_value(processed_next_state, best_action, table_id=2)
+            else:
+                next_best = 0.0
+        else:
+            # Standard Q-learning (or terminal state)
+            next_best = 0.0 if done_flag else max(
+                self._get_q_value(processed_next_state, a, table_id=1)
+                for a in self.possible_actions
+            )
+    
         td_target = reward_value + self.discount_factor * next_best
         td_error = td_target - current_q
-
+    
+        # ---- Store transition in replay memory (using primary Q error) ----
         transition = Transition(
             state=processed_state,
             action=action,
@@ -412,26 +500,30 @@ class RLAgent:
         )
         priority = abs(td_error) + self.replay_priority_epsilon
         self.learning_memory.add(transition, priority=priority, tag=self.agent_id)
-
-        self._update_eligibility(processed_state, action)
-
-        updated_pairs: List[Tuple[State, Any, float]] = []
-        for key, eligibility in list(self.eligibility_traces.items()):
-            state_key, action_key = key
-            updated_value = self._get_q_value(state_key, action_key) + self.learning_rate * td_error * eligibility
-            self._set_q_value(state_key, action_key, updated_value)
-            updated_pairs.append((state_key, action_key, updated_value))
-
-        self._decay_eligibility()
+    
+        # ---- Choose which Q‑table to update (alternate if Double Q) ----
+        update_table = 1
+        if self.double_q:
+            update_table = 1 if (self.total_learning_updates % 2 == 0) else 2
+    
+        # ---- Update eligibility and apply TD update to the chosen table ----
+        self._update_eligibility(processed_state, action, table_id=update_table)
+        self._update_q_table(processed_state, action, td_error, table_id=update_table)
+        self._decay_eligibility(table_id=update_table)
+    
+        # ---- Update auxiliary structures ----
         self.state_action_counts[(processed_state, action)] += 1
         self.total_steps += 1
         self.total_learning_updates += 1
-
-        for state_key, action_key, value in updated_pairs:
-            self._compress_q_value(state_key, action_key, value)
-
+    
+        # ---- Compress Q-values (only for primary table in default setup) ----
+        # Note: compression for secondary table can be added if needed
+        for s, a, val in self._get_updated_pairs(update_table, td_error):
+            self._compress_q_value(s, a, val)   # compresses only primary table
+    
         self._replay_from_memory()
-
+    
+        # ---- Metrics ----
         metrics = {
             "td_error": float(td_error),
             "td_target": float(td_target),
@@ -442,11 +534,23 @@ class RLAgent:
             "memory_size": float(self.learning_memory.size()),
         }
         self.last_learning_metrics = metrics
-
+    
         if done_flag:
             self.end_episode(processed_next_state, done=True)
-
+    
         return metrics
+    
+    def _get_updated_pairs(self, table_id: int, td_error: float) -> List[Tuple[State, Any, float]]:
+        """Utility to return list of (state, action, new_value) for the updated table."""
+        traces = self.eligibility_traces if table_id == 1 else self.eligibility_traces2
+        updated = []
+        for (s, a), e in traces.items():
+            if e == 0.0:
+                continue
+            old_q = self._get_q_value(s, a, table_id=table_id)
+            new_q = old_q + self.learning_rate * td_error * e
+            updated.append((s, a, new_q))
+        return updated
 
     def learn(self, next_state: Any, reward: float, done: bool) -> Optional[Dict[str, float]]:
         """Apply one Q(λ) update from the most recent (state, action)."""
@@ -951,7 +1055,7 @@ __all__ = ["RLAgent", "RLHyperparameters"]
 # ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Recursive Learning ===\n")
-    from src.agents.learning.slaienv import SLAIEnv
+    from .slaienv import SLAIEnv
 
     env = SLAIEnv(state_dim=4, action_dim=3)
     possible_actions = list(range(env.action_space.n)) if hasattr(env.action_space, "n") else [0, 1, 2]

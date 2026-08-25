@@ -1041,6 +1041,15 @@ class AgentRegistry:
         ) # type: ignore
 
 
+__all__ = [
+    "AgentRegistry",
+    "AgentRegistrationRecord",
+    "ModuleDiscoveryRecord",
+    "RegistryEventType",
+    "RegistryIntegrityReport",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Registry ===\n")
     printer.status("TEST", "Registry initialized", "info")

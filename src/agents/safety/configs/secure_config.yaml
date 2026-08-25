@@ -724,6 +724,12 @@ neural_network:
 
 
 reward_model:
+  log_evaluations: false
+  log_full_report: false
+  log_every_n: 100
+  cache_enabled: true
+  cache_ttl_seconds: 2.0
+  cache_max_entries: 256
   enabled: true
   schema_version: "reward_model.evaluation.v3"
   strict_config_validation: true
@@ -1441,6 +1447,9 @@ security_error:
 
 
 score_model:
+  log_assessments: false
+  log_full_report: false
+  log_every_n: 100
   enabled: true
   schema_version: score_model.v2
   strict_config_validation: true
@@ -1559,3 +1568,6 @@ score_model:
         safety: 0.80
         alignment: 0.90
 
+
+safety_agent:
+  verbose_console: false

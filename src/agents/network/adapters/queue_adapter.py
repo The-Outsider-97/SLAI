@@ -34,7 +34,7 @@ from typing import Any, Deque, Dict, Mapping, Optional, Protocol, Sequence, Tupl
 
 from ..utils import *
 from .base_adapter import BaseAdapter
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Queue Adapter")
 printer = PrettyPrinter()
@@ -179,6 +179,13 @@ class QueueAdapter(BaseAdapter):
         self.purge_on_close = self._get_bool_config("purge_on_close", False)
 
         self.prefetch_count = max(1, self._get_non_negative_int_config("prefetch_count", 10))
+        self.prefetch_backpressure_enabled = self._get_bool_config("prefetch_backpressure_enabled", True)
+        self.prefetch_backpressure_high_watermark = self._coerce_ratio(self.queue_adapter_config.get("prefetch_backpressure_high_watermark"), 0.80)
+        self.prefetch_backpressure_low_watermark = self._coerce_ratio(self.queue_adapter_config.get("prefetch_backpressure_low_watermark"), 0.30)
+        self.prefetch_backpressure_step = max(1, self._get_non_negative_int_config("prefetch_backpressure_step", 2))
+        self.prefetch_backpressure_min = max(1, self._get_non_negative_int_config("prefetch_backpressure_min", 2))
+        self.prefetch_backpressure_max = max(self.prefetch_backpressure_min, self._get_non_negative_int_config("prefetch_backpressure_max", 64))
+        self.prefetch_count = min(self.prefetch_backpressure_max, max(self.prefetch_backpressure_min, self.prefetch_count))
         self.visibility_timeout_ms = self._get_optional_timeout_ms_config("visibility_timeout_ms")
         self.poll_timeout_ms = coerce_timeout_ms(
             self.queue_adapter_config.get("poll_timeout_ms"),
@@ -304,6 +311,30 @@ class QueueAdapter(BaseAdapter):
             "result": json_safe(publish_result),
         }
 
+    def _queue_pressure_ratio(self) -> float:
+        outstanding = len(self._receive_buffer) + len(self._inflight_receipts)
+        return min(1.0, outstanding / float(self.max_queued_inbound_messages))
+    
+    
+    def _adjust_prefetch_for_backpressure(self) -> int:
+        if not self.prefetch_backpressure_enabled:
+            return self.prefetch_count
+    
+        pressure = self._queue_pressure_ratio()
+    
+        if pressure >= self.prefetch_backpressure_high_watermark:
+            self.prefetch_count = max(
+                self.prefetch_backpressure_min,
+                self.prefetch_count - self.prefetch_backpressure_step,
+            )
+        elif pressure <= self.prefetch_backpressure_low_watermark:
+            self.prefetch_count = min(
+                self.prefetch_backpressure_max,
+                self.prefetch_count + self.prefetch_backpressure_step,
+            )
+    
+        return self.prefetch_count
+
     def _receive_impl(self, *, timeout_ms: int, metadata: Mapping[str, Any]) -> Mapping[str, Any] | None:
         if self.receive_from_buffer and self._receive_buffer:
             if self.consume_buffered_messages_on_recv:
@@ -377,6 +408,24 @@ class QueueAdapter(BaseAdapter):
                 "queue_name": receipt.get("queue_name"),
                 "delivery_tag": receipt.get("delivery_tag"),
             }
+
+        if self.requeue_on_nack:
+            if len(self._receive_buffer) >= self.max_queued_inbound_messages:
+                raise QueueBackpressureError(
+                    "Inbound requeue buffer is full.",
+                    context={
+                        "operation": "nack_requeue",
+                        "channel": self.channel,
+                        "protocol": self.protocol,
+                        "endpoint": self.session.endpoint,
+                    },
+                    details={
+                        "buffered_messages": len(self._receive_buffer),
+                        "max_queued_inbound_messages": self.max_queued_inbound_messages,
+                        "prefetch_count": self.prefetch_count,
+                    },
+                )
+            self._receive_buffer.append(receipt)
 
         self._ensure_transport_present(operation="ack")
         assert self.transport is not None
@@ -659,6 +708,17 @@ class QueueAdapter(BaseAdapter):
         if value in (None, "", 0, "0"):
             return None
         return coerce_timeout_ms(value, default=self.default_timeout_ms, minimum=1, maximum=300000)
+    
+    def _coerce_ratio(self, value: Any, default: float) -> float:
+        """
+        Coerce a configuration value to a float between 0.0 and 1.0.
+        Returns the default if the value cannot be converted.
+        """
+        try:
+            v = float(value) if value is not None else default
+        except (TypeError, ValueError):
+            v = default
+        return max(0.0, min(1.0, v))
 
 
 class _InMemoryQueueTransport:
@@ -880,7 +940,7 @@ if __name__ == "__main__":
     assert adapter.memory.get("network.delivery.state")
     if requeued is not None:
         assert requeued["payload"]["task"] == "retry-path"
-        assert requeued_ack["acknowledged"] is True
+        assert requeued_ack["acknowledged"] is True # type: ignore
 
     printer.status("TEST", "All Queue Adapter checks passed", "info")
     print("\n=== Test ran successfully ===\n")

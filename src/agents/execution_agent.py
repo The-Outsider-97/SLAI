@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 """
 SLAI Execution Agent:
@@ -41,28 +41,29 @@ import uuid
 import numpy as np
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Mapping, Optional, Sequence, Type
 
-from src.agents.base_agent import BaseAgent
-from src.agents.base.utils.main_config_loader import get_config_section, load_global_config
-from src.agents.execution.task_coordinator import TaskCoordinator, TaskState
-from src.agents.execution.execution_validator import ExecutionValidator
-from src.agents.execution.execution_recovery import ExecutionRecovery
-from src.agents.execution.action_selector import ActionSelector
-from src.agents.execution.actions.base_action import BaseAction
-from src.agents.execution.actions.idle import IdleAction
-from src.agents.execution.actions.move_to import MoveToAction
-from src.agents.execution.actions.pick_object import PickObjectAction
-from src.agents.execution.actions.place_object import PlaceObjectAction
-from src.agents.execution.utils.execution_error import (ActionFailureError, ActionInterruptionError,
-                                                        CookieMismatchError, DeadlockError,
-                                                        ExecutionError, InvalidContextError,
-                                                        StaleCheckpointError, TimeoutError)
-from src.agents.planning.task_scheduler import DeadlineAwareScheduler
-from logs.logger import get_logger, PrettyPrinter
+from .base_agent import BaseAgent
+from .base.utils.main_config_loader import get_config_section, load_global_config
+from .execution.task_coordinator import TaskCoordinator, TaskState
+from .execution.execution_validator import ExecutionValidator
+from .execution.execution_recovery import ExecutionRecovery
+from .execution.execution_memory import ExecutionMemory
+from .execution.action_selector import ActionSelector
+from .execution.actions.base_action import BaseAction
+from .execution.actions.idle import IdleAction
+from .execution.actions.move_to import MoveToAction
+from .execution.actions.pick_object import PickObjectAction
+from .execution.actions.place_object import PlaceObjectAction
+from .execution.actions.robot_actions import *
+from .execution.utils.execution_error import *
+from .execution.modules.robot_interface import RobotInterface
+from .planning.task_scheduler import DeadlineAwareScheduler
+from .runtime_contracts import RuntimeLifecycle
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Execution Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class ExecutionAgent(BaseAgent):
     """
@@ -72,8 +73,33 @@ class ExecutionAgent(BaseAgent):
     between high-level planning and low-level action execution.
     """
     DEFAULT_THRESHOLDS = {"timeout": 300, "energy_alert": 2.0}
+    DEFAULT_ACTIONS: Dict[str, Type[BaseAction]] = {
+        "move_to": MoveToAction,
+        "pick_object": PickObjectAction,
+        "place_object": PlaceObjectAction,
+        "idle": IdleAction,
+    }
+    ROBOT_ACTIONS: Dict[str, Type[BaseAction]] = {
+        "motor": MotorAction,
+        "ackermann": AckermannAction,
+        "stop": StopAction,
+        "spin": SpinAction,
+        "navigate": NavigateAction,
+        "follow_path": FollowPathAction,
+        "gripper": GripperAction,
+        "joint": JointAction,
+        "sensor_read": SensorReadAction,
+        "wait": WaitAction,
+        "led": LedAction,
+        "sequence": SequenceAction,
+    }
 
-    def __init__(self, shared_memory, agent_factory, config=None):
+
+    def __init__(self, shared_memory, agent_factory, config: Optional[Mapping[str, Any]]=None,
+                 execution_memory: Optional[ExecutionMemory] = None, task_coordinator: Optional[TaskCoordinator] = None,
+                 action_selector: Optional[ActionSelector] = None, validator: Optional[ExecutionValidator] = None,
+                 recovery: Optional[ExecutionRecovery] = None, scheduler: Optional[DeadlineAwareScheduler] = None,
+                 robot: Optional[RobotInterface] = None, action_registry: Optional[Mapping[str, Type[BaseAction]]] = None,):
         super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
         self.adaptive_agent = None
         self.shared_memory = shared_memory
@@ -86,35 +112,95 @@ class ExecutionAgent(BaseAgent):
         # self.max_task_seconds = int(self.execution_agent_config.get("max_task_seconds", self.thresholds["timeout"]))
         self.thresholds = self.shared_memory.get("execution_thresholds", default=self.DEFAULT_THRESHOLDS)
         self.max_task_seconds = int(self.execution_agent_config.get("max_task_seconds", self.thresholds["timeout"]))
+        self.task_lock_ttl_buffer_seconds = int(self.execution_agent_config.get("task_lock_ttl_buffer_seconds", 120))
         self.max_step_retries = int(self.execution_agent_config.get("max_step_retries", 2))
         self.default_grid_size = int(self.execution_agent_config.get("default_grid_size", 100))
+        self.efficiency = float(self.execution_agent_config.get("efficiency", 1.0))
+        if not np.isfinite(self.efficiency) or self.efficiency <= 0.0:
+            raise ValueError("execution_agent.efficiency must be finite and greater than zero")
 
         # Core subsystem composition
-        self.task_coordinator = TaskCoordinator()
-        self.action_selector = ActionSelector()
-        self.validator = ExecutionValidator()
+        self.execution_memory = execution_memory if execution_memory is not None else ExecutionMemory()
+        self._owns_execution_memory = execution_memory is None
+        self.task_coordinator = (task_coordinator if task_coordinator is not None else TaskCoordinator(memory=self.execution_memory))
+        self.action_selector = (action_selector if action_selector is not None else ActionSelector(memory=self.execution_memory))
+        self.validator = validator if validator is not None else ExecutionValidator(memory=self.execution_memory)
         self.recovery = ExecutionRecovery(task_coordinator=self.task_coordinator)
-        self.scheduler = DeadlineAwareScheduler()
+        self._scheduler_initialization_error: Optional[Exception] = None
+        self.scheduler = (scheduler
+            if scheduler is not None
+            else DeadlineAwareScheduler())
+        self.robot = robot
 
         # Local runtime state
+        self._current_plan_index = 0
+        self._initial_task_distance: Optional[float] = None
+        self.action_class_registry = self._build_action_registry(action_registry)
         self.state: Dict[str, Any] = self._initialize_state()
         self.current_task: Optional[Dict[str, Any]] = None
         self.active_tasks: Dict[str, Dict[str, Any]] = {}
 
-        self.action_class_registry: Dict[str, Type[BaseAction]] = {
-            "move_to": MoveToAction,
-            "pick_object": PickObjectAction,
-            "place_object": PlaceObjectAction,
-            "idle": IdleAction,
-        }
         self._register_actions()
 
         logger.info("ExecutionAgent initialized")
+
+    def _require_scheduler(self) -> Any:
+        if self.scheduler is None:
+            self.scheduler
+        if self.scheduler is None:
+            raise ActionFailureError(
+                "scheduler",
+                "Planning scheduler is unavailable; inspect runtime degradation details",
+            )
+        self._mark_runtime_recovered("dependency", "execution.scheduler.initialize")
+        return self.scheduler
+
+    def _build_action_registry(
+        self,
+        injected_registry: Optional[Mapping[str, Type[BaseAction]]],
+    ) -> Dict[str, Type[BaseAction]]:
+        available = {**self.DEFAULT_ACTIONS, **self.ROBOT_ACTIONS}
+        if injected_registry is not None:
+            for name, action_class in injected_registry.items():
+                if not isinstance(action_class, type) or not issubclass(action_class, BaseAction):
+                    raise TypeError(f"Action registry entry {name!r} must be a BaseAction subclass")
+                available[str(name)] = action_class
+
+        configured_names = self.execution_agent_config.get(
+            "enabled_actions",
+            list(self.DEFAULT_ACTIONS),
+        )
+        if isinstance(configured_names, (str, bytes)) or not isinstance(configured_names, Sequence):
+            raise TypeError("execution_agent.enabled_actions must be a sequence of action names")
+        names = [str(name).strip() for name in configured_names if str(name).strip()]
+        if not names:
+            raise ValueError("execution_agent.enabled_actions cannot be empty")
+        unknown = sorted(set(names) - set(available))
+        if unknown:
+            raise ValueError(f"Unknown execution actions configured: {unknown}")
+        if "idle" not in names:
+            raise ValueError("execution_agent.enabled_actions must include the idle fallback action")
+        return {name: available[name] for name in dict.fromkeys(names)}
 
     def _register_actions(self) -> None:
         for name, cls in self.action_class_registry.items():
             self.action_selector.register_action(name, cls.preconditions, cls.postconditions)
             self.validator.register_action_handler(name, cls)
+
+    def register_action(self, name: str, action_class: Type[BaseAction]) -> None:
+        """Register an action consistently with selection and validation."""
+        normalized_name = str(name).strip()
+        if not normalized_name:
+            raise ValueError("Action name cannot be empty")
+        if not isinstance(action_class, type) or not issubclass(action_class, BaseAction):
+            raise TypeError("action_class must be a BaseAction subclass")
+        self.action_class_registry[normalized_name] = action_class
+        self.action_selector.register_action(
+            normalized_name,
+            action_class.preconditions,
+            action_class.postconditions,
+        )
+        self.validator.register_action_handler(normalized_name, action_class)
 
     def _initialize_state(self) -> Dict[str, Any]:
         printer.status("EXECUTION", "Initializing states...", "info")
@@ -202,7 +288,7 @@ class ExecutionAgent(BaseAgent):
         self.shared_memory.set(
             lock_key,
             {"agent": self.name, "start_time": time.time(), "task_id": task["id"]},
-            ttl=int(task["timeout"]) + 120,
+            ttl=int(task["timeout"]) + self.task_lock_ttl_buffer_seconds,
         )
 
         try:
@@ -214,15 +300,16 @@ class ExecutionAgent(BaseAgent):
             self.shared_memory.delete(lock_key)
 
     def _preflight_task(self, task: Dict[str, Any]) -> None:
+        self.current_plan = list(task.get("action_sequence") or [])
+        self._current_plan_index = 0
+        self._initial_task_distance = None
         if task.get("action_sequence"):
-            context = self._gather_context()
+            context = self._gather_context(task)
             is_valid, report = self.validator.validate_plan(task["action_sequence"], context)
             if not is_valid:
                 summary = self.validator.generate_validation_summary(report)
                 raise ActionFailureError("preflight", f"Plan validation failed: {summary}")
-            self.current_plan = task["action_sequence"]
-
-        schedule = self.scheduler.schedule(
+        schedule = self._require_scheduler().schedule(
             tasks=[task],
             agents={self.name: self._get_agent_capabilities()},
             state=self.state,
@@ -241,7 +328,7 @@ class ExecutionAgent(BaseAgent):
         if not self.task_coordinator.start_task(task["name"], assignee=self.name):
             raise ActionFailureError("task_coordinator", "Failed to transition task to IN_PROGRESS")
 
-        self.current_task = self.task_coordinator._find_task(task["name"])
+        self.current_task = self.task_coordinator.get_task_snapshot(task["name"])
         self.shared_memory.publish("task_events", {"event": "task_started", "task": task, "agent": self.name})
 
     def _run_task_loop(self, task: Dict[str, Any]) -> None:
@@ -263,7 +350,7 @@ class ExecutionAgent(BaseAgent):
             elif step_outcome.get("status") == "failed":
                 raise ActionFailureError(step_outcome.get("action", "unknown"), step_outcome.get("reason", "Failed"))
 
-            self.current_task = self.task_coordinator._find_task(task["name"])
+            self.current_task = self.task_coordinator.get_task_snapshot(task["name"])
 
     def _finalize_task_result(self, task: Dict[str, Any]) -> Dict[str, Any]:
         final_ok = self.task_coordinator.validate_task_completion(task["name"])
@@ -303,8 +390,12 @@ class ExecutionAgent(BaseAgent):
                     working_context["disallowed_actions"] = sorted(blocked_actions)
                 selected_action = self._select_action(working_context)
                 action_name = selected_action.get("name", "idle")
-                self._validate_action(action_name, working_context)
-                self._execute_selected_action(action_name, working_context)
+                action_context = self._context_for_action(selected_action, working_context)
+                self._validate_action(action_name, action_context)
+                self._execute_selected_action(action_name, action_context)
+
+                if self.current_plan and self._current_plan_index < len(self.current_plan):
+                    self._current_plan_index += 1
 
                 refreshed_context = self._gather_context()
                 progress = self._calculate_task_progress(refreshed_context)
@@ -343,7 +434,44 @@ class ExecutionAgent(BaseAgent):
         ]
 
     def _select_action(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        if self.current_plan and self._current_plan_index < len(self.current_plan):
+            planned_step = self.current_plan[self._current_plan_index]
+            if isinstance(planned_step, str):
+                return {"name": planned_step}
+            if isinstance(planned_step, Mapping):
+                selected = dict(planned_step)
+                selected.setdefault("name", "unknown")
+                return selected
+            raise InvalidContextError("action_sequence", [f"step[{self._current_plan_index}]"])
         return self.action_selector.select(self._build_potential_actions(), context)
+
+    @staticmethod
+    def _context_for_action(
+        selected_action: Mapping[str, Any],
+        base_context: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Merge one plan step into context without mutating task or agent state."""
+        merged = copy.deepcopy(dict(base_context))
+        for field in ("context", "params", "parameters"):
+            payload = selected_action.get(field)
+            if payload is None:
+                continue
+            if not isinstance(payload, Mapping):
+                raise InvalidContextError(
+                    str(selected_action.get("name", "action")),
+                    [f"{field}(mapping)"],
+                )
+            merged.update(copy.deepcopy(dict(payload)))
+
+        control_fields = {"name", "context", "params", "parameters", "priority"}
+        merged.update(
+            {
+                str(key): copy.deepcopy(value)
+                for key, value in selected_action.items()
+                if key not in control_fields
+            }
+        )
+        return merged
 
     def _validate_action(self, action_name: str, context: Dict[str, Any]) -> None:
         is_valid, report = self.validator.validate_plan(
@@ -368,16 +496,22 @@ class ExecutionAgent(BaseAgent):
 
         self._update_state_from_action(action_instance)
 
-    def _gather_context(self) -> Dict[str, Any]:
+    def _gather_context(
+        self,
+        task_override: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
         printer.status("EXECUTION", "Context gatherer", "info")
 
         context = copy.deepcopy(self.state)
         context["current_time"] = time.time()
         context.setdefault("cancel_movement", False)
         context.setdefault("urgent_event", False)
+        if self.robot is not None:
+            context["robot"] = self.robot
+            context["robot_ready"] = True
 
-        if self.current_task:
-            task = self.current_task
+        task = task_override if task_override is not None else self.current_task
+        if task:
             goal = task.get("goal_type", task.get("task_type", "generic"))
             destination = task.get("destination") or task.get("target_position")
             place_position = task.get("place_position") or task.get("destination")
@@ -393,7 +527,7 @@ class ExecutionAgent(BaseAgent):
                     "target_object": target_object,
                     "object_position": task.get("object_position", destination),
                     "object_properties": task.get("object_properties", context.get("object_properties", {})),
-                    "robot": task.get("robot", context.get("robot")),
+                    "robot": task.get("robot") or context.get("robot"),
                     "robot_ready": bool(task.get("robot") or context.get("robot_ready", False)),
                 }
             )
@@ -417,6 +551,9 @@ class ExecutionAgent(BaseAgent):
     def _is_task_complete(self, context: Dict[str, Any]) -> bool:
         if not self.current_task:
             return False
+
+        if self.current_plan and self._current_plan_index >= len(self.current_plan):
+            return True
 
         goal = str(self.current_task.get("goal_type", "")).lower()
         if goal in {"navigate", "move", "travel"}:
@@ -448,10 +585,10 @@ class ExecutionAgent(BaseAgent):
 
         goal = str(self.current_task.get("goal_type", "")).lower()
         if goal in {"navigate", "move", "travel"} and context.get("destination_distance") is not None:
-            initial_distance = self.current_task.get("initial_distance")
+            initial_distance = self._initial_task_distance
             if initial_distance is None:
-                initial_distance = max(1.0, float(context.get("destination_distance", 0.0)) + 1.0)
-                self.current_task["initial_distance"] = initial_distance
+                initial_distance = max(1.0, float(context.get("destination_distance", 0.0)))
+                self._initial_task_distance = initial_distance
             remaining = max(0.0, float(context.get("destination_distance", initial_distance)))
             return max(0.0, min(0.99, 1.0 - (remaining / max(0.1, float(initial_distance)))))
 
@@ -506,9 +643,11 @@ class ExecutionAgent(BaseAgent):
 
     def _get_agent_capabilities(self) -> Dict[str, Any]:
         return {
-            "capabilities": ["navigation", "object_manipulation", "task_execution"],
+            "capabilities": sorted(
+                {"navigation", "object_manipulation", "task_execution", *self.action_class_registry}
+            ),
             "current_load": 0.0,
-            "efficiency": float(self.config.get("efficiency", 1.0)),
+            "efficiency": self.efficiency,
         }
 
     def sync_state(self, env_state: np.ndarray):
@@ -526,11 +665,50 @@ class ExecutionAgent(BaseAgent):
         self.adaptive_agent = adaptive_agent
         logger.info("Adaptive agent attached to ExecutionAgent")
 
+    def attach_robot(self, robot: RobotInterface) -> None:
+        """Attach a robot adapter used by enabled hardware actions."""
+        if robot is None:
+            raise TypeError("robot cannot be None")
+        self.robot = robot
+
+    def get_health_report(self) -> Dict[str, Any]:
+        report = self.runtime_status()
+        report["subsystems"] = {
+            "execution_memory": self.execution_memory.summary(),
+            "task_coordinator": self.task_coordinator.summary(),
+            "validator": self.validator.get_validation_stats(),
+            "recovery": self.recovery.get_recovery_report(),
+        }
+        report["enabled_actions"] = sorted(self.action_class_registry)
+        report["robot_attached"] = self.robot is not None
+        report["scheduler_ready"] = self.scheduler is not None
+        return report
+
     def get_validation_report(self):
         return self.validator.get_validation_stats()
 
     def get_recovery_report(self):
         return self.recovery.get_recovery_report()
+
+    def shutdown(self) -> None:
+        """Persist execution state and release agent-owned storage handles."""
+        lifecycle = self._runtime_status.lifecycle
+        if lifecycle in {RuntimeLifecycle.STOPPING, RuntimeLifecycle.STOPPED}:
+            return
+        self._transition_runtime_lifecycle(RuntimeLifecycle.STOPPING)
+        self.operational_state = "stopping"
+        try:
+            self.shared_memory.set(f"agent_state:{self.name}", self.state)
+            if self._owns_execution_memory:
+                self.execution_memory.close()
+            else:
+                self.execution_memory.flush()
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "execution_memory.shutdown", exc)
+            logger.warning("ExecutionAgent shutdown persistence is degraded: %s", exc)
+        finally:
+            self.operational_state = "stopped"
+            self._transition_runtime_lifecycle(RuntimeLifecycle.STOPPED)
 
 
 if __name__ == "__main__":
@@ -538,8 +716,8 @@ if __name__ == "__main__":
     printer.status("TEST", "Execution Agent initialized", "info")
     import uuid
 
-    from src.agents.agent_factory import AgentFactory
-    from src.agents.collaborative.shared_memory import SharedMemory
+    from .agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
 
     memory = SharedMemory()
     factory = AgentFactory()

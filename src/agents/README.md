@@ -138,7 +138,9 @@ The package exposes two complementary layers:
 
 ## 5) Agent factory lifecycle
 
-`AgentFactory` is the canonical instantiation path and is responsible for metadata registration, dependency-aware creation, and per-agent config injection.
+`AgentFactory` is the canonical instantiation path and is responsible for metadata registration, dependency-aware creation, per-agent config injection, and validated runtime lifecycle ownership.
+
+Runtime identity has three non-interchangeable parts: the registered definition (`name@version`), the unique constructed `instance_id`, and a non-secret `scope_id` derived from shared memory, config, and constructor context. The cache uses the definition and scope together, so aliases resolve to the same canonical definition while different versions or constructor scopes cannot collide.
 
 ```mermaid
 sequenceDiagram
@@ -149,7 +151,9 @@ sequenceDiagram
     participant Agent as Target Agent
 
     Caller->>Factory: create(agent_type, shared_memory, **kwargs)
-    Factory->>Factory: check cache (active_agents)
+    Factory->>Registry: resolve canonical name and version
+    Registry-->>Factory: definition identity
+    Factory->>Factory: check definition + scope cache
     alt cached
         Factory-->>Caller: return existing instance
     else not cached
@@ -160,10 +164,13 @@ sequenceDiagram
         Config-->>Factory: agent config
         Factory->>Agent: construct(shared_memory, agent_factory, config, ...)
         Agent-->>Factory: initialized instance
-        Factory->>Factory: cache instance
+        Factory->>Factory: validate action contract and activate
+        Factory->>Factory: cache managed runtime record
         Factory-->>Caller: return instance
     end
 ```
+
+Lifecycle transitions are restricted to `initializing`, `active`, `degraded`, `stopping`, `stopped`, and `failed`. `release()` and `shutdown()` transition and close each managed instance once. Optional persistence or telemetry failures do not mask a successful primary task; they appear in `runtime_status()` and `health_check()` with the degraded channel, operation, error, occurrence count, and timestamps.
 
 ---
 
@@ -237,7 +244,7 @@ This allows each domain to evolve independently while preserving predictable int
 1. **Create a facade agent** at `src/agents/<new>_agent.py`, inheriting from `BaseAgent`.
 2. **Add a domain package** under `src/agents/<new>/` if the logic is non-trivial.
 3. **Provide config assets** in `<new>/configs/` and load via shared config helpers.
-4. **Register in factory map** (`AgentFactory._agent_classes`) and metadata registry flow.
+4. **Register in the factory agent specs** and metadata registry flow with an explicit version.
 5. **Expose collaboration hooks** if the agent participates in routed tasks.
 6. **Add/update documentation** in both domain README and this top-level architecture README.
 

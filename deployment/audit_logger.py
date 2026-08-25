@@ -1,37 +1,27 @@
-import logging
-import psutil
 import json
 import os
+import socket
+import psutil # type: ignore
 
-from datetime import datetime
-from typing import Optional, Dict
-from tenacity import retry, stop_after_attempt, wait_fixed
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Dict, Any
+from tenacity import retry, stop_after_attempt, wait_fixed # pyright: ignore[reportMissingImports]
+
+from ..logs.logger import get_logger
+from ..logs.standards import LogDomain, build_event, default_log_path
 
 MAX_LOG_SIZE = 200 * 1024 * 1024  # 200MB
-SENSITIVE_KEYS = {
-    "password", 
-    "token", 
-    "secret"
-}
-LOG_DIR = "deployment/logs"
-LOG_FILE = os.path.join(LOG_DIR, "deployment_audit.jsonl")
-os.makedirs(LOG_DIR, exist_ok=True)
-VALID_EVENT_TYPES = {
-    "deploy", 
-    "rollback", 
-    "config_change", 
-    "version_bump"
-}
-
-from logs.logger import get_logger, PrettyPrinter
+SENSITIVE_KEYS = {"password", "token", "secret"}
+LOG_FILE = default_log_path(LogDomain.AUDIT, "deployment_audit.jsonl")
+VALID_EVENT_TYPES = {"deploy", "rollback", "config_change", "version_bump", "log_access"}
 
 logger = get_logger("Audit Logger")
-printer = PrettyPrinter
 
-def _redact_sensitive(data: dict) -> dict:
-    """Scrub sensitive values from details"""
-    return {k: "**REDACTED**" if k in SENSITIVE_KEYS else v 
-            for k, v in data.items()}
+
+def _redact_sensitive(data: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: "**REDACTED**" if k in SENSITIVE_KEYS else v for k, v in data.items()}
+
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(0.5))
 def log_event(
@@ -41,72 +31,58 @@ def log_event(
     branch: Optional[str] = None,
     version: Optional[str] = None,
     success: bool = True,
-    details: Optional[Dict] = None
-):
-    if os.path.exists(LOG_FILE):
-        if os.path.getsize(LOG_FILE) > MAX_LOG_SIZE:
-            rotate_logs()    
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
     if event_type not in VALID_EVENT_TYPES:
         raise ValueError(f"Invalid event type: {event_type}. Valid types: {VALID_EVENT_TYPES}")
 
-    try:
-        system_metrics = {
-            "cpu_percent": psutil.cpu_percent(),
-            "ram_used": psutil.virtual_memory().used,
-            "disk_free": psutil.disk_usage('/').free
-        }
-        """
-        Logs a structured JSON event to the deployment log.
-        """
-        event = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "event_type": event_type,
+    if LOG_FILE.exists() and LOG_FILE.stat().st_size > MAX_LOG_SIZE:
+        rotate_logs()
+
+    redacted_details = _redact_sensitive(details or {})
+    event = build_event(
+        agent="deployment",
+        event=event_type,
+        severity="INFO" if success else "ERROR",
+        payload={
             "user": user,
             "environment": environment,
             "branch": branch,
             "version": version,
             "success": success,
-            "details": details or {},
-            "system_metrics": system_metrics,
-            "hostname": os.uname().nodename,
-            "ip_address": socket.gethostbyname(socket.gethostname())
-        }
-        logger.info(json.dumps(event))
-        print(f"[{event_type.upper()}] env={environment} | user={user} | branch={branch} | success={success}")
+            "details": redacted_details,
+            "system_metrics": {
+                "cpu_percent": psutil.cpu_percent(),
+                "ram_used": psutil.virtual_memory().used,
+                "disk_free": psutil.disk_usage('/').free,
+            },
+            "hostname": socket.gethostname(),
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
-    except Exception as e:
-        print(f"Critical logging failure: {str(e)}")
-        raise
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOG_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event.__dict__, ensure_ascii=False) + "\n")
 
-def rotate_logs():
-    """Rotate logs when they reach max size"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    archived_log = os.path.join(LOG_DIR, f"deployment_audit_{timestamp}.jsonl")
+    logger.info(json.dumps(event.__dict__))
+
+
+def rotate_logs() -> None:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    archived_log = LOG_FILE.with_name(f"deployment_audit_{timestamp}.jsonl")
     os.rename(LOG_FILE, archived_log)
 
-def read_logs(as_dicts=True, limit=100):
+
+def read_logs(as_dicts: bool = True, limit: int = 100):
     log_event(
         event_type="log_access",
         user=os.getenv("USER", "unknown"),
         environment="audit",
-        details={"action": "read_logs", "limit": limit}
+        details={"action": "read_logs", "limit": limit},
     )
-    """
-    Reads the latest deployment log entries.
-
-    Parameters:
-        as_dicts: Return parsed JSON dicts or raw lines.
-        limit: Number of most recent entries to return.
-
-    Returns:
-        List of deployment events.
-    """
-    if not os.path.exists(LOG_FILE):
+    if not LOG_FILE.exists():
         return []
 
-    with open(LOG_FILE, "r", encoding="utf-8") as f:
-        lines = f.readlines()[-limit:]
-
+    lines = LOG_FILE.read_text(encoding="utf-8").splitlines()[-limit:]
     return [json.loads(line) for line in lines] if as_dicts else lines
-
-details = _redact_sensitive(details or {})

@@ -1,39 +1,41 @@
 # Logs Directory
 
-This directory now enforces structured observability standards across logging, metrics, and governance.
+This directory enforces a deterministic and standardized logging layout.
 
-## Structured Logging
+## Canonical Event Schema
 
-`logs/observability.py` defines a `StructuredLogger` that emits JSON records with a fixed schema:
+All structured log events should use this shape:
 
-- `timestamp`, `level`, `logger`, `event`, `message`
-- `service`, `environment`, `component`
-- `trace_id`, `span_id`
-- `metadata` (object payload for context)
+- `timestamp` (UTC ISO-8601)
+- `agent`
+- `trace_id`
+- `event`
+- `severity`
+- `payload` (object)
 
-Use canonical Python log levels (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) only.
+This schema is implemented in `logs/standards.py` via `StandardLogEvent` and `build_event()`.
 
-## Service-level Metrics and Alerts
+## Deterministic Log Domains
 
-`ServiceMetrics` computes rolling-window SLO telemetry:
+`logs/standards.py` creates and manages three deterministic directories:
 
-- Average and p95 latency (ms)
-- Error rate
-- Composite health score
+- `logs/runtime/` → runtime/service logs
+- `logs/audit/` → compliance and deployment audit trails
+- `logs/training/` → experiment/training logs
 
-Alert thresholds are configured in `MetricsAlertThresholds`:
+Use `default_log_path(domain, filename)` to prevent ad-hoc paths.
 
-- `min_health_score` (default: `0.95`)
-- `max_p95_latency_ms` (default: `1000`)
-- `max_error_rate` (default: `0.02`)
+## Integration Points
 
-## Log Lifecycle and Access Controls
+- `logs/logger.py` writes application runtime logs to `logs/runtime/app.log`.
+- `logs/observability.py` emits redacted JSON runtime events using the standard shape.
+- `deployment/audit_logger.py` writes audit events to `logs/audit/deployment_audit.jsonl`.
 
-`LogGovernancePolicy` configures:
+## Governance
 
-- Rotation policy (`rotation_bytes`, `rotation_backups`)
-- Retention policy (`retention_days`) via `enforce_retention()`
-- PII redaction for email/phone/SSN/credit-card patterns
-- File and directory permission masks (`0640` files, `0750` directories)
+`logs/observability.py` still provides:
 
-This gives baseline controls for privacy and least-privilege log access.
+- Rotation controls
+- Retention enforcement
+- PII redaction
+- Access permission settings

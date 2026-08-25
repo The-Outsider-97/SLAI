@@ -1,41 +1,25 @@
+import sys, os
+from pathlib import Path
+
+if sys.platform == "win32":
+    try:
+        import torch
+        torch_lib_path = os.path.join(os.path.dirname(torch.__file__), "lib")
+        if os.path.exists(torch_lib_path):
+            # This is the crucial line for Python 3.8+
+            os.add_dll_directory(torch_lib_path)
+    except (ImportError, AttributeError):
+        pass
+
+import io
 import json
 import math
-import sys
-import subprocess
-import io
 
-from pathlib import Path
 from datetime import datetime
-
-from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent
-from PyQt5.QtGui import (
-    QColor,
-    QFont,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-    QPolygonF,
-    QBrush,
-    QRadialGradient,
-    QRegion,
-    QTransform
-)
-from PyQt5.QtWidgets import (
-    QApplication,
-    QLabel,
-    QPushButton,
-    QWidget,
-    QGraphicsDropShadowEffect,
-    QGraphicsOpacityEffect,
-    QFrame,
-    QVBoxLayout,
-    QDialog,
-    QLineEdit,
-    QMessageBox,
-    QHBoxLayout,
-    QTextEdit,
-)
+from PyQt5.QtCore import QPointF, QRectF, QRect, QPoint, Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent # type: ignore
+from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QBrush, QRadialGradient, QRegion, QTransform # type: ignore
+from PyQt5.QtWidgets import (QApplication, QLabel, QPushButton, QWidget, QGraphicsDropShadowEffect, # type: ignore
+                             QGraphicsOpacityEffect, QFrame, QVBoxLayout, QDialog, QLineEdit, QMessageBox, QHBoxLayout, QTextEdit)
 
 from src.functions.dropdown import DropdownMenu, DropdownOption, AnimationConfig
 from src.functions.auth import AuthService
@@ -835,31 +819,135 @@ class HubWindow(QWidget):
         self.desc_label.adjustSize()
         self.desc_label.show()
 
+    
     def _on_app_clicked(self, app_name: str) -> None:
-        if app_name not in {"SignalSentry", "ContentOps Autopublisher"}:
-            return
-        if self._app_launch_in_progress:
-            return
-
+        """
+        Launch only the selected app.
+    
+        No fallback logic is allowed. If Documaster fails, Documaster fails.
+        This method does not try to open SignalSentry, AutoPublisher, or any other app.
+        """
         try:
-            self._app_launch_in_progress = True
-            start_loading(self.app_launch_loader, f"Launching {app_name}…")
-            update_loading(self.app_launch_loader, progress=0.35, message=f"Initializing {app_name} window…")
-            if app_name == "SignalSentry":
-                from component.signal_sentry import SignalSentryWindow
-                self.child_window = SignalSentryWindow()
-            else:
-                from component.autopublisher import AutopublisherWindow
-                self.child_window = AutopublisherWindow()
-            update_loading(self.app_launch_loader, progress=0.85, message=f"Opening {app_name}…")
-            self.child_window.show()
-            complete_loading(self.app_launch_loader, f"{app_name} ready")
-            self.close()
+            launchers = {
+                "Documaster": self._open_documaster,
+                "SignalSentry": self._open_signal_sentry,
+                "ContentOps Autopublisher": self._open_autopublisher,
+            }
+    
+            launcher = launchers.get(app_name)
+    
+            if launcher is None:
+                QMessageBox.critical(
+                    self,
+                    "Launch error",
+                    f"No launcher is configured for: {app_name}"
+                )
+                return
+    
+            launcher()
+    
         except Exception as exc:
-            complete_loading(self.app_launch_loader, "Launch failed")
-            print(f"Failed to launch {app_name}: {exc}")
-        finally:
-            self._app_launch_in_progress = False
+            QMessageBox.critical(
+                self,
+                f"{app_name} failed to open",
+                f"{app_name} could not be opened.\n\nError:\n{exc}"
+            )
+            return
+        
+    def _open_documaster(self) -> None:
+        from documaster.documaster import DocumasterWindow
+    
+        self.documaster_window = DocumasterWindow()
+        self.documaster_window.show()
+    
+    
+    def _open_signal_sentry(self) -> None:
+        from component.signal_sentry import SignalSentryWindow
+    
+        self.signal_sentry_window = SignalSentryWindow()
+        self.signal_sentry_window.show()
+    
+    
+    def _open_autopublisher(self) -> None:
+        from component.autopublisher import AutopublisherWindow
+    
+        self.autopublisher_window = AutopublisherWindow()
+        self.autopublisher_window.show()
+
+    ##    ##
+    ## OR ##
+    ##    ##
+    
+#    APP_LAUNCHERS = {
+#        "ProPlanner": "_launch_proplanner",
+#        "Documaster": "_launch_documaster",
+#        "SignalSentry": "_launch_signal_sentry",
+#        "ContentOps Autopublisher": "_launch_autopublisher",
+#    }
+
+#    def _on_app_clicked(self, app_name: str) -> None:
+#        """Launch exactly the selected SLAIHub app-card.
+#    
+#        There is no cross-app fallback. If Documaster fails, Documaster fails.
+#        """
+#        launcher_name = self.APP_LAUNCHERS.get(app_name)
+#        if launcher_name is None:
+#            QMessageBox.critical(self, "Launch error", f"No launcher is configured for: {app_name}")
+#            return
+    
+#        launcher = getattr(self, launcher_name, None)
+#        if launcher is None:
+#            QMessageBox.critical(self, "Launch error", f"Launcher is missing for: {app_name}")
+#            return
+    
+#        try:
+#            launcher()
+#        except Exception as exc:  # noqa: BLE001
+#            QMessageBox.critical(
+#                self,
+#                f"{app_name} failed to open",
+#                f"{app_name} could not be opened. No fallback app was launched.\n\n{type(exc).__name__}: {exc}",
+#            )
+        
+#    def _open_proplanner(self) -> None:
+#        from proplanner.proplanner import PPWindow
+#    
+#        self.documaster_window = PPWindow()
+#        self.documaster_window.show()
+    
+#    def _open_documaster(self) -> None:
+#        from documaster.documaster import DocumasterWindow
+    
+#        self.documaster_window = DocumasterWindow()
+#        self.documaster_window.show()
+    
+    
+#    def _open_signal_sentry(self) -> None:
+#        from component.signal_sentry import SignalSentryWindow
+#    
+#        self.signal_sentry_window = SignalSentryWindow()
+#        self.signal_sentry_window.show()
+    
+    
+#    def _open_autopublisher(self) -> None:
+#        from component.autopublisher import AutopublisherWindow
+#    
+#        self.autopublisher_window = AutopublisherWindow()
+#        self.autopublisher_window.show()
+
+
+
+    def _return_from_child_app(self) -> None:
+        child = self.child_window
+        self.child_window = None
+    
+        if child is not None:
+            child.close()
+            child.deleteLater()
+    
+        self.showMaximized()
+        self.raise_()
+        self.activateWindow()
 
     def resizeEvent(self, _event) -> None:
         self._position_top_bar()

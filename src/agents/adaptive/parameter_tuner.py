@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 import pickle
-import numpy as np
+import numpy as np # type: ignore
 
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Type, Union
 from collections import deque
 
-from src.tuning.tuner import HyperparamTuner
-from src.tuning.utils.config_loader import get_config_section as get_tuner_config
+from src.tuning.tuner import HyperparamTuner # pyright: ignore[reportMissingImports]
+from src.tuning.utils.config_loader import get_config_section as get_tuner_config # pyright: ignore[reportMissingImports]
 from .utils.config_loader import load_global_config, get_config_section as get_param_config
 from .utils.adaptive_errors import *
+from .utils.adaptive_helpers import *
 from .adaptive_memory import MultiModalMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Parameter Tuner")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class LearningParameterTuner:
@@ -217,7 +218,8 @@ class LearningParameterTuner:
         ensure_non_empty(rewards, name, component="parameter_tuner")
         values: List[float] = []
         for idx, reward in enumerate(rewards):
-            if not isinstance(reward, (int, float, np.number)) or not np.isfinite(reward):
+            # if not isinstance(reward, (int, float, np.number)) or not np.isfinite(reward):
+            if not is_finite_number(reward):
                 raise InvalidValueError(
                     f"All entries in '{name}' must be finite numeric values.",
                     component="parameter_tuner",
@@ -227,7 +229,8 @@ class LearningParameterTuner:
         return values
 
     def _coerce_param_value(self, name: str, value: Any) -> float:
-        if not isinstance(value, (int, float, np.number)) or not np.isfinite(value):
+        # if not isinstance(value, (int, float, np.number)) or not np.isfinite(value):
+        if not is_finite_number(value):
             raise InvalidValueError(
                 f"Parameter '{name}' must be a finite numeric value.",
                 component="parameter_tuner",
@@ -529,7 +532,8 @@ class LearningParameterTuner:
         return float(self.params["exploration_rate"])
 
     def update_performance(self, reward: Any) -> float:
-        if not isinstance(reward, (int, float, np.number)) or not np.isfinite(reward):
+        # if not isinstance(reward, (int, float, np.number)) or not np.isfinite(reward):
+        if not is_finite_number(reward):
             raise InvalidValueError(
                 "reward must be a finite numeric value.",
                 component="parameter_tuner",
@@ -686,7 +690,11 @@ class LearningParameterTuner:
 
         perf_history = state.get("performance_history", [])
         self.performance_history = deque(
-            [float(v) for v in perf_history if isinstance(v, (int, float, np.number)) and np.isfinite(v)],
+            [
+                float(v)
+                for v in perf_history
+                if is_finite_number(v)
+            ],
             maxlen=self.history_size,
         )
 
@@ -760,6 +768,8 @@ if __name__ == "__main__":
                 {"learning_rate": 0.012, "exploration_rate": 0.20, "discount_factor": 0.97, "temperature": 0.80},
                 {"learning_rate": 0.006, "exploration_rate": 0.30, "discount_factor": 0.94, "temperature": 1.00},
             ]
+            if self.evaluation_function is None:
+                return candidates[0]
             scored = [(float(self.evaluation_function(candidate)), candidate) for candidate in candidates]
             scored.sort(key=lambda item: item[0], reverse=True)
             return scored[0][1]

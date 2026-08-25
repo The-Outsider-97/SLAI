@@ -1,204 +1,1424 @@
-__version__ = "2.1.0"
+from __future__ import annotations
 
-import re
+__version__ = "2.2.0"
+
+"""
+SLAI Reader Agent
+
+Production-ready orchestration layer for the Reader subsystem.
+
+Responsibilities
+----------------
+- coordinate Reader parsing, optional conservative recovery, conversion, and merge flows
+- keep subsystem-specific parsing/recovery/conversion policy inside ``src/agents/reader``
+- load only agent-level orchestration settings from ``agents_config.yaml``
+- use ``SharedMemory`` as the agent state/cache/checkpoint boundary
+- preserve BaseAgent lifecycle, metrics, retry, shared-memory audit, and issue handling
+- return deterministic, JSON-safe Reader task results without fabricating document content
+"""
+
 import asyncio
+import contextlib
+import threading
+import time
+import uuid
 
-from typing import Any, Awaitable, Callable, Dict, List, TypeVar
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Awaitable, Coroutine, Dict, Iterable, List, Mapping, TypeVar, Optional, Sequence, Tuple, Generic
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.base_agent import BaseAgent
-from src.agents.reader.utils.reader_error import ReaderError
-from src.agents.reader import (
-    ConversionEngine,
-    ParserEngine,
-    ReaderValidationError,
-    ReaderMemory,
-    RecoveryEngine,
-)
-from logs.logger import get_logger, PrettyPrinter
+from .base_agent import BaseAgent
+from .base.utils.main_config_loader import get_config_section
+from .reader import *
+from .reader.utils.reader_error import *
+from .reader.utils.reader_helpers import *
+from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Reader Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
 
 T = TypeVar("T")
 
-class ReaderAgent(BaseAgent):
-    """Thin facade for reader-domain orchestration (parse -> recover -> convert|merge)."""
+@dataclass(frozen=True)
+class ReaderAgentTask:
+    """Normalized ReaderAgent task contract used internally by the pipeline."""
 
-    def __init__(self, shared_memory, agent_factory, config=None):
-        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
+    instruction: str
+    files: List[str]
+    output_format: str
+    output_dir: str
+    mode: str = "pipeline"
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    recover: bool = False
+    merge: bool = False
+    fail_fast: bool = False
+    use_cache: bool = True
+    write_checkpoints: bool = True
+    include_documents: bool = False
+    include_content: bool = False
+    output_filename: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return json_safe(asdict(self))
+
+
+T = TypeVar("T")
+StageItem = TypeVar("StageItem", bound=Mapping[str, Any])
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderStageError:
+    """Normalized failure returned by one Reader pipeline stage."""
+
+    stage: str
+    code: str
+    message: str
+    retryable: bool
+    recoverable: bool
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        safe_details = json_safe(dict(self.details), redact=True)
+        if not isinstance(safe_details, dict):
+            safe_details = {"payload": safe_details}
+
+        # Keep the original error envelope at the top level for compatibility,
+        # while also exposing the normalized typed fields.
+        return {
+            **safe_details,
+            "stage": self.stage,
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+            "recoverable": self.recoverable,
+            "details": safe_details,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderStageBatch(Generic[StageItem]):
+    """Typed result of one Reader pipeline stage."""
+
+    stage: str
+    items: Tuple[Mapping[str, Any], ...] = ()
+    errors: Tuple[ReaderStageError, ...] = ()
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.errors)
+
+    @property
+    def success_count(self) -> int:
+        return len(self.items)
+
+    @classmethod
+    def empty(cls, stage: str) -> "ReaderStageBatch[Mapping[str, Any]]":
+        return ReaderStageBatch[Mapping[str, Any]](stage=stage, items=(), errors=())
+
+    def error_dicts(self) -> List[Dict[str, Any]]:
+        return [error.to_dict() for error in self.errors]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "success_count": self.success_count,
+            "failed_count": self.failed_count,
+            "errors": self.error_dicts(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderAgentStageResult:
+    """Normalized stage result for Reader parse/recover/convert operations."""
+
+    stage: str = ""
+    items: Tuple[Mapping[str, Any], ...] = ()
+    errors: Tuple[Mapping[str, Any], ...] = ()
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.errors)
+
+    @property
+    def success_count(self) -> int:
+        return len(self.items)
+
+    def error_dicts(self) -> List[Dict[str, Any]]:
+        return [dict(error) for error in self.errors]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "success_count": self.success_count,
+            "failed_count": self.failed_count,
+            "errors": self.error_dicts(),
+        }
+
+
+class ReaderAgent(BaseAgent):
+    """Top-level Reader orchestration agent.
+
+    The agent intentionally avoids ``ReaderMemory``. All orchestration state,
+    checkpoint records, cache entries, and events are written through
+    ``self.shared_memory`` so the Reader participates in the same runtime fabric
+    as the other SLAI agents.
+    """
+
+    SUPPORTED_MODES = {"pipeline", "parse", "read", "recover", "convert", "merge", "capabilities", "describe"}
+    CACHE_VERSION = "reader_agent.v2"
+    RECOVERY_CACHE_VERSION = ("reader_agent.recovery.semantic_flags.v1")
+
+    def __init__(self, shared_memory, agent_factory, config: Optional[Mapping[str, Any]] = None) -> None:
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory)
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
 
-        self.config = load_global_config()
-        self.reader_agent_config = get_config_section("reader_agent")
+        self.agent_config: Dict[str, Any] = dict(get_config_section("reader_agent") or {})
+        if config:
+            self.agent_config.update(dict(config))
 
-        self.parser_engine = ParserEngine()
-        self.conversion_engine = ConversionEngine()
-        self.recovery_engine = RecoveryEngine(
-            min_quality_score=float(self.reader_agent_config.get("recovery_min_quality_score", 0.55))
+        self._load_reader_agent_config()
+        self._validate_reader_agent_config()
+
+        self.parser = ParserEngine()
+        self.recovery = RecoveryEngine()
+        self.converter = ConversionEngine()
+
+        self.retry_config = RetryConfig(
+            max_attempts=self.retry_max_attempts,
+            base_delay_seconds=self.retry_base_delay_seconds,
+            max_delay_seconds=self.retry_max_delay_seconds,
+            backoff_factor=self.retry_backoff_factor,
+            jitter_ratio=self.retry_jitter_ratio,
         )
-        self.reader_memory = ReaderMemory()
 
-        self.default_output_format = str(self.reader_agent_config.get("default_output_format", "txt")).lower()
-        self.output_dir = str(self.reader_agent_config.get("output_dir", "output/reader"))
-        self.max_concurrency = max(1, int(self.reader_agent_config.get("max_concurrency", 4)))
-        self.enable_cache = bool(self.reader_agent_config.get("enable_cache", True))
+        self.register_known_issue_handler("ReaderValidationError", self._handle_reader_known_issue, replace=True)
+        self.register_known_issue_handler("ReaderBatchError", self._handle_reader_known_issue, replace=True)
+        self.register_known_issue_handler("ReaderTaskExecutionError", self._handle_reader_known_issue, replace=True)
 
-        logger.info("Reader Agent initialized")
+        self._publish_reader_event("initialized", {"settings": self._settings_snapshot()})
+        logger.info(
+            "Reader Agent initialized | output_dir=%s default_format=%s max_concurrency=%s shared_cache=%s",
+            self.output_dir,
+            self.default_output_format,
+            self.max_concurrency,
+            self.use_shared_cache,
+        )
 
-    def _validate_task(self, task_data: Dict[str, Any]) -> tuple[str, List[str]]:
-        if not isinstance(task_data, dict):
-            raise ReaderValidationError("task_data must be a dictionary")
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
 
-        instruction = str(task_data.get("instruction", "")).strip()
-        files = task_data.get("files", [])
+    def _cfg(self, key: str, default: Any) -> Any:
+        return self.agent_config.get(key, default)
 
-        if not isinstance(files, list) or not files:
-            raise ReaderValidationError("task_data.files must be a non-empty list", {"files": files})
-        if not all(isinstance(path, str) and path.strip() for path in files):
-            raise ReaderValidationError("task_data.files must contain valid non-empty file paths")
+    def _load_reader_agent_config(self) -> None:
+        self.enabled = coerce_bool(self._cfg("enabled", True), True)
+        self.output_dir = str(self._cfg("output_dir", "output/reader") or "output/reader")
+        self.default_output_format = normalize_output_format(
+            self._cfg("default_output_format", "txt"),
+            supported_formats=DEFAULT_OUTPUT_FORMATS,
+            default="txt",
+        )
+        self.max_concurrency = coerce_int(self._cfg("max_concurrency", 4), 4, minimum=1, maximum=64)
+        self.fail_fast = coerce_bool(self._cfg("fail_fast", False), False)
+        self.auto_recover_low_quality = coerce_bool(self._cfg("auto_recover_low_quality", True), True)
+        self.low_quality_threshold = coerce_float(self._cfg("low_quality_threshold", 0.55), 0.55, minimum=0.0, maximum=1.0)
+        self.dedupe_files = coerce_bool(self._cfg("dedupe_files", True), True)
+        self.include_documents_by_default = coerce_bool(self._cfg("include_documents_by_default", False), False)
+        self.include_content_by_default = coerce_bool(self._cfg("include_content_by_default", False), False)
+        self.max_result_documents = coerce_int(self._cfg("max_result_documents", 50), 50, minimum=1, maximum=5000)
 
-        return instruction, files
+        self.use_shared_cache = coerce_bool(self._cfg("use_shared_cache", self._cfg("enable_cache", True)), True)
+        self.cache_ttl_seconds = coerce_int(self._cfg("cache_ttl_seconds", 0), 0, minimum=0)
+        self.cache_key_prefix = str(self._cfg("cache_key_prefix", "reader_agent.cache") or "reader_agent.cache")
+        self.cache_parse_results = coerce_bool(self._cfg("cache_parse_results", True), True)
+        self.cache_recovery_results = coerce_bool(self._cfg("cache_recovery_results", True), True)
 
-    def _extract_format(self, instruction: str) -> str | None:
-        if not instruction:
-            return None
+        self.write_checkpoints = coerce_bool(self._cfg("write_checkpoints", True), True)
+        self.checkpoint_key_prefix = str(self._cfg("checkpoint_key_prefix", "reader_agent.checkpoint") or "reader_agent.checkpoint")
+        self.checkpoint_index_key = str(self._cfg("checkpoint_index_key", "reader_agent.checkpoints") or "reader_agent.checkpoints")
+        self.max_checkpoint_index_entries = coerce_int(
+            self._cfg("max_checkpoint_index_entries", 250),
+            250,
+            minimum=1,
+            maximum=10000,
+        )
+        self.redact_checkpoints = coerce_bool(self._cfg("redact_checkpoints", True), True)
 
-        supported = sorted(self.conversion_engine.supported_output_formats)
-        tokens = set(re.findall(r"\.?[a-zA-Z0-9]+", instruction.lower()))
-        for fmt in supported:
-            if fmt in tokens or f".{fmt}" in tokens:
-                return fmt
-        return None
+        self.publish_events = coerce_bool(self._cfg("publish_events", True), True)
+        self.event_channel = str(self._cfg("event_channel", "reader.events") or "reader.events")
+        self.result_key_prefix = str(self._cfg("result_key_prefix", "reader_agent.result") or "reader_agent.result")
+        self.summary_key_prefix = str(self._cfg("summary_key_prefix", "reader_agent.summary") or "reader_agent.summary")
+        self.error_key_prefix = str(self._cfg("error_key_prefix", "reader_agent.error") or "reader_agent.error")
 
-    def _build_plan(self, instruction: str, files: List[str]) -> List[Dict[str, Any]]:
-        lowered = instruction.lower()
-        target_format = self._extract_format(instruction) or self.default_output_format
+        self.raise_on_pipeline_error = coerce_bool(self._cfg("raise_on_pipeline_error", False), False)
+        self.include_debug_errors = coerce_bool(self._cfg("include_debug_errors", False), False)
+        self.include_traceback_errors = coerce_bool(self._cfg("include_traceback_errors", False), False)
 
-        plan: List[Dict[str, Any]] = [{"action": "parse", "files": files}]
+        self.retry_max_attempts = coerce_int(self._cfg("retry_max_attempts", 2), 2, minimum=1, maximum=10)
+        self.retry_base_delay_seconds = coerce_float(self._cfg("retry_base_delay_seconds", 0.15), 0.15, minimum=0.0, maximum=60.0)
+        self.retry_max_delay_seconds = coerce_float(self._cfg("retry_max_delay_seconds", 2.0), 2.0, minimum=0.0, maximum=300.0)
+        self.retry_backoff_factor = coerce_float(self._cfg("retry_backoff_factor", 2.0), 2.0, minimum=1.0, maximum=10.0)
+        self.retry_jitter_ratio = coerce_float(self._cfg("retry_jitter_ratio", 0.10), 0.10, minimum=0.0, maximum=1.0)
 
-        if any(term in lowered for term in ("recover", "repair", "corrupt", "broken")):
-            plan.append({"action": "recover"})
+    def _validate_reader_agent_config(self) -> None:
+        if not self.enabled:
+            logger.warning("Reader Agent is configured as disabled; direct calls will still return a structured error.")
+        if not self.output_dir.strip():
+            raise ReaderConfigurationError("reader_agent.output_dir cannot be empty")
+        if self.max_concurrency < 1:
+            raise ReaderConfigurationError("reader_agent.max_concurrency must be >= 1", {"max_concurrency": self.max_concurrency})
+        if self.max_result_documents < 1:
+            raise ReaderConfigurationError("reader_agent.max_result_documents must be >= 1")
 
-        if "merge" in lowered or len(files) > 1:
-            plan.append({"action": "merge", "output": target_format})
-        else:
-            plan.append({"action": "convert", "target": target_format})
+    def _settings_snapshot(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "output_dir": self.output_dir,
+            "default_output_format": self.default_output_format,
+            "max_concurrency": self.max_concurrency,
+            "fail_fast": self.fail_fast,
+            "auto_recover_low_quality": self.auto_recover_low_quality,
+            "low_quality_threshold": self.low_quality_threshold,
+            "dedupe_files": self.dedupe_files,
+            "use_shared_cache": self.use_shared_cache,
+            "cache_ttl_seconds": self.cache_ttl_seconds,
+            "write_checkpoints": self.write_checkpoints,
+            "publish_events": self.publish_events,
+            "raise_on_pipeline_error": self.raise_on_pipeline_error,
+        }
 
-        return plan
+    # ------------------------------------------------------------------
+    # BaseAgent integration
+    # ------------------------------------------------------------------
 
-    async def _bounded_map(self, items: List[T], worker: Callable[[T], Awaitable[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-        semaphore = asyncio.Semaphore(self.max_concurrency)
+    def perform_task(self, task_data: Any) -> Dict[str, Any]:
+        """Execute a Reader task through parse/recover/convert/merge orchestration."""
 
-        async def wrapped(item: T) -> Dict[str, Any]:
-            async with semaphore:
-                return await worker(item)
+        if not self.enabled:
+            error = ReaderConfigurationError("Reader Agent is disabled by configuration")
+            return self._error_result(error, operation="reader_task")
 
-        return await asyncio.gather(*(wrapped(item) for item in items))
+        try:
+            if isinstance(task_data, Mapping):
+                operation = str(task_data.get("operation", "") or "").strip().lower()
+                if operation in {"capabilities", "describe"}:
+                    return build_success_result(operation="reader_capabilities", payload=self.capabilities())
 
-    async def _parse_files(self, files: List[str]) -> List[Dict[str, Any]]:
-        async def parse_one(file_path: str) -> Dict[str, Any]:
-            cache_key = {"action": "parse", "file": file_path}
-            if self.enable_cache:
-                cached = self.reader_memory.get_cache(cache_key)
-                if cached:
-                    out = dict(cached)
-                    out["cached"] = True
-                    return out
+            task = self._normalize_task(task_data)
+            result = self._run_coroutine_sync(self._execute_reader_task(task))
+            self._store_latest_result(task.run_id, result)
+            return result
+        except ReaderError as exc:
+            self._record_reader_error(exc, task_data)
+            if self.raise_on_pipeline_error:
+                raise
+            return self._error_result(exc, operation="reader_task")
+        except Exception as exc:
+            error = normalize_reader_error(
+                exc,
+                message="Reader Agent task execution failed",
+                context={"task_preview": truncate_text(stable_json_dumps(json_safe(task_data)), 600)},
+                stage=ReaderErrorStage.RUNTIME,
+            )
+            self._record_reader_error(error, task_data)
+            if self.raise_on_pipeline_error:
+                raise error from exc
+            return self._error_result(error, operation="reader_task")
 
-            parsed = await asyncio.to_thread(self.parser_engine.parse, file_path)
-            if self.enable_cache:
-                self.reader_memory.set_cache(cache_key, parsed)
+    def predict(self, state: Any, context: Any = None) -> Dict[str, Any]:
+        """Compatibility route for BaseAgent dispatchers that call ``predict``."""
 
-            out = dict(parsed)
-            out["cached"] = False
-            return out
+        task = state if isinstance(state, Mapping) else {"instruction": str(state), "context": context}
+        return self.perform_task(task)
 
-        return await self._bounded_map(files, parse_one)
+    def act(self, task_data: Any, context: Any = None) -> Dict[str, Any]:
+        """Compatibility route for action-style orchestration."""
 
-    async def _recover_docs(self, parsed_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        async def recover_one(doc: Dict[str, Any]) -> Dict[str, Any]:
-            recovered = await asyncio.to_thread(self.recovery_engine.recover_document, doc)
-            updated = dict(doc)
-            updated["content"] = recovered["content"]
-            updated["recovery"] = recovered
-            return updated
+        task = task_data if isinstance(task_data, Mapping) else {"instruction": str(task_data), "context": context}
+        return self.perform_task(task)
 
-        return await self._bounded_map(parsed_docs, recover_one)
+    def extract_performance_metrics(self, result: Any) -> Dict[str, float]:
+        metrics = super().extract_performance_metrics(result)
+        if isinstance(result, Mapping):
+            metadata = result.get("metadata", {})
+            if isinstance(metadata, Mapping):
+                for key in ("latency_ms", "throughput", "success_rate", "cache_hit_rate", "documents_processed"):
+                    value = metadata.get(key)
+                    if isinstance(value, (int, float)):
+                        metrics[key] = float(value)
+        return metrics
 
-    async def _convert_docs(self, docs: List[Dict[str, Any]], target: str) -> List[Dict[str, Any]]:
-        async def convert_one(doc: Dict[str, Any]) -> Dict[str, Any]:
-            return await asyncio.to_thread(
-                self.conversion_engine.convert,
-                doc,
-                target,
-                self.output_dir,
+    # ------------------------------------------------------------------
+    # Task normalization and planning
+    # ------------------------------------------------------------------
+
+    def _unwrap_payload(self, task_data: Any) -> Mapping[str, Any]:
+        if not isinstance(task_data, Mapping):
+            raise ReaderValidationError("ReaderAgent task_data must be a mapping", {"type": type(task_data).__name__})
+
+        payload: Mapping[str, Any] = task_data
+        for key in ("task_data", "input_data", "payload"):
+            nested = task_data.get(key)
+            if isinstance(nested, Mapping) and not any(candidate in task_data for candidate in ("files", "file", "path", "paths")):
+                payload = nested
+                break
+        return payload
+
+    def _normalize_task(self, task_data: Any) -> ReaderAgentTask:
+        payload = self._unwrap_payload(task_data)
+        instruction = normalize_instruction(payload.get("instruction", payload.get("query", payload.get("message", ""))))
+
+        raw_files = payload.get("files", None)
+        if raw_files is None:
+            raw_files = payload.get("paths", None)
+        if raw_files is None:
+            raw_files = payload.get("file", payload.get("path", []))
+        files = normalize_files(raw_files)
+        if self.dedupe_files:
+            files = dedupe_preserve_order(files)
+
+        operation = str(payload.get("operation", "") or "").strip().lower()
+        mode = operation if operation in self.SUPPORTED_MODES else str(payload.get("mode", "pipeline") or "pipeline").strip().lower()
+        if mode not in self.SUPPORTED_MODES:
+            mode = "pipeline"
+        if mode == "describe":
+            mode = "capabilities"
+
+        explicit_format = payload.get("output_format", payload.get("target_format", payload.get("format", None)))
+        requested_format = normalize_output_format(
+            explicit_format or extract_requested_format(instruction, self.converter.supported_formats(), default=self.default_output_format),
+            supported_formats=self.converter.supported_formats(),
+            default=self.default_output_format,
+        )
+
+        output_dir = str(payload.get("output_dir", self.output_dir) or self.output_dir)
+        run_id = safe_filename(payload.get("run_id", uuid.uuid4().hex), fallback="reader_run")
+
+        recover = self._bool_or_default(payload.get("recover", payload.get("recovery", None)), instruction_requests_recovery(instruction))
+        merge = self._bool_or_default(payload.get("merge", None), instruction_requests_merge(instruction, file_count=len(files)))
+        if mode == "recover":
+            recover = True
+            merge = False
+        elif mode == "merge":
+            merge = True
+        elif mode in {"parse", "read", "convert"}:
+            merge = False
+
+        fail_fast = self._bool_or_default(payload.get("fail_fast", None), self.fail_fast)
+        use_cache = self._bool_or_default(payload.get("use_cache", payload.get("enable_cache", None)), self.use_shared_cache)
+        write_checkpoints = self._bool_or_default(payload.get("write_checkpoints", None), self.write_checkpoints)
+        include_documents = self._bool_or_default(payload.get("include_documents", None), self.include_documents_by_default)
+        include_content = self._bool_or_default(payload.get("include_content", None), self.include_content_by_default)
+
+        metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata", {}), Mapping) else {}
+        return ReaderAgentTask(
+            instruction=instruction,
+            files=files,
+            output_format=requested_format,
+            output_dir=output_dir,
+            mode=mode,
+            run_id=run_id,
+            recover=recover,
+            merge=merge,
+            fail_fast=fail_fast,
+            use_cache=use_cache,
+            write_checkpoints=write_checkpoints,
+            include_documents=include_documents,
+            include_content=include_content,
+            output_filename=str(payload.get("output_filename", payload.get("filename", "")) or "") or None,
+            metadata=dict(metadata),
+        )
+
+    @staticmethod
+    def _bool_or_default(value: Any, default: bool) -> bool:
+        if value is None:
+            return bool(default)
+        return coerce_bool(value, bool(default))
+
+    def build_plan(self, task_data: Mapping[str, Any] | ReaderAgentTask) -> List[Dict[str, Any]]:
+        task = task_data if isinstance(task_data, ReaderAgentTask) else self._normalize_task(task_data)
+        if task.mode in {"parse", "read"}:
+            return [{"action": "parse", "files": list(task.files)}]
+        if task.mode == "recover":
+            return [{"action": "parse", "files": list(task.files)}, {"action": "recover"}]
+        if task.mode == "merge":
+            return [{"action": "parse", "files": list(task.files)}, {"action": "recover", "condition": "if_requested_or_low_quality"}, {"action": "merge", "output": task.output_format}]
+        if task.mode == "convert":
+            return [{"action": "parse", "files": list(task.files)}, {"action": "recover", "condition": "if_requested_or_low_quality"}, {"action": "convert", "target": task.output_format}]
+        return build_basic_reader_plan(
+            task.instruction,
+            task.files,
+            supported_output_formats=self.converter.supported_formats(),
+            default_output_format=task.output_format,
+        )
+
+    # ------------------------------------------------------------------
+    # Pipeline orchestration
+    # ------------------------------------------------------------------
+
+    async def _execute_reader_task(self, task: ReaderAgentTask) -> Dict[str, Any]:
+        timer = OperationTimer(operation="reader_task")
+        self._publish_reader_event(
+            "started",
+            {
+                "run_id": task.run_id,
+                "mode": task.mode,
+                "file_count": len(task.files),
+            },
+        )
+
+        plan = self.build_plan(task)
+        if task.write_checkpoints:
+            self._write_checkpoint(task.run_id, "plan",
+                                   {"task": task.to_dict(), "plan": plan},
             )
 
-        return await self._bounded_map(docs, convert_one)
+        # 1. Parse
+        parse_started = time.perf_counter()
+        parsed_stage = await self._parse_files(task)
 
-    async def process(self, instruction: str, files: List[str]) -> Dict[str, Any]:
-        plan = self._build_plan(instruction=instruction, files=files)
-        self.reader_memory.write_checkpoint("plan", {"instruction": instruction, "plan": plan, "files": files})
+        self._profile_hot_path(
+            "reader.parse",
+            parse_started,
+            run_id=task.run_id,
+            files=len(task.files),
+            failed=parsed_stage.failed_count,
+        )
 
-        parsed_docs = await self._parse_files(files)
-        self.reader_memory.write_checkpoint("parse", {"count": len(parsed_docs), "files": files})
+        if parsed_stage.failed_count and task.fail_fast:
+            raise ReaderBatchError(
+                "Reader parse stage failed",
+                {
+                    "stage": "parse",
+                    "errors": parsed_stage.error_dicts(),
+                },
+                failed_count=parsed_stage.failed_count,
+                total_count=len(task.files),
+            )
 
-        for step in plan:
-            action = step["action"]
-            if action == "recover":
-                parsed_docs = await self._recover_docs(parsed_docs)
-                self.reader_memory.write_checkpoint("recover", {"count": len(parsed_docs)})
+        parsed_docs = parsed_stage.items
+
+        if task.write_checkpoints:
+            self._write_checkpoint(
+                task.run_id,
+                "parse",
+                parsed_stage.to_dict()
+                | {"documents": self._summaries(parsed_docs)},
+            )
+
+        # 2. Low-level recovery followed by optional semantic recovery.
+        working_docs: Sequence[Mapping[str, Any]] = parsed_docs
+        recovery_stage = ReaderStageBatch[Dict[str, Any]].empty(
+            "recover"
+        )
+        semantic_attempted = 0
+        semantic_applied = 0
+
+        should_recover = self._should_run_recovery(
+            task,
+            parsed_docs,
+        )
+
+        if should_recover and parsed_docs:
+            recovery_started = time.perf_counter()
+            recovery_stage = await self._recover_documents(
+                task,
+                parsed_docs,
+            )
+
+            self._profile_hot_path(
+                "reader.recovery",
+                recovery_started,
+                run_id=task.run_id,
+                documents=len(parsed_docs),
+                failed=recovery_stage.failed_count,
+            )
+
+            semantic_attempted, semantic_applied = (
+                self._semantic_recovery_usage(
+                    recovery_stage.items,
+                )
+            )
+
+            # SemanticRecovery is internal to RecoveryEngine. Consequently,
+            # duration_ms represents the containing recovery-stage wall time.
+            self._profile_hot_path(
+                "reader.semantic_recovery",
+                recovery_started,
+                run_id=task.run_id,
+                documents=semantic_attempted,
+                applied=semantic_applied,
+                measurement_scope="recovery_stage",
+            )
+
+            if recovery_stage.failed_count and task.fail_fast:
+                raise ReaderBatchError(
+                    "Reader recovery stage failed",
+                    {
+                        "stage": "recovery",
+                        "errors": recovery_stage.error_dicts(),
+                    },
+                    failed_count=recovery_stage.failed_count,
+                    total_count=len(parsed_docs),
+                )
+
+            working_docs = self._merge_recovered_with_originals(
+                parsed_docs,
+                recovery_stage.items,
+            )
+
+            if task.write_checkpoints:
+                self._write_checkpoint(
+                    task.run_id,
+                    "recover",
+                    recovery_stage.to_dict()
+                    | {
+                        "documents": self._summaries(working_docs),
+                        "semantic_attempted": semantic_attempted,
+                        "semantic_applied": semantic_applied,
+                    },
+                )
+
+        # 3. Conversion or merge
+        artifacts: List[Dict[str, Any]] = []
+        merge_artifact: Optional[Dict[str, Any]] = None
+        conversion_stage = ReaderStageBatch[Dict[str, Any]].empty(
+            "convert"
+        )
+
+        if (
+            task.mode not in {"parse", "read", "recover"}
+            and working_docs
+        ):
+            if task.merge:
+                merge_artifact = await self._merge_documents(
+                    task,
+                    working_docs,
+                )
+                artifacts = [merge_artifact]
+
+                if task.write_checkpoints:
+                    self._write_checkpoint(
+                        task.run_id,
+                        "merge",
+                        {"artifact": merge_artifact},
+                    )
+            else:
+                conversion_started = time.perf_counter()
+                conversion_stage = await self._convert_documents(
+                    task,
+                    working_docs,
+                )
+
+                self._profile_hot_path(
+                    "reader.conversion",
+                    conversion_started,
+                    run_id=task.run_id,
+                    documents=len(working_docs),
+                    failed=conversion_stage.failed_count,
+                    output_format=task.output_format,
+                )
+
+                if conversion_stage.failed_count and task.fail_fast:
+                    raise ReaderBatchError(
+                        "Reader conversion stage failed",
+                        {
+                            "stage": "conversion",
+                            "errors": conversion_stage.error_dicts(),
+                        },
+                        failed_count=conversion_stage.failed_count,
+                        total_count=len(working_docs),
+                    )
+
+                artifacts = [dict(item) for item in conversion_stage.items]
+
+                if task.write_checkpoints:
+                    self._write_checkpoint(
+                        task.run_id,
+                        "convert",
+                        conversion_stage.to_dict()
+                        | {"artifacts": artifacts},
+                    )
+
+        stage_errors = (
+            parsed_stage.errors
+            + recovery_stage.errors
+            + conversion_stage.errors
+        )
+        serialized_stage_errors = [
+            error.to_dict() if hasattr(error, 'to_dict') else error # type: ignore
+            for error in stage_errors
+        ]
+
+        warnings = self._collect_warnings(
+            parsed_docs,
+            working_docs,
+            artifacts,
+            serialized_stage_errors,
+        )
+
+        completed = timer.stop()
+        elapsed = completed.elapsed_seconds
+        processed = len(working_docs)
+        success_count = (
+            len(artifacts)
+            if artifacts
+            else len(working_docs)
+        )
+        failed_count = len(stage_errors)
+
+        status = (
+            "ok"
+            if failed_count == 0
+            else "partial"
+            if success_count > 0
+            else "error"
+        )
+
+        payload: Dict[str, Any] = {
+            "run_id": task.run_id,
+            "plan": plan,
+            "parsed": parsed_stage.to_dict(),
+            "recovery": recovery_stage.to_dict(),
+            "conversion": conversion_stage.to_dict(),
+            "artifacts": artifacts,
+        }
+
+        if merge_artifact is not None:
+            payload["merge"] = merge_artifact
+
+        if task.include_documents:
+            payload["documents"] = self._sanitize_documents(
+                working_docs,
+                include_content=task.include_content,
+            )
+
+        metadata = {
+            "mode": task.mode,
+            "file_count": len(task.files),
+            "documents_processed": processed,
+            "output_format": task.output_format,
+            "output_dir": task.output_dir,
+            "semantic_recovery_attempted": semantic_attempted,
+            "semantic_recovery_applied": semantic_applied,
+            "latency_ms": round(elapsed * 1000.0, 3),
+            "throughput": (
+                round(processed / elapsed, 6)
+                if elapsed > 0 and processed
+                else 0.0
+            ),
+            "success_rate": round(
+                success_count
+                / max(1, success_count + failed_count),
+                6,
+            ),
+            "cache_hit_rate": self._cache_hit_rate(
+                [*parsed_docs, *working_docs]
+            ),
+            "settings": self._settings_snapshot(),
+        }
+
+        result = {
+            "status": status,
+            "operation": "reader_task",
+            "payload": json_safe(payload),
+            "metadata": json_safe(metadata),
+            "warnings": dedupe_preserve_order(warnings),
+            "timing": completed.to_dict(),
+        }
+
+        if serialized_stage_errors:
+            result["errors"] = serialized_stage_errors
+
+        if task.write_checkpoints:
+            self._write_checkpoint(
+                task.run_id,
+                "complete",
+                result,
+            )
+
+        self._publish_reader_event(
+            "completed",
+            {
+                "run_id": task.run_id,
+                "status": status,
+                "metadata": metadata,
+            },
+        )
+        return result
+
+    @staticmethod
+    def _adapt_engine_result(result: Any, *, operation: str) -> Dict[str, Any]:
+        """Normalize one engine result at the ReaderAgent boundary."""
+    
+        if not isinstance(result, Mapping):
+            raise ReaderTaskExecutionError(
+                "Reader engine returned an unsupported result type",
+                {
+                    "operation": operation,
+                    "type": type(result).__name__,
+                },
+            )
+    
+        adapted = json_safe(dict(result), redact=False)
+        if not isinstance(adapted, dict):
+            raise ReaderTaskExecutionError(
+                "Reader engine result could not be normalized to a mapping",
+                {
+                    "operation": operation,
+                    "type": type(adapted).__name__,
+                },
+            )
+    
+        status = str(adapted.get("status", "")).strip().lower()
+        if not status:
+            raise ReaderTaskExecutionError(
+                "Reader engine result is missing its status field",
+                {
+                    "operation": operation,
+                    "keys": sorted(adapted),
+                },
+            )
+    
+        return adapted
+    
+    
+    @staticmethod
+    def _mark_cache_hit(result: Mapping[str, Any]) -> Dict[str, Any]:
+        """Return a copy marked as originating from the shared Reader cache."""
+    
+        cached_result = dict(result)
+        raw_metadata = cached_result.get("metadata", {})
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        metadata["cached"] = True
+        cached_result["metadata"] = metadata
+        return cached_result
+
+    async def _parse_files(
+        self,
+        task: ReaderAgentTask,
+    ) -> ReaderStageBatch[Dict[str, Any]]:
+        async def worker(file_path: str) -> Dict[str, Any]:
+            return await self._parse_one(task, file_path)
+    
+        results = await async_bounded_map(
+            task.files,
+            worker,
+            max_concurrency=self.max_concurrency,
+            operation_name="reader_parse",
+            return_exceptions=True,
+        )
+        return self._split_stage_results(results, operation="parse")
+    
+    
+    async def _parse_one(
+        self,
+        task: ReaderAgentTask,
+        file_path: str,
+    ) -> Dict[str, Any]:
+        cache_key = self._shared_parse_cache_key(file_path)
+    
+        if task.use_cache and self.cache_parse_results:
+            cached = self._shared_get(cache_key)
+            if isinstance(cached, Mapping):
+                adapted = self._adapt_engine_result(
+                    cached,
+                    operation="parser.parse",
+                )
+                return self._mark_cache_hit(adapted)
+    
+        raw_result = await retry_async(
+            lambda: asyncio.to_thread(self.parser.parse, file_path),
+            config=self.retry_config,
+            operation_name="parser.parse",
+        )
+        result = self._adapt_engine_result(
+            raw_result,
+            operation="parser.parse",
+        )
+    
+        if (
+            task.use_cache
+            and self.cache_parse_results
+            and str(result.get("status", "")).lower() == "ok"
+        ):
+            self._shared_set(
+                cache_key,
+                result,
+                tags=("reader", "reader_parse_cache"),
+            )
+    
+        return result
+
+    def _should_run_recovery(self, task: ReaderAgentTask, parsed_docs: Sequence[Mapping[str, Any]]) -> bool:
+        if task.mode == "recover" or task.recover:
+            return True
+        if not self.auto_recover_low_quality:
+            return False
+        for doc in parsed_docs:
+            try:
+                cost = estimate_processing_cost(doc)
+            except ReaderError:
+                continue
+            if float(cost.get("quality_score", 1.0) or 1.0) < self.low_quality_threshold or bool(cost.get("requires_attention")):
+                return True
+        return False
+
+    @staticmethod
+    def _semantic_recovery_usage(documents: Sequence[Mapping[str, Any]]) -> Tuple[int, int]:
+        """Return semantic-recovery attempted and applied counts."""
+    
+        attempted = 0
+        applied = 0
+    
+        for document in documents:
+            raw_recovery = document.get("recovery", {})
+            if not isinstance(raw_recovery, Mapping):
+                continue
+    
+            raw_metadata = raw_recovery.get("metadata", {})
+            metadata = (
+                raw_metadata
+                if isinstance(raw_metadata, Mapping)
+                else {}
+            )
+    
+            semantic_was_attempted = (
+                metadata.get(
+                    "semantic_attempted",
+                    metadata.get("used_semantic"),
+                )
+                is True
+            )
+            semantic_was_applied = (
+                metadata.get("semantic_applied") is True
+                or str(raw_recovery.get("strategy", "")).lower()
+                == "semantic"
+            )
+    
+            if semantic_was_attempted:
+                attempted += 1
+            if semantic_was_applied:
+                applied += 1
+    
+        return attempted, applied
+
+    async def _recover_documents(self, task: ReaderAgentTask, parsed_docs: Sequence[Mapping[str, Any]]) -> ReaderStageBatch[Dict[str, Any]]:
+        async def worker(doc: Mapping[str, Any]) -> Dict[str, Any]:
+            return await self._recover_one(task, doc)
+    
+        results = await async_bounded_map(
+            list(parsed_docs),
+            worker,
+            max_concurrency=self.max_concurrency,
+            operation_name="reader_recovery",
+            return_exceptions=True,
+        )
+        return self._split_stage_results(results, operation="recover")
+    
+    
+    async def _recover_one(self, task: ReaderAgentTask, parsed_doc: Mapping[str, Any]) -> Dict[str, Any]:
+        doc = validate_parsed_document(parsed_doc)
+        source = str(doc.get("source", "unknown"))
+        content = str(doc.get("content", ""))
+        cache_key = self._shared_recovery_cache_key(source, content)
+    
+        if task.use_cache and self.cache_recovery_results:
+            cached = self._shared_get(cache_key)
+            if isinstance(cached, Mapping):
+                adapted = self._adapt_engine_result(
+                    cached,
+                    operation="recovery.recover_and_apply",
+                )
+                return self._mark_cache_hit(adapted)
+    
+        raw_result = await retry_async(
+            lambda: asyncio.to_thread(
+                self.recovery.recover_and_apply,
+                doc,
+            ),
+            config=self.retry_config,
+            operation_name="recovery.recover_and_apply",
+        )
+        result = self._adapt_engine_result(
+            raw_result,
+            operation="recovery.recover_and_apply",
+        )
+    
+        if (
+            task.use_cache
+            and self.cache_recovery_results
+            and str(result.get("status", "")).lower() == "ok"
+        ):
+            self._shared_set(
+                cache_key,
+                result,
+                tags=("reader", "reader_recovery_cache"),
+            )
+    
+        return result
+
+    async def _convert_documents(self, task: ReaderAgentTask, docs: Sequence[Mapping[str, Any]]) -> ReaderStageBatch[Dict[str, Any]]:
+        async def worker(doc: Mapping[str, Any]) -> Dict[str, Any]:
+            return await self._convert_one(task, doc)
+    
+        results = await async_bounded_map(
+            list(docs),
+            worker,
+            max_concurrency=self.max_concurrency,
+            operation_name="reader_conversion",
+            return_exceptions=True,
+        )
+        return self._split_stage_results(results, operation="convert")
+    
+    
+    async def _convert_one(self, task: ReaderAgentTask, parsed_doc: Mapping[str, Any]) -> Dict[str, Any]:
+        raw_result = await retry_async(
+            lambda: asyncio.to_thread(
+                self.converter.convert,
+                dict(parsed_doc),
+                task.output_format,
+                task.output_dir,
+            ),
+            config=self.retry_config,
+            operation_name="conversion.convert",
+        )
+        return self._adapt_engine_result(
+            raw_result,
+            operation="conversion.convert",
+        )
+    
+    
+    async def _merge_documents(self, task: ReaderAgentTask, docs: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        docs_as_dicts = [dict(doc) for doc in docs]
+    
+        raw_result = await retry_async(
+            lambda: asyncio.to_thread(
+                self.converter.merge,
+                docs_as_dicts,
+                task.output_format,
+                task.output_dir,
+                task.output_filename or "merged",
+            ),
+            config=self.retry_config,
+            operation_name="conversion.merge",
+        )
+    
+        # Normalise raw_result to a dict if necessary
+        if not isinstance(raw_result, Mapping):
+            # Assume it's a string path or a simple value
+            raw_result = {
+                "status": "ok",
+                "output_path": str(raw_result),
+            }
+    
+        return self._adapt_engine_result(raw_result, operation="conversion.merge")
+
+    # ------------------------------------------------------------------
+    # Stage, cache, checkpoint, and event helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _merge_recovered_with_originals(
+        original_docs: Sequence[Mapping[str, Any]],
+        recovered_docs: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Keep original parse order while replacing only successfully recovered docs."""
+
+        recovered_by_source = {str(doc.get("source", "unknown")): dict(doc) for doc in recovered_docs if isinstance(doc, Mapping)}
+        merged: List[Dict[str, Any]] = []
+        for original in original_docs:
+            source = str(original.get("source", "unknown"))
+            merged.append(recovered_by_source.get(source, dict(original)))
+        return merged
+
+    def _stage_error_from_payload(self, payload: Mapping[str, Any], *, operation: str, index: int) -> ReaderStageError:
+        safe_payload = json_safe(dict(payload), redact=True)
+        if not isinstance(safe_payload, dict):
+            safe_payload = {"payload": safe_payload}
+
+        # Preserve both the stage location and the complete engine envelope.
+        details = {
+            "operation": operation,
+            "index": index,
+            **safe_payload,
+        }
+
+        nested_error = safe_payload.get("error")
+        descriptor = (
+            nested_error
+            if isinstance(nested_error, Mapping)
+            else safe_payload
+        )
+
+        raw_policy = descriptor.get("policy", {})
+        policy = raw_policy if isinstance(raw_policy, Mapping) else {}
+
+        return ReaderStageError(
+            stage=str(descriptor.get("stage") or operation),
+            code=str(
+                descriptor.get("code")
+                or "READER_STAGE_FAILURE"
+            ),
+            message=str(
+                descriptor.get("public_message")
+                or descriptor.get("message")
+                or "Reader stage failed"
+            ),
+            retryable=policy.get("retryable") is True,
+            recoverable=policy.get("recoverable") is True,
+            details=details,
+        )
+
+
+    def _split_stage_results(self, results: Sequence[Any], *, operation: str) -> ReaderStageBatch[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        errors: List[ReaderStageError] = []
+
+        for index, item in enumerate(results):
+            if isinstance(item, ReaderError):
+                errors.append(
+                    self._stage_error_from_payload(
+                        item.to_public_dict(),
+                        operation=operation,
+                        index=index,
+                    )
+                )
                 continue
 
-            if action == "convert":
-                target = step.get("target", self.default_output_format)
-                outputs = await self._convert_docs(parsed_docs, target)
-                result = {"status": "ok", "plan": plan, "outputs": outputs}
-                self.reader_memory.write_checkpoint("convert", result)
-                return result
-
-            if action == "merge":
-                output = step.get("output", self.default_output_format)
-                merged = await asyncio.to_thread(
-                    self.conversion_engine.merge,
-                    parsed_docs,
-                    output,
-                    self.output_dir,
+            if isinstance(item, BaseException):
+                errors.append(
+                    self._stage_error_from_payload(
+                        reader_error_payload(
+                            item,
+                            include_debug=self.include_debug_errors,
+                            include_traceback=self.include_traceback_errors,
+                        ),
+                        operation=operation,
+                        index=index,
+                    )
                 )
-                result = {"status": "ok", "plan": plan, "merged": merged}
-                self.reader_memory.write_checkpoint("merge", result)
-                return result
+                continue
 
-        return {"status": "ok", "plan": plan, "outputs": parsed_docs}
+            if (
+                isinstance(item, Mapping)
+                and str(item.get("status", "")).lower() == "error"
+            ):
+                # Keep status, operation, error, metadata, timing and any other
+                # outer fields supplied by the engine.
+                errors.append(
+                    self._stage_error_from_payload(
+                        {
+                            "operation": operation,
+                            "index": index,
+                            **json_safe(dict(item), redact=True),
+                        },
+                        operation=operation,
+                        index=index,
+                    )
+                )
+                continue
 
-    def perform_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+            if isinstance(item, Mapping):
+                try:
+                    items.append(
+                        self._adapt_engine_result(
+                            item,
+                            operation=operation,
+                        )
+                    )
+                except ReaderError as exc:
+                    errors.append(
+                        self._stage_error_from_payload(
+                            exc.to_public_dict(),
+                            operation=operation,
+                            index=index,
+                        )
+                    )
+                continue
+
+            unsupported = ReaderTaskExecutionError(
+                "Reader stage returned an unsupported result type",
+                {
+                    "operation": operation,
+                    "index": index,
+                    "type": type(item).__name__,
+                },
+            )
+            errors.append(
+                self._stage_error_from_payload(
+                    unsupported.to_public_dict(),
+                    operation=operation,
+                    index=index,
+                )
+            )
+
+        return ReaderStageBatch(
+            stage=operation,
+            items=tuple(items),
+            errors=tuple(errors),
+        )
+
+    def _shared_parse_cache_key(self, file_path: str) -> str:
+        return f"{self.cache_key_prefix}:parse:{parse_cache_key(file_path)}:{self.CACHE_VERSION}"
+
+    def _shared_recovery_cache_key(self, source: str, content: str) -> str:
+        policy = {
+            'agent': self.CACHE_VERSION,
+            'recovery_contract': self.RECOVERY_CACHE_VERSION,
+        }
+        key = recovery_cache_key(source, content, policy=policy)
+        return f"{self.cache_key_prefix}:recovery:{key}"
+
+    def _shared_get(self, key: str) -> Any:
+        if not self.use_shared_cache:
+            return None
+        with contextlib.suppress(Exception):
+            return self.shared_memory.get(key)
+        return None
+
+    def _shared_set(self, key: str, value: Any, *, tags: Iterable[str] = ()) -> None:
+        if not self.use_shared_cache:
+            return
+        ttl = None if self.cache_ttl_seconds <= 0 else self.cache_ttl_seconds
+        with contextlib.suppress(Exception):
+            self.shared_memory.set(key, json_safe(value, redact=False), ttl=ttl, tags=list(tags), metadata={"agent": self.name})
+
+    def _write_checkpoint(self, run_id: str, step: str, payload: Mapping[str, Any]) -> None:
+        if not self.write_checkpoints:
+            return
+        key = f"{self.checkpoint_key_prefix}:{run_id}:{safe_filename(step, fallback='step')}"
+        record = {
+            "run_id": run_id,
+            "step": step,
+            "timestamp": time.time(),
+            "payload": json_safe(payload, redact=self.redact_checkpoints),
+        }
+        with contextlib.suppress(Exception):
+            self.shared_memory.set(key, record, tags=["reader", "reader_checkpoint"], metadata={"agent": self.name, "step": step})
+            index = self.shared_memory.get(self.checkpoint_index_key) or []
+            if not isinstance(index, list):
+                index = []
+            index.append({"run_id": run_id, "step": step, "key": key, "timestamp": record["timestamp"]})
+            self.shared_memory.set(self.checkpoint_index_key, index[-self.max_checkpoint_index_entries:])
+
+    def _publish_reader_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        if not self.publish_events:
+            return
+        event = {"event_type": event_type, "timestamp": time.time(), "agent": self.name, "payload": json_safe(payload, redact=True)}
+        with contextlib.suppress(Exception):
+            if hasattr(self.shared_memory, "publish"):
+                self.shared_memory.publish(self.event_channel, event)
+            if hasattr(self.shared_memory, "notify"):
+                self.shared_memory.notify(self.event_channel, event)
+
+
+    def _profile_hot_path(self, path: str, started: float, **extra: Any) -> None:
+        duration_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+        payload = {"path": path, "duration_ms": round(duration_ms, 4), **{k: v for k, v in extra.items() if v is not None}}
+        self._publish_reader_event("hot_path_profile", payload)
+
+    def _store_latest_result(self, run_id: str, result: Mapping[str, Any]) -> None:
+        with contextlib.suppress(Exception):
+            self.shared_memory.set(f"{self.result_key_prefix}:{run_id}", json_safe(result, redact=False), tags=["reader", "reader_result"])
+            summary = {
+                "run_id": run_id,
+                "status": result.get("status"),
+                "operation": result.get("operation"),
+                "metadata": result.get("metadata", {}),
+                "warnings": result.get("warnings", []),
+            }
+            self.shared_memory.set(f"{self.summary_key_prefix}:{run_id}", json_safe(summary, redact=True), tags=["reader", "reader_summary"])
+
+    def _record_reader_error(self, exc: BaseException, task_data: Any) -> None:
+        payload = reader_error_payload(exc, include_debug=self.include_debug_errors, include_traceback=self.include_traceback_errors)
+        payload["task_preview"] = truncate_text(stable_json_dumps(json_safe(task_data, redact=True)), 600)
+        with contextlib.suppress(Exception):
+            key = f"{self.error_key_prefix}:{uuid.uuid4().hex}"
+            self.shared_memory.set(key, payload, tags=["reader", "reader_error"])
+        self._publish_reader_event("error", payload)
+
+    # ------------------------------------------------------------------
+    # Result shaping and public utilities
+    # ------------------------------------------------------------------
+
+    def _summaries(self, docs: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+        summaries: List[Dict[str, Any]] = []
+        for doc in list(docs)[: self.max_result_documents]:
+            with contextlib.suppress(Exception):
+                summaries.append(summarize_parsed_document(doc, include_hash=True))
+        return summaries
+
+    def _sanitize_documents(self, docs: Sequence[Mapping[str, Any]], *, include_content: bool) -> List[Dict[str, Any]]:
+        output: List[Dict[str, Any]] = []
+        for doc in list(docs)[: self.max_result_documents]:
+            safe_doc = dict(doc)
+            if not include_content:
+                content = str(safe_doc.get("content", ""))
+                safe_doc["content_preview"] = truncate_text(content, 500) if content else ""
+                safe_doc.pop("content", None)
+            output.append(json_safe(safe_doc, redact=False))
+        return output
+
+    @staticmethod
+    def _cache_hit_rate(docs: Sequence[Mapping[str, Any]]) -> float:
+        if not docs:
+            return 0.0
+        hits = 0
+        for doc in docs:
+            metadata = doc.get("metadata", {}) if isinstance(doc, Mapping) else {}
+            if isinstance(metadata, Mapping) and metadata.get("cached"):
+                hits += 1
+        return round(hits / max(1, len(docs)), 6)
+
+    @staticmethod
+    def _collect_warnings(*groups: Any) -> List[str]:
+        warnings: List[str] = []
+        for group in groups:
+            if isinstance(group, Mapping):
+                warnings.extend(str(item) for item in group.get("warnings", []) or [])
+                continue
+            if isinstance(group, Sequence) and not isinstance(group, (str, bytes, bytearray)):
+                for item in group:
+                    if isinstance(item, Mapping):
+                        warnings.extend(str(entry) for entry in item.get("warnings", []) or [])
+        return dedupe_preserve_order(warnings)
+
+    def _error_result(self, exc: BaseException, *, operation: str) -> Dict[str, Any]:
+        result = build_error_result(
+            exc,
+            operation=operation,
+            include_debug=self.include_debug_errors,
+            include_traceback=self.include_traceback_errors,
+        )
+        self._publish_reader_event("failed", result)
+        return result
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "agent": "ReaderAgent",
+            "version": __version__,
+            "modes": sorted(self.SUPPORTED_MODES),
+            "settings": self._settings_snapshot(),
+            "parser": self.parser.capabilities(),
+            "recovery": self.recovery.capabilities(),
+            "conversion": self.converter.describe(),
+        }
+
+    def summarize(self, task_data: Mapping[str, Any]) -> Dict[str, Any]:
+        task = self._normalize_task(task_data)
+        return {
+            "task": task.to_dict(),
+            "plan": self.build_plan(task),
+            "capabilities": self.capabilities(),
+        }
+
+    def _handle_reader_known_issue(self, _agent: Any, task_data: Any, error_info: Mapping[str, Any], _issue_handler: Any = None) -> Dict[str, Any]:
+        """Local BaseAgent known-issue recovery boundary for Reader failures."""
+
+        message = str(error_info.get("error_message", ""))
+        if "max_concurrency" in message.lower():
+            # Copy task_data and ensure it's a mutable dict
+            if isinstance(task_data, Mapping):
+                fallback_task = dict(task_data)
+            else:
+                fallback_task = {"instruction": str(task_data)}
+            # Set max_concurrency to 1 – the value is an integer, acceptable for the agent
+            fallback_task["max_concurrency"] = 1   # type: ignore[assignment]
+            try:
+                result = self.perform_task(fallback_task)
+                return {"recovered": True, "result": result, "strategy": "reader_concurrency_fallback"}
+            except Exception as exc:
+                return {"status": "failed", "reason": str(exc), "strategy": "reader_concurrency_fallback"}
+        return {"status": "failed", "reason": "No Reader-specific known issue fallback matched."}
+
+    # ------------------------------------------------------------------
+    # Async bridge
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _run_coroutine_sync(coro: Awaitable[T]) -> T:
+        """Run an awaitable synchronously, handling both running loop and no loop."""
         try:
-            instruction, files = self._validate_task(task_data)
-            return asyncio.run(self.process(instruction=instruction, files=files))
-        except ReaderError:
-            raise
-        except Exception as exc:
-            logger.error("ReaderAgent.perform_task failed: %s", exc)
-            raise ReaderValidationError("Reader task execution failed", {"error": str(exc)}) from exc
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop – we can run the coroutine
+            return asyncio.run(coro)   # type: ignore[arg-type]  # asyncio.run accepts Awaitable
+        else:
+            # Already in an event loop – we can't block, so we create a new thread
+            import threading
+            result_holder: Dict[str, Any] = {}
+            def runner():
+                try:
+                    result_holder["result"] = asyncio.run(coro) # type: ignore
+                except BaseException as e:
+                    result_holder["error"] = e
+            t = threading.Thread(target=runner, daemon=True)
+            t.start()
+            t.join()
+            if "error" in result_holder:
+                raise result_holder["error"]
+            return result_holder["result"]
 
 
 if __name__ == "__main__":
     print("\n=== Running Reader Agent ===\n")
     printer.status("TEST", "Reader Agent initialized", "info")
-    from src.agents.collaborative.shared_memory import SharedMemory
-    from src.agents.agent_factory import AgentFactory
+    import tempfile
+
+    from .agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+
     shared_memory = SharedMemory()
     agent_factory = AgentFactory()
 
-    agent = ReaderAgent(shared_memory=shared_memory,agent_factory=agent_factory)
-    print(agent)
+    with tempfile.TemporaryDirectory(prefix="reader_agent_test_") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        file_one = tmp_path / "alpha.txt"
+        file_two = tmp_path / "beta.txt"
+        output_dir = tmp_path / "out"
 
-    print("\n* * * * * Phase 2 - Plan * * * * *\n")
-    instruction = "convert to txt"    # <-- fixed
-    files = ["file1.pdf"]              # use a list of files
-    plan = agent._build_plan(instruction=instruction, files=files)
-    print(plan)
+        file_one.write_text("Architecture organizes light, memory, and threshold.\n", encoding="utf-8")
+        file_two.write_text("Reader recovery removes\x00 detectable corruption without fabricating facts.\n", encoding="utf-8")
 
-    print("\n=== Successfully ran the Reader Agent ===\n")
+        agent = ReaderAgent(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config={
+                "output_dir": str(output_dir),
+                "default_output_format": "txt",
+                "max_concurrency": 2,
+                "use_shared_cache": True,
+                "write_checkpoints": True,
+                "publish_events": True,
+                "include_documents_by_default": True,
+                "include_content_by_default": False,
+            },
+        )
+
+        result = agent.execute(
+            {
+                "instruction": "recover and merge to md",
+                "files": [str(file_one), str(file_two)],
+                "output_dir": str(output_dir),
+                "output_format": "md",
+                "include_documents": True,
+            }
+        )
+        assert result["status"] in {"ok", "partial"}, result
+        assert result["payload"]["parsed"]["success_count"] == 2, result
+        assert result["payload"].get("merge", {}).get("status") == "ok", result
+        assert Path(result["payload"]["merge"]["output_path"]).exists(), result
+
+        parse_only = agent.perform_task({"operation": "parse", "files": str(file_one), "include_documents": True})
+        assert parse_only["status"] == "ok", parse_only
+        assert parse_only["payload"]["parsed"]["success_count"] == 1, parse_only
+
+        caps = agent.perform_task({"operation": "capabilities", "files": str(file_one)})
+        assert caps["status"] == "ok", caps
+        assert caps["payload"]["agent"] == "ReaderAgent", caps
+
+    print("\n=== Test ran successfully ===\n")

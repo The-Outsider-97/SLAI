@@ -1451,7 +1451,7 @@ if __name__ == "__main__":
     print("\n=== Running  Collaborative agent ===\n")
     printer.status("TEST", " Collaborative agent initialized", "info")
     from .collaborative.shared_memory import SharedMemory
-    from.agent_factory import AgentFactory
+    from .agent_factory import AgentFactory
 
     memory = SharedMemory()
     agent = CollaborativeAgent(

@@ -1,18 +1,18 @@
-import psutil
+import psutil # type: ignore
 import time
 
 from collections import deque, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.agents.planning.utils.config_loader import load_global_config, get_config_section
-from src.agents.planning.planning_types import Task, TaskType, TaskStatus
-from src.agents.planning.planning_metrics import PlanningMetrics
-from src.agents.planning.heuristics import DecisionTreeHeuristic, GradientBoostingHeuristic
-from src.agents.planning.task_scheduler import DeadlineAwareScheduler
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import load_global_config, get_config_section
+from .planning_types import Task, TaskType, TaskStatus
+from .planning_metrics import PlanningMetrics
+from .heuristics import DecisionTreeHeuristic, GradientBoostingHeuristic
+from .task_scheduler import DeadlineAwareScheduler
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Monitor")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class PlanningMonitor:
     """Monitors planner outcomes, method quality, and local resource pressure."""

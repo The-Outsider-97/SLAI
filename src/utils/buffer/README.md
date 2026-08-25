@@ -1,313 +1,834 @@
 # Buffer Subsystem (`src/utils/buffer`)
 
-This document explains the buffer modules in `src/utils/buffer`, their roles, and their strengths, and includes diagrams to visualize how the pieces fit together.
+The buffer subsystem provides reusable storage, sampling, validation, telemetry, persistence, and backpressure primitives for reinforcement-learning and networked-agent workloads. It is designed as a layered utility package: low-level helpers enforce configuration, validation, error semantics, metrics, checkpoints, segment-tree priority storage, and eviction policy selection; higher-level buffers compose those primitives for uniform replay, prioritized replay, distributed replay, sequence replay, n-step return construction, reservoir sampling, and network-facing queues.
 
 ---
 
 ## 1) Design goals
 
-The buffer subsystem is built to support reinforcement learning and networked agent workloads with:
+The subsystem is built around the following goals:
 
-- **Reliable storage and retrieval** of transitions/messages.
-- **Flexible sampling strategies** (uniform, prioritized, reward-based, agent-balanced, and reservoir).
-- **Fairness and observability hooks** for operational quality.
-- **Composable primitives** (validation, telemetry, segment trees, and eviction policies) used by higher-level buffers.
+- **Correct replay semantics:** store transitions consistently and sample them using the appropriate strategy for the training workload.
+- **Clear specialization boundaries:** keep single-node PER, distributed replay, reservoir sampling, sequence replay, n-step preprocessing, and network buffering separate instead of forcing every behavior into one module.
+- **Centralized validation:** normalize replay transitions before they contaminate training buffers.
+- **Centralized error handling:** use the shared buffer error hierarchy instead of local `ValueError`, `IndexError`, or ad-hoc exceptions.
+- **Observable runtime behavior:** track push latency, sample latency, lock contention, rejection rates, stale-prune counts, and checkpoint timing.
+- **Versioned persistence:** save and load buffer state through one checkpoint service instead of each buffer inventing a brittle format.
+- **Config-driven behavior:** load all buffer settings from `buffer_config.yaml` through `utils/config_loader.py`.
+- **Composable primitives:** reuse segment trees, eviction policies, telemetry, validation, and persistence across high-level buffers.
 
 ---
 
-## 2) Module map
+## 2) Canonical transition contract
 
-| Module | Primary Role | Main Strengths |
+Most replay-oriented modules use the same canonical transition format:
+
+```python
+(agent_id, state, action, reward, next_state, done)
+```
+
+Field meaning:
+
+| Field | Meaning | Validation responsibility |
 |---|---|---|
-| `replay_buffer.py` | Minimal uniform replay buffer | Very simple API, low overhead, easy baseline |
-| `distributed_replay_buffer.py` | Production-oriented multi-strategy replay | Prioritized sampling, staleness pruning, fairness checks, persistence |
-| `network_buffer.py` | Transport-facing queue with backpressure and fairness | Drop strategies, TTL expiration, weighted fairness scheduling, inflight limits |
-| `nstep_buffer.py` | Converts 1-step transitions into n-step returns | Better credit assignment, terminal-aware truncation, thread-safe queueing |
-| `reservoir_buffer.py` | Streaming replay via reservoir sampling | Unbiased retention over unbounded streams, fixed memory |
-| `sequence_replay_buffer.py` | Segment tree primitives for fast range ops | Efficient sum/min aggregation and prefix-sum index lookup |
-| `eviction_policies.py` | Pluggable eviction heuristics | FIFO/LIFO/largest/hybrid options with config-driven selection |
-| `buffer_validation.py` | Transition schema validation + coercion | Early data integrity guarantees, batch validation reports |
-| `buffer_telemetry.py` | In-memory metrics and timing collection | Thread-safe counters/observations, latency instrumentation |
-| `utils/config_loader.py` | Shared config loading utilities | Centralized YAML section retrieval across modules |
-| `utils/buffer_errors.py` | Shared error definitions | Consistent exception semantics |
+| `agent_id` | Producer, actor, environment, or agent identifier | `buffer_validation.py` |
+| `state` | Current observation/state payload | `buffer_validation.py` |
+| `action` | Action selected for the state | `buffer_validation.py` |
+| `reward` | Numeric reward value | `buffer_validation.py` |
+| `next_state` | Next observation/state payload | `buffer_validation.py` |
+| `done` | Episode terminal flag | `buffer_validation.py` |
+
+The canonical validator may accept tuple/list transitions and, when enabled, mapping-style transitions. It normalizes rewards, validates terminal flags, rejects invalid payloads, and returns structured validation reports for batch ingestion.
 
 ---
 
-## 3) Detailed module explanations
+## 3) Module map
 
-### 3.1 `replay_buffer.py`
-
-**Role**
-- Implements a classic replay buffer backed by a bounded `deque`.
-- Supports push + random uniform sample.
-
-**Strengths**
-- Extremely simple, predictable behavior.
-- Good default for prototypes and smoke-testing RL pipelines.
-- Minimal dependencies and small cognitive overhead.
-
-**When to use**
-- You only need uniform random sampling and bounded memory.
-- You prefer a lightweight baseline before introducing more advanced policies.
-
----
-
-### 3.2 `distributed_replay_buffer.py`
-
-**Role**
-- Provides a more advanced replay buffer for multi-agent/distributed training contexts.
-- Tracks metadata (timestamps, priorities, per-agent statistics, fairness indicators).
-
-**Strengths**
-- **Multiple sampling strategies:**
-  - `uniform`
-  - `prioritized` (with importance weights)
-  - `reward`
-  - `agent_balanced`
-- **Staleness management:** removes expired/aged experiences based on threshold.
-- **Fairness instrumentation:** demographic parity checks on sampled batches.
-- **Persistence support:** `save()`/`load()` with metadata.
-- **Health reporting:** model-card style summarization.
-
-**When to use**
-- You need richer sampling control and production-like observability.
-- Multi-agent workloads require distribution-aware or fairness-aware sampling.
+| Module | Main owner | Primary role | Typical consumers |
+|---|---:|---|---|
+| `replay_buffer.py` | `ReplayBuffer` | Minimal uniform replay baseline backed by a bounded `deque`. | Smoke tests, prototypes, simple off-policy loops. |
+| `distributed_replay_buffer.py` | `DistributedReplayBuffer` | Multi-strategy replay for distributed or multi-agent workloads. | Multi-agent trainers, fairness-aware replay, reward/prioritized strategy experiments. |
+| `prioritized_buffer.py` | `PrioritizedReplayBuffer` | Dedicated single-node Prioritized Experience Replay implementation. | Clean PER benchmarks and trainer pipelines needing explicit TD-error updates. |
+| `reservoir_buffer.py` | `ReservoirReplayBuffer` | Statistically unbiased fixed-memory reservoir for long or unbounded streams. | Continual learning, online telemetry, data streams with unknown length. |
+| `sequence_replay_buffer.py` | `SequenceReplayBuffer` | Episode-grouped contiguous sequence replay with padding and masks. | RNN, Transformer, recurrent policy/value training. |
+| `nstep_buffer.py` | `NStepBuffer` | Converts 1-step transitions into n-step returns. | DQN-style preprocessing, value-learning pipelines. |
+| `network_buffer.py` | `NetworkBuffer` | Transport-facing queue with TTL, backpressure, fairness, and inflight controls. | Network adapters, agent communication, burst handling. |
+| `segment_tree.py` | `SegmentTree`, `SumSegmentTree`, `MinSegmentTree` | O(log N) range aggregation and priority lookup primitives. | Prioritized replay and any priority-mass sampling logic. |
+| `eviction_policies.py` | `EvictionPolicy` implementations | Config-driven capacity pressure policies. | Sequence replay, network buffer, custom replay storage. |
+| `buffer_validation.py` | `TransitionValidator` | Transition schema validation, coercion, and batch reports. | Replay, PER, reservoir, sequence, n-step. |
+| `buffer_telemetry.py` | `BufferTelemetry` | Runtime metrics, timings, lock contention, rejection rates, and summaries. | All production buffer modules. |
+| `buffer_persistence.py` | `BufferCheckpointIO` | Versioned checkpoint save/load with compression, checksums, and adapter hooks. | Reservoir, sequence, n-step, PER, distributed replay migration. |
+| `utils/buffer_errors.py` | `BufferError` hierarchy | Shared structured exceptions and guards. | Every buffer-facing module. |
+| `utils/config_loader.py` | `load_global_config`, `get_config_section` | Thread-safe YAML config loading and section retrieval. | Every config-driven module. |
 
 ---
 
-### 3.3 `network_buffer.py`
+## 4) Buffer import hierarchy
 
-**Role**
-- Acts as a network-facing buffering layer for incoming/outgoing message traffic.
-- Separates transport backpressure concerns from model-side replay logic.
+The buffer package is intentionally layered. Low-level utility modules should not import higher-level replay implementations. High-level buffers may depend on shared utilities, but shared utilities should remain business-logic free.
 
-**Strengths**
-- **Backpressure strategies:** drop oldest/newest/lowest-priority, random early drop, reject new, or policy-driven eviction.
-- **Fairness controls:** weighted round robin style key scheduling with per-key credits.
-- **Operational guardrails:** high/low watermarks, per-key inflight limits, TTL expiration.
-- **Telemetry integration:** enqueue/dequeue/drop/backpressure metrics and latency timing.
+### 4.1 Layered import tree
 
-**When to use**
-- You need deterministic queue behavior under burst traffic.
-- You have multi-tenant channels and want fairness + controlled overload handling.
+```text
+src/utils/buffer/
+├── utils/
+│   ├── config_loader.py          # YAML loading and section access
+│   └── buffer_errors.py          # canonical buffer exception hierarchy
+│
+├── shared primitives
+│   ├── buffer_validation.py      # depends on config_loader + buffer_errors
+│   ├── buffer_telemetry.py       # depends on config_loader + buffer_errors
+│   ├── buffer_persistence.py     # depends on config_loader + buffer_errors
+│   ├── segment_tree.py           # depends on config_loader + buffer_errors
+│   └── eviction_policies.py      # depends on config_loader + buffer_errors
+│
+├── preprocessing buffers
+│   └── nstep_buffer.py           # validation + telemetry + persistence
+│
+├── replay buffers
+│   ├── replay_buffer.py          # minimal baseline, intentionally small
+│   ├── prioritized_buffer.py     # validation + telemetry + persistence + segment trees
+│   ├── reservoir_buffer.py       # validation + telemetry + persistence
+│   ├── sequence_replay_buffer.py # validation + telemetry + persistence + eviction
+│   └── distributed_replay_buffer.py # multi-strategy replay + fairness telemetry
+│
+└── transport buffers
+    └── network_buffer.py         # telemetry + eviction + config-driven backpressure
+```
 
----
-
-### 3.4 `nstep_buffer.py`
-
-**Role**
-- Converts incoming 1-step transitions into n-step transitions:
-  - Aggregates discounted rewards over a configurable window.
-  - Propagates terminal handling and final next-state semantics.
-
-**Strengths**
-- Improves training signal by encoding multi-step return information.
-- Supports early terminal flush and optional clear-on-terminal behavior.
-- Thread-safe and validator-backed for robust ingestion.
-
-**When to use**
-- You train value-based methods benefiting from n-step returns.
-- You want a preprocessing stage before writing to replay storage.
-
----
-
-### 3.5 `reservoir_buffer.py`
-
-**Role**
-- Implements fixed-size reservoir sampling for streaming data.
-- Ensures every seen sample has equal probability of retention.
-
-**Strengths**
-- Unbiased retention for unbounded streams with constant memory footprint.
-- Useful when input volume is unknown or very large.
-- Includes validation + telemetry hooks and supports sampling with/without replacement.
-
-**When to use**
-- Data arrives continuously and you cannot store everything.
-- You need statistically fair retention over long-running streams.
-
----
-
-### 3.6 `sequence_replay_buffer.py`
-
-**Role**
-- Provides reusable segment tree data structures (`SegmentTree`, `SumSegmentTree`, `MinSegmentTree`) and factory utilities.
-
-**Strengths**
-- Efficient range reduction operations.
-- Fast prefix-sum index lookup (key primitive for prioritized replay implementations).
-- Capacity normalization to power-of-two for simpler/index-safe tree arithmetic.
-
-**When to use**
-- You need scalable aggregate queries for priorities or sequence-level scoring.
-- You are building/optimizing prioritized replay internals.
-
----
-
-### 3.7 `eviction_policies.py`
-
-**Role**
-- Defines policy abstractions and concrete eviction strategies.
-- Supplies config-aware policy builder.
-
-**Strengths**
-- Swappable policies without changing caller logic.
-- Includes heuristics for different workload shapes:
-  - FIFO: oldest-first eviction.
-  - LIFO: newest-first eviction.
-  - Largest episode: frees capacity quickly.
-  - Age-reward hybrid: balances recency and reward signal.
-
-**When to use**
-- Buffer pressure is expected and eviction needs to be tunable.
-- You want workload-specific capacity recovery behavior.
-
----
-
-### 3.8 `buffer_validation.py`
-
-**Role**
-- Validates and sanitizes transition payloads against a schema.
-- Offers both single-transition and batch validation flows.
-
-**Strengths**
-- Prevents malformed experience tuples from contaminating training.
-- Configurable constraints (length, reward numeric checks, done boolean checks, optional limits).
-- Structured validation reporting for diagnostics.
-
-**When to use**
-- Input quality is variable or comes from heterogeneous producers.
-- You want explicit fail-fast behavior for bad transitions.
-
----
-
-### 3.9 `buffer_telemetry.py`
-
-**Role**
-- Collects thread-safe counters, observations, and operation timings.
-- Exposes snapshots and NumPy-friendly exports.
-
-**Strengths**
-- Lightweight and embeddable in all buffer modules.
-- Context-manager timing blocks simplify latency instrumentation.
-- Useful bridge between runtime monitoring and analysis workflows.
-
-**When to use**
-- You need module-level metrics without adopting a full metrics stack.
-- You want quick introspection for performance tuning.
-
----
-
-### 3.10 `utils/config_loader.py` and `utils/buffer_errors.py`
-
-**Role**
-- `config_loader.py`: loads global YAML and returns section-scoped config.
-- `buffer_errors.py`: defines shared exceptions used by validation-oriented modules.
-
-**Strengths**
-- Centralized configuration behavior across all buffers.
-- Consistent exception vocabulary for callers and tests.
-
----
-
-## 4) Structural diagrams
-
-### 4.1 High-level dependency graph
+### 4.2 Dependency graph
 
 ```mermaid
 graph TD
-    CFG[configs/buffer_config.yaml] --> CL[utils/config_loader.py]
+    CFG[buffer_config.yaml] --> CL[utils/config_loader.py]
+    ERR[utils/buffer_errors.py] --> VAL[buffer_validation.py]
+    ERR --> TEL[buffer_telemetry.py]
+    ERR --> PERSIST[buffer_persistence.py]
+    ERR --> TREE[segment_tree.py]
+    ERR --> EVICT[eviction_policies.py]
+    CL --> VAL
+    CL --> TEL
+    CL --> PERSIST
+    CL --> TREE
+    CL --> EVICT
 
-    CL --> RB[replay_buffer.py]
-    CL --> DRB[distributed_replay_buffer.py]
-    CL --> NB[network_buffer.py]
-    CL --> NSB[nstep_buffer.py]
-    CL --> RSB[reservoir_buffer.py]
-    CL --> ST[sequence_replay_buffer.py]
-    CL --> EV[eviction_policies.py]
-    CL --> BV[buffer_validation.py]
-    CL --> BT[buffer_telemetry.py]
+    VAL --> NSTEP[nstep_buffer.py]
+    TEL --> NSTEP
+    PERSIST --> NSTEP
 
-    BV --> NSB
-    BV --> RSB
+    VAL --> PER[prioritized_buffer.py]
+    TEL --> PER
+    PERSIST --> PER
+    TREE --> PER
 
-    BT --> NB
-    BT --> RSB
+    VAL --> RES[reservoir_buffer.py]
+    TEL --> RES
+    PERSIST --> RES
 
-    EV --> NB
+    VAL --> SEQ[sequence_replay_buffer.py]
+    TEL --> SEQ
+    PERSIST --> SEQ
+    EVICT --> SEQ
 
-    ST --> DRB
+    TEL --> DIST[distributed_replay_buffer.py]
+    VAL -. recommended integration .-> DIST
+    PERSIST -. recommended migration .-> DIST
+
+    TEL --> NET[network_buffer.py]
+    EVICT --> NET
+    CL --> NET
 ```
 
-> Note: `sequence_replay_buffer.py` provides segment tree primitives intended for prioritized/sequence workloads; it is an enabling component in the subsystem architecture.
+### 4.3 Import boundary rules
 
-### 4.2 Experience ingestion flow (training path)
+- `utils/config_loader.py` must remain the only config-loading authority.
+- `utils/buffer_errors.py` must remain side-effect-light and should not import buffer implementations.
+- `buffer_validation.py`, `buffer_telemetry.py`, `buffer_persistence.py`, `segment_tree.py`, and `eviction_policies.py` are shared primitives. They should not depend on high-level buffers.
+- Replay modules may import shared primitives, but shared primitives should not import replay modules.
+- `prioritized_buffer.py` should own single-node PER. `distributed_replay_buffer.py` may keep a prioritized strategy for distributed workloads, but it should not be the only PER implementation.
+- `sequence_replay_buffer.py` should own episode/sequence windows. `segment_tree.py` should own tree primitives.
+
+---
+
+## 5) Runtime data-flow diagrams
+
+### 5.1 Standard replay ingestion flow
 
 ```mermaid
 flowchart LR
-    A[Producer emits transition] --> B[buffer_validation.TransitionValidator]
-    B --> C[nstep_buffer.NStepBuffer - optional]
-    C --> D{Buffer choice}
+    Producer[Agent / Environment Producer]
+    Raw[Raw transition]
+    Validator[TransitionValidator]
+    Buffer[Replay-style buffer]
+    Telemetry[BufferTelemetry]
+    Checkpoint[BufferCheckpointIO]
+    Trainer[Trainer / Learner]
 
-    D --> E[replay_buffer.ReplayBuffer\n-uniform]
-    D --> F[distributed_replay_buffer\n-uniform/prioritized/reward/agent_balanced]
-    D --> G[reservoir_buffer\n-streaming reservoir]
-
-    E --> H[Sample batch]
-    F --> H
-    G --> H
+    Producer --> Raw --> Validator
+    Validator -- valid transition --> Buffer
+    Validator -- invalid transition --> Telemetry
+    Buffer -- sample batch --> Trainer
+    Buffer -- push/sample timing --> Telemetry
+    Buffer -- state_dict/save --> Checkpoint
+    Checkpoint -- load/restore --> Buffer
 ```
 
-### 4.3 Network buffering and backpressure flow
+### 5.2 Prioritized replay loop
 
 ```mermaid
 flowchart TD
-    A[Incoming network message] --> B[network_buffer.enqueue]
-    B --> C{Capacity / inflight checks}
+    Env[Environment / Actor] --> Push[push transition]
+    Push --> Validate[validate transition]
+    Validate --> Store[store slot]
+    Store --> SumTree[update SumSegmentTree]
+    Store --> MinTree[update MinSegmentTree]
 
-    C -->|Pass| D[Store by global + fairness-key queues]
-    C -->|Fail| E[Apply drop/reject strategy]
-
-    D --> F[dequeue with fairness scheduler]
-    F --> G[Ack / Nack]
-
-    E --> T[buffer_telemetry counters]
-    D --> T
-    F --> T
+    SumTree --> SampleMass[prefix_sum_index mass lookup]
+    SampleMass --> Batch[sample batch + indices + IS weights]
+    MinTree --> Weights[min priority for IS normalization]
+    Weights --> Batch
+    Batch --> Learner[learner computes TD errors]
+    Learner --> Update[update_priorities indices, td_errors]
+    Update --> SumTree
+    Update --> MinTree
 ```
 
-### 4.4 Eviction policy selection
+### 5.3 Sequence replay flow
 
 ```mermaid
-graph LR
-    U[Runtime/User Config] --> BLD[build_eviction_policy]
-    BLD --> FIFO[FIFOEviction]
-    BLD --> LIFO[LIFOEviction]
-    BLD --> LE[LargestEpisodeEviction]
-    BLD --> ARH[AgeRewardHybridEviction]
+flowchart TD
+    Push[push transition] --> Episode[append to current episode]
+    Episode --> Done{done?}
+    Done -- no --> Continue[keep episode open]
+    Done -- yes --> Close[close episode if long enough]
+    Close --> Capacity{over capacity?}
+    Capacity -- yes --> Evict[eviction policy selects episode]
+    Capacity -- no --> Ready[eligible episodes]
+    Evict --> Ready
+    Ready --> Window[sample contiguous window]
+    Window --> Pad[pad if needed]
+    Pad --> Masks[mask + burn_in_mask + learning_mask]
+    Masks --> Batch[sequence batch]
+```
+
+### 5.4 Network buffer flow
+
+```mermaid
+flowchart LR
+    Inbound[Inbound message] --> Normalize[NetworkMessage]
+    Normalize --> TTL[TTL / expiry check]
+    TTL --> Capacity{capacity available?}
+    Capacity -- yes --> Enqueue[enqueue by fairness key]
+    Capacity -- no --> Backpressure[drop / reject / eviction policy]
+    Backpressure --> Enqueue
+    Enqueue --> Fairness[weighted fairness scheduling]
+    Fairness --> Dequeue[dequeue batch]
+    Dequeue --> AckNack[ack / nack]
+    AckNack --> Metrics[telemetry counters]
 ```
 
 ---
 
-## 5) Practical selection guide
+## 6) Detailed module explanations
 
-- Use **`ReplayBuffer`** when you need a fast, minimal baseline.
-- Use **`DistributedReplayBuffer`** when you need advanced sampling + fairness/health instrumentation.
-- Use **`ReservoirReplayBuffer`** for high-volume streaming with strict memory caps.
-- Use **`NStepBuffer`** as a preprocessing stage before any replay store.
-- Use **`NetworkBuffer`** for transport-layer fairness and backpressure control.
-- Use **segment tree and eviction modules** as internal building blocks for tuned policies.
+### 6.1 `replay_buffer.py` — minimal uniform replay
+
+**Owner:** `ReplayBuffer`
+
+`ReplayBuffer` is the simplest replay implementation in the package. It stores transitions in a bounded `deque` and samples uniformly with Python's random sampling. It intentionally has a small API and minimal dependencies.
+
+**Use it when:**
+
+- You need a quick baseline.
+- You want a smoke-test buffer for training loops.
+- You do not need validation, priorities, persistence, telemetry, or multi-agent scheduling.
+
+**Main API:**
+
+```python
+buffer = ReplayBuffer(capacity=10000)
+buffer.push(transition)
+batch = buffer.sample(batch_size=32)
+```
 
 ---
 
-## 6) Consistency notes
+### 6.2 `distributed_replay_buffer.py` — multi-strategy distributed replay
 
-To keep implementation and documentation consistent across this subsystem:
+**Owner:** `DistributedReplayBuffer`
 
-1. Maintain the canonical transition shape:
-   `(agent_id, state, action, reward, next_state, done)`.
-2. Keep config in `configs/buffer_config.yaml` and retrieve via `utils/config_loader.py`.
-3. Wire validation (`TransitionValidator`) at module boundaries that ingest external payloads.
-4. Emit telemetry around latency-sensitive paths (`push`, `sample`, `enqueue`, `dequeue`).
-5. Use eviction strategies via `build_eviction_policy(...)` instead of hardcoding policy classes in call sites.
+`DistributedReplayBuffer` is the broad replay implementation for multi-agent or distributed training contexts. It tracks timestamps, priorities, per-agent experience counts, per-agent reward statistics, fairness summaries, and several sampling strategies.
 
+**Supported sampling strategies:**
+
+- `uniform`
+- `prioritized`
+- `reward`
+- `agent_balanced`
+
+**Use it when:**
+
+- Sampling must account for agents/producers.
+- You need staleness pruning.
+- You need reward-based or agent-balanced sampling.
+- You are evaluating fairness or distribution health across sampled batches.
+
+**Important distinction:**
+
+`DistributedReplayBuffer` can support prioritized sampling as one strategy, but dedicated single-node PER benchmarking should use `PrioritizedReplayBuffer` from `prioritized_buffer.py`.
+
+---
+
+### 6.3 `prioritized_buffer.py` — single-node Prioritized Experience Replay
+
+**Owner:** `PrioritizedReplayBuffer`
+
+`PrioritizedReplayBuffer` is the dedicated non-distributed PER implementation. It uses proportional priority sampling, explicit TD-error updates, sum/min segment trees, and importance-sampling weights.
+
+**Key APIs:**
+
+```python
+buffer.push(agent_id, state, action, reward, next_state, done, td_error=td_error)
+sample = buffer.sample(batch_size=64, beta=0.4)
+report = buffer.update_priorities(sample.indices, td_errors)
+```
+
+**Core behavior:**
+
+- Stores validated replay transitions.
+- Converts TD-errors into priorities using `alpha` and `epsilon`.
+- Samples with prefix-sum mass lookup through `SumSegmentTree`.
+- Uses `MinSegmentTree` for IS-weight normalization.
+- Returns indices so the trainer can update priorities after learning.
+- Supports checkpoint save/load through `BufferCheckpointIO`.
+
+**Use it when:**
+
+- You want a clean single-node PER benchmark.
+- You need the classic `push → sample → update_priorities` loop.
+- You do not need distributed/multi-agent sampling strategies.
+
+---
+
+### 6.4 `reservoir_buffer.py` — unbiased streaming replay
+
+**Owner:** `ReservoirReplayBuffer`
+
+`ReservoirReplayBuffer` is designed for unbounded streams where total stream size is unknown or too large to store. It uses standard reservoir sampling so every accepted item has equal probability of remaining in the fixed-size buffer.
+
+**Core behavior:**
+
+- Retains all items until capacity is reached.
+- After capacity is reached, randomly replaces retained items with probability `capacity / total_seen`.
+- Supports sampling with or without replacement.
+- Tracks accepted, retained, replaced, skipped, and rejected items.
+- Supports persistence with `state_dict()`, `save()`, and `load()`.
+
+**Use it when:**
+
+- Data arrives continuously.
+- You need fixed memory usage.
+- You care about unbiased retention over a long stream.
+- You are collecting continual-learning or online telemetry samples.
+
+---
+
+### 6.5 `sequence_replay_buffer.py` — contiguous episode sequence replay
+
+**Owner:** `SequenceReplayBuffer`
+
+`SequenceReplayBuffer` stores transitions grouped by episode and samples contiguous windows for recurrent or attention-based models. It returns padded arrays plus masks so learners can separate burn-in context from learning steps.
+
+**Core behavior:**
+
+- Maintains a current open episode.
+- Closes episodes when terminal transitions arrive or when explicitly flushed.
+- Samples contiguous windows of `burn_in + sequence_length`.
+- Returns `mask`, `burn_in_mask`, and `learning_mask`.
+- Uses eviction policies to remove complete episodes when capacity pressure occurs.
+- Persists state through `BufferCheckpointIO`.
+
+**Use it when:**
+
+- Training RNNs, GRUs, LSTMs, Transformers, or memory-based agents.
+- You need sequence windows rather than independent transitions.
+- You need padded sequences with explicit valid-step masks.
+
+---
+
+### 6.6 `nstep_buffer.py` — n-step return preprocessing
+
+**Owner:** `NStepBuffer`
+
+`NStepBuffer` converts validated 1-step transitions into n-step transitions. It is a preprocessing buffer rather than a replay store: it receives incoming transitions, emits ready n-step outputs, and can flush terminal tails.
+
+**Core behavior:**
+
+- Maintains a pending queue of transitions.
+- Computes discounted n-step reward using `gamma`.
+- Emits outputs when enough transitions are available or terminal flushing is triggered.
+- Preserves final `next_state` and terminal status.
+- Supports batch ingestion diagnostics and persistence.
+
+**Use it when:**
+
+- You want richer credit assignment before writing to replay.
+- Your trainer expects n-step returns.
+- You need terminal-aware truncated returns.
+
+---
+
+### 6.7 `network_buffer.py` — transport queue and backpressure buffer
+
+**Owner:** `NetworkBuffer`
+
+`NetworkBuffer` is not an RL replay buffer. It is a transport-facing queue for messages, channels, protocols, fairness keys, and backpressure. It separates network pressure from training replay logic.
+
+**Core behavior:**
+
+- Normalizes messages into `NetworkMessage` records.
+- Supports TTL expiration.
+- Supports weighted fairness scheduling by fairness key.
+- Enforces optional per-key inflight limits.
+- Handles capacity pressure with configured drop strategies or eviction policy integration.
+- Emits queue depth, enqueue/dequeue, drop, ack/nack, and backpressure telemetry.
+
+**Use it when:**
+
+- Agent communication can burst.
+- Producers must be scheduled fairly.
+- You need deterministic drop/reject behavior under pressure.
+- Network transport should not leak into replay modules.
+
+---
+
+### 6.8 `segment_tree.py` — O(log N) priority storage primitives
+
+**Owners:** `SegmentTree`, `SumSegmentTree`, `MinSegmentTree`, `PriorityTreeBundle`, `SegmentTreeFactory`
+
+`segment_tree.py` owns tree-based priority aggregation. It is the canonical place for fast priority updates and prefix-sum sampling. Replay modules should import these primitives instead of duplicating tree logic.
+
+**Core behavior:**
+
+- Point update in O(log N).
+- Range reduce in O(log N).
+- Prefix-sum index lookup in O(log N).
+- Sum-tree total mass for proportional sampling.
+- Min-tree minimum priority for IS-weight normalization.
+
+**Key PER APIs:**
+
+```python
+sum_tree.update(idx, priority)
+idx = sum_tree.prefix_sum_index(mass)
+min_priority = min_tree.min()
+```
+
+**Use it when:**
+
+- You need prioritized replay sampling.
+- You need fast priority mass lookup.
+- You need stable range aggregation over fixed replay slots.
+
+---
+
+### 6.9 `eviction_policies.py` — capacity-pressure policies
+
+**Owners:** `FIFOEviction`, `LeastSurpriseEviction`, `AgeRewardHybridEviction`, compatibility policies, and `build_eviction_policy`
+
+`eviction_policies.py` provides reusable, config-driven eviction behavior. It is designed for modules that need to remove items under capacity pressure without hardcoding one eviction strategy.
+
+**Canonical policies:**
+
+- `FIFOEviction`: evicts the oldest item.
+- `LeastSurpriseEviction`: keeps high-TD-error, rare, high-priority, or protected samples; evicts low-surprise/common samples first.
+- `AgeRewardHybridEviction`: combines recency, reward strength, priority, terminal bonus, and protection signals.
+
+**Compatibility policies:**
+
+- `LIFOEviction`
+- `LargestEpisodeEviction`
+
+**Use it when:**
+
+- A buffer stores complete episodes or messages and must reclaim capacity.
+- Eviction strategy should be configurable.
+- You want consistent capacity-pressure decisions across buffer modules.
+
+---
+
+### 6.10 `buffer_validation.py` — transition schema validation
+
+**Owners:** `TransitionValidator`, `TransitionSchema`, `ValidationReport`, `TransitionValidationIssue`
+
+`buffer_validation.py` validates and normalizes transition payloads before they are accepted into replay-like buffers. It prevents malformed rewards, terminal flags, missing states, invalid shapes, or bad batch entries from silently entering training data.
+
+**Core behavior:**
+
+- Accepts tuple/list transitions and optional mapping transitions.
+- Validates canonical transition length.
+- Coerces rewards and done flags when configured.
+- Rejects NaN/Inf rewards unless explicitly allowed.
+- Supports batch validation with structured reports.
+- Records rejection rate and invalid indices.
+
+**Use it when:**
+
+- Producers are heterogeneous.
+- Data quality matters.
+- Bad transitions should be rejected early with diagnostic context.
+
+---
+
+### 6.11 `buffer_telemetry.py` — buffer metrics and diagnostics
+
+**Owners:** `BufferTelemetry`, `MetricStats`, `MetricSummarizer`, `FairnessMetrics`
+
+`buffer_telemetry.py` collects lightweight in-process metrics. It is intentionally embeddable and does not require a full external metrics stack.
+
+**Canonical signals:**
+
+- `push_latency_seconds`
+- `sample_latency_seconds`
+- `lock_wait_seconds`
+- `lock_contention_count`
+- `rejection_count`
+- `stale_prune_count`
+
+**Core behavior:**
+
+- Thread-safe counters and observations.
+- Bounded percentile history for p50, p95, and p99.
+- Rejection rate tracking.
+- Lock contention tracking.
+- Slow operation diagnostics.
+- Snapshot and NumPy export helpers.
+- Fairness metric helpers for replay diagnostics.
+
+**Use it when:**
+
+- You need operational visibility without heavy dependencies.
+- You want testable runtime metrics for buffers.
+- You need a common metrics vocabulary across replay, network, and persistence modules.
+
+---
+
+### 6.12 `buffer_persistence.py` — shared checkpoint I/O
+
+**Owners:** `BufferCheckpointIO`, `BufferCheckpoint`, `BufferCheckpointManifest`
+
+`buffer_persistence.py` owns shared persistence so individual buffers do not each invent checkpoint formats. It writes a versioned checkpoint envelope with manifest metadata and serialized state.
+
+**Core behavior:**
+
+- Schema version tags.
+- Stable checkpoint manifest.
+- Payload and stored-payload SHA-256 checksums.
+- Optional gzip compression.
+- Hook-based encryption/decryption integration.
+- Atomic writes.
+- Backward-compatible adapter registration.
+- Optional legacy `.npz` loading support.
+- Telemetry for checkpoint saves, loads, payload size, and latency.
+
+**Use it when:**
+
+- Buffer state must survive process restarts.
+- Checkpoints need explicit schema versions.
+- Save/load behavior should be consistent across buffer modules.
+
+---
+
+### 6.13 `utils/buffer_errors.py` — centralized buffer exception hierarchy
+
+**Owner:** `BufferError` hierarchy
+
+`buffer_errors.py` defines the shared error language for the entire buffer subsystem. It should be used instead of duplicate module-local exception classes.
+
+**Major domains:**
+
+- configuration errors
+- validation errors
+- capacity and state errors
+- sampling and priority errors
+- network/backpressure errors
+- n-step errors
+- segment-tree errors
+- eviction errors
+- sequence replay errors
+- telemetry/fairness errors
+- persistence errors
+- bulk operation errors
+
+**Use it when:**
+
+- A buffer operation needs to fail explicitly.
+- Tests need to assert exact failure modes.
+- Telemetry needs to classify errors consistently.
+
+---
+
+### 6.14 `utils/config_loader.py` — shared configuration access
+
+**Owners:** `load_global_config`, `get_config_section`, `reload_config`, `clear_config_cache`
+
+`config_loader.py` is the configuration authority for the buffer subsystem. Modules should keep using it directly rather than creating duplicate config loading code.
+
+**Core behavior:**
+
+- Resolves `buffer/configs/buffer_config.yaml` by default.
+- Loads YAML safely.
+- Caches loaded config with TTL and file modification checks.
+- Provides section-level access through `get_config_section(...)`.
+- Exposes cache diagnostics for debugging.
+
+**Use it when:**
+
+- A module needs values from `buffer_config.yaml`.
+- Tests need to inspect or clear cached config state.
+- Config access should remain consistent across all buffer modules.
+
+---
+
+## 7) Recommended imports
+
+### 7.1 Baseline uniform replay
+
+```python
+from src.utils.buffer.replay_buffer import ReplayBuffer
+```
+
+### 7.2 Single-node prioritized replay
+
+```python
+from src.utils.buffer.prioritized_buffer import PrioritizedReplayBuffer
+
+buffer = PrioritizedReplayBuffer()
+buffer.push(agent_id, state, action, reward, next_state, done, td_error=1.0)
+batch = buffer.sample(batch_size=64, beta=0.4)
+update_report = buffer.update_priorities(batch.indices, td_errors)
+```
+
+### 7.3 Reservoir replay for unbounded streams
+
+```python
+from src.utils.buffer.reservoir_buffer import ReservoirReplayBuffer
+
+buffer = ReservoirReplayBuffer()
+buffer.push((agent_id, state, action, reward, next_state, done))
+batch = buffer.sample(batch_size=128)
+```
+
+### 7.4 Sequence replay for recurrent/Transformer models
+
+```python
+from src.utils.buffer.sequence_replay_buffer import SequenceReplayBuffer
+
+buffer = SequenceReplayBuffer()
+buffer.push(agent_id, state, action, reward, next_state, done)
+sequence_batch = buffer.sample_sequences(batch_size=16)
+```
+
+### 7.5 N-step preprocessing
+
+```python
+from src.utils.buffer.nstep_buffer import NStepBuffer
+
+nstep = NStepBuffer()
+maybe_transition = nstep.add((agent_id, state, action, reward, next_state, done))
+ready_tail = nstep.flush()
+```
+
+### 7.6 Network buffer
+
+```python
+from src.utils.buffer.network_buffer import NetworkBuffer
+
+network_buffer = NetworkBuffer()
+decision = network_buffer.enqueue(payload, channel="agent", protocol="internal")
+messages = network_buffer.dequeue(max_items=8)
+```
+
+### 7.7 Shared primitives
+
+```python
+from src.utils.buffer.buffer_validation import TransitionValidator
+from src.utils.buffer.buffer_telemetry import BufferTelemetry
+from src.utils.buffer.buffer_persistence import BufferCheckpointIO
+from src.utils.buffer.segment_tree import SumSegmentTree, MinSegmentTree
+from src.utils.buffer.eviction_policies import build_eviction_policy
+```
+
+---
+
+## 8) Choosing the correct buffer
+
+| Need | Recommended module |
+|---|---|
+| Minimal uniform sampling | `ReplayBuffer` |
+| Single-node Prioritized Experience Replay | `PrioritizedReplayBuffer` |
+| Explicit TD-error priority update loop | `PrioritizedReplayBuffer` |
+| Multi-agent or distributed sampling strategies | `DistributedReplayBuffer` |
+| Reward-based or agent-balanced sampling | `DistributedReplayBuffer` |
+| Long-running stream with bounded memory | `ReservoirReplayBuffer` |
+| Online telemetry / continual learning sample retention | `ReservoirReplayBuffer` |
+| RNN/Transformer contiguous training windows | `SequenceReplayBuffer` |
+| N-step return construction before replay | `NStepBuffer` |
+| Transport queue with TTL/fairness/backpressure | `NetworkBuffer` |
+| Priority tree primitive only | `SumSegmentTree`, `MinSegmentTree` |
+| Capacity pressure policy | `build_eviction_policy` |
+| Shared checkpointing | `BufferCheckpointIO` |
+
+---
+
+## 9) Configuration sections
+
+All production settings should live in `buffer_config.yaml` and be accessed through `get_config_section(...)`.
+
+Expected top-level sections include:
+
+```yaml
+validation: {}
+telemetry: {}
+persistence: {}
+segment_tree: {}
+eviction: {}
+distributed: {}
+prioritized_replay: {}
+reservoir: {}
+sequence_replay: {}
+nstep: {}
+network_buffer: {}
+```
+
+Configuration rules:
+
+- Do not duplicate config loading inside individual modules.
+- Do not create separate module-specific config files for buffer modules.
+- Do not replace `load_global_config()` / `get_config_section(...)` with ad-hoc YAML reads.
+- User overrides may be accepted by constructors, but the default source of truth remains `buffer_config.yaml`.
+
+---
+
+## 10) Persistence contract
+
+Buffers that support persistence should expose the same shape:
+
+```python
+state = buffer.state_dict()
+buffer.load_state_dict(state)
+buffer.save(filepath)
+buffer.load(filepath)
+```
+
+Persistence should flow through `BufferCheckpointIO`, which owns:
+
+- checkpoint manifest creation
+- schema version tagging
+- compression
+- checksums
+- optional encryption hooks
+- backward-compatible adapters
+- atomic writes
+- load validation
+
+This keeps save/load behavior consistent and prevents drift between replay implementations.
+
+---
+
+## 11) Telemetry contract
+
+Production buffers should record the following signals where applicable:
+
+| Signal | Meaning |
+|---|---|
+| `push_latency_seconds` | Time spent accepting a transition/message. |
+| `sample_latency_seconds` | Time spent producing a sample batch. |
+| `lock_wait_seconds` | Time spent waiting for internal locks. |
+| `lock_contention_count` | Count of meaningful lock contention events. |
+| `rejection_count` | Count of rejected pushes, samples, updates, or invalid transitions. |
+| `stale_prune_count` | Count of stale transitions/messages pruned. |
+
+Buffers may expose additional counters, but these names should remain canonical for cross-module dashboards and tests.
+
+---
+
+## 12) Development guidelines
+
+- Keep validation in `buffer_validation.py` unless the rule is truly module-specific.
+- Keep error types in `utils/buffer_errors.py`; do not create duplicate local exception classes.
+- Keep checkpoint I/O in `buffer_persistence.py`; do not invent separate formats per buffer.
+- Keep priority trees in `segment_tree.py`; do not duplicate tree code in replay modules.
+- Keep eviction logic in `eviction_policies.py`; do not hardcode eviction heuristics in buffers.
+- Keep config handling compatible with `buffer_config.yaml` and `utils/config_loader.py`.
+- Use compact `__main__` smoke tests for each module, but avoid fake integrations when real shared modules are available.
+- Prefer explicit, typed reports for batch operations such as ingest reports, validation reports, and priority update reports.
+
+---
+
+## 13) Quick architecture summary
+
+```mermaid
+flowchart TB
+    subgraph Foundation
+        CL[config_loader]
+        ERR[buffer_errors]
+    end
+
+    subgraph Shared_Primitives[Shared primitives]
+        VAL[validation]
+        TEL[telemetry]
+        PERSIST[persistence]
+        TREE[segment_tree]
+        EVICT[eviction_policies]
+    end
+
+    subgraph Replay_Preprocessing[Replay and preprocessing]
+        NSTEP[nstep_buffer]
+        PER[prioritized_buffer]
+        RES[reservoir_buffer]
+        SEQ[sequence_replay_buffer]
+        DIST[distributed_replay_buffer]
+        BASE[replay_buffer]
+    end
+
+    subgraph Transport
+        NET[network_buffer]
+    end
+
+    CL --> Shared_Primitives
+    ERR --> Shared_Primitives
+    VAL --> NSTEP
+    VAL --> PER
+    VAL --> RES
+    VAL --> SEQ
+    TEL --> NSTEP
+    TEL --> PER
+    TEL --> RES
+    TEL --> SEQ
+    TEL --> DIST
+    TEL --> NET
+    PERSIST --> NSTEP
+    PERSIST --> PER
+    PERSIST --> RES
+    PERSIST --> SEQ
+    TREE --> PER
+    EVICT --> SEQ
+    EVICT --> NET
+```
+
+---
+
+## 14) Maintenance checklist
+
+Before adding or changing a buffer module, verify:
+
+- [ ] Config values come from `buffer_config.yaml` through `get_config_section(...)`.
+- [ ] Transition-like payloads pass through `TransitionValidator`.
+- [ ] Failures use `utils/buffer_errors.py` error types.
+- [ ] Push/sample/update paths emit telemetry.
+- [ ] Persistence uses `BufferCheckpointIO` when save/load is required.
+- [ ] Capacity pressure uses `eviction_policies.py` where policy choice matters.
+- [ ] Priority sampling uses `segment_tree.py` rather than a duplicate implementation.
+- [ ] The module has a compact `__main__` smoke test.
+- [ ] The README module map and import hierarchy remain accurate.

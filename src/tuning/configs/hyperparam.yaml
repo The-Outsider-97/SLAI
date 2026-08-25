@@ -1,90 +1,135 @@
-# ==============================================
-# Unified Hyperparameter Tuning Configuration
-# ==============================================
+# SLAI v2.3 tuning configuration
+#
+# Search selects candidates, evaluators produce trial evidence, promotion is an
+# explicit policy decision, and tuning_artifacts persists immutable run data.
 
-model:
-  name: SLAI-Agent
-  version: v1.8.1
+schema_version: 2
 
-run:
-  id_prefix: run
-  output_dir: logs/
-  plots_dir: plots/
+# Change this to BayesianNeuralNetwork when tuning the variational model.
+model_type: DenseNeuralNetwork
 
-training:
-  num_samples: 500
-
-# Used by HyperparamTuner when model_type is not passed at runtime.
-model_type: GradientBoosting
-
-# ==========================================================
-# High-level orchestration settings (non-strategy-specific)
-# ==========================================================
 tuning:
-  strategy: bayesian    # bayesian | grid
-  allow_generate: true
+  strategy: bayesian  # bayesian | grid
+  allow_generate: false
 
-# ============================
-# Bayesian search configuration
-# ============================
+  # Objective direction is always explicit. Search code never infers direction
+  # from a metric name.
+  objective:
+    name: rmse
+    direction: minimize
+    unit: null
+
+# ---------------------------------------------------------------------------
+# Search strategies
+# ---------------------------------------------------------------------------
+
 bayesian_search:
-  n_calls: 50
-  n_initial_points: 5
+  n_trials: 40
+  n_initial_points: 8
   random_state: 42
-  output_dir: src/tuning/reports/bayesian_search
+  candidate_pool_size: 1024
+  fail_fast: false
 
-  # Strategy behavior
-  objective: auto       # auto | minimize | maximize
-  scoring_metric: null  # e.g. elbo, mse, rmse, log_likelihood
+  acquisition:
+    name: expected_improvement
+    exploration: 0.01
 
-  # Built-in BNN evaluator split controls
-  validation_fraction: 0.2
-  shuffle_validation: true
+  surrogate:
+    kernel: matern
+    matern_nu: 2.5
+    normalize_y: true
+    noise: 1.0e-6
+    optimizer_restarts: 2
 
-  # Reporting
-  plot_results: true
-
-# =======================
-# Grid search configuration
-# =======================
 grid_search:
-  n_jobs: -1
-  cross_val_folds: 5
-  random_state: 42
-  output_dir: src/tuning/reports/grid_search
+  fail_fast: false
 
-  # Optional overrides
-  model_type: GradientBoosting
-  scoring_metric: null  # if null, evaluator falls back to gnn.grid_defaults.metric
-  task_type: auto       # auto | regression | classification | binary_classification | multiclass_classification
+  # null evaluates the complete Cartesian product. Set an integer only when an
+  # operational policy requires a hard cardinality limit.
+  max_combinations: null
 
-  # Reporting
-  plot_results: true
+# ---------------------------------------------------------------------------
+# Supervised evaluation
+# ---------------------------------------------------------------------------
 
-# ======================================
-# Bayesian Neural Network default settings
-# ======================================
+supervised_evaluation:
+  objective:
+    name: rmse
+    direction: minimize
+
+  metrics:
+    - rmse
+    - mae
+    - r2
+
+  # Prespecify seeds before a study; do not select them from observed results.
+  seeds:
+    - 11
+    - 29
+    - 47
+
+  split_strategy: nested_k_fold  # holdout | nested_k_fold | time_series
+  validation_fraction: 0.15
+  n_splits: 5
+  shuffle: true
+
+  # Thresholds belong to an explicit SLAI policy and are not assumed here.
+  constraints: []
+
+# ---------------------------------------------------------------------------
+# Agent evaluation
+# ---------------------------------------------------------------------------
+
+agent_evaluation:
+  objective:
+    name: task_utility
+    direction: maximize
+
+  seeds:
+    - 11
+    - 29
+    - 47
+
+  state:
+    source: fresh  # fresh | checkpoint
+    checkpoint_id: null
+    cleanup: auto  # auto restores checkpoints and discards fresh candidates
+
+  calibration_bins: 10
+  require_calibration: true
+  fail_fast: true
+
+  # Add thresholds only after safety, latency, memory, stability, and
+  # calibration limits have been justified by policy or baseline evidence.
+  constraints: []
+
+# ---------------------------------------------------------------------------
+# Network defaults
+# ---------------------------------------------------------------------------
+
 bnn:
+  task_type: regression
   learning_rate: 0.005
   prior_mu: 0.0
   prior_logvar: 0.0
-  random_state: 42
-
+  posterior_rho_init: -3.0
+  likelihood_std: 1.0
   hidden_activation: relu
   leaky_relu_slope: 0.01
-  likelihood_std: 1.0
-
-  min_variance: 1.0e-6
-  stability_epsilon: 1.0e-8
-  logvar_clip_range: [-8.0, 4.0]
-
   weight_init_scale: 0.75
   gradient_clip_norm: 5.0
+  beta1: 0.9
+  beta2: 0.999
+  adam_epsilon: 1.0e-8
+  prediction_threshold: 0.5
+  stability_epsilon: 1.0e-8
+  random_state: 42
 
   training:
     epochs: 200
     batch_size: 64
     num_samples: 5
+    validation_num_samples: 20
     shuffle: true
     early_stopping_patience: 15
     min_delta: 1.0e-4
@@ -95,41 +140,21 @@ bnn:
     lower_quantile: 0.05
     upper_quantile: 0.95
 
-  persistence:
-    format: json
-    indent: 2
-    sort_keys: true
-
-  monitoring:
-    track_gradient_norm: true
-    track_elbo: true
-    track_kl_divergence: true
-    track_log_likelihood: true
-    track_predictive_std: true
-
-# ==========================================
-# Deterministic Grid Neural Network defaults
-# ==========================================
-gnn:
+dnn:
   task_type: regression
-  optimizer: adam
-  random_state: 42
-
   learning_rate: 0.001
   hidden_activation: relu
-  output_activation: auto
   leaky_relu_slope: 0.01
-
   weight_init_scale: 1.0
   gradient_clip_norm: 5.0
   l2_lambda: 1.0e-4
   dropout_rate: 0.10
-  stability_epsilon: 1.0e-8
-
   beta1: 0.9
   beta2: 0.999
   adam_epsilon: 1.0e-8
   prediction_threshold: 0.5
+  stability_epsilon: 1.0e-8
+  random_state: 42
 
   training:
     epochs: 120
@@ -139,106 +164,67 @@ gnn:
     min_delta: 1.0e-4
     restore_best_weights: true
 
-  grid_defaults:
-    metric: r2
+# ---------------------------------------------------------------------------
+# Search spaces
+#
+# Explicit value sets make the same space valid for both grid and Bayesian
+# search. Bayesian optimization treats ordered numeric values as ordinal and
+# hidden-layer alternatives as categorical.
+# ---------------------------------------------------------------------------
 
-  persistence:
-    format: json
-    indent: 2
-    sort_keys: true
-
-  monitoring:
-    track_gradient_norm: true
-    track_loss: true
-    track_learning_rate: true
-
-# ==========================
-# Hyperparameter search spaces
-# ==========================
 hyperparameters:
-  GradientBoosting:
-    - name: learning_rate
-      type: real
-      min: 0.0001
-      max: 0.1
-
-    - name: n_estimators
-      type: integer
-      min: 50
-      max: 300
-
-  RandomForest:
-    - name: n_estimators
-      type: integer
-      min: 50
-      max: 300
-
-    - name: max_depth
-      type: integer
-      min: 3
-      max: 15
-
-  ARIMA:
-    - name: p
-      type: integer
-      values: [0, 1, 2, 3]
-    - name: d
-      type: integer
-      values: [0, 1, 2]
-    - name: q
-      type: integer
-      values: [0, 1, 2, 3]
-
   BayesianNeuralNetwork:
-    - name: learning_rate
-      type: real
-      min: 0.0001
-      max: 0.01
-      prior: log-uniform
-
     - name: hidden_layer_sizes
       type: categorical
-      values: ["64", "128", "128,64", "256,128"]
-
-    - name: batch_size
-      type: categorical
-      values: [32, 64, 128]
-
-    - name: epochs
-      type: integer
-      min: 50
-      max: 300
-
-    - name: num_samples_mc
-      type: integer
-      min: 1
-      max: 10
-
-    - name: prior_logvar
-      type: real
-      min: -5.0
-      max: 0.0
-
-    - name: likelihood_std
-      type: real
-      min: 0.1
-      max: 2.0
-
-  GridNeuralNetwork:
-    - name: hidden_layer_sizes
-      type: categorical
-      values: ["64", "128", "128,64", "256,128"]
+      values:
+        - [64]
+        - [128]
+        - [128, 64]
+        - [256, 128]
 
     - name: learning_rate
-      type: categorical
-      values: [0.0005, 0.001, 0.003]
+      type: real
+      values: [0.0005, 0.001, 0.005]
 
     - name: batch_size
-      type: categorical
+      type: integer
       values: [32, 64]
 
     - name: epochs
+      type: integer
+      values: [100, 200]
+
+    - name: num_samples
+      type: integer
+      values: [3, 5, 10]
+
+    - name: prior_logvar
+      type: real
+      values: [-2.0, -1.0, 0.0]
+
+    - name: likelihood_std
+      type: real
+      values: [0.5, 1.0, 1.5]
+
+  DenseNeuralNetwork:
+    - name: hidden_layer_sizes
       type: categorical
+      values:
+        - [64]
+        - [128]
+        - [128, 64]
+        - [256, 128]
+
+    - name: learning_rate
+      type: real
+      values: [0.0005, 0.001, 0.003]
+
+    - name: batch_size
+      type: integer
+      values: [32, 64]
+
+    - name: epochs
+      type: integer
       values: [80, 120]
 
     - name: hidden_activation
@@ -246,16 +232,20 @@ hyperparameters:
       values: [relu, tanh]
 
     - name: dropout_rate
-      type: categorical
+      type: real
       values: [0.0, 0.1]
 
     - name: l2_lambda
-      type: categorical
+      type: real
       values: [0.0, 0.0001, 0.001]
 
-# =================================
-# Generator input/output file mapping
-# =================================
-configs:
-  bayesian_config: src/tuning/configs/bayesian_config.json
-  grid_config: src/tuning/configs/grid_config.json
+# ---------------------------------------------------------------------------
+# Immutable run artifacts
+# ---------------------------------------------------------------------------
+
+tuning_artifacts:
+  output_dir: src/tuning/reports
+  write_summary: true
+  write_trials: true
+  write_config_snapshot: true
+  indent: 2

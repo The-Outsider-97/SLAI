@@ -113,6 +113,11 @@ class ScoreModel:
             "medical": self._handle_medical_context,
         }
 
+        self.log_assessments = coerce_bool(self.score_config.get("log_assessments", False), False)
+        self.log_full_report = coerce_bool(self.score_config.get("log_full_report", False), False)
+        self.log_every_n = max(1, int(self.score_config.get("log_every_n", 100)))
+        self._assessment_count = 0
+
         self._compiled_term_patterns: Dict[str, List[Tuple[str, re.Pattern[str], float, str]]] = {}
         self._compiled_pattern_components: Dict[str, List[Tuple[str, re.Pattern[str], float]]] = {}
         self._last_indicators: List[ScoreIndicator] = []
@@ -673,7 +678,36 @@ class ScoreModel:
                 "text_length": len(normalized),
             },
         )
-        logger.info("Score assessment completed: %s", safe_log_payload("score_assessment", report.to_dict()))
+        self._assessment_count += 1
+        
+        should_log = (
+            self.log_assessments
+            or report.decision in {"review", "block"}
+            or self._assessment_count % self.log_every_n == 0
+        )
+        
+        if should_log:
+            payload = report.to_dict() if self.log_full_report else {
+                "text_fingerprint": report.text_fingerprint,
+                "decision": report.decision,
+                "aggregate_score": report.aggregate_score,
+                "risk_score": report.risk_score,
+                "context_type": report.context_type,
+                "component_count": len(report.component_scores),
+            }
+            logger.info("Score assessment completed: %s", safe_log_payload("score_assessment", payload))
+        else:
+            logger.debug(
+                "Score assessment completed: %s",
+                safe_log_payload(
+                    "score_assessment",
+                    {
+                        "text_fingerprint": report.text_fingerprint,
+                        "decision": report.decision,
+                        "risk_score": report.risk_score,
+                    },
+                ),
+            )
         return report
 
     def to_feature_vector(self, text: str, context: Optional[Dict[str, Any]] = None, order: Optional[Sequence[str]] = None) -> List[float]:

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import yaml
-
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 """
 Knowledge Agent for SLAI (Scalable Learning Autonomous Intelligence).
@@ -18,11 +16,12 @@ Production-oriented knowledge retrieval and management agent with:
 import hashlib
 import json
 import math
+import yaml
 import os
 import re
 import threading
 import time
-import numpy as np
+import numpy as np # type: ignore
 
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,19 +30,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Callabl
 
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .base_agent import BaseAgent
-from .knowledge.utils.knowledge_errors import (
-    BiasDetectionError,
-    EmbeddingError,
-    GovernanceViolation,
-    InvalidDocumentError,
-    MemoryUpdateError,
-    OntologyError,
-    RetrievalError,
-)
+from .runtime_contracts import RuntimeLifecycle
+from .knowledge.utils.knowledge_errors import *
+from .knowledge.utils.knowledge_helpers import *
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Knowledge Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 _TOKENIZER_INSTANCE = None
 
@@ -64,34 +57,30 @@ class KnowledgeAgent(BaseAgent):
     _embedding_model_cache: Dict[str, Any] = {}
     _embedding_model_lock = threading.Lock()
 
-    def __init__(
-        self,
-        shared_memory,
-        agent_factory,
-        config: Optional[dict] = None,
-        persist_file: Optional[str] = None,
-        knowledge_memory: Optional[Any] = None,
-        knowledge_cache: Optional[Any] = None,
-        perform_action: Optional[Any] = None,
-        ontology_manager: Optional[Any] = None,
-        governor: Optional[Any] = None,
-        rule_engine: Optional[Any] = None,
-        synchronizer: Optional[Any] = None,
-        monitor: Optional[Any] = None,
-        orchestrator: Optional[Any] = None,
-    ):
+    def __init__(self, shared_memory, agent_factory, config: Optional[dict] = None,
+                 persist_file: Optional[str] = None, knowledge_memory: Optional[Any] = None,
+                 knowledge_cache: Optional[Any] = None, perform_action: Optional[Any] = None,
+                 ontology_manager: Optional[Any] = None, governor: Optional[Any] = None,
+                 rule_engine: Optional[Any] = None, synchronizer: Optional[Any] = None,
+                 monitor: Optional[Any] = None, orchestrator: Optional[Any] = None,
+                 runtime_metrics: Optional[Any] = None ):
         super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
-
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = load_global_config()
         self.knowledge_config = get_config_section('knowledge_agent') or {}
+        if config:
+            self.knowledge_config.update(dict(config))
 
         self.source = self.knowledge_config.get("source", "knowledge_agent")
         self.tokenize = bool(self.knowledge_config.get("tokenize", True))
         self.is_query = bool(self.knowledge_config.get("is_query", True))
         self.stopwords_path = self.knowledge_config.get("stopwords")
         self.cache_size = self._coerce_positive_int(self.knowledge_config.get("cache_size"), 1000)
+        self.retrieval_cache_ttl = self._coerce_positive_int(
+            self.knowledge_config.get("ttl"),
+            600,
+        )
         self.first_pass = bool(self.knowledge_config.get("first_pass", True))
         self.max_workers = self._coerce_positive_int(self.knowledge_config.get("max_workers"), 4)
         self._decay_factor = self._coerce_float(self.knowledge_config.get("decay_factor"), 0.8)
@@ -102,17 +91,12 @@ class KnowledgeAgent(BaseAgent):
         self.directory_path = str(self.knowledge_config.get("directory_path", ""))
         self.embedding_model = self.knowledge_config.get("embedding_model")
         self.use_graph_ontology = bool(self.knowledge_config.get("use_graph_ontology", True))
-        self.similarity_threshold = self._coerce_float(
-            self.knowledge_config.get("similarity_threshold"), 0.3
-        )
-        self.bias_detection_enabled = bool(
-            self.knowledge_config.get("bias_detection_enabled", False)
-        )
-        self.use_ontology_expansion = bool(
-            self.knowledge_config.get("use_ontology_expansion", True)
-        )
+        self.similarity_threshold = self._coerce_float(self.knowledge_config.get("similarity_threshold"), 0.3)
+        self.bias_detection_enabled = bool(self.knowledge_config.get("bias_detection_enabled", False))
+        self.use_ontology_expansion = bool(self.knowledge_config.get("use_ontology_expansion", True))
 
-        self.persist_file = persist_file
+        configured_persist_file = self.knowledge_config.get("persist_file")
+        self.persist_file = str(persist_file or configured_persist_file or "") or None
         self.cache_lock = threading.RLock()
         self._index_lock = threading.RLock()
         self._query_executor = ThreadPoolExecutor(max_workers=self.max_workers)
@@ -124,27 +108,53 @@ class KnowledgeAgent(BaseAgent):
         self.learning_agent = None
         self.reasoning_agent = None
 
-        self.knowledge_memory = knowledge_memory or self._create_knowledge_memory()
-        self.knowledge_cache = knowledge_cache or self._create_knowledge_cache()
-        self.perform_action = perform_action or self._create_perform_action()
-        self.ontology_manager = ontology_manager or self._create_ontology_manager()
-        self.rule_engine = rule_engine or self._create_rule_engine()
+        self._owns_knowledge_memory = knowledge_memory is None
+        self.knowledge_memory = (knowledge_memory if knowledge_memory is not None else self._create_knowledge_memory())
+        if self.persist_file and hasattr(self.knowledge_memory, "persist_file"):
+            self.knowledge_memory.persist_file = self.persist_file
+        self.knowledge_cache = (knowledge_cache if knowledge_cache is not None else self._create_knowledge_cache())
+        self.perform_action = (
+            perform_action
+            if perform_action is not None
+            else self._create_perform_action(self.knowledge_memory)
+        )
+        self.ontology_manager = (
+            ontology_manager if ontology_manager is not None else self._create_ontology_manager()
+        )
+        self.rule_engine = rule_engine if rule_engine is not None else self._create_rule_engine()
         self.governor = governor
         if self.governor is None:
             self.governor = self._initialize_governance()
-        self.synchronizer = synchronizer or self._create_synchronizer(self.knowledge_memory, self.rule_engine)
-        self.monitor = monitor or self._create_monitor(
-            self.knowledge_cache, self.rule_engine, self.governor, self.perform_action
+        self._owns_synchronizer = synchronizer is None
+        self.synchronizer = (
+            synchronizer
+            if synchronizer is not None
+            else self._create_synchronizer(self.knowledge_memory, self.rule_engine)
         )
-        self.orchestrator = orchestrator or self._create_orchestrator(
-            self.knowledge_memory,
-            self.knowledge_cache,
-            self.rule_engine,
-            self.governor,
-            self.synchronizer,
-            self.monitor,
-            self.perform_action,
+        self._owns_monitor = monitor is None
+        self.monitor = (
+            monitor
+            if monitor is not None
+            else self._create_monitor(self.knowledge_cache, self.rule_engine,
+                                      self.governor, self.perform_action))
+        self._owns_orchestrator = orchestrator is None
+        self.orchestrator = (
+            orchestrator
+            if orchestrator is not None
+            else self._create_orchestrator(
+                self.knowledge_memory,
+                self.knowledge_cache,
+                self.rule_engine,
+                self.governor,
+                self.synchronizer,
+                self.monitor,
+                self.perform_action,
+                manage_memory=self._owns_knowledge_memory,
+                manage_synchronizer=self._owns_synchronizer,
+                manage_monitor=self._owns_monitor,
+            )
         )
+        self.runtime_metrics = (runtime_metrics if runtime_metrics is not None else self._create_runtime_metrics())
         self.cache = self.knowledge_cache
 
         # Bind shared dependencies into components that can benefit from them.
@@ -187,37 +197,42 @@ class KnowledgeAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _create_knowledge_memory(self):
-        from src.agents.knowledge.knowledge_memory import KnowledgeMemory
+        from .knowledge.knowledge_memory import KnowledgeMemory 
 
         return KnowledgeMemory()
 
     def _create_knowledge_cache(self):
-        from src.agents.knowledge.knowledge_cache import KnowledgeCache
+        from .knowledge.knowledge_cache import KnowledgeCache
 
         return KnowledgeCache()
 
-    def _create_perform_action(self):
-        from src.agents.knowledge.perform_action import PerformAction
+    def _create_perform_action(self, knowledge_memory):
+        from .knowledge.perform_action import PerformAction
 
-        return PerformAction()
+        return PerformAction(knowledge_memory=knowledge_memory)
+
+    def _create_runtime_metrics(self):
+        from .knowledge.runtime.metrics import RTMetrics
+
+        return RTMetrics()
 
     def _create_ontology_manager(self):
-        from src.agents.knowledge.ontology_manager import OntologyManager
+        from .knowledge.ontology_manager import OntologyManager 
 
         return OntologyManager()
 
     def _create_rule_engine(self):
-        from src.agents.knowledge.utils.rule_engine import RuleEngine
+        from .knowledge.modules.rule_engine import RuleEngine 
 
         return RuleEngine()
 
     def _create_synchronizer(self, knowledge_memory, rule_engine):
-        from src.agents.knowledge.knowledge_sync import KnowledgeSynchronizer
+        from .knowledge.knowledge_sync import KnowledgeSynchronizer
 
         return KnowledgeSynchronizer(knowledge_memory=knowledge_memory, rule_engine=rule_engine, autostart=False)
 
     def _create_monitor(self, knowledge_cache, rule_engine, governor, perform_action):
-        from src.agents.knowledge.knowledge_monitor import KnowledgeMonitor
+        from .knowledge.knowledge_monitor import KnowledgeMonitor
 
         return KnowledgeMonitor(
             agent=self,
@@ -228,8 +243,21 @@ class KnowledgeAgent(BaseAgent):
             autostart=False,
         )
 
-    def _create_orchestrator(self, knowledge_memory, knowledge_cache, rule_engine, governor, synchronizer, monitor, perform_action):
-        from src.agents.knowledge.knowledge_orchestrator import KnowledgeOrchestrator
+    def _create_orchestrator(
+        self,
+        knowledge_memory,
+        knowledge_cache,
+        rule_engine,
+        governor,
+        synchronizer,
+        monitor,
+        perform_action,
+        *,
+        manage_memory: bool,
+        manage_synchronizer: bool,
+        manage_monitor: bool,
+    ):
+        from .knowledge.knowledge_orchestrator import KnowledgeOrchestrator
 
         return KnowledgeOrchestrator(
             agent=self,
@@ -240,6 +268,10 @@ class KnowledgeAgent(BaseAgent):
             synchronizer=synchronizer,
             monitor=monitor,
             action_executor=perform_action,
+            create_governor=governor is not None,
+            manage_memory=manage_memory,
+            manage_synchronizer=manage_synchronizer,
+            manage_monitor=manage_monitor,
             lazy_start=False,
         )
 
@@ -271,9 +303,13 @@ class KnowledgeAgent(BaseAgent):
         if not isinstance(governor_config, dict):
             governor_config = {}
         if governor_config.get("enabled", True):
-            from src.agents.knowledge.governor import Governor
+            from .knowledge.governor import Governor
 
-            governor = Governor(knowledge_agent=self)
+            governor = Governor(
+                knowledge_agent=self,
+                knowledge_memory=self.knowledge_memory,
+                rule_engine=self.rule_engine,
+            )
             logger.info("Governance subsystem initialized")
             return governor
         logger.info("Governance subsystem disabled")
@@ -607,6 +643,42 @@ class KnowledgeAgent(BaseAgent):
             "document_id": doc.get("doc_id"),
         }
 
+    def _record_retrieval_metrics(self, start_time: float, *, cache_hit: bool) -> None:
+        latency = max(0.0, time.time() - start_time)
+        self.performance_metrics["cache_hits"].append(1 if cache_hit else 0)
+        self.performance_metrics["retrieval_times"].append(latency)
+
+        def emit_runtime_metrics() -> None:
+            if hasattr(self.runtime_metrics, "inc_counter"):
+                counter = (
+                    "knowledge_cache_hits_total"
+                    if cache_hit
+                    else "knowledge_cache_misses_total"
+                )
+                self.runtime_metrics.inc_counter(counter)
+            if hasattr(self.runtime_metrics, "observe_histogram"):
+                self.runtime_metrics.observe_histogram(
+                    "knowledge_retrieval_latency_seconds",
+                    latency,
+                )
+            if hasattr(self.runtime_metrics, "set_gauge"):
+                self.runtime_metrics.set_gauge(
+                    "knowledge_cache_size",
+                    float(len(self.knowledge_cache)),
+                )
+                if hasattr(self.knowledge_memory, "get_statistics"):
+                    statistics = self.knowledge_memory.get_statistics()
+                    self.runtime_metrics.set_gauge(
+                        "knowledge_memory_size",
+                        float(statistics.get("active_entries", 0)),
+                    )
+
+        self._run_optional_runtime_operation(
+            "telemetry",
+            "knowledge.retrieval_metrics",
+            emit_runtime_metrics,
+        )
+
     def retrieve(self, query, k=5):
         query = "" if query is None else str(query)
         if not query.strip():
@@ -619,22 +691,23 @@ class KnowledgeAgent(BaseAgent):
         with self.cache_lock:
             cached_result = self.knowledge_cache.get(cache_key)
         if cached_result is not None:
-            self.performance_metrics["cache_hits"].append(1)
-            self.performance_metrics["retrieval_times"].append(time.time() - start_time)
+            self._record_retrieval_metrics(start_time, cache_hit=True)
             return cached_result
-        self.performance_metrics["cache_hits"].append(0)
 
         if query.strip() == "*":
             results = [(1.0, doc) for doc in self.knowledge_agent[:k]]
             with self.cache_lock:
-                self.knowledge_cache.set(cache_key, results)
+                self.knowledge_cache.set(cache_key, results, ttl=self.retrieval_cache_ttl)
+            self._record_retrieval_metrics(start_time, cache_hit=False)
             return results
 
         if not self.knowledge_agent:
+            self._record_retrieval_metrics(start_time, cache_hit=False)
             return []
 
         original_tokens = self._preprocess(query)
         if not original_tokens:
+            self._record_retrieval_metrics(start_time, cache_hit=False)
             return []
 
         expanded_query = query
@@ -678,7 +751,11 @@ class KnowledgeAgent(BaseAgent):
 
         serializable_results = [(float(score), doc) for score, doc in final_results]
         with self.cache_lock:
-            self.knowledge_cache.set(cache_key, serializable_results)
+            self.knowledge_cache.set(
+                cache_key,
+                serializable_results,
+                ttl=self.retrieval_cache_ttl,
+            )
 
         self._safe_shared_set(
             "knowledge:last_retrieval",
@@ -702,7 +779,7 @@ class KnowledgeAgent(BaseAgent):
             [doc.get("text", "") for _, doc in serializable_results],
         )
         self._safe_shared_increment(f"knowledge:metrics:{self.name}:retrieval_count", 1)
-        self.performance_metrics["retrieval_times"].append(time.time() - start_time)
+        self._record_retrieval_metrics(start_time, cache_hit=False)
         return serializable_results
 
     def _retrieve_tfidf(self, query_text: str) -> List[Tuple[float, Dict[str, Any]]]:
@@ -713,7 +790,7 @@ class KnowledgeAgent(BaseAgent):
         results = []
         for doc in self.knowledge_agent:
             doc_vector = self._dict_to_numpy(self.doc_tf_idf_vectors.get(doc["doc_id"], {}))
-            similarity = cosine_sim(query_vector, doc_vector)
+            similarity = cosine_sim(query_vector.tolist(), doc_vector.tolist())
             if similarity >= self.similarity_threshold:
                 results.append((float(similarity), doc))
         return sorted(results, key=lambda item: item[0], reverse=True)
@@ -738,7 +815,7 @@ class KnowledgeAgent(BaseAgent):
             doc = self.doc_index.get(doc_id)
             if doc is None:
                 continue
-            similarity = cosine_sim(query_embedding, doc_embedding)
+            similarity = cosine_sim(query_embedding.tolist(), doc_embedding.tolist())
             if similarity >= self.similarity_threshold:
                 results.append((float(similarity), doc))
         return sorted(results, key=lambda item: item[0], reverse=True)
@@ -832,21 +909,14 @@ class KnowledgeAgent(BaseAgent):
         all_terms = sorted(set(vec_a.keys()) | set(vec_b.keys()))
         if not all_terms:
             return 0.0
-        a = np.asarray([vec_a.get(term, 0.0) for term in all_terms], dtype=float)
-        b = np.asarray([vec_b.get(term, 0.0) for term in all_terms], dtype=float)
+        a = [vec_a.get(term, 0.0) for term in all_terms]
+        b = [vec_b.get(term, 0.0) for term in all_terms]
         return cosine_sim(a, b)
 
     # ------------------------------------------------------------------
     # Knowledge memory integration
     # ------------------------------------------------------------------
-    def update_memory(
-        self,
-        key: str,
-        value: Any,
-        metadata: dict = None,
-        context: dict = None,
-        ttl: int = None,
-    ):
+    def update_memory(self, key: str, value: Any, metadata: Optional[dict] = None, context: Optional[dict] = None, ttl: Optional[int] = None ):
         try:
             self.knowledge_memory.update(key=key, value=value, metadata=metadata, context=context, ttl=ttl)
             recalled = self.knowledge_memory.recall(key=key)
@@ -865,13 +935,7 @@ class KnowledgeAgent(BaseAgent):
             logger.error("Memory update failed: %s", exc, exc_info=True)
             raise error from exc
 
-    def recall_memory(
-        self,
-        key: str = None,
-        filters: dict = None,
-        sort_by: str = None,
-        top_k: int = None,
-    ) -> list:
+    def recall_memory(self, key: Optional[str] = None, filters: Optional[dict] = None, sort_by: Optional[str] = None, top_k: Optional[int] = None) -> list:
         return self.knowledge_memory.recall(key=key, filters=filters, sort_by=sort_by, top_k=top_k)
 
     def _apply_filters(self, metadata: dict, filters: dict) -> bool:
@@ -1147,7 +1211,11 @@ class KnowledgeAgent(BaseAgent):
                 try:
                     emb_value = self.sbert_model.encode(value_text, show_progress_bar=False)
                     emb_context = self.sbert_model.encode(str(context_query), show_progress_bar=False)
-                    score = cosine_sim(emb_value, emb_context)
+                    val_list = emb_value.tolist() if hasattr(emb_value, 'tolist') else list(emb_value)
+                    ctx_list = emb_context.tolist() if hasattr(emb_context, 'tolist') else list(emb_context)
+                    val_list = [float(v) for v in val_list]
+                    ctx_list = [float(v) for v in ctx_list]
+                    score = cosine_sim(val_list, ctx_list)
                 except Exception as exc:
                     logger.warning("SBERT relevance calculation failed: %s", exc)
 
@@ -1250,18 +1318,42 @@ class KnowledgeAgent(BaseAgent):
         except Exception as exc:
             logger.warning("Shared memory publish failed for %s: %s", channel, exc)
 
+    def get_health_report(self) -> Dict[str, Any]:
+        report = self.runtime_status()
+        report["subsystems"] = self.orchestrator.health()
+        report["retrieval"] = {
+            "mode": self.retrieval_mode,
+            "documents": self.total_documents,
+            "cache_entries": len(self.knowledge_cache),
+            "dense_model_ready": self.sbert_model is not None,
+        }
+        return report
+
     def shutdown(self) -> None:
+        lifecycle = self._runtime_status.lifecycle
+        if lifecycle in {RuntimeLifecycle.STOPPING, RuntimeLifecycle.STOPPED}:
+            return
+        self._transition_runtime_lifecycle(RuntimeLifecycle.STOPPING)
+        self.operational_state = "stopping"
         try:
-            self.orchestrator.stop()
+            if self._owns_orchestrator:
+                self.orchestrator.stop()
+        except Exception as exc:
+            self._mark_runtime_degraded("persistence", "knowledge_orchestrator.stop", exc)
+            logger.warning("Knowledge orchestrator shutdown is degraded: %s", exc)
         finally:
-            self._query_executor.shutdown(wait=False)
+            try:
+                self._query_executor.shutdown(wait=False, cancel_futures=True)
+            finally:
+                self.operational_state = "stopped"
+                self._transition_runtime_lifecycle(RuntimeLifecycle.STOPPED)
 
 
 if __name__ == "__main__":  # pragma: no cover
     print("\n=== Running Knowledge Agent ===\n")
     printer.status("Init", "Knowledge Agent initialized", "success")
-    from src.agents.collaborative.shared_memory import SharedMemory
-    from src.agents.agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+    from .agent_factory import AgentFactory
 
     shared_memory = SharedMemory()
     agent_factory = AgentFactory()

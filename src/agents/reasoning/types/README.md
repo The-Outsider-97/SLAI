@@ -1,229 +1,243 @@
-
-# Reasoning Types System
+# Reasoning Types Subsystem
 
 ## Overview
-This system provides a flexible framework for reasoning that combines multiple reasoning methodologies. It supports:
-- 6 core reasoning types (abduction, deduction, induction, analogical, decompositional, cause-effect)
-- Dynamic combination of up to 3 reasoning types
-- Context passing between reasoning steps
-- Memory-enhanced reasoning with prioritized experience replay
+The `src/agents/reasoning/types/` package defines SLAI’s **typed reasoning modes** and the base contract they share.
 
-## Core Components
+It exists to make reasoning strategies:
+- modular (each reasoning family is isolated),
+- composable (single mode or combined multi-mode chains),
+- testable (consistent input/output expectations), and
+- extensible (new reasoning modes can be added without rewriting the core engine).
 
-### Reasoning Types
+The reasoning types layer is consumed by the broader reasoning subsystem (`rule_engine.py`, `validation.py`, and related orchestration layers), and should be treated as the canonical home for reasoning-style semantics.
+
+---
+
+## Package Contents
+
+```text
+src/agents/reasoning/types/
+├── README.md
+├── __init__.py
+├── base_reasoning.py
+├── reasoning_abduction.py
+├── reasoning_analogical.py
+├── reasoning_cause_effect.py
+├── reasoning_decompositional.py
+├── reasoning_deductive.py
+└── reasoning_inductive.py
+```
+
+### Files and Responsibilities
+
+- `base_reasoning.py`  
+  Defines the shared base abstraction/interface for all reasoning types.
+
+- `reasoning_abduction.py`  
+  Implements abductive reasoning (best explanation from observations).
+
+- `reasoning_deductive.py`  
+  Implements deductive reasoning (conclusion from premises/rules).
+
+- `reasoning_inductive.py`  
+  Implements inductive reasoning (pattern/regularity extraction from examples).
+
+- `reasoning_analogical.py`  
+  Implements analogical transfer (mapping source structures to a target problem).
+
+- `reasoning_decompositional.py`  
+  Implements decomposition of complex systems/problems into subcomponents.
+
+- `reasoning_cause_effect.py`  
+  Implements causal reasoning around causes, effects, and influence pathways.
+
+---
+
+## Supported Reasoning Families
+
+### 1) Abductive Reasoning
+**Goal:** infer the most plausible explanation for observed evidence.
+
+Typical use:
+- explaining anomalies,
+- generating candidate causes,
+- triage/investigative workflows.
+
+### 2) Deductive Reasoning
+**Goal:** derive conclusions that logically follow from known premises/rules.
+
+Typical use:
+- policy/rule compliance,
+- deterministic entailment,
+- formal consistency checks.
+
+### 3) Inductive Reasoning
+**Goal:** generalize from examples or observations to broader hypotheses.
+
+Typical use:
+- discovering regularities,
+- deriving probable rules from repeated evidence,
+- trend-driven hypothesis generation.
+
+### 4) Analogical Reasoning
+**Goal:** map structure from a known domain to a new domain.
+
+Typical use:
+- transfer learning in symbolic form,
+- solution bootstrapping for novel tasks,
+- cross-domain explanation generation.
+
+### 5) Decompositional Reasoning
+**Goal:** break a large problem into tractable subproblems.
+
+Typical use:
+- planning,
+- systems diagnosis,
+- hierarchical analysis.
+
+### 6) Cause-and-Effect Reasoning
+**Goal:** model and evaluate causal relationships.
+
+Typical use:
+- intervention analysis,
+- dependency tracing,
+- outcome forecasting under causal assumptions.
+
+---
+
+## Common Interface Contract
+
+All reasoning types are expected to conform to the base contract defined in `base_reasoning.py`.
+
+### Conceptual Contract
+- Accept task input + optional context.
+- Produce structured output (not opaque free-form text only).
+- Preserve enough metadata for downstream validation/audit.
+- Fail with explicit, typed errors whenever possible.
+
+### Recommended Output Shape
+While each mode can enrich output differently, keep these minimum fields stable where practical:
+
+- `reasoning_type`: mode identifier (e.g., `"abduction"`).
+- `result` or `output`: primary reasoning conclusion.
+- `confidence`: normalized confidence in `[0.0, 1.0]` where meaningful.
+- `trace`: concise explanation of steps/criteria used.
+- `metadata`: optional diagnostics (timing, matches, heuristics, etc.).
+
+---
+
+## Composition Model
+
+Reasoning types are designed to work in **single-mode** and **multi-mode** chains.
+
+### Single-Mode Execution
+One reasoning type receives input + context and returns its own structured result.
+
+### Multi-Mode Chaining
+Multiple reasoning types can execute sequentially (left-to-right), where each step can read:
+- original input,
+- initial shared context,
+- outputs from prior steps.
+
+This allows pipelines such as:
+- `abduction -> deduction` (hypothesis generation then logical filtering),
+- `decomposition -> induction -> deduction`,
+- `analogical -> cause_effect`.
+
+### Chaining Guidance
+- Keep step outputs compact and structured.
+- Pass only necessary state forward.
+- Normalize confidence before downstream comparison.
+- Prefer deterministic merge rules for combined outputs.
+
+---
+
+## Suggested Dataflow
+
 ```mermaid
-classDiagram
-    class BaseReasoning {
-        <<Abstract>>
-        +perform_reasoning(input, context)
-    }
-    
-    class ReasoningAbduction {
-        +perform_reasoning(observations, context)
-    }
-    
-    class ReasoningDeductive {
-        +perform_reasoning(premises, hypothesis, context)
-    }
-    
-    class ReasoningInductive {
-        +perform_reasoning(observations, context)
-    }
-    
-    class ReasoningAnalogical {
-        +perform_reasoning(target, source_domain, context)
-    }
-    
-    class ReasoningDecompositional {
-        +perform_reasoning(system, context)
-    }
-    
-    class ReasoningCauseAndEffect {
-        +perform_reasoning(events, conditions, context)
-    }
-    
-    BaseReasoning <|-- ReasoningAbduction
-    BaseReasoning <|-- ReasoningDeductive
-    BaseReasoning <|-- ReasoningInductive
-    BaseReasoning <|-- ReasoningAnalogical
-    BaseReasoning <|-- ReasoningDecompositional
-    BaseReasoning <|-- ReasoningCauseAndEffect
+flowchart LR
+    A[Task Input] --> B[Reasoning Type 1]
+    B --> C[Intermediate Structured Result]
+    C --> D[Reasoning Type 2]
+    D --> E[Combined/Final Result]
+    E --> F[Validation + Memory]
 ```
 
-### ReasoningTypes -> Manager
+---
 
+## Integration with the Parent Reasoning Subsystem
 
-```mermaid
-classDiagram
-    class ReasoningTypes {
-        -_task_types: Dict[str, Type[BaseReasoning]]
-        -memory: ReasoningMemory
-        +discover_task_types()
-        +create(task_type: str) BaseReasoning
-        -_get_reasoning_class(task_type)
-        -_create_combined_reasoning(combined_type)
-        -_create_combined_class(reasoning_classes)
-    }
-    
-    class CombinedReasoning {
-        -components: List[BaseReasoning]
-        +perform_reasoning(input, context)
-        -_synthesize_result(results)
-    }
-    
-    ReasoningTypes --> BaseReasoning: Creates
-    ReasoningTypes --> CombinedReasoning: Creates
-    CombinedReasoning --> BaseReasoning: Composes
-```
+The `types/` layer should integrate cleanly with:
 
-### ReasoningMemory
+- **Rule Engine (`rule_engine.py`)** for symbolic rule-aware operations,
+- **Validation Engine (`validation.py`)** for consistency/soundness checks,
+- **Reasoning Memory (`reasoning_memory.py`)** for experience tagging and replay,
+- **Reasoning Cache (`reasoning_cache.py`)** for repeated-query optimization.
 
-```mermaid
-classDiagram
-    class ReasoningMemory {
-        -tree: SumTree
-        -tag_index: defaultdict
-        -lock: Lock
-        +add(experience, priority, tag)
-        +sample_proportional(batch_size)
-        +save_checkpoint(name)
-        +load_checkpoint(path)
-        +get_current_context()
-    }
-    
-    class SumTree {
-        -capacity: int
-        -tree: ndarray
-        -data: ndarray
-        +add(priority, data)
-        +update(data_idx, priority)
-        +sample(value)
-    }
-    
-    ReasoningMemory --> SumTree: Uses
-```
+### Integration Principles
+- Keep type modules stateless where possible.
+- If a type needs shared state, expose explicit lifecycle hooks.
+- Avoid hidden global mutation that bypasses validation/memory layers.
 
-## System Flow
+---
 
-### Single Reasoning Flow
+## Quality and Robustness Standards
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant ReasoningTypes
-    participant ReasoningInstance
-    participant ReasoningMemory
-    
-    User->>ReasoningTypes: create("abduction")
-    ReasoningTypes->>ReasoningInstance: Instantiate ReasoningAbduction
-    User->>ReasoningInstance: perform_reasoning(observations, context)
-    ReasoningInstance->>ReasoningMemory: Query context
-    ReasoningMemory-->>ReasoningInstance: Return context tags
-    ReasoningInstance->>ReasoningInstance: Execute reasoning logic
-    ReasoningInstance->>ReasoningMemory: Store results
-    ReasoningInstance-->>User: Return reasoning result
-```
+### Input Validation
+Each reasoning type should defensively validate:
+- input type/shape,
+- required fields,
+- domain assumptions,
+- confidence bounds.
 
-### Combined Reasoning Flow
+### Determinism and Reproducibility
+For the same input/context:
+- deterministic paths should be stable,
+- stochastic paths should expose seed/config controls,
+- emitted traces should explain any non-deterministic decisions.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant ReasoningTypes
-    participant CombinedReasoning
-    participant Abduction
-    participant Induction
-    participant Deduction
-    participant ReasoningMemory
-    
-    User->>ReasoningTypes: create("abduction+induction+deduction")
-    ReasoningTypes->>CombinedReasoning: Instantiate with 3 components
-    User->>CombinedReasoning: perform_reasoning(input, context)
-    
-    CombinedReasoning->>Abduction: perform_reasoning(input, context)
-    Abduction->>ReasoningMemory: Get context
-    ReasoningMemory-->>Abduction: Context tags
-    Abduction->>Abduction: Execute abduction
-    Abduction->>ReasoningMemory: Store result
-    Abduction-->>CombinedReasoning: Return result1
-    
-    CombinedReasoning->>Induction: perform_reasoning(input, context + result1)
-    Induction->>ReasoningMemory: Get updated context
-    ReasoningMemory-->>Induction: Context tags
-    Induction->>Induction: Execute induction
-    Induction->>ReasoningMemory: Store result
-    Induction-->>CombinedReasoning: Return result2
-    
-    CombinedReasoning->>Deduction: perform_reasoning(input, context + result1 + result2)
-    Deduction->>ReasoningMemory: Get updated context
-    ReasoningMemory-->>Deduction: Context tags
-    Deduction->>Deduction: Execute deduction
-    Deduction->>ReasoningMemory: Store result
-    Deduction-->>CombinedReasoning: Return result3
-    
-    CombinedReasoning->>CombinedReasoning: _synthesize_result(results)
-    CombinedReasoning-->>User: Return combined result
-```
+### Error Semantics
+Prefer typed exceptions from the parent reasoning error hierarchy.
+Include actionable context (which phase failed, and why).
 
-## Key Concepts
-### 1. Reasoning Type Composition
-- Combine up to 3 reasoning types using + syntax
-- Types execute in sequence (left to right)
-- Output from each type becomes context for the next
-- Final result synthesized from all outputs
+### Confidence Handling
+- Clamp/normalize confidence where appropriate.
+- Do not silently default over explicit caller-provided values.
+- Use explicit `None` checks for override semantics.
 
-### 2. Context Passing
-Each reasoning step receives:
-- Original input arguments
-- Initial context (if provided)
-- Results from previous steps
-- Memory context tags
-Context keys:
-- prev_<TypeName>_result: Individual step result
-- prev_step_result: Last step result
-- Memory context tags (e.g., "high_priority_context")
+---
 
-### 3. Memory Integration
-- All reasoning types share a common memory
-- Memory provides:
-    - Contextual tags based on recent experiences
-    - Experience prioritization (SumTree)
-    - Automatic checkpointing
-    - Tag-based experience retrieval
+## Extension Guide: Adding a New Reasoning Type
 
-### 4. Result Synthesis
-The combined reasoning:
-- Collects individual results in combined_result
-- Sets reasoning_types to combined type names
-- Sets final_output to last result by default
-- Can be customized by overriding _synthesize_result()
+1. **Create module** under `types/` (e.g., `reasoning_counterfactual.py`).
+2. **Implement base contract** from `base_reasoning.py`.
+3. **Add export/wiring** via `types/__init__.py` and any type registry/factory used by the parent package.
+4. **Document behavior** in this README (purpose, inputs, outputs, limits).
+5. **Add tests** for:
+   - nominal paths,
+   - malformed inputs,
+   - boundary confidence values (`0`, `1`, `0.0`),
+   - composition with at least one existing type.
 
-----
+### Backward Compatibility Expectations
+- Keep output keys stable unless versioning/migration is introduced.
+- Avoid breaking call signatures without coordinated subsystem updates.
 
-## Usage Examples
+---
 
-### Single Reasoning
-```code
-reasoning_types = ReasoningTypes()
-abduction = reasoning_types.create("abduction")
-result = abduction.perform_reasoning(observations="The grass is wet")
-```
+## Practical Usage Patterns
 
-### Combined Reasoning
-```code
-combo = reasoning_types.create("abduction+induction")
-result = combo.perform_reasoning(
-    observations=["Temperature drop", "Wind increase"],
-    context={"location": "Seattle"}
-)
-```
+### Pattern A: Explain-then-Verify
+1. Run `abduction` to generate hypotheses.
+2. Run `deduction` to verify hypotheses against rule premises.
+3. Send final claims to validation for contradiction/redundancy checks.
 
-### Custom Synthesis
-```code
-class CustomCombined(CombinedReasoning):
-    def _synthesize_result(self, results):
-        return {
-            "insights": self._extract_insights(results),
-            "confidence": self._calculate_confidence(results)
-        }
-```
+### Pattern B: Decompose-then-Induce
+1. Run `decompositional` to split a complex scenario.
+2. Run `inductive` on each subcomponent.
+3. Aggregate with explicit confidence weighting.
+
+### Pattern C: Analogical Bootstrap
+1. Run `analogical` using a trusted source domain.
+2. Validate mapped assumptions with `cause_effect` reasoning.
+3. Persist accepted mappings as reusable reasoning artifacts.

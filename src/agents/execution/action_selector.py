@@ -1,23 +1,29 @@
-import math
+
 import time
 import random
 
-from typing import Dict, List, Any, Callable, Optional, Tuple
+from typing import Dict, List, Any, Callable, Optional
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.execution_error import InvalidContextError, ActionFailureError
-from src.agents.execution.execution_memory import ExecutionMemory
-from logs.logger import get_logger, PrettyPrinter
+from .utils.execution_error import *
+from .utils.execution_helpers import *
+from .execution_memory import ExecutionMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Action Selector")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
+
+def get_action_selector(context: Optional[Dict[str, Any]] = None) -> "ActionSelector":
+    """Factory function to create an ActionSelector instance."""
+    return ActionSelector(context=context)
 
 class ActionSelector:
     """
     Production‑ready action selector that chooses the best action from a list
     based on configurable strategies: priority, random, contextual, utility, hybrid.
     """
-    def __init__(self, context: Optional[Dict[str, Any]] = None):
+    def __init__(self, context: Optional[Dict[str, Any]] = None, memory=None):
         self.context = context or {}
         self.config = load_global_config()
         self.selector_config = get_config_section("action_selector")
@@ -52,6 +58,43 @@ class ActionSelector:
         self._restore_state()
 
         logger.info(f"ActionSelector initialized with strategy '{self.selection_strategy}'")
+
+    @property
+    def available_actions(self) -> List[str]:
+        """Return a list of registered action names."""
+        return list(self.action_registry.keys())
+
+    @property
+    def registered_utility_functions(self) -> List[str]:
+        """Return a list of registered utility function names."""
+        return list(self.utility_functions.keys())
+
+    @property
+    def current_strategy(self) -> str:
+        """Return the current selection strategy."""
+        return self.selection_strategy
+
+    @property
+    def current_weights(self) -> Dict[str, float]:
+        """Return the current strategy weights."""
+        return self.strategy_weights
+
+    @property
+    def current_context(self) -> Dict[str, Any]:
+        """Return the current context used for selection."""
+        return self.context
+
+    @property
+    def default_context(self) -> Dict[str, Any]:
+        """Return the default context for selection."""
+        return self.context
+
+    @default_context.setter
+    def default_context(self, ctx: Dict[str, Any]):
+        """Set a default context for selection if none is provided."""
+        self.context = ctx or {}
+        logger.debug(f"Default context set to: {self.context}")
+
 
     # ------------------------ Public API ------------------------------
     def select(self, actions: List[Dict], context: Optional[Dict] = None) -> Dict:
@@ -151,7 +194,7 @@ class ActionSelector:
         """
         energy = context.get("energy", 10.0)
         max_energy = context.get("max_energy", 10.0)
-        energy_ratio = energy / max_energy if max_energy > 0 else 1.0
+        energy_ratio = safe_divide(energy, max_energy, default=1.0) if max_energy > 0 else 1.0
         dest_distance = context.get("destination_distance", float('inf'))
         object_nearby = context.get("object_nearby", False)
         carrying_items = context.get("carrying_items", 0)
@@ -215,7 +258,7 @@ class ActionSelector:
         valid = []
         for action in actions:
             name = action.get("name")
-            if name in disallowed:
+            if not name or name in disallowed:
                 continue
             preconditions = self.action_registry.get(name, {}).get("preconditions", [])
             if not preconditions:
@@ -228,14 +271,11 @@ class ActionSelector:
     @staticmethod
     def _check_preconditions(preconditions: List[str], context: Dict) -> bool:
         """Return True if all preconditions exist and are truthy in context."""
-        return all(context.get(cond, False) for cond in preconditions)
+        return preconditions_met(preconditions, context)
 
     def _find_action_by_name(self, actions: List[Dict], name: str) -> Optional[Dict]:
         """Return first action with matching name, or None."""
-        for a in actions:
-            if a.get("name") == name:
-                return a
-        return None
+        return find_named_item(actions, name)
 
     def _create_fallback_action(self, context: Dict) -> Dict:
         """Return a minimal idle action when no valid actions exist."""
@@ -257,9 +297,7 @@ class ActionSelector:
                 k: context.get(k) for k in ["energy", "destination_distance", "holding_object", "object_nearby"]
             }
         }
-        self.selection_history.append(entry)
-        if len(self.selection_history) > self.max_history:
-            self.selection_history.pop(0)
+        bounded_append(self.selection_history, entry, self.max_history)
 
     # ------------------------ Utility Calculation ----------------------
     def _calculate_utility(self, action: Dict, context: Dict) -> float:
@@ -269,19 +307,22 @@ class ActionSelector:
             k: context.get(k) for k in ["energy", "destination_distance", "holding_object",
                                         "object_nearby", "time_critical", "deadline", "current_goal"]
         }
-        cache_key = f"util::{action['name']}::{hash(frozenset(context_fingerprint.items()))}"
+        cache_params = {
+            "action": action["name"],
+            "context": context_fingerprint,
+        }
 
         # Try to get from cache (memory/disk)
         cached = self.memory.get_cache(
             "utility_score",
-            params={"action": action["name"], "context": context_fingerprint},
+            params=cache_params,
             namespace="action_selector",
         )
         if cached is not None:
             return cached
 
         # Compute utility
-        base = min(1.0, action.get("priority", 0) / 10.0)
+        base = clamp01(action.get("priority", 0) / 10.0)
         total = base
         for func_name, weight in self.strategy_weights.items():
             if func_name in self.utility_functions:
@@ -293,10 +334,16 @@ class ActionSelector:
             else:
                 logger.debug(f"Utility function '{func_name}' not registered, skipping")
 
-        final = max(0.0, min(1.0, total))
+        final = clamp01(total)
 
         # Cache with short TTL (context changes often)
-        self.memory.set_cache(cache_key, final, ttl=5)
+        self.memory.set_cache(
+            "utility_score",
+            final,
+            params=cache_params,
+            namespace="action_selector",
+            ttl=5,
+        )
         return final
 
     def _register_default_utility_functions(self):
@@ -310,9 +357,9 @@ class ActionSelector:
         """Returns higher utility for low‑cost actions when energy is low."""
         energy = context.get("energy", 10.0)
         max_energy = context.get("max_energy", 10.0)
-        energy_ratio = energy / max_energy if max_energy > 0 else 1.0
+        energy_ratio = safe_divide(energy, max_energy, default=1.0) if max_energy > 0 else 1.0
         cost = self._estimate_action_cost(action, context)
-        norm_cost = min(1.0, cost / 2.0)
+        norm_cost = clamp01(cost / 2.0)
 
         if energy_ratio < 0.3:
             return 1.0 - norm_cost
@@ -473,7 +520,7 @@ if __name__ == "__main__":
     for i, ctx in enumerate(test_scenarios):
         print(f"\n--- Scenario {i+1} ---")
         selected = selector.select(test_actions, ctx)
-        printer.pretty(f"Selected", selected["name"], "success")
+        printer.pretty("Selected", selected["name"], "success")
 
     # Checkpoint and restore test
     selector._checkpoint_state()

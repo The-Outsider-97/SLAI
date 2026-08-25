@@ -13,56 +13,39 @@ Key Features:
 
 import os
 import time
-import math
-import torch
-import json, yaml
-import numpy as np
-import pandas as pd
-import torch.nn as nn
+import torch # type: ignore
+import json
+import numpy as np # type: ignore
+import pandas as pd # pyright: ignore[reportMissingModuleSource]
+import torch.nn as nn # type: ignore
 import threading
 
 from datetime import datetime
-from joblib import load, dump
+from joblib import load, dump # type: ignore
 from dataclasses import dataclass, field
-from sklearn.ensemble import IsolationForest
+from sklearn.ensemble import IsolationForest # type: ignore
 from typing import Dict, List, Optional, Any, Tuple
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.base_agent import BaseAgent
-from src.utils.interpretability import InterpretabilityHelper
-from src.utils.database import IssueDBConnector, FallbackIssueTracker
-from src.agents.evaluators.adaptive_risk import RiskAdaptation
-from src.agents.evaluators.base_infra import EvalTuner
-from src.agents.evaluators.safety_evaluator import SafetyEvaluator
-from src.agents.evaluators.behavioral_validator import BehavioralValidator
-from src.agents.evaluators.efficiency_evaluator import EfficiencyEvaluator
-from src.agents.evaluators.autonomous_evaluator import AutonomousEvaluator
-from src.agents.evaluators.statistical_evaluator import StatisticalEvaluator
-from src.agents.evaluators.performance_evaluator import PerformanceEvaluator
-from src.agents.evaluators.resource_utilization_evaluator import ResourceUtilizationEvaluator
-from src.agents.evaluators.modules.certification_framework import CertificationStatus
-from src.agents.evaluators.utils.evaluation_errors import OperationalError, CertificationError
-from src.agents.evaluators.utils.evaluators_calculations import EvaluatorsCalculations
-from src.agents.evaluators.utils.evaluation_transformer import EvaluationTransformer
-from src.agents.evaluators.utils.validation_protocol import ValidationProtocol
-from src.agents.evaluators.utils.static_analyzer import StaticAnalyzer
-from src.agents.safety.safety_guard import SafetyGuard
-from logs.logger import get_logger, PrettyPrinter
+from .base.utils.main_config_loader import load_global_config, get_config_section
+from .base.utils.interpretability import InterpretabilityHelper
+from .base_agent import BaseAgent
+from .evaluators import *
+from .evaluators.modules.certification_framework import CertificationStatus
+from .evaluators.utils.issue_db import IssueDBConnector, FallbackIssueTracker
+from .evaluators.utils.evaluation_errors import OperationalError, CertificationError
+from .evaluators.utils.evaluators_calculations import EvaluatorsCalculations
+from .evaluators.utils.evaluation_transformer import EvaluationTransformer
+from .evaluators.utils.validation_protocol import ValidationProtocol
+from .evaluators.utils.static_analyzer import StaticAnalyzer
+from .safety.safety_guard import SafetyGuard
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Evaluation Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class FallbackEvaluatorAgent(BaseAgent):
-    def __init__(self,
-                 shared_memory, 
-                 agent_factory, 
-                 config=None,
-                 **kwargs):
-        super().__init__(
-            shared_memory=shared_memory,
-            agent_factory=agent_factory,
-            config=config
-        )
+    def __init__(self, shared_memory, agent_factory, config=None, **kwargs):
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
         self.safety_guard = SafetyGuard()
 
     def is_initialized(self):
@@ -75,6 +58,7 @@ class FallbackEvaluatorAgent(BaseAgent):
         - Core evaluations still run (e.g. safety checks)
         - System doesn't crash entirely under failure
         """
+        self.evaluators = None
         return hasattr(self, 'evaluators') and all(
             callable(getattr(ev, "execute_test_suite", None)) for ev in self.evaluators.values()
         )
@@ -125,16 +109,8 @@ class FallbackEvaluatorAgent(BaseAgent):
         }
 
 class EvaluationAgent(BaseAgent):
-    def __init__(self, 
-                 shared_memory, 
-                 agent_factory, 
-                 config = None,
-                 **kwargs):
-        super().__init__(
-            shared_memory=shared_memory,
-            agent_factory=agent_factory,
-            config=config
-        )
+    def __init__(self, shared_memory, agent_factory, config = None, **kwargs):
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self.config = load_global_config()
@@ -291,7 +267,8 @@ class EvaluationAgent(BaseAgent):
             'statistical': StatisticalEvaluator(),
             'resource': ResourceUtilizationEvaluator(),
             'autonomous': AutonomousEvaluator(),
-            'safety': SafetyEvaluator()
+            'safety': SafetyEvaluator(),
+            'performance_budget': PerformanceBudgetEvaluator()
         }
         return modules
 
@@ -655,6 +632,17 @@ class EvaluationAgent(BaseAgent):
                     logger.error(f"Safety evaluation failed: {str(e)}")
                     results['safety'] = {'error': str(e)}
 
+
+            # Cross-agent performance budget contracts
+            observed_budget_metrics = params.get('agent_performance_metrics', {})
+            if observed_budget_metrics:
+                results['performance_budget'] = self.evaluators['performance_budget'].evaluate(observed_budget_metrics)
+            else:
+                results['performance_budget'] = {
+                    'status': 'skipped',
+                    'reason': 'No agent_performance_metrics provided for contract validation.'
+                }
+
             # Add aggregated metrics
             results.update(self._gather_core_metrics(results))
 
@@ -781,7 +769,11 @@ class EvaluationAgent(BaseAgent):
 
     def _init_hyperparam_tuner(self):
         """Initialize tuner with validation"""
-        return EvalTuner(model_type=None,
+        tuner_class = globals().get("EvalTuner")
+        if tuner_class is None:
+            logger.warning("EvalTuner is unavailable; hyperparameter tuning disabled")
+            return None
+        return tuner_class(model_type=None,
             evaluation_function=self.evaluate_hyperparameters
         )
 

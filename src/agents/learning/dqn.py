@@ -18,20 +18,26 @@ import copy
 import math
 import os
 import random
-import numpy as np
-import torch
+import numpy as np # type: ignore
+import torch # type: ignore
 
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from collections import deque
 
-from src.agents.learning.learning_memory import LearningMemory, Transition
-from src.agents.learning.utils.config_loader import load_global_config, get_config_section
-from src.agents.learning.utils.neural_network import NeuralNetwork
-from src.utils.buffer.replay_buffer import ReplayBuffer
-from logs.logger import PrettyPrinter, get_logger
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.learning_error import *
+from .utils.learning_calculations import *
+from .utils.learning_helpers import *
+from .learning_memory import LearningMemory, Transition
+from .modules.neural_network import NeuralNetwork
+from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer # pyright: ignore[reportMissingImports]
+from src.utils.buffer.replay_buffer import ReplayBuffer, normalize_replay_backend # pyright: ignore[reportMissingImports]
+from src.tuning.tuner import HyperparamTuner # pyright: ignore[reportMissingImports]
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Deep-Q Network Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 TensorLike = Union[torch.Tensor, np.ndarray, Sequence[float]]
 TransitionLike = Union[Transition, Tuple[Any, Any, Any, Any, Any], List[Any]]
@@ -64,8 +70,12 @@ def _step_environment(env: Any, action: int) -> Tuple[Any, float, bool, Dict[str
 
 def _state_to_tensor(state: TensorLike, device: Optional[torch.device] = None) -> torch.Tensor:
     """Convert a state-like input into a 1D float tensor."""
+    # Convert NumPy object arrays to float arrays
+    if isinstance(state, np.ndarray) and state.dtype == np.object_: # type: ignore
+        state = np.asarray(state, dtype=np.float32)
+
     if isinstance(state, torch.Tensor):
-        tensor = state.detach().clone().to(dtype=torch.float32)
+        tensor = state.detach().clone().to(dtype=torch.float32) # type: ignore
     else:
         tensor = torch.as_tensor(state, dtype=torch.float32)
 
@@ -137,8 +147,8 @@ class DQNAgent:
         self.state_dim = int(state_dim)
         self.action_dim = int(action_dim)
         self.device = torch.device(device) if device is not None else torch.device("cpu")
-        self.config = load_global_config()
-        self.dqn_config = get_config_section('dqn')
+        self.config = deep_merge_dicts(load_global_config(), config or {})
+        self.dqn_config = dict(self.config.get("dqn") or get_config_section("dqn") or {})
         self.model_id = "DQN_Agent"
 
         self.hidden_dim = self.dqn_config.get("hidden_size", 128)
@@ -158,6 +168,25 @@ class DQNAgent:
         )
         self.use_double_dqn = bool(self.dqn_config.get("double_dqn", False))
         self.replay_backend = str(self.dqn_config.get("replay_backend", "uniform")).strip().lower()
+        # --- N‑step returns ---
+        self.n_step = int(self.dqn_config.get("n_step", 1))
+        self.n_step_buffer = deque(maxlen=self.n_step)
+
+        # --- Learning rate scheduler ---
+        self.lr_scheduler_type = self.dqn_config.get("lr_scheduler")  # "step"/"cosine"/"exponential"/None
+        self.lr_scheduler_params = self.dqn_config.get("lr_scheduler_params", {})
+        self.lr_scheduler_step = 0
+        self.base_lr = self.lr
+        self._init_lr_scheduler()
+
+        # --- Exploration enhancements ---
+        self.exploration_type = self.dqn_config.get("exploration_type", "epsilon_greedy")
+        self.performance_based_epsilon = self.dqn_config.get("performance_based_epsilon", False)
+        self.performance_window = self.dqn_config.get("performance_window", 20)
+        self.epsilon_plateau_threshold = self.dqn_config.get("epsilon_plateau_threshold", 0.02)
+        self.epsilon_increase_factor = self.dqn_config.get("epsilon_increase_factor", 1.2)
+        self._reward_history = deque(maxlen=self.performance_window)
+        self.epsilon_max = self.dqn_config.get("epsilon_max", 1.0)   # upper bound for epsilon increase
 
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive.")
@@ -175,6 +204,9 @@ class DQNAgent:
         self.total_env_steps = 0
         self.total_gradient_steps = 0
         self.episodes_completed = 0
+        self.beta_end = 0
+        self.beta_start = 0
+        self.beta_annealing_steps = 0
 
         network_config = self._build_network_config()
         self.policy_net = NeuralNetwork(
@@ -190,7 +222,7 @@ class DQNAgent:
             device=self.device,
         )
         self.update_target_net(force=True)
-        self._init_buffer()
+        self._init_replay_buffer()
 
         logger.info(
             "Deep-Q Network Agent initialised | id=%s state_dim=%s action_dim=%s replay=%s double_dqn=%s",
@@ -226,17 +258,55 @@ class DQNAgent:
         neural_cfg["learning_rate"] = self.lr
         return neural_cfg
 
-    def _init_buffer(self) -> None:
-        """Initialise the selected replay backend."""
-        if self.replay_backend in {"prioritized", "per", "learning_memory"}:
-            self.learning_memory = LearningMemory()
-            self.learning_memory.memory_config["max_size"] = self.buffer_size
-            self.learning_memory.clear()
-            self.memory = self.learning_memory
-            self.replay_backend = "prioritized"
-        else:
+    def _init_replay_buffer(self):
+        """Initialise the configured replay backend."""
+        backend = normalize_replay_backend(self.dqn_config.get("replay_backend"))
+
+        if backend == "distributed":
+            # DistributedReplayBuffer loads its own config from buffer_config.yaml
+            self.memory = DistributedReplayBuffer(user_config={"capacity": self.buffer_size})
+            self.replay_backend = "distributed"
+        elif backend == "uniform":
             self.memory = ReplayBuffer(self.buffer_size)
             self.replay_backend = "uniform"
+        elif backend == "prioritized":
+            self.memory = LearningMemory()
+            self.memory.memory_config["max_size"] = self.buffer_size
+            self.memory.clear()
+            self.replay_backend = "prioritized"
+
+    def _init_lr_scheduler(self):
+        """Prepare scheduler state (no external objects)."""
+        if not self.lr_scheduler_type:
+            self.lr_scheduler = None
+        else:
+            self.lr_scheduler_step = 0
+
+    def _update_learning_rate(self):
+        """Update optimiser's learning rate based on scheduler type."""
+        if not self.lr_scheduler_type:
+            return
+        self.lr_scheduler_step += 1
+        step = self.lr_scheduler_step
+
+        if self.lr_scheduler_type == "step":
+            step_size = self.lr_scheduler_params.get("step_size", 1000)
+            gamma = self.lr_scheduler_params.get("gamma", 0.95)
+            new_lr = self.base_lr * (gamma ** (step // step_size))
+        elif self.lr_scheduler_type == "cosine":
+            T_max = self.lr_scheduler_params.get("T_max", 10000)
+            eta_min = self.lr_scheduler_params.get("eta_min", 1e-6)
+            new_lr = eta_min + 0.5 * (self.base_lr - eta_min) * (1 + math.cos(math.pi * step / T_max))
+        elif self.lr_scheduler_type == "exponential":
+            gamma = self.lr_scheduler_params.get("gamma", 0.99)
+            new_lr = self.base_lr * (gamma ** step)
+        else:
+            return
+
+        new_lr = max(1e-8, new_lr)
+        self.policy_net.optimizer.learning_rate = new_lr
+        self.target_net.optimizer.learning_rate = new_lr
+        self.lr = new_lr
 
     def replay_size(self) -> int:
         """Return the current replay size regardless of backend."""
@@ -277,10 +347,10 @@ class DQNAgent:
             q_values = self.policy_net.forward(state_tensor.unsqueeze(0)).squeeze(0)
         return int(torch.argmax(q_values).item())
 
-    def store_transition(self, *transition: Any) -> None:
+    def store_transition(self, *transition):
         """Store a transition in the configured replay backend."""
         transition_obj = _coerce_transition(transition if len(transition) != 1 else transition[0])
-        stored_transition = Transition(
+        stored = Transition(
             _state_to_tensor(transition_obj.state).cpu(),
             int(transition_obj.action),
             float(transition_obj.reward),
@@ -288,15 +358,49 @@ class DQNAgent:
             bool(transition_obj.done),
         )
 
-        if stored_transition.state.numel() != self.state_dim or stored_transition.next_state.numel() != self.state_dim:
-            raise ValueError("Stored state dimensions must match the configured state_dim.")
-
-        if self.replay_backend == "prioritized":
-            self.memory.add(stored_transition)
+        if self.n_step == 1:
+            self._push_to_memory(stored)
         else:
-            self.memory.push(stored_transition)
-
+            self.n_step_buffer.append(stored)
+            if len(self.n_step_buffer) == self.n_step or stored.done:
+                # Compute n‑step discounted return
+                n_step_reward = 0.0
+                for i, trans in enumerate(self.n_step_buffer):
+                    n_step_reward += (self.gamma ** i) * trans.reward
+                last = self.n_step_buffer[-1]
+                n_step_trans = Transition(
+                    state=self.n_step_buffer[0].state,
+                    action=self.n_step_buffer[0].action,
+                    reward=n_step_reward,
+                    next_state=last.next_state,
+                    done=last.done,
+                )
+                self._push_to_memory(n_step_trans)
+                if stored.done:
+                    self.n_step_buffer.clear()
+                else:
+                    self.n_step_buffer.popleft()
         self.total_env_steps += 1
+
+    def _push_to_memory(self, transition):
+        if self.replay_backend == "distributed":
+            # Initial priority for PER: abs(reward) + epsilon
+            priority = abs(transition.reward) + 1e-5 if hasattr(self.memory, 'alpha') else None
+            self.memory.push( # pyright: ignore[reportAttributeAccessIssue]
+                agent_id=self.agent_id,
+                state=transition.state,
+                action=transition.action,
+                reward=transition.reward,
+                next_state=transition.next_state,
+                done=transition.done,
+                priority=priority
+            )
+        elif self.replay_backend == "prioritized":
+            self.memory.add(transition)          # LearningMemory.add
+        elif self.replay_backend == "uniform":
+            self.memory.push(transition)         # pyright: ignore[reportAttributeAccessIssue] # ReplayBuffer.push
+        else:
+            raise RuntimeError(f"Unknown replay_backend: {self.replay_backend}")
 
     def _sample_replay_batch(
         self,
@@ -304,23 +408,16 @@ class DQNAgent:
         indices: Optional[Sequence[int]] = None,
         importance_weights: Optional[Sequence[float]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Prepare a replay batch for learning."""
-        batch: List[Transition]
-        sampled_indices = list(indices) if indices is not None else None
-
-        if experience_batch is None:
-            if self.replay_size() < self.batch_size:
-                return None
-
-            if self.replay_backend == "prioritized":
-                batch_raw, sampled_indices, sampled_weights = self.memory.sample_proportional(self.batch_size)
-                batch = [_coerce_transition(item) for item in batch_raw]
-                weights = torch.as_tensor(sampled_weights, dtype=torch.float32, device=self.device)
-            else:
-                batch_raw = self.memory.sample(self.batch_size)
-                batch = [_coerce_transition(item) for item in batch_raw]
-                weights = torch.ones(len(batch), dtype=torch.float32, device=self.device)
-        else:
+        """
+        Sample a batch from the replay buffer and return tensors.
+        
+        Returns:
+            dict with keys: states, actions, rewards, next_states, dones,
+                            indices (for PER), weights (IS weights), transitions (raw)
+            or None if buffer undersized.
+        """
+        # ---- 1. Manual batch provided (external) ----
+        if experience_batch is not None:
             batch = [_coerce_transition(item) for item in experience_batch]
             if len(batch) == 0:
                 return None
@@ -328,25 +425,121 @@ class DQNAgent:
                 weights = torch.ones(len(batch), dtype=torch.float32, device=self.device)
             else:
                 weights = torch.as_tensor(importance_weights, dtype=torch.float32, device=self.device)
-                if weights.ndim != 1 or weights.shape[0] != len(batch):
-                    raise ValueError("importance_weights must be a 1D sequence aligned with the experience batch.")
+            states = torch.stack([_state_to_tensor(t.state, device=self.device) for t in batch])
+            actions = torch.as_tensor([int(t.action) for t in batch], dtype=torch.long, device=self.device)
+            rewards = torch.as_tensor([float(t.reward) for t in batch], dtype=torch.float32, device=self.device)
+            next_states = torch.stack([_state_to_tensor(t.next_state, device=self.device) for t in batch])
+            dones = torch.as_tensor([float(bool(t.done)) for t in batch], dtype=torch.float32, device=self.device)
+            return {
+                "states": states,
+                "actions": actions,
+                "rewards": rewards,
+                "next_states": next_states,
+                "dones": dones,
+                "indices": indices,
+                "weights": weights,
+                "transitions": batch,
+            }
 
-        states = torch.stack([_state_to_tensor(t.state, device=self.device) for t in batch])
-        actions = torch.as_tensor([int(t.action) for t in batch], dtype=torch.long, device=self.device)
-        rewards = torch.as_tensor([float(t.reward) for t in batch], dtype=torch.float32, device=self.device)
-        next_states = torch.stack([_state_to_tensor(t.next_state, device=self.device) for t in batch])
-        dones = torch.as_tensor([float(bool(t.done)) for t in batch], dtype=torch.float32, device=self.device)
+        # ---- 2. Not enough samples in buffer ----
+        if self.replay_size() < self.batch_size:
+            return None
 
-        return {
-            "transitions": batch,
-            "states": states,
-            "actions": actions,
-            "rewards": rewards,
-            "next_states": next_states,
-            "dones": dones,
-            "indices": sampled_indices,
-            "weights": weights.clamp_min(1e-8),
-        }
+        # ---- 3. Distributed buffer (supports uniform, prioritized, reward) ----
+        if self.replay_backend == "distributed":
+            # Determine sampling strategy from config
+            use_prioritized = self.dqn_config.get("prioritized_replay", False)
+            strategy = "prioritized" if use_prioritized else "uniform"
+            # Beta for importance sampling (annealed over time)
+            beta = self._current_beta() if use_prioritized else None
+
+            result = self.memory.sample(
+                batch_size=self.batch_size,
+                strategy=strategy, # type: ignore
+                beta=beta, # type: ignore
+            )
+
+            if use_prioritized:
+                # Result is (batch_tuple, indices, weights)
+                batch_tuple, sampled_indices, sampled_weights = result
+                weights = torch.as_tensor(sampled_weights, dtype=torch.float32, device=self.device)
+            else:
+                # Result is just batch_tuple
+                batch_tuple = result
+                sampled_indices = None
+                weights = torch.ones(self.batch_size, dtype=torch.float32, device=self.device)
+
+            # batch_tuple = (agent_ids, states, actions, rewards, next_states, dones)
+            # Convert each to tensors
+            states = torch.stack([_state_to_tensor(s, device=self.device) for s in batch_tuple[1]])
+            action_array = batch_tuple[2]
+            if isinstance(action_array, np.ndarray) and action_array.dtype == np.object_:
+                action_array = action_array.astype(np.int64, copy=False)
+            actions = torch.as_tensor(action_array, dtype=torch.long, device=self.device)
+            
+            rewards = torch.as_tensor(batch_tuple[3], dtype=torch.float32, device=self.device)
+            next_states = torch.stack([_state_to_tensor(ns, device=self.device) for ns in batch_tuple[4]])
+            dones = torch.as_tensor(batch_tuple[5], dtype=torch.float32, device=self.device)
+
+            return {
+                "states": states,
+                "actions": actions,
+                "rewards": rewards,
+                "next_states": next_states,
+                "dones": dones,
+                "indices": sampled_indices,
+                "weights": weights,
+                "transitions": None,
+            }
+
+        # ---- 4. Legacy uniform buffer (simple ReplayBuffer) ----
+        if self.replay_backend == "uniform":
+            batch_raw = self.memory.sample(self.batch_size)
+            batch = [_coerce_transition(item) for item in batch_raw]
+            weights = torch.ones(len(batch), dtype=torch.float32, device=self.device)
+            states = torch.stack([_state_to_tensor(t.state, device=self.device) for t in batch])
+            actions = torch.as_tensor([int(t.action) for t in batch], dtype=torch.long, device=self.device)
+            rewards = torch.as_tensor([float(t.reward) for t in batch], dtype=torch.float32, device=self.device)
+            next_states = torch.stack([_state_to_tensor(t.next_state, device=self.device) for t in batch])
+            dones = torch.as_tensor([float(bool(t.done)) for t in batch], dtype=torch.float32, device=self.device)
+            return {
+                "states": states,
+                "actions": actions,
+                "rewards": rewards,
+                "next_states": next_states,
+                "dones": dones,
+                "indices": None,
+                "weights": weights,
+                "transitions": batch,
+            }
+
+        # ---- 5. Legacy PER buffer (LearningMemory) ----
+        if self.replay_backend == "prioritized":
+            batch_raw, sampled_indices, sampled_weights = self.memory.sample_proportional(self.batch_size)
+            batch = [_coerce_transition(item) for item in batch_raw]
+            weights = torch.as_tensor(sampled_weights, dtype=torch.float32, device=self.device)
+            states = torch.stack([_state_to_tensor(t.state, device=self.device) for t in batch])
+            actions = torch.as_tensor([int(t.action) for t in batch], dtype=torch.long, device=self.device)
+            rewards = torch.as_tensor([float(t.reward) for t in batch], dtype=torch.float32, device=self.device)
+            next_states = torch.stack([_state_to_tensor(t.next_state, device=self.device) for t in batch])
+            dones = torch.as_tensor([float(bool(t.done)) for t in batch], dtype=torch.float32, device=self.device)
+            return {
+                "states": states,
+                "actions": actions,
+                "rewards": rewards,
+                "next_states": next_states,
+                "dones": dones,
+                "indices": sampled_indices,
+                "weights": weights,
+                "transitions": batch,
+            }
+
+        # Should never reach here
+        raise RuntimeError(f"Unknown replay_backend: {self.replay_backend}")
+    
+    def _current_beta(self) -> float:
+        progress = clamp(self.total_gradient_steps / max(1, self.beta_annealing_steps), 0.0, 1.0)
+        return self.beta_start + (self.beta_end - self.beta_start) * progress
 
     def learn_step(
         self,
@@ -392,6 +585,13 @@ class DQNAgent:
             td_target = rewards + (1.0 - dones) * self.gamma * next_q_values
             td_errors = td_target - chosen_q
 
+            # Update priorities in distributed buffer
+            if self.replay_backend == "distributed" and sampled_indices is not None:
+                self.memory.update_priorities(sampled_indices, td_errors.detach().abs().cpu().numpy())
+    
+            # Learning rate scheduler step
+            self._update_learning_rate()
+
             target = current_q.clone()
             batch_indices = torch.arange(states.shape[0], device=self.device)
             weighted_residual = td_errors * torch.sqrt(weights)
@@ -430,48 +630,80 @@ class DQNAgent:
         metrics = self.learn_step()
         return None if metrics is None else float(metrics["loss"])
 
-    def train_episode(
-        self,
-        env: Any,
-        max_steps: Optional[int] = None,
-        explore: bool = True,
-        learn: bool = True,
-        render: bool = False,
-    ) -> Dict[str, Any]:
-        """Run one full environment episode and optionally learn online from replay."""
+    def train_episode(self, env: Any, max_steps: Optional[int] = None, explore: bool = True,
+                      learn: bool = True, render: bool = False) -> Dict[str, Any]:
+        """Run one full environment episode and optionally learn online from replay.
+    
+        Integrates:
+        - N‑step returns (handled in store_transition, no changes here)
+        - Performance‑based epsilon adjustment (plateau detection)
+        - Distributed replay buffer (via existing store_transition / learn_step)
+        """
+        # Reset environment and get initial state
         state = _extract_state(env.reset())
         done = False
         step_limit = max_steps if max_steps is not None else self.max_steps_per_episode
+    
         total_reward = 0.0
         losses: List[float] = []
         q_values_seen: List[float] = []
         steps = 0
-
+    
         while not done:
             if step_limit is not None and steps >= int(step_limit):
                 break
             if render:
                 env.render()
-
+    
+            # Record max Q‑value for diagnostics
             with torch.no_grad():
                 state_tensor = _state_to_tensor(state, device=self.device)
                 q_values = self.policy_net.forward(state_tensor.unsqueeze(0)).squeeze(0)
                 q_values_seen.append(float(q_values.max().item()))
-
+    
+            # Select action using current exploration strategy
             action = self.select_action(state, explore=explore)
+    
+            # Step environment (normalised to Gym/Gymnasium API)
             next_state, reward, done, _ = _step_environment(env, action)
+    
+            # Store transition (handles n‑step aggregation internally)
             self.store_transition(state, action, reward, next_state, done)
-
+    
+            # Learn if replay buffer has enough samples
             if learn and self.replay_size() >= max(self.batch_size, self.warmup_steps):
                 learn_metrics = self.learn_step()
                 if learn_metrics is not None:
                     losses.append(float(learn_metrics["loss"]))
-
+    
             total_reward += float(reward)
             state = next_state
             steps += 1
-
+    
         self.episodes_completed += 1
+    
+        # --- Performance‑based epsilon adjustment (plateau detection) ---
+        if self.performance_based_epsilon:
+            self._reward_history.append(total_reward)
+            if len(self._reward_history) == self.performance_window:
+                # Split history into two halves
+                half = self.performance_window // 2
+                earlier_avg = float(np.mean(list(self._reward_history)[:half]))
+                recent_avg = float(np.mean(list(self._reward_history)[-half:]))
+                # Avoid division by zero
+                if earlier_avg > 0:
+                    relative_improvement = (recent_avg - earlier_avg) / earlier_avg
+                    if relative_improvement < self.epsilon_plateau_threshold:
+                        # Plateau detected: increase epsilon (capped at epsilon_max)
+                        self.epsilon = min(self.epsilon_max, self.epsilon * self.epsilon_increase_factor)
+                        logger.info(
+                            "Performance plateau (Δ=%.4f < %.4f): epsilon increased to %.4f",
+                            relative_improvement, self.epsilon_plateau_threshold, self.epsilon
+                        )
+                # Keep only the last `performance_window` rewards (deque handles this automatically)
+            # else: still warming up the reward history, do nothing
+    
+        # Build return dictionary (same format as original)
         return {
             "reward": float(total_reward),
             "length": int(steps),
@@ -483,14 +715,8 @@ class DQNAgent:
             "epsilon": float(self.epsilon),
         }
 
-    def evaluate(
-        self,
-        env: Any,
-        episodes: int = 20,
-        exploration_rate: float = 0.05,
-        visualize: bool = False,
-        max_steps: Optional[int] = None,
-    ) -> Dict[str, Any]:
+    def evaluate(self, env: Any, episodes: int = 20, exploration_rate: float = 0.05,
+                 visualize: bool = False, max_steps: Optional[int] = None) -> Dict[str, Any]:
         """Evaluate the agent with multiple behavioural and value statistics."""
         if episodes <= 0:
             raise ValueError("episodes must be positive.")
@@ -627,8 +853,19 @@ class DQNAgent:
         if bool(self.config.get("dqn", {}).get("save_replay_buffer", False)):
             if self.replay_backend == "prioritized":
                 checkpoint["replay_buffer"] = self.memory.get()
+            elif self.replay_backend == "distributed":
+                # DistributedReplayBuffer has a save() method – use that, or skip?
+                # Since we cannot serialise it easily via torch.save, we skip.
+                logger.warning("Saving DistributedReplayBuffer via checkpoint not implemented – skipping.")
             else:
-                checkpoint["replay_buffer"] = list(self.memory.buffer)
+                # For unknown or uniform backend: do not try to list(self.memory.add)
+                # Instead, check if self.memory has a known iterable attribute
+                if hasattr(self.memory, "buffer"):
+                    checkpoint["replay_buffer"] = list(self.memory.buffer) # type: ignore
+                elif hasattr(self.memory, "storage"):
+                    checkpoint["replay_buffer"] = list(self.memory.storage) # type: ignore
+                else:
+                    logger.warning("Replay buffer saving not supported for backend %s", self.replay_backend)
 
         torch.save(checkpoint, checkpoint_path)
         logger.info("Saved DQN model checkpoint to %s", checkpoint_path)
@@ -643,7 +880,7 @@ class DQNAgent:
         if int(checkpoint.get("action_dim", self.action_dim)) != self.action_dim:
             raise ValueError("Checkpoint action_dim does not match the current agent.")
 
-        self.config = _deep_merge(self.config, checkpoint.get("config", {}))
+        self.config = deep_merge_dicts(self.config, checkpoint.get("config", {}))
         self.policy_net.load_checkpoint(checkpoint["policy_net"])
         self.target_net.load_checkpoint(checkpoint["target_net"])
         self.epsilon = float(checkpoint.get("epsilon", self.epsilon))
@@ -657,12 +894,35 @@ class DQNAgent:
                 self.memory.clear()
                 for item in replay_buffer:
                     self.memory.add(_coerce_transition(item))
-            else:
-                self.memory = ReplayBuffer(self.buffer_size)
+            elif self.replay_backend == "uniform":
+                self.memory.clear()
                 for item in replay_buffer:
-                    self.memory.push(_coerce_transition(item))
+                    self.memory.push(_coerce_transition(item)) # type: ignore
 
         logger.info("Loaded DQN model checkpoint from %s", checkpoint_path)
+
+    @classmethod
+    def tune(cls, env, state_dim, action_dim, strategy="bayesian",
+             eval_episodes=20, train_episodes_per_eval=50, **tuner_kwargs):
+        """
+        Run hyperparameter search using HyperparamTuner.
+        The search space is defined in hyperparam.yaml under 'hyperparameters.DQN'.
+        """
+        def evaluation_function(params):
+            agent = cls(agent_id="tune_temp", state_dim=state_dim, action_dim=action_dim,
+                        config={"dqn": params})
+            for _ in range(train_episodes_per_eval):
+                agent.train_episode(env, explore=True, learn=True)
+            eval_results = agent.evaluate(env, episodes=eval_episodes, exploration_rate=0.05)
+            return eval_results["avg_reward"]  # higher is better
+
+        tuner = HyperparamTuner(model_type="DQN", evaluation_function=evaluation_function)
+        # Force strategy if provided
+        if strategy:
+            tuner.strategy = strategy
+        best_params = tuner.run_tuning_pipeline(X_data=None, y_data=None)
+        return cls(agent_id="tuned", state_dim=state_dim, action_dim=action_dim,
+                   config={"dqn": best_params})
 
 
 class EvolutionaryTrainer:
@@ -931,7 +1191,6 @@ class UnifiedDQNAgent:
                 env=env,
                 state_dim=int(state_dim),
                 action_dim=int(action_dim),
-                base_config=self.config,
                 agent_id_prefix=self.agent_id,
             )
         else:
@@ -961,6 +1220,8 @@ class UnifiedDQNAgent:
     ) -> Dict[str, Any]:
         """Train in standard mode or run evolutionary search in evolutionary mode."""
         if self.mode == "evolutionary":
+            if self.trainer is None:
+                raise RuntimeError("Evolutionary trainer not initialised.")
             self.agent = self.trainer.evolve()
             return {
                 "mode": "evolutionary",
@@ -1063,6 +1324,7 @@ class UnifiedDQNAgent:
             "final_epsilon": float(agent.epsilon),
             "diagnostics": agent.diagnostics(),
         }
+    
 
     def save(self, path: Union[str, os.PathLike[str]]) -> None:
         """Save the current agent checkpoint."""
@@ -1079,9 +1341,10 @@ class UnifiedDQNAgent:
 
 if __name__ == "__main__":
     print("\n=== Running Deep-Q Network Agent Smoke Test ===\n")
-    from src.agents.learning.slaienv import SLAIEnv
+    from .slaienv import SLAIEnv
 
     env = SLAIEnv()
+    id_prefix = "EvoDQN"
     config = {
         "dqn": {
             "hidden_size": [128, 64],
@@ -1101,7 +1364,7 @@ if __name__ == "__main__":
     evaluation = agent.evaluate(env, episodes=3)
     print("Evaluation summary:", evaluation)
 
-    trainer = EvolutionaryTrainer(env=env, state_dim=4, action_dim=2, base_config=config)
+    trainer = EvolutionaryTrainer(env=env, state_dim=4, action_dim=2, agent_id_prefix=id_prefix)
     trainer.generations = 2
     trainer.pop_size = 3
     trainer.candidate_training_episodes = 2

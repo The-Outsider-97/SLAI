@@ -5,25 +5,63 @@ random_state: 42
 planning_db_path: "templates/planning_db.json"
 heuristic_model_path: "src/agents/planning/models/"
 monitor_snapshot: "src/agents/planning/checkpoints/monitor_snapshot.json"
+runtime_profile: production
 
 safety_margins:
   resource_buffers:
-    gpu: 0.15           # 15% of available GPUs must remain unallocated
-    ram: 0.2            # 20% of total RAM must remain free
-    specialized_hardware: ["emergency_gpu"]  # Reserved hardware units
+    gpu: 0.15
+    ram: 0.2
+    specialized_hardware_buffer: 0.1
+
   temporal:
-    min_task_duration: 30  # Minimum allowed task duration in seconds
-    max_concurrent: 5      # Max simultaneous tasks per agent
-    time_buffer: 120       # Minimum gap between dependent tasks (seconds)
+    min_task_duration: 30
+    max_concurrent: 5
+    time_buffer: 120
+
+  profiles:
+    chronos:
+      temporal:
+        min_task_duration: 1
+        max_concurrent: 5
+        time_buffer: 5
+
 
 service_discovery:
-  skip_localhost_http: True
-  mode: "static"  # Options: static|consul|k8s
-  static_nodes: ["localhost"] # OR add "node1", "node2", "gpu-node1"
-  consul_url: "http://localhost:5000"
+  mode: "static"                    # static | consul | k8s | local
+  static_nodes: ["localhost"]
+  skip_localhost_http: true
+  consul_url: "http://localhost:8500"
   k8s_api: "https://kubernetes.default.svc"
   k8s_token: ""
-  node_port: 9100  # Port for node metrics API
+  node_port: 9100
+
+
+cluster_monitoring:
+  auto_start: true
+  update_interval: 5.0
+  node_query_timeout: 2.0
+  node_cache_ttl: 10.0
+  discovery_poll_interval: 300.0
+  history_limit: 1000
+  resource_log_interval: 60.0
+
+  fallback_profile:
+    gpu_total: 0.0
+    ram_total: 16.0
+    specialized_hardware_available: []
+
+  local_monitoring:
+    max_gpu_load: 0.85
+    max_gpu_memory_utilization: 0.90
+    include_hostname_as_node: true
+
+  load_thresholds:
+    cpu: 0.85
+    memory: 0.90
+    gpu: 0.90
+    storage: 0.90
+    temperature: 70.0
+
 
 decomposition:
   min_chunk_size: 100      # Minimum data elements per horizontal split
@@ -47,27 +85,162 @@ decomposition:
         gpu: 0
         ram: 4
 
+
 task_scheduler:
-  risk_threshold: 0.7
-  base_duration_per_requirement: 5.0  # Time per capability requirement
-  efficiency_attribute: "efficiency"  # Key in agent's details for efficiency
+  strict_validation: true
+  raise_on_validation_error: false
+
+  risk_threshold: 0.70
+  base_duration_per_requirement: 5.0
+  default_task_duration: 30.0
+  default_deadline_seconds: 300.0
+  deadline_horizon_seconds: 3600.0
+
+  max_priority: 10.0
+  max_agent_load: 1.0
+  load_time_scale_seconds: 60.0
+  efficiency_attribute: "efficiency"
+
+  use_planning_calculations: false
+  include_unassigned_diagnostics: true
+  allow_deadline_miss: true
+  allow_partial_schedule: true
+  allow_decomposition_mitigation: true
+
+  allowed_agent_statuses:
+    - idle
+    - available
+    - ready
+    - healthy
+    - online
+
   retry_policy:
     max_retries: 3
     max_attempts: 3
     backoff_factor: 1.5
-    delay: 10
+    delay: 10.0
+    base_delay: 1.0
+    max_delay: 60.0
+
+  priority_weights:
+    base_priority: 0.45
+    deadline_urgency: 0.35
+    risk_urgency: 0.15
+    dependency_pressure: 0.05
+
+  agent_score_weights:
+    success_rate: 0.30
+    efficiency: 0.25
+    specialization: 0.20
+    availability: 0.15
+    load: 0.10
+
+  risk_mitigation:
+    reassign_min_score: 0.05
+    delay_factor: 1.0
+    risk_reduction_on_delay: 0.05
+    risk_reduction_on_decomposition: 0.25
+
 
 heuristic_selector:
-  heuristic_priority: ["RL", "GB", "DT", "UA", "CBR"]
+  enabled: true
+  lazy_initialization: true
+  fail_fast_on_init: false
+
+  heuristic_priority:
+    - RL
+    - GB
+    - DT
+    - UA
+    - CBR
+
+  fallback_heuristic: "DT"
+
   min_rl_sequence_length: 3
   max_dt_depth: 5
   min_cases_for_cbr: 10
-  speed_threshold: 0.1  # seconds
-  accuracy_weight: 0.7
-  speed_weight: 0.3
+  cbr_task_types:
+    - troubleshooting
+    - support
+    - repair
+
+  speed_threshold: 0.1
   time_budget: 0.5
-  performance_log_path: "heuristic_performance.log"
-  cbr_task_types: ["troubleshooting", "support", "repair"]
+
+  accuracy_weight: 0.70
+  speed_weight: 0.30
+  reliability_weight: 0.10
+  confidence_weight: 0.10
+
+  default_speed: 0.05
+  default_accuracy: 0.50
+  default_confidence: 0.50
+
+  availability_speed_buffer: 1.20
+  allow_untrained_fallback: true
+  require_candidates: true
+
+  smoothing_alpha: 0.30
+  performance_log_path: "src/agents/planning/models/heuristic_performance.joblib"
+  persist_performance: true
+
+  memory_state_key: "heuristic_selector"
+  record_selection_trace: true
+  max_trace_entries: 250
+
+  routing_thresholds:
+    resource_cpu_low: 0.30
+    resource_memory_low: 0.30
+    safety_priority: 0.80
+    high_uncertainty_risk: 0.70
+
+  heuristic_aliases:
+    DT: "decision_tree"
+    GB: "gradient_boosting"
+    RL: "reinforcement_learning"
+    UA: "uncertainty_aware"
+    CBR: "case_based_reasoning"
+
+
+base_heuristics:
+  max_task_depth: 20
+  max_priority: 10.0
+  max_dependency_count: 25
+  max_age_hours: 168.0
+  deadline_horizon_seconds: 86400.0
+  state_diversity_normalizer: 100.0
+
+  enable_feature_cache: true
+  feature_cache_ttl_seconds: 5.0
+  use_planning_calculations: true
+
+  selection:
+    min_score: 0.0
+    raise_on_empty_candidates: true
+    raise_below_min_score: false
+    tie_breaker: "score_then_confidence_then_name"
+
+  method_stats:
+    default_success: 1.0
+    default_total: 2.0
+    confidence_sample_scale: 20.0
+    success_keys: ["success", "successes", "successful", "wins"]
+    total_keys: ["total", "attempts", "count", "n"]
+    failure_keys: ["failure", "failures", "failed", "losses"]
+
+  selection_weights:
+    predicted_success: 0.70
+    method_success_rate: 0.15
+    goal_overlap: 0.05
+    temporal_margin: 0.04
+    resource_margin: 0.04
+    priority: 0.02
+
+  penalties:
+    method_failure_rate: 0.05
+    deadline_proximity: 0.03
+    risk_score: 0.04
+
 
 global_heuristic:
   max_depth: 8
@@ -126,23 +299,78 @@ case_based_reasoning_heuristic:
   adaptation_rules: {}
   feature_config: {}
 
+
 planning_memory:
   checkpoints_dir: "src/agents/planning/checkpoints/"
-  max_checkpoints: 100                 # Maximum stored planning states
-  history_window: 1000                 # Execution history items to retain
-  retention_days: 30                    # Auto-delete checkpoints older than this
-  compression: false                   # Enable checkpoint compression
-  auto_save_interval: 300              # Seconds between auto-saves (0=disabled)
+  max_checkpoints: 100
+  history_window: 1000
+  retention_days: 30
+  compression: false
+  auto_save_interval: 300.0
+  default_duration_fallback: 300.0
+
+  atomic_write_retries: 5
+  atomic_write_retry_delay: 0.05
+  load_latest_on_start: true
+  prune_on_start: true
+  checkpoint_extension: ".json"
+
+  state_fields:
+    - task_library
+    - method_stats
+    - world_state
+    - execution_history
+    - plan_metrics
+    - current_plan
+    - plan_history
+    - schedule_state
+    - adaptive_context
+    - heuristic_selector
+
 
 planning_metrics:
-  enable_timing: true          # Whether to require timing data
-  default_task_cost: 1.0       # Fallback cost for tasks without cost attribute
-  default_task_duration: 0.5   # Fallback duration (seconds) when timing data missing
-  use_length_fallback: true    # Use plan length * duration when no timing data
+  enable_timing: true
+  enable_system_metrics: true
+  record_history: true
+  history_window: 1000
+
+  default_task_cost: 1.0
+  default_task_duration: 0.5
+  use_length_fallback: true
+  use_critical_path: true
+
+  slow_plan_threshold_seconds: 30.0
+  memory_unit: "mb"
+  process_memory_only: true
+  smoothing_alpha: 0.30
+
   metrics_weights:
-    success: 0.5               # Weight for success rate in efficiency score
-    cost: 0.3                  # Weight for cost efficiency
-    time: 0.2                  # Weight for time efficiency
+    success: 0.50
+    cost: 0.20
+    time: 0.20
+    resource: 0.10
+
+  normalizers:
+    planning_time_seconds: 60.0
+    execution_time_seconds: 600.0
+    cost: 100.0
+    makespan_seconds: 600.0
+    plan_length: 100.0
+    memory_mb: 4096.0
+    cpu_percent: 100.0
+
+  success_statuses:
+    - SUCCESS
+
+  failure_statuses:
+    - FAILED
+    - CANCELLED
+
+  quality_thresholds:
+    excellent: 0.85
+    good: 0.70
+    warning: 0.50
+
 
 planning_monitor:
   metrics_window: 100          # Number of plans to retain for trend analysis
@@ -156,10 +384,39 @@ planning_monitor:
     resource_scan: 300         # Full system scan every N seconds
 
 planning_types:
-  default_constraints: []
-  type_checks: enabled
   validation_level: strict
-  cost: 1.0
+  type_checks: enabled
+
+  default_task_name: "Planning Task"
+  default_task_version: "1.0"
+  default_owner: "system"
+  default_duration: 300.0
+  default_estimated_duration: 0.0
+  default_cost: 1.0
+  default_priority: 1
+  default_max_retries: 3
+  default_success_threshold: 0.9
+
+  relative_time_threshold_seconds: 1000000000
+  max_progress: 1.0
+
+  allowed_criticalities:
+    - low
+    - medium
+    - high
+    - critical
+
+  allowed_adjustments:
+    - modify_task
+    - add_task
+    - remove_task
+
+  default_safety_margins:
+    gpu_buffer: 0.15
+    ram_buffer: 0.20
+    min_task_duration: 30
+    max_concurrent: 5
+    time_buffer: 120
 
 planning_executor:
   check_interval: 0.5
@@ -184,22 +441,84 @@ local_planning:
   slow_speed_factor: 0.4
   max_local_horizon_s: 3.0
 
+
 probabilistic_planner:
   gamma: 0.99
   convergence_threshold: 0.0001
   max_iterations: 1000
 
-safety_planning: {}
+  default_success_threshold: 0.90
+  goal_reward: 1.0
+  dead_end_value: 0.0
+  action_cost_weight: 0.0
 
-cluster_monitoring:
-  skip_localhost_http: True
-  node_query_timeout: 2    # Seconds to wait for node response
-  update_interval: 5       # Seconds between resource updates
-  discovery_poll_interval: 300  # Seconds between node discovery scans
-  load_thresholds:
-    cpu: 0.85              # CPU usage alert threshold
-    memory: 0.9            # Memory usage alert threshold
-    temperature: 70        # GPU temperature threshold (°C)
+  max_reachable_states: 10000
+  max_expansion_steps: 50000
+  cache_q_values: true
+
+  raise_on_invalid_problem: true
+  memory_enabled: false
+  trace_limit: 250
+
+  policy_tie_breaker: "value_then_cost_then_name"
+
+
+safety_planning:
+  enabled: true
+  strict_mode: true
+
+  max_adjustment_retries: 3
+  retry_base_delay: 0.25
+  retry_backoff_factor: 2.0
+  max_retry_delay: 5.0
+  queue_max_size: 1000
+
+  violation_history_limit: 1000
+  auto_checkpoint_on_failure: true
+  auto_checkpoint_on_repair: true
+
+  partial_execution_enabled: true
+  human_escalation_enabled: false
+  resource_scaling_enabled: false
+
+  alert_webhook_url: ""
+  alert_timeout_seconds: 2.0
+  network_probe_url: ""
+  network_probe_timeout: 1.0
+
+  allowed_update_fields:
+    - deadline
+    - priority
+    - resource_requirements
+    - requirements
+    - dependencies
+    - duration
+    - estimated_duration
+    - cost
+    - risk_score
+    - execution_modes
+    - parameters
+
+  min_margin_thresholds:
+    resource: 0.05
+    temporal: 0.05
+    dependency: 0.05
+
+  max_task_risk_score: 0.95
+  max_plan_risk_score: 0.90
+
+  repair_weights:
+    cost: 0.35
+    risk: 0.40
+    time: 0.15
+    resource: 0.10
+
+  distributed_decomposition:
+    default_strategy: "hybrid"
+    max_horizontal_splits: 4
+    vertical_stage_count: 3
+    split_duration_factor: 0.50
+    split_resource_factor: 0.50
 
 learning_retraining_scheduler:
   risk_threshold: 0.4

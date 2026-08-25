@@ -1,7 +1,7 @@
 import heapq
 import random
 import time
-import numpy as np
+import numpy as np # type: ignore
 
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
@@ -9,11 +9,12 @@ from threading import RLock
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 from .utils.config_loader import get_config_section, load_global_config
-from ...utils.metrics_utils import FairnessMetrics, MetricSummarizer, PerformanceMetrics
-from logs.logger import PrettyPrinter, get_logger
+from .utils.buffer_errors import *
+from .buffer_telemetry import FairnessMetrics, MetricSummarizer
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Distributed Replay Buffer")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 PUSH_TIMEOUT_SECONDS = 5.0
 MIN_PRIORITY = 1e-5
@@ -299,11 +300,15 @@ class DistributedReplayBuffer:
         agent_ids = batch[0]
         if len(agent_ids) == 0:
             return
-
+    
         unique, counts = np.unique(agent_ids, return_counts=True)
+        # Skip fairness check if only one group is present
+        if len(unique) < 2:
+            return
+    
         selection_rates = {aid: count / len(agent_ids) for aid, count in zip(unique, counts)}
         self.fairness_stats["fair_batches_checked"] += 1
-
+    
         violation, msg = FairnessMetrics.demographic_parity(
             sensitive_groups=list(selection_rates.keys()),
             positive_rates=selection_rates,
@@ -319,12 +324,16 @@ class DistributedReplayBuffer:
         if rewards.size == 0:
             return
 
-        probs = np.abs(rewards) + MIN_PRIORITY
-        try:
-            calibration = PerformanceMetrics.calibration_error(y_true=rewards, probs=probs)
-            logger.info("Reward calibration error: %.6f", calibration)
-        except Exception as exc:
-            logger.warning("Failed to compute calibration error: %s", exc)
+        reward_summary = MetricSummarizer.summarize([float(r) for r in rewards.tolist()])
+        logger.info(
+            "Reward summary | mean=%.6f std=%.6f min=%.6f max=%.6f p95=%.6f count=%s",
+            reward_summary.mean,
+            reward_summary.std,
+            reward_summary.min,
+            reward_summary.max,
+            reward_summary.p95,
+            reward_summary.count,
+        )
 
     def update_priorities(self, indices: Sequence[int], new_priorities: Sequence[float]) -> None:
         with self.lock:
@@ -421,6 +430,11 @@ class DistributedReplayBuffer:
             )
 
 
+__all__ = [
+    "DistributedReplayBuffer",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Distributed Replay Buffer ===\n")
     printer.status("TEST", "Distributed Replay Buffer initialized", "info")
@@ -450,10 +464,10 @@ if __name__ == "__main__":
         printer.status("STATS", f"Buffer stats: {stats}", "success")
 
         uniform_batch = buffer.sample(batch_size=16, strategy="uniform")
-        assert uniform_batch[0].shape[0] == 16
+        assert len(uniform_batch[0]) == 16
         printer.status("SAMPLE", "Uniform sampling passed", "success")
 
-        prioritized_batch, prioritized_indices, importance_weights = buffer.sample(
+        prioritized_batch, prioritized_indices, importance_weights = buffer.sample( # type: ignore
             batch_size=16,
             strategy="prioritized",
             beta=0.6,
@@ -464,11 +478,11 @@ if __name__ == "__main__":
         printer.status("SAMPLE", "Prioritized sampling passed", "success")
 
         reward_batch = buffer.sample(batch_size=16, strategy="reward")
-        assert reward_batch[0].shape[0] == 16
+        assert len(reward_batch[0]) == 16
         printer.status("SAMPLE", "Reward sampling passed", "success")
 
         agent_balanced_batch = buffer.sample(batch_size=16, strategy="agent_balanced")
-        assert agent_balanced_batch[0].shape[0] == 16
+        assert len(agent_balanced_batch[0]) == 16
         printer.status("SAMPLE", "Agent-balanced sampling passed", "success")
 
         health_report = buffer.generate_health_report()

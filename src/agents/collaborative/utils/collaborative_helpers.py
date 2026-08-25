@@ -1739,17 +1739,56 @@ def build_delegation_record(
 # ---------------------------------------------------------------------------
 # Shared-memory safety wrappers
 # ---------------------------------------------------------------------------
-def memory_get(memory: MemoryLike, key: str, default: Any = None) -> Any:
-    """Safely read a key from a SharedMemory-like object."""
+def memory_get(
+    memory: MemoryLike,
+    key: str,
+    default: Any = None,
+) -> Any:
+    """
+    Safely read a key from a SharedMemory-like object.
 
+    The fallback value is passed by keyword rather than positionally because
+    SLAI's SharedMemory.get() uses ``version_timestamp`` as its second
+    positional parameter:
+
+        get(key, version_timestamp=None, update_access=True, default=None)
+
+    Passing ``default`` positionally would therefore be interpreted as a
+    historical-version timestamp and could cause reads to return the wrong
+    value or None.
+
+    The keyword-based call remains compatible with ordinary dict-like ``get``
+    implementations and SharedMemory proxies. A single-argument fallback is
+    retained for minimal custom memory implementations that do not accept a
+    ``default`` keyword.
+    """
     if memory is None:
         return default
+
+    getter = getattr(memory, "get", None)
+    if not callable(getter):
+        logger.warning("Shared memory object %s does not expose callable get().", type(memory).__name__)
+        return default
+
     try:
+        # IMPORTANT:
+        # Do not change this to getter(key, default).
+        #
+        # SharedMemory.get() defines its second positional argument as
+        # version_timestamp rather than default.
+        return getter(key, default=default)
+
+    except TypeError:
+        # Compatibility path for minimal/custom memory implementations whose
+        # get() method does not accept a keyword argument named "default".
         try:
-            return memory.get(key, default)
-        except TypeError:
-            result = memory.get(key)
-            return default if result is None else result
+            result = getter(key)
+        except Exception as exc:
+            logger.warning("Shared memory get failed for key %s: %s", key, exc)
+            return default
+
+        return default if result is None else result
+
     except Exception as exc:
         logger.warning("Shared memory get failed for key %s: %s", key, exc)
         return default
@@ -2568,3 +2607,163 @@ if __name__ == "__main__":
     assert result["status"] == "success"
 
     print("All collaborative_helpers.py smoke tests passed.\n")
+
+__all__ = [
+    # Constants
+    "DEFAULT_AGENT_STATS_KEY",
+    "DEFAULT_AGENT_KEY_PREFIX",
+    "DEFAULT_AUDIT_KEY",
+    "DEFAULT_TASK_EVENT_KEY",
+    "DEFAULT_RESULT_STATUS_SUCCESS",
+    "DEFAULT_RESULT_STATUS_ERROR",
+    "DEFAULT_RESULT_STATUS_REVIEW",
+    "DEFAULT_RESULT_STATUS_SKIPPED",
+    "DEFAULT_MAX_SERIALIZATION_DEPTH",
+    "DEFAULT_MAX_COLLECTION_ITEMS",
+    "DEFAULT_MAX_STRING_LENGTH",
+    "DEFAULT_MAX_AUDIT_EVENTS",
+    "DEFAULT_TASK_PRIORITY",
+    "DEFAULT_MAX_TASK_RETRIES",
+    "DEFAULT_NEW_AGENT_SUCCESS_BIAS",
+    "DEFAULT_AGENT_TASK_MULTIPLIER",
+    "DEFAULT_BACKOFF_BASE_SECONDS",
+    "DEFAULT_BACKOFF_MULTIPLIER",
+    "DEFAULT_BACKOFF_MAX_SECONDS",
+    "DEFAULT_BACKOFF_JITTER_RATIO",
+    # Enums and dataclasses
+    "CollaborationStatus",
+    "AgentHealthStatus",
+    "BackoffPolicy",
+    "Stopwatch",
+    "ValidationResult",
+    "TaskEnvelope",
+    "RoutingAttempt",
+    "AgentSnapshot",
+    "LoadSnapshot",
+    "OperationResult",
+    # Config
+    "refresh_runtime_config",
+    # Time and ids
+    "utc_now",
+    "utc_timestamp",
+    "epoch_seconds",
+    "monotonic_ms",
+    "elapsed_ms",
+    "generate_uuid",
+    "generate_task_id",
+    "generate_correlation_id",
+    "generate_agent_session_id",
+    "generate_idempotency_key",
+    # Coercion and serialization
+    "normalize_whitespace",
+    "truncate_text",
+    "normalize_identifier_component",
+    "coerce_bool",
+    "coerce_int",
+    "coerce_float",
+    "clamp",
+    "ensure_list",
+    "ensure_mapping",
+    "ensure_sequence",
+    "require_non_empty_string",
+    "safe_repr",
+    "json_safe",
+    "stable_json_dumps",
+    "json_loads",
+    "stable_hash",
+    "is_sensitive_key",
+    "redact_text",
+    "redact_sensitive_value",
+    "redact_mapping",
+    "sanitize_for_logging",
+    "merge_mappings",
+    "prune_none",
+    "flatten_mapping",
+    "normalize_metadata",
+    "normalize_tags",
+    # Task helpers
+    "normalize_task_type",
+    "normalize_capability",
+    "normalize_capabilities",
+    "normalize_task_payload",
+    "normalize_priority",
+    "normalize_retry_limit",
+    "coerce_deadline_at",
+    "normalize_fallback_plan",
+    "get_configured_fallback_plan",
+    "build_task_envelope",
+    "validate_task_envelope",
+    # Agent helpers
+    "normalize_agent_name",
+    "agent_memory_key",
+    "normalize_channel_name",
+    "task_channel",
+    "agent_channel",
+    "is_agent_like",
+    "extract_agent_capabilities",
+    "normalize_agent_meta",
+    "build_agent_registration",
+    "build_agent_batch_registrations",
+    "normalize_agent_stats",
+    "normalize_agent_stats_map",
+    "calculate_success_rate",
+    "calculate_agent_score",
+    "build_agent_snapshot",
+    "build_agent_snapshots",
+    # Load/routing helpers
+    "get_system_load_from_stats",
+    "count_active_agents",
+    "calculate_max_load",
+    "build_load_snapshot",
+    "is_overloaded",
+    "normalize_routing_attempt",
+    "summarize_routing_attempts",
+    "build_routing_context",
+    "build_delegation_record",
+    # Shared memory helpers
+    "memory_get",
+    "memory_set",
+    "memory_delete",
+    "memory_append",
+    "memory_increment",
+    "memory_compare_and_swap",
+    "memory_publish",
+    "memory_snapshot",
+    "get_agent_stats",
+    "set_agent_stats",
+    "update_agent_stats",
+    "record_agent_success",
+    "record_agent_failure",
+    "set_agent_active_delta",
+    "touch_agent_heartbeat",
+    "read_agent_heartbeats",
+    # Results/errors
+    "make_collaboration_exception",
+    "exception_to_error_payload",
+    "success_result",
+    "error_result",
+    "review_result",
+    "normalize_result",
+    # Contract/policy helpers
+    "contract_validation_to_dict",
+    "policy_evaluation_to_dict",
+    "policy_allows",
+    "policy_requires_review",
+    "contract_is_valid",
+    # Audit/reports
+    "build_audit_event",
+    "append_audit_event",
+    "record_audit_event",
+    "build_health_report",
+    "export_json_file",
+    # Retry
+    "calculate_backoff_delay",
+    "build_backoff_policy_from_config",
+    "is_retryable_exception",
+    "retry_call",
+    # Object snapshots/adapters
+    "snapshot_manager",
+    "snapshot_registry",
+    "can_agent_handle_task",
+    "filter_agents_for_task",
+]

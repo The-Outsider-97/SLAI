@@ -20,25 +20,25 @@ Real-World Use Case:
 import os
 import json
 import threading
-import numpy as np
-import joblib
+import numpy as np # type: ignore
+import joblib # type: ignore
 
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, WhiteKernel
-from sklearn.preprocessing import StandardScaler
+from sklearn.gaussian_process import GaussianProcessRegressor # type: ignore
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel # type: ignore
+from sklearn.preprocessing import StandardScaler # type: ignore
 from typing import List, Any, Dict, Tuple, Optional
 
-import numpy as np
+import numpy as np # type: ignore
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
 from ....tuning.networks.bayesian_neural_network import BayesianNeuralNetwork
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Uncertainty-Aware Heuristic")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class DotDict(dict):
     def __getattr__(self, item):
