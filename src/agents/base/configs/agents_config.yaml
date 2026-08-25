@@ -67,6 +67,10 @@ agent_factory:
     cache_agent_instances: true
     cache_imports: true
     cache_constructor_signatures: true
+    construction_failure_threshold: 3
+    construction_circuit_capacity: 1024
+    circuit_base_cooldown_seconds: 5.0
+    circuit_max_cooldown_seconds: 300.0
     allow_runtime_config_override: true
     allow_unknown_constructor_kwargs: false
     create_dependencies: true
@@ -78,6 +82,21 @@ agent_factory:
     creation_history_size: 100
     diagnostics_import_check: true
     diagnostics_constructor_check: true
+    routing_max_metric_age_seconds: 30.0
+    routing_require_metrics: false
+    routing_require_fresh_metrics: false
+    routing_allow_degraded: true
+    routing_weights:
+      capability: 0.25
+      health: 0.20
+      availability: 0.15
+      latency: 0.10
+      errors: 0.10
+      load: 0.08
+      freshness: 0.07
+      preference: 0.05
+    adaptation_auto_apply: false
+    adaptation_proposal_history_size: 100
     discovery_enabled: false
     discovery_packages: []
     required_action_methods:
@@ -95,6 +114,8 @@ agent_factory:
       web: browser
       obs: observability
       net: network
+      collaboration: collaborative
+      collaborative_agent: collaborative
       reader_agent: reader
       language_agent: language
       knowledge_agent: knowledge
@@ -116,6 +137,9 @@ agent_factory:
       - reasoning
       - safety
     dependency_profiles:
+      collaborative:
+        torch_required: false
+        notes: "Task coordination, policy, and delegation are torch-free."
       browser:
         torch_required: false
         notes: "Selenium/browser stack only."
@@ -165,57 +189,89 @@ agent_factory:
       adaptive:
         module_path: src.agents.adaptive_agent
         class_name: AdaptiveAgent
+        capabilities: [adaptation, policy_adaptation, runtime_optimization]
       alignment:
         module_path: src.agents.alignment_agent
         class_name: AlignmentAgent
+        capabilities: [alignment, value_alignment, ethical_assessment]
       browser:
         module_path: src.agents.browser_agent
         class_name: BrowserAgent
+        capabilities: [browser_automation, web_navigation, web_interaction]
+      collaborative:
+        module_path: src.agents.collaborative_agent
+        class_name: CollaborativeAgent
+        capabilities: [coordination, safety_assessment, shared_memory, task_delegation, collaboration_management]
+        constraints:
+          orchestration_scope: task_coordination
+          factory_authority: false
+          registry_authority: false
+        metadata:
+          orchestration_role: domain_orchestrator
       evaluation:
         module_path: src.agents.evaluation_agent
         class_name: EvaluationAgent
+        capabilities: [evaluation, performance_assessment, anomaly_detection]
       execution:
         module_path: src.agents.execution_agent
         class_name: ExecutionAgent
+        capabilities: [execution, action_selection, task_execution]
       handler:
         module_path: src.agents.handler_agent
         class_name: HandlerAgent
+        capabilities: [failure_handling, recovery, escalation]
       knowledge:
         module_path: src.agents.knowledge_agent
         class_name: KnowledgeAgent
+        capabilities: [knowledge_retrieval, knowledge_management, semantic_search]
       language:
         module_path: src.agents.language_agent
         class_name: LanguageAgent
+        capabilities: [language_understanding, language_generation, text_processing]
       learning:
         module_path: src.agents.learning_agent
         class_name: LearningAgent
+        capabilities: [learning, reinforcement_learning, model_adaptation]
       network:
         module_path: src.agents.network_agent
         class_name: NetworkAgent
+        capabilities: [networking, message_routing, transport]
       observability:
         module_path: src.agents.observability_agent
         class_name: ObservabilityAgent
+        capabilities: [observability, telemetry, monitoring]
       perception:
         module_path: src.agents.perception_agent
         class_name: PerceptionAgent
+        capabilities: [perception, sensor_processing, representation_learning]
       planning:
         module_path: src.agents.planning_agent
         class_name: PlanningAgent
+        capabilities: [planning, task_planning, scheduling]
       privacy:
         module_path: src.agents.privacy_agent
         class_name: PrivacyAgent
+        capabilities: [privacy, data_protection, privacy_assessment]
+      qnn:
+        module_path: src.agents.qnn_agent
+        class_name: QNNAgent
+        capabilities: [quantum_state_simulation, quantum_circuit_inference, quantum_circuit_training, quantum_state_evaluation]
       quality:
         module_path: src.agents.quality_agent
         class_name: QualityAgent
+        capabilities: [quality_assessment, validation, data_quality]
       reader:
         module_path: src.agents.reader_agent
         class_name: ReaderAgent
+        capabilities: [document_reading, information_extraction, parsing]
       reasoning:
         module_path: src.agents.reasoning_agent
         class_name: ReasoningAgent
+        capabilities: [reasoning, inference, decision_support]
       safety:
         module_path: src.agents.safety_agent
         class_name: SafetyAgent
+        capabilities: [safety, risk_assessment, policy_enforcement]
 
 
 base_agent:
@@ -737,9 +793,6 @@ reasoning_agent:
   builtin_rule_weights:
     identity_rule: 1.0
     transitive_rule: 0.8
-
-
-
 
 
 safety_agent:
