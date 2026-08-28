@@ -1,16 +1,16 @@
 import math
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import torch # type: ignore
+import torch.nn as nn # type: ignore
+import torch.nn.functional as F # type: ignore
 
 from typing import Optional, List, Dict, Any
 
 from .config_loader import load_global_config, get_config_section
 from ...base.modules.activation_engine import get_activation
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Task Heads")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class PositionalEncoding(nn.Module):
@@ -250,14 +250,14 @@ class Seq2SeqHead(TaskHead):
             self.embedding.weight = self.generator.weight
 
     def forward(self,
-                encoder_states: torch.Tensor,
+                x: torch.Tensor,
                 tgt_tokens: Optional[torch.Tensor] = None,
                 tgt_mask: Optional[torch.Tensor] = None,
                 memory_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         if tgt_tokens is None:
-            batch_size = encoder_states.size(0)
+            batch_size = x.size(0)
             tgt_tokens = torch.full((batch_size, 1), self.sos_token_id,
-                                    device=encoder_states.device, dtype=torch.long)
+                                    device=x.device, dtype=torch.long)
 
         tgt = self.embedding(tgt_tokens)
         tgt = self.positional_encoding(tgt)
@@ -266,7 +266,7 @@ class Seq2SeqHead(TaskHead):
         for layer in self.decoder:
             decoder_output = layer(
                 tgt=decoder_output,
-                memory=encoder_states,
+                memory=x,
                 tgt_mask=tgt_mask,
                 memory_mask=memory_mask
             )
@@ -414,6 +414,8 @@ class MultiModalClassificationHead(TaskHead):
                         bilinear = torch.einsum('bd,de,be->b', projected[i], self.bilinear_weight, projected[j])
                         bilinear_out.append(bilinear)
                 fused = torch.stack(bilinear_out, dim=1).mean(dim=1)
+            else:
+                raise ValueError(f"Unsupported fusion method: {self.fusion_method}")
 
         return self.classifier(fused)
 
@@ -443,6 +445,17 @@ class MultiTaskHead(TaskHead):
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         return {name: head(x) for name, head in self.heads.items()}
+
+
+__all__ = [
+    "PositionalEncoding",
+    "TaskHead",
+    "ClassificationHead",
+    "RegressionHead",
+    "Seq2SeqHead",
+    "MultiModalClassificationHead",
+    "MultiTaskHead",
+]
 
 
 # ----------------------------------------------------------------------

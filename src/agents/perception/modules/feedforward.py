@@ -6,7 +6,9 @@ import torch.nn.functional as F
 from typing import Optional
 
 from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.common import TensorOps, Parameter
+from ..utils.common import *
+from ..utils.perception_errors import *
+from ..utils.perception_helpers import *
 from ...base.modules.activation_engine import (
     get_activation,
     he_init, lecun_normal, xavier_uniform, xavier_normal
@@ -14,7 +16,7 @@ from ...base.modules.activation_engine import (
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("FeedForward")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class FeedForward(nn.Module):
@@ -230,9 +232,9 @@ class FeedForward(nn.Module):
             self.b2.data = weights[b2_key].to(self.device)
 
 
-# ----------------------------------------------------------------------
-# Test block
-# ----------------------------------------------------------------------
+__all__ = ["FeedForward"]
+
+
 if __name__ == "__main__":
     print("\n=== Running FeedForward ===\n")
     model = FeedForward()

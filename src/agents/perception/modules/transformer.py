@@ -4,23 +4,19 @@ import torch.nn as nn
 
 from typing import Optional
 
-from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.taskheads import (
-    TaskHead, ClassificationHead, MultiTaskHead,
-    RegressionHead, Seq2SeqHead, MultiModalClassificationHead
-)
-from ..utils.common import TensorOps, Parameter
-from .attention import (
-    EfficientAttention, BaseAttention,
-    CosineAttention, MultiQueryAttention, CrossAttention
-)
-from .feedforward import FeedForward
-from ..perception_memory import PerceptionMemory
 from ...base.modules.base_transformer import BaseTransformer
+from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.common import *
+from ..utils.perception_errors import *
+from ..utils.perception_helpers import *
+from ..utils.taskheads import *
+from ..perception_memory import *
+from .attention import *
+from .feedforward import *
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Transformer")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class Transformer(BaseTransformer):
@@ -317,9 +313,9 @@ class Transformer(BaseTransformer):
                         break
 
 
-# ----------------------------------------------------------------------
-# Test block
-# ----------------------------------------------------------------------
+__all__ = ["Transformer"]
+
+
 if __name__ == "__main__":
     print("\n=== Running Transformer ===\n")
     model = Transformer()

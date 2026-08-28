@@ -81,6 +81,15 @@ perception_memory:
   cache_dir: "src/agents/perception/cache/"
   enable_cache: True
   max_cache_size: 100
+  max_memory_mb: 512               # 0 disables the memory-budget eviction pass
+  cache_ttl_seconds: 0              # 0 disables TTL-based expiry
+  eviction_policy: "lru"            # "lru" or "size" (evict largest resident item first)
+  enable_disk_persistence: False    # spill evicted items to cache_dir and reload on demand
+  persist_index_filename: "memory_index.json"
+  checkpoint_retention: 20          # 0 = keep every checkpoint file indefinitely
+  validate_finite: True             # reject NaN/Inf tensors on cache/checkpoint
+  key_algorithm: "sha256"           # any hashlib-supported algorithm
+  lock_timeout_seconds: 5.0         # bounded wait on the internal RLock
 
 audio_encoder:
   audio_length: 16000
