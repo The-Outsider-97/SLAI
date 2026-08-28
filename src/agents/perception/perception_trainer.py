@@ -15,29 +15,17 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from .modalities.base import BasePerceptionModality
-from .perception_contracts import (
-    FusedRepresentation,
-    Modality,
-    ModalityRepresentation,
-    ObjectiveLoss,
-    TrainingStepResult,
-)
+from .perception_contracts import *
 from .perception_fusion import PerceptionFusion
 from .perception_objectives import PerceptionObjectives
-from .utils.perception_errors import (
-    NonFiniteLossError,
-    OptimizerConfigurationError,
-    PerceptionStateError,
-    PerceptionTrainingError,
-)
-from .utils.perception_helpers import (
-    add_missing_parameters_to_optimizer,
-    collect_unique_trainable_parameters,
-    ensure_finite_tensor,
-    optimizer_parameter_ids,
-    resolve_torch_device,
-)
+from .modalities.base import BasePerceptionModality
+from .utils.config_loader import get_config_section, load_global_config
+from .utils.perception_errors import *
+from .utils.perception_helpers import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+
+logger = get_logger("Perception Trainer")
+printer = PrettyPrinter()
 
 
 class PerceptionTrainer:

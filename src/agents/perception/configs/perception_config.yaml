@@ -20,6 +20,7 @@ dynamic_patching: true
 
 
 parameter: {}
+
 tensor_ops:
   eps: 0.00001
   momentum: 0.1
@@ -92,10 +93,19 @@ perception_memory:
   lock_timeout_seconds: 5.0         # bounded wait on the internal RLock
 
 audio_encoder:
+  encoder_type: "transformer"
   audio_length: 16000
   patch_size: 400
   positional_encoding: "learned"
   in_channels: 1
+
+vision_encoder:
+  encoder_type: "transformer"
+  img_size: 224
+  patch_size: 16
+  positional_encoding: learned
+  output_activation: sigmoid
+  in_channels: 3
 
 mfcc:
   sample_rate: 16000
@@ -106,20 +116,21 @@ mfcc:
   low_freq: 0
   high_freq: 8000
 
-vision_encoder:
-  img_size: 224
-  patch_size: 16
-  positional_encoding: learned
-  output_activation: sigmoid
-  in_channels: 3
-
 cnn:
+  # Audio CNN
+  out_channels: [64, 128, 256]
+  kernel_sizes: [3, 3, 3]
+  strides: [2, 2, 2]
+
+  # Vision CNN
   input_size: [224, 224]
   channels: 3
   filters:
     - [11, 11, 96]
     - [5, 5, 256]
     - [3, 3, 384]
+
+  spp_levels: [1, 2, 4]
 
 inference:
   vision_batch: 8
@@ -129,6 +140,26 @@ inference:
 
 text_encoder:
   max_gen_length: 64
+
+audio_decoder:
+  decoder_type: "transformer"   # transformer | cnn | mfcc
+  in_channels: 1
+  audio_length: 16000
+
+cnn_decoder:
+  base_channels: 256
+  min_channels: 32
+  upsample_factors: [4, 4, 4, 4]
+  kernel_size: 5
+  output_activation: "none"
+
+mfcc_decoder:
+  griffin_lim_iterations: 16
+  phase_initialization: "zeros"
+  log_epsilon: 0.000001
+  pinv_rcond: 0.000001
+  replicate_channels: false
+  output_activation: "none"
 
 generator: 
   temperature: 1.0

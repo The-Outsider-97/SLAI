@@ -22,22 +22,28 @@ from pathlib import Path
 from collections import OrderedDict
 from typing import Dict, Any, Optional, List, Tuple, Union
 
-from src.agents.base.utils.main_config_loader import load_global_config, get_config_section
-from src.agents.base_agent import BaseAgent
-from src.agents.perception.utils.common import Parameter, TensorOps
-from src.agents.perception.modules.transformer import Transformer
-from src.agents.perception.encoders.text_encoder import TextEncoder
-from src.agents.perception.encoders.vision_encoder import VisionEncoder
-from src.agents.perception.encoders.audio_encoder import AudioEncoder
-from src.agents.perception.decoders.text_decoder import TextDecoder
-from src.agents.perception.decoders.vision_decoder import VisionDecoder
-from src.agents.perception.decoders.audio_decoder import AudioDecoder
-from src.agents.perception.modules.tokenizer import Tokenizer
-from src.agents.perception.utils.taskheads import ClassificationHead, RegressionHead, Seq2SeqHead
-from logs.logger import get_logger, PrettyPrinter
+from .base.utils.main_config_loader import load_global_config, get_config_section
+from .base_agent import BaseAgent
+from .perception.perception_trainer import *
+from .perception.perception_contracts import *
+from .perception.perception_objectives import *
+from .perception.perception_fusion import *
+from .perception.modalities import *
+from .perception.modules.transformer import Transformer
+from .perception.encoders.text_encoder import TextEncoder
+from .perception.encoders.vision_encoder import VisionEncoder
+from .perception.encoders.audio_encoder import AudioEncoder
+from .perception.decoders.text_decoder import TextDecoder
+from .perception.decoders.vision_decoder import VisionDecoder
+from .perception.decoders.audio_decoder import AudioDecoder
+from .perception.modules.tokenizer import Tokenizer
+from .perception.utils.taskheads import *
+from .perception.utils.perception_errors import *
+from .perception.utils.perception_helpers import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Perception Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class PerceptionAgent(BaseAgent, nn.Module):
     def __init__(self, shared_memory, agent_factory, config=None):
@@ -52,7 +58,6 @@ class PerceptionAgent(BaseAgent, nn.Module):
         self._init_shared_memory_keys()
         #self.optimizer = self._configure_optimizer()
 
-        #self.global_projection_param = Parameter(torch.randn(1, device=self.device) * 0.01, name="global_projection_param")
         assert self.text_encoder.embed_dim == self.embed_dim, "Text encoder dim mismatch!"
         assert self.audio_encoder.embed_dim == self.embed_dim, "Audio encoder dim mismatch!"
         assert self.vision_encoder.embed_dim == self.embed_dim, "Vision encoder dim mismatch!"
@@ -84,78 +89,139 @@ class PerceptionAgent(BaseAgent, nn.Module):
         self.mse_weight = self.perception_config.get('mse_weight')
         self.contrastive_weight = self.perception_config.get('contrastive_weight')
 
-    def _init_components(self):
-        """Initialize encoders, decoders, tokenizer, memory, and projection heads."""
-        self.tokenizer = Tokenizer() # Uses its own config loading
-
-        # Modality Encoders
-        self.text_encoder = TextEncoder().to(self.device)
-        self.vision_encoder = VisionEncoder().to(self.device)
-        self.audio_encoder = AudioEncoder().to(self.device)
-
-        # Audio encoder with transformer configured to return hidden states
-        if hasattr(self.audio_encoder, 'transformer'):
-            self.audio_encoder.transformer.return_hidden = True  # Force hidden state output
-
-        # Full decoders for generation tasks (optional, can be loaded on demand)
-        self.text_generator = TextDecoder(encoder=self.text_encoder).to(self.device)
-        self.vision_generator = VisionDecoder().to(self.device) # VisionDecoder can init without encoder
-        self.audio_generator = AudioDecoder().to(self.device)   # AudioDecoder can init without encoder
-
-        self.global_projection_param = Parameter(torch.randn(self.embed_dim, self.embed_dim), requires_grad=True)
-
-        # Projection heads for contrastive learning (to a common dimension)
-        self.contrastive_projection_dim = self.perception_config.get('contrastive_projection_dim', 256)
-        self.text_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
-        self.vision_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
-        self.audio_contrastive_proj = nn.Linear(self.embed_dim, self.contrastive_projection_dim).to(self.device)
-
-        # Use each encoder's actual embed_dim for prediction heads
-        self.text_prediction_head = nn.Linear(
-            self.text_encoder.embed_dim,  # Use text encoder's dim
-            self.tokenizer.get_vocab_size()
+    def _init_components(self) -> None:
+        text_encoder = TextEncoder().to(self.device)
+        vision_encoder = VisionEncoder().to(self.device)
+        audio_encoder = AudioEncoder().to(self.device)
+    
+        text_decoder = TextDecoder(
+            encoder=text_encoder
         ).to(self.device)
-
-        vision_patch_dim = self.vision_encoder.in_channels * (self.vision_encoder.patch_size ** 2)
-        self.vision_prediction_head = nn.Linear(
-            self.vision_encoder.embed_dim,  # Use vision encoder's dim
-            vision_patch_dim
-        ).to(self.device)
-
-        audio_patch_dim = self.audio_encoder.in_channels * self.audio_encoder.patch_size
-        self.audio_prediction_head = nn.Linear(
-            self.audio_encoder.embed_dim,  # Use audio encoder's dim
-            audio_patch_dim
-        ).to(self.device)
-
-        # Initialize mask tokens for each modality
-        self.mask_tokens = nn.ParameterDict({
-            'text': Parameter(torch.zeros(1, self.embed_dim)),
-            'vision': Parameter(torch.zeros(1, self.embed_dim)),
-            'audio': Parameter(torch.zeros(1, self.embed_dim))
-        })
-        for key in self.mask_tokens:
-            nn.init.normal_(self.mask_tokens[key], mean=0.0, std=0.02)
-
-        # Reference position embeddings from encoders
-        self.position_embeddings = {
-            'text': self.text_encoder.position_embeddings,
-            'vision': self.vision_encoder.position_embed,
-            'audio': self.audio_encoder.position_embed
+    
+        vision_decoder = VisionDecoder().to(
+            self.device
+        )
+    
+        audio_decoder = AudioDecoder().to(
+            self.device
+        )
+    
+        self.text_perception = TextPerception(
+            encoder=text_encoder,
+            decoder=text_decoder,
+            device=self.device,
+        )
+    
+        self.vision_perception = VisionPerception(
+            encoder=vision_encoder,
+            decoder=vision_decoder,
+            device=self.device,
+        )
+    
+        self.audio_perception = AudioPerception(
+            encoder=audio_encoder,
+            decoder=audio_decoder,
+            device=self.device,
+        )
+    
+        input_dims = {
+            Modality.TEXT: self.text_perception.embed_dim,
+            Modality.VISION: self.vision_perception.embed_dim,
+            Modality.AUDIO: self.audio_perception.embed_dim,
         }
-
-        self.multi_modal_projector = nn.ModuleDict({
-            'text': nn.Linear(self.text_encoder.embed_dim, self.embed_dim),
-            'vision': nn.Linear(self.vision_encoder.embed_dim, self.embed_dim),
-            'audio': nn.Linear(self.audio_encoder.embed_dim, self.embed_dim)
-        }).to(self.device)
+    
+        multimodal_config = dict(
+            self.model_config.get(
+                "multimodal",
+                {},
+            )
+        )
+    
+        self.fusion = PerceptionFusion(
+            input_dims=input_dims,
+            output_dim=self.embed_dim,
+            fusion_method=multimodal_config.get(
+                "fusion_method",
+                "concat",
+            ),
+            use_attention=multimodal_config.get(
+                "use_attention",
+                True,
+            ),
+            num_heads=int(
+                self.model_config.get(
+                    "num_heads",
+                    8,
+                )
+            ),
+            dropout=float(
+                self.model_config.get(
+                    "dropout_rate",
+                    0.1,
+                )
+            ),
+        )
+    
+        self.objectives = PerceptionObjectives(
+            input_dims=input_dims,
+            contrastive_projection_dim=int(
+                self.perception_config.get(
+                    "contrastive_projection_dim",
+                    256,
+                )
+            ),
+            contrastive_temperature=self.contrastive_temp,
+            temporal_loss_type=self.perception_config.get(
+                "loss_type",
+                "hybrid",
+            ),
+            temporal_max_scale=int(
+                self.perception_config.get(
+                    "max_scale",
+                    3,
+                )
+            ),
+            temporal_temperature=float(
+                self.perception_config.get(
+                    "temperature",
+                    0.1,
+                )
+            ),
+            temporal_mse_weight=float(
+                self.perception_config.get(
+                    "mse_weight",
+                    1.0,
+                )
+            ),
+            temporal_contrastive_weight=float(
+                self.perception_config.get(
+                    "contrastive_weight",
+                    1.0,
+                )
+            ),
+        )
+    
         self.task_heads = nn.ModuleDict()
-
-        # Move components to device
-        self.mask_tokens = self.mask_tokens.to(self.device)
-
-        # Optimizer
-        self.optimizer = self._configure_optimizer()
+        self._task_head_specs = []
+    
+        self.trainer = PerceptionTrainer(
+            modalities={
+                Modality.TEXT: self.text_perception,
+                Modality.VISION: self.vision_perception,
+                Modality.AUDIO: self.audio_perception,
+            },
+            fusion=self.fusion,
+            objectives=self.objectives,
+            task_heads=self.task_heads,
+            learning_rate=self.learning_rate,
+            weight_decay=self.weight_decay,
+            adam_betas=self.adam_betas,
+            adam_eps=self.adam_eps,
+            device=self.device,
+        )
+    
+        # Backward-compatible attribute only.
+        self.optimizer = self.trainer.optimizer
 
     def _configure_optimizer(self):
         """Configures the optimizer for training."""
@@ -189,6 +255,35 @@ class PerceptionAgent(BaseAgent, nn.Module):
             'embeddings': f"perception:embeddings:{self.name}",
             'training_state': f"perception:training:{self.name}"
         }
+
+    @property
+    def text_encoder(self) -> nn.Module:
+        return self.text_perception.encoder
+    
+    
+    @property
+    def vision_encoder(self) -> nn.Module:
+        return self.vision_perception.encoder
+    
+    
+    @property
+    def audio_encoder(self) -> nn.Module:
+        return self.audio_perception.encoder
+    
+    
+    @property
+    def text_generator(self) -> nn.Module:
+        return self.text_perception.require_decoder()
+    
+    
+    @property
+    def vision_generator(self) -> nn.Module:
+        return self.vision_perception.require_decoder()
+    
+    
+    @property
+    def audio_generator(self) -> nn.Module:
+        return self.audio_perception.require_decoder()
 
     # --- Masking Helpers ---
     def _apply_masking_text(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -703,35 +798,69 @@ class PerceptionAgent(BaseAgent, nn.Module):
 
         self.load_state_dict(model_state_dict)
 
-    def _get_task_head(self, downstream_task: str, input_dim: int, num_classes: Optional[int] = None) -> nn.Module:
-        """
-        Lazily create and cache task heads for downstream fine-tuning/inference.
-        """
-        task_lower = downstream_task.lower()
-        if "classification" in task_lower:
+    def _get_task_head(
+        self,
+        downstream_task: str,
+        input_dim: int,
+        num_classes: Optional[int] = None,
+    ) -> nn.Module:
+
+        normalized = downstream_task.strip().lower()
+
+        if "classification" in normalized:
             head_type = "classification"
-        elif "regression" in task_lower:
+        elif "regression" in normalized:
             head_type = "regression"
         else:
-            head_type = "seq2seq"
+            raise UnsupportedPerceptionOptionError(
+                "Perception fine-tuning currently supports "
+                "classification and regression task heads.",
+                component="perception_agent",
+                details={
+                    "downstream_task": downstream_task
+                },
+            )
 
-        key = f"{head_type}:{input_dim}:{num_classes}"
+        key = (
+            f"{head_type}:"
+            f"{int(input_dim)}:"
+            f"{num_classes}"
+        )
+
         if key in self.task_heads:
             return self.task_heads[key]
 
         if head_type == "classification":
-            head = ClassificationHead(hidden_dim=input_dim)
-            if num_classes is not None:
-                classifier = getattr(head, "classifier", None)
-                if isinstance(classifier, nn.Sequential) and len(classifier) > 0 and isinstance(classifier[-1], nn.Linear):
-                    in_features = classifier[-1].in_features
-                    classifier[-1] = nn.Linear(in_features, num_classes)
-        elif head_type == "regression":
-            head = RegressionHead(hidden_dim=input_dim)
-        else:
-            head = Seq2SeqHead(hidden_dim=input_dim)
+            head = ClassificationHead(
+                hidden_dim=input_dim
+            )
 
-        self.task_heads[key] = head.to(self.device)
+            if num_classes is not None:
+                classifier = head.classifier
+
+                if (
+                    isinstance(classifier, nn.Sequential)
+                    and isinstance(classifier[-1], nn.Linear)
+                ):
+                    classifier[-1] = nn.Linear(classifier[-1].in_features, int(num_classes))
+
+                resolved_num_classes = int(num_classes)
+
+            else:
+                resolved_num_classes = int(head.num_classes)
+
+        else:
+            head = RegressionHead(hidden_dim=input_dim)
+            resolved_num_classes = None
+
+        self.trainer.register_task_head(key, head)
+        self._task_head_specs.append({
+            "key": key,
+            "type": head_type,
+            "input_dim": int(input_dim),
+            "num_classes": resolved_num_classes,
+        })
+
         return self.task_heads[key]
 
     def _finetune_step(self, task_data: Dict) -> Dict[str, Any]:

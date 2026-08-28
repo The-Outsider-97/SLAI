@@ -296,9 +296,10 @@ class TrainingExtensions:
         self.augmentation = self._create_augmentations()
  
     def _create_augmentations(self) -> Dict:
-        aug_config = self.config.get("training", {}).get("augmentations", {})
+        training_cfg = self.config.get("training")
+        aug_config = training_cfg.get("augmentations", {}) if isinstance(training_cfg, dict) else {}
         aug_dict: Dict = {}
- 
+    
         if "vision" in self.modalities:
             vision_aug = []
             if aug_config.get("random_crop", False):
@@ -311,12 +312,12 @@ class TrainingExtensions:
                 )
             if aug_config.get("horizontal_flip", False):
                 vision_aug.append(transforms.RandomHorizontalFlip())
- 
+    
             aug_dict["vision"] = transforms.Compose(vision_aug) if vision_aug else None
- 
+    
         if "audio" in self.modalities and aug_config.get("audio_noise", False):
             aug_dict["audio"] = self._add_audio_noise
- 
+    
         return aug_dict
  
     @staticmethod

@@ -7,12 +7,16 @@ from typing import Dict, List, Optional
 from ...base.modules.activation_engine import he_init
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.common import Parameter
+from ..utils.perception_errors import *
+from ..utils.perception_helpers import *
 from ..modules.transformer import Transformer
 from ..perception_memory import PerceptionMemory
+from .fallbacks.cnn_decoder import *
+from .fallbacks.mfcc_decoder import *
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Audio Decoder")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class AudioDecoder(nn.Module):
     """
@@ -37,9 +41,11 @@ class AudioDecoder(nn.Module):
         self.decoder_config = get_config_section('audio_decoder') if 'audio_decoder' in self.config else {}
 
         # Core parameters
-        self.embed_dim = self.config.get('embed_dim')
-        self.in_channels = self.config.get('in_channels', 1)
-        self.decoder_type = self.config.get('decoder_type', self.config.get('encoder_type', 'transformer'))
+        self.embed_dim = self.config.get('embed_dim', 512)
+        self.in_channels = int(self.decoder_config.get("in_channels", self.audio_config.get( "in_channels", 1)))
+        self.decoder_type = self.decoder_config.get("decoder_type",
+                                                    self.config.get("decoder_type",
+                                                                    self.config.get( "encoder_type", "transformer")))
         self.device = self.config.get('device', 'cpu')
         self.max_position_embeddings = self.config.get('max_position_embeddings', 5000)
         self.dropout_rate = self.config.get('dropout_rate', 0.1)
@@ -58,26 +64,78 @@ class AudioDecoder(nn.Module):
         # Cache for hidden states (if needed)
         self._hidden_states = None
 
-    def _validate_configs(self):
-        """Validate critical parameters."""
-        if not self.embed_dim:
-            raise ValueError("embed_dim must be specified in config")
+    def _validate_configs(self) -> None:
+        if not self.embed_dim or self.embed_dim <= 0:
+            raise InvalidPerceptionConfigurationError(
+                "embed_dim must be > 0.",
+                component="audio_decoder",
+                details={"embed_dim": self.embed_dim},
+            )
+    
         if self.patch_size <= 0:
-            raise ValueError("patch_size must be positive")
-        if self.decoder_type not in ['transformer', 'cnn', 'mfcc']:
-            logger.warning(f"Unknown decoder type '{self.decoder_type}', falling back to 'transformer'")
-            self.decoder_type = 'transformer'
+            raise InvalidPerceptionConfigurationError(
+                "patch_size must be > 0.",
+                component="audio_decoder",
+                details={"patch_size": self.patch_size},
+            )
+    
+        if self.in_channels <= 0:
+            raise InvalidPerceptionConfigurationError(
+                "in_channels must be > 0.",
+                component="audio_decoder",
+                details={"in_channels": self.in_channels},
+            )
+    
+        if self.audio_length <= 0:
+            raise InvalidPerceptionConfigurationError(
+                "audio_length must be > 0.",
+                component="audio_decoder",
+                details={"audio_length": self.audio_length},
+            )
+    
+        if self.decoder_type not in {
+            "transformer",
+            "cnn",
+            "mfcc",
+        }:
+            raise UnsupportedPerceptionOptionError(
+                "Unsupported audio decoder backend.",
+                component="audio_decoder",
+                details={
+                    "decoder_type": self.decoder_type,
+                    "supported": [
+                        "transformer",
+                        "cnn",
+                        "mfcc",
+                    ],
+                },
+            )
 
-    def _init_components(self):
-        """Initialize decoder components based on type."""
+    def _init_components(self) -> None:
+        """Initialize exactly one configured reconstruction backend."""
+        self.fallback_decoder = None
+    
         if self.decoder_type == "transformer":
             self._init_transformer_decoder()
+    
         elif self.decoder_type == "cnn":
-            self._init_cnn_decoder()
+            self.fallback_decoder = CNNDecoder(
+                config=self.config,
+                decoder_config=self.decoder_config,
+            )
+    
         elif self.decoder_type == "mfcc":
-            self._init_mfcc_decoder()
+            self.fallback_decoder = MFCCDecoder(
+                config=self.config,
+                decoder_config=self.decoder_config,
+            )
+    
         else:
-            raise ValueError(f"Unsupported decoder type: {self.decoder_type}")
+            raise UnsupportedPerceptionOptionError(
+                "Unsupported audio decoder backend.",
+                component="audio_decoder",
+                details={"decoder_type": self.decoder_type},
+            )
 
         # Memory for gradient checkpointing
         self.memory = PerceptionMemory(enable_checkpointing=self.use_checkpointing)
@@ -109,8 +167,11 @@ class AudioDecoder(nn.Module):
         )
 
         # Transformer backbone
-        self.transformer = Transformer()
-        self.transformer.return_hidden = True
+        self.transformer = Transformer(
+            causal=False,
+            enable_cross_attention=False,
+            return_hidden=True,
+        )
 
     def _init_sinusoidal_encoding(self) -> Parameter:
         """Create sinusoidal positional encoding (non‑trainable)."""
@@ -121,18 +182,6 @@ class AudioDecoder(nn.Module):
         pe[0, :, 0::2] = torch.sin(position * div_term)
         pe[0, :, 1::2] = torch.cos(position * div_term)
         return Parameter(pe, requires_grad=False)
-
-    def _init_cnn_decoder(self):
-        """Placeholder for CNN‑based decoder."""
-        logger.warning("CNN decoder not fully implemented; using transformer fallback")
-        self.decoder_type = 'transformer'
-        self._init_transformer_decoder()
-
-    def _init_mfcc_decoder(self):
-        """Placeholder for inverse MFCC decoder."""
-        logger.warning("MFCC decoder not fully implemented; using transformer fallback")
-        self.decoder_type = 'transformer'
-        self._init_transformer_decoder()
 
     def forward(self, x: torch.Tensor, style_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -153,7 +202,7 @@ class AudioDecoder(nn.Module):
         else:
             raise NotImplementedError(f"Forward not implemented for {self.decoder_type}")
 
-    def _forward_transformer(self, x: torch.Tensor, style_id: torch.Tensor) -> torch.Tensor:
+    def _forward_transformer(self, x: torch.Tensor, style_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Transformer‑based decoder forward pass."""
         batch_size, seq_len, _ = x.shape
 

@@ -5,15 +5,16 @@ import torch.nn.functional as F
 
 from typing import Optional, Tuple, List, Dict
 
-from ...base.modules.activation_engine import he_init
 from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.common import TensorOps, Parameter
+from ..utils.common import *
+from ..utils.perception_errors import *
+from ..utils.perception_helpers import *
 from ..modules.transformer import Transformer
 from ..perception_memory import PerceptionMemory
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Text Decoder")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class TextDecoder(nn.Module):
     """
@@ -35,11 +36,11 @@ class TextDecoder(nn.Module):
         self.text_encoder_config = get_config_section('text_encoder')
 
         # Core parameters
-        self.vocab_size = self.config.get('vocab_size')
-        self.embed_dim = self.config.get('embed_dim')
-        self.num_layers = self.config.get('num_layers')
-        self.num_heads = self.config.get('num_heads')
-        self.ff_dim = self.config.get('ff_dim')
+        self.vocab_size = self.config.get('vocab_size', 5000)
+        self.embed_dim = self.config.get('embed_dim', 512)
+        self.num_layers = self.config.get('num_layers', 4)
+        self.num_heads = self.config.get('num_heads', 8)
+        self.ff_dim = self.config.get('ff_dim', 2048)
         self.num_styles = self.config.get('num_styles')
         self.max_position_embeddings = self.config.get('max_position_embeddings', 5000)
         self.positional_encoding = self.config.get('positional_encoding', 'sinusoidal')
@@ -91,9 +92,12 @@ class TextDecoder(nn.Module):
         self.style_embeddings = nn.Embedding(self.num_styles, self.embed_dim)
 
         # Transformer backbone
-        self.transformer = Transformer()
-        self.transformer.return_hidden = True  # Always return full sequence
-        self.transformer.causal = True         # Enable causal masking for autoregressive decoding
+        self.transformer = Transformer(
+            causal=True,
+            enable_cross_attention=True,
+            attention_type="base",
+            return_hidden=True,
+        )
 
         # Disable feedforward fusion (decoder should not add encoder memory to FFN)
         for layer in self.transformer.layers:

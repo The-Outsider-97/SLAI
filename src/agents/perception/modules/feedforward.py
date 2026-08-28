@@ -1,18 +1,20 @@
-import math
+"""
+FeedForward module for the Perception Agent's subsystem
+"""
+
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Optional
+from collections.abc import Mapping
+from typing import Any, Dict, Tuple
 
 from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.common import *
 from ..utils.perception_errors import *
 from ..utils.perception_helpers import *
-from ...base.modules.activation_engine import (
-    get_activation,
-    he_init, lecun_normal, xavier_uniform, xavier_normal
-)
+from ...base.modules.activation_engine import get_activation, he_init, lecun_normal, xavier_uniform, xavier_normal
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("FeedForward")
@@ -20,216 +22,262 @@ printer = PrettyPrinter()
 
 
 class FeedForward(nn.Module):
-    """Enhanced position‑wise feed‑forward network with configurable components."""
-    def __init__(self):
+    """Position-wise Transformer feed-forward network.
+
+    Normalization, residual connections, and multimodal/context fusion are
+    deliberately owned by the surrounding Transformer layer.  This module is
+    therefore a pure ``D -> FF -> D`` transformation.
+    """
+    def __init__(self) -> None:
         super().__init__()
+
         self.config = load_global_config()
-        self.embed_dim = self.config.get('embed_dim')
-        self.initializer = self.config.get('initializer', 'xavier_uniform')
-        self.device = self.config.get('device', 'cpu')
-        self.dropout_rate = self.config.get('dropout_rate', 0.1)
-        self.ff_dim = self.config.get('ff_dim', self.embed_dim * 4)
-        self.activation_name = self.config.get('activation', 'relu')
-        self.norm_type = self.config.get('norm_type', 'layernorm')
+        self.ff_config = get_config_section("feedforward") or {}
 
-        self.ff_config = get_config_section('feedforward')
-        self.use_bias = self.ff_config.get('use_bias', True)
-        self.use_residual = self.ff_config.get('use_residual', True)
-        self.fusion_type = self.ff_config.get('fusion_type', None)
-        self.context_dim = self.ff_config.get('context_dim', self.embed_dim)
+        self.embed_dim = int(self.config.get("embed_dim", 512))
+        self.ff_dim = int(self.config.get("ff_dim", self.embed_dim * 4))
+        self.dropout_rate = float(self.config.get("dropout_rate", 0.1))
+        self.activation_name = str(self.config.get("activation", "gelu"))
+        self.initializer = str(self.config.get("initializer", "xavier_uniform"))
+        self.device = resolve_torch_device(self.config.get("device", "cpu"))
+        self.use_bias = bool(self.ff_config.get("use_bias", True))
 
-        # Activation from engine
+        self._validate_config()
         self.activation = get_activation(self.activation_name)
 
-        # Normalization layer
-        self._init_normalization()
+        # These matrix shapes intentionally preserve the existing SLAI
+        # checkpoint/pretrained-weight convention used by this module:
+        #   x @ w1 -> hidden, hidden @ w2 -> output.
+        self.w1 = nn.Parameter(self._initialized_tensor((self.embed_dim, self.ff_dim)))
+        self.w2 = nn.Parameter(self._initialized_tensor((self.ff_dim, self.embed_dim)))
 
-        # Fusion parameters (if needed)
-        self._init_fusion()
-
-        # Linear layers
-        self._init_parameters()
-
-        logger.info(f"FeedForward initialized: embed_dim={self.embed_dim}, ff_dim={self.ff_dim}, "
-                    f"activation={self.activation_name}, use_bias={self.use_bias}, "
-                    f"residual={self.use_residual}, norm={self.norm_type}, fusion={self.fusion_type}")
-
-    def _init_normalization(self):
-        """Initialize the normalization layer based on config."""
-        if self.norm_type == 'layernorm':
-            self.norm = nn.LayerNorm(self.embed_dim, eps=1e-5)
-        elif self.norm_type == 'instancenorm':
-            # InstanceNorm expects (batch, channels, seq) – we'll adapt in forward
-            self.norm = nn.InstanceNorm1d(self.embed_dim, affine=True)
-        elif self.norm_type is None or self.norm_type == 'none':
-            self.norm = None
+        if self.use_bias:
+            self.b1 = nn.Parameter(torch.zeros(self.ff_dim, device=self.device))
+            self.b2 = nn.Parameter(torch.zeros(self.embed_dim, device=self.device))
         else:
-            raise ValueError(f"Unsupported normalization type: {self.norm_type}")
+            self.register_parameter("b1", None)
+            self.register_parameter("b2", None)
 
-    def _init_fusion(self):
-        """Initialize parameters for multi‑modal fusion."""
-        self.film_gamma = None
-        self.film_beta = None
-        self.context_proj = None
+        logger.info(
+            "FeedForward initialized: embed_dim=%s, ff_dim=%s, "
+            "activation=%s, dropout=%.4f, use_bias=%s",
+            self.embed_dim,
+            self.ff_dim,
+            self.activation_name,
+            self.dropout_rate,
+            self.use_bias,
+        )
 
-        if self.fusion_type == 'concat':
-            # First linear layer input dimension will be increased
-            self.fused_embed_dim = self.embed_dim + self.context_dim
-        elif self.fusion_type == 'film':
-            # Feature‑wise Linear Modulation: learnable scales and shifts
-            self.film_gamma = Parameter(torch.ones(1, self.embed_dim, device=self.device))
-            self.film_beta = Parameter(torch.zeros(1, self.embed_dim, device=self.device))
-            # Project context to match embedding dimension if needed
-            if self.context_dim != self.embed_dim:
-                self.context_proj = nn.Linear(self.context_dim, self.embed_dim, bias=False)
-                self._init_layer(self.context_proj)
-        elif self.fusion_type == 'add':
-            # No extra parameters
-            pass
-        elif self.fusion_type is not None:
-            raise ValueError(f"Unsupported fusion type: {self.fusion_type}")
+    def _validate_config(self) -> None:
+        if self.embed_dim <= 0:
+            raise PerceptionConfigurationError(
+                "embed_dim must be positive.",
+                component="feedforward",
+                details={"embed_dim": self.embed_dim},
+            )
+        if self.ff_dim <= 0:
+            raise PerceptionConfigurationError(
+                "ff_dim must be positive.",
+                component="feedforward",
+                details={"ff_dim": self.ff_dim},
+            )
+        if not 0.0 <= self.dropout_rate < 1.0:
+            raise PerceptionConfigurationError(
+                "dropout_rate must be in [0,1).",
+                component="feedforward",
+                details={
+                    "dropout_rate": self.dropout_rate
+                },
+            )
 
-    def _init_layer(self, layer):
-        """Helper to initialize a linear layer with the configured initializer."""
+    def _initialized_tensor(
+        self,
+        shape: Tuple[int, ...],
+    ) -> torch.Tensor:
         init_map = {
-            'he': he_init,
-            'lecun': lecun_normal,
-            'xavier_uniform': xavier_uniform,
-            'xavier_normal': xavier_normal,
+            "he": he_init,
+            "he_normal": he_init,
+            "lecun": lecun_normal,
+            "xavier_uniform": xavier_uniform,
+            "xavier_normal": xavier_normal,
         }
         init_fn = init_map.get(self.initializer, xavier_uniform)
-        weight_shape = layer.weight.shape
+        tensor = init_fn(shape, device=self.device)
+        return tensor.to(device=self.device, dtype=torch.float32)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the position-wise feed-forward transformation."""
+        if not isinstance(x, torch.Tensor):
+            raise PerceptionDimensionError(
+                "FeedForward input must be a torch.Tensor.",
+                component="feedforward",
+                details={
+                    "actual_type": type(x).__name__
+                },
+            )
+        if x.dim() < 2:
+            raise PerceptionDimensionError(
+                "FeedForward input must have rank >= 2.",
+                component="feedforward",
+                details={"shape": list(x.shape)},
+            )
+        if x.size(-1) != self.embed_dim:
+            raise PerceptionDimensionError(
+                "FeedForward input dimension does not match embed_dim.",
+                component="feedforward",
+                details={
+                    "actual": x.size(-1),
+                    "expected": self.embed_dim,
+                    "shape": list(x.shape),
+                },
+            )
+
+        hidden = torch.matmul(x, self.w1)
+        if self.b1 is not None:
+            hidden = hidden + self.b1
+
+        hidden = self.activation(hidden)
+
+        if self.dropout_rate > 0.0:
+            hidden = F.dropout(
+                hidden,
+                p=self.dropout_rate,
+                training=self.training,
+            )
+
+        output = torch.matmul(hidden, self.w2)
+        if self.b2 is not None:
+            output = output + self.b2
+
+        return output
+
+    @staticmethod
+    def _coerce_weight(
+        source: torch.Tensor,
+        target: torch.Tensor,
+        *,
+        name: str,
+    ) -> torch.Tensor:
+        """Adapt standard Linear weight orientation to SLAI's matmul layout.
+
+        ``nn.Linear`` stores weights as ``(out_features, in_features)`` while
+        this module stores matrices for direct right-multiplication as
+        ``(in_features, out_features)``.
+        """
+        if not isinstance(source, torch.Tensor):
+            raise PerceptionStateError(
+                f"Pretrained {name} must be a tensor.",
+                component="feedforward",
+                details={
+                    "actual_type": type(source).__name__
+                },
+            )
+
+        if tuple(source.shape) == tuple(target.shape):
+            return source
+
+        transposed = source.transpose(-2, -1)
+        if tuple(transposed.shape) == tuple(target.shape):
+            return transposed
+
+        raise PerceptionDimensionError(
+            f"Pretrained {name} shape is incompatible.",
+            component="feedforward",
+            details={
+                "source_shape": list(source.shape),
+                "target_shape": list(target.shape),
+            },
+        )
+
+    @staticmethod
+    def _copy_parameter(
+        target: torch.Tensor,
+        source: torch.Tensor,
+    ) -> None:
         with torch.no_grad():
-            layer.weight.data = init_fn(weight_shape, device=self.device)
+            target.copy_(source.to(device=target.device, dtype=target.dtype))
 
-    def _init_parameters(self):
-        """Initialize weights and biases for linear layers."""
-        # Input dimension for first layer (may be increased by concat fusion)
-        input_dim = self.embed_dim
-        if self.fusion_type == 'concat':
-            input_dim = self.fused_embed_dim
+    def load_pretrained(
+        self,
+        weights: Mapping[str, torch.Tensor],
+        prefix: str = "",
+        *,
+        strict: bool = False,
+    ) -> Dict[str, Any]:
+        """Load a BERT/HuggingFace-style feed-forward block conservatively.
 
-        init_map = {
-            'he': he_init,
-            'lecun': lecun_normal,
-            'xavier_uniform': xavier_uniform,
-            'xavier_normal': xavier_normal,
+        Supported source names:
+          ``intermediate.dense.weight``
+          ``intermediate.dense.bias``
+          ``output.dense.weight``
+          ``output.dense.bias``
+
+        Unknown source parameters are not interpreted heuristically.
+        """
+        if not isinstance(weights, Mapping):
+            raise PerceptionStateError(
+                "weights must be a mapping.",
+                component="feedforward",
+                details={
+                    "actual_type": type(weights).__name__
+                },
+            )
+
+        keys = {
+            "w1": f"{prefix}intermediate.dense.weight",
+            "b1": f"{prefix}intermediate.dense.bias",
+            "w2": f"{prefix}output.dense.weight",
+            "b2": f"{prefix}output.dense.bias",
         }
-        init_fn = init_map.get(self.initializer, xavier_uniform)
 
-        # First linear transformation
-        w1_shape = (input_dim, self.ff_dim)
-        self.w1 = Parameter(init_fn(w1_shape, device=self.device))
-        self.b1 = Parameter(torch.zeros(self.ff_dim, device=self.device)) if self.use_bias else None
+        loaded = []
+        missing = []
 
-        # Second linear transformation
-        w2_shape = (self.ff_dim, self.embed_dim)
-        self.w2 = Parameter(init_fn(w2_shape, device=self.device))
-        self.b2 = Parameter(torch.zeros(self.embed_dim, device=self.device)) if self.use_bias else None
+        for name, source_key in keys.items():
+            target = getattr(self, name)
 
-    def _apply_fusion(self, x, context):
-        """Apply multi‑modal fusion (modifies x in place or returns new tensor)."""
-        if self.fusion_type == 'add':
-            # Simple addition (context must have same shape as x)
-            if context.shape != x.shape:
-                # Project context to match if needed
-                if not hasattr(self, '_add_proj'):
-                    self._add_proj = nn.Linear(context.shape[-1], self.embed_dim, bias=False).to(x.device)
-                    self._init_layer(self._add_proj)
-                context = self._add_proj(context)
-            return x + context
+            # Biases are legitimately absent when use_bias=False.
+            if target is None:
+                continue
 
-        elif self.fusion_type == 'concat':
-            # Concatenate along feature dimension
-            # Ensure context has same batch and sequence dimensions as x
-            if context.dim() == 2:  # (batch, features) -> add sequence dim
-                context = context.unsqueeze(1).expand(-1, x.size(1), -1)
-            elif context.dim() == 3 and context.size(1) == 1:
-                context = context.expand(-1, x.size(1), -1)
-            # If context dims still don't match, project
-            if context.size(-1) != self.context_dim:
-                context = context[..., :self.context_dim]  # truncate or pad? For simplicity, truncate
-            return torch.cat([x, context], dim=-1)
+            source = weights.get(source_key)
+            if source is None:
+                missing.append(source_key)
+                continue
 
-        elif self.fusion_type == 'film':
-            # Feature‑wise Linear Modulation
-            # Context may be global (batch, features) or sequence (batch, seq, features)
-            if context.dim() == 2:
-                context = context.unsqueeze(1)  # (batch, 1, features)
-            # Project context to embedding dimension if needed
-            if self.context_proj is not None:
-                context = self.context_proj(context)
-            gamma = self.film_gamma * context
-            beta = self.film_beta * context
-            return x * gamma + beta
+            if name in ("w1", "w2"):
+                source = self._coerce_weight(
+                    source,
+                    target,
+                    name=name,
+                )
+            elif tuple(source.shape) != tuple(target.shape):
+                raise PerceptionDimensionError(
+                    f"Pretrained {name} shape is incompatible.",
+                    component="feedforward",
+                    details={
+                        "source_shape": list(source.shape),
+                        "target_shape": list(target.shape),
+                    },
+                )
 
-        else:
-            return x
+            self._copy_parameter(target, source)
+            loaded.append(source_key)
 
-    def forward(self, x, context=None):
-        """
-        Forward pass.
+        if strict and missing:
+            raise PerceptionStateError(
+                "Required pretrained feed-forward parameters are missing.",
+                component="feedforward",
+                details={"missing_keys": missing},
+            )
 
-        Args:
-            x: Input tensor of shape (batch, seq_len, embed_dim)
-            context: Optional context tensor for multi‑modal fusion.
-        """
-        residual = x  # Save for residual connection
-
-        # Apply normalization
-        if self.norm is not None:
-            if isinstance(self.norm, nn.InstanceNorm1d):
-                # InstanceNorm expects (batch, channels, seq)
-                x = x.permute(0, 2, 1)
-                x = self.norm(x)
-                x = x.permute(0, 2, 1)
-            else:
-                x = self.norm(x)
-
-        # Apply multi‑modal fusion
-        if context is not None:
-            x = self._apply_fusion(x, context)
-
-        # First linear projection
-        h = torch.matmul(x, self.w1)
-        if self.use_bias and self.b1 is not None:
-            h += self.b1
-
-        # Activation
-        h_act = self.activation(h)
-
-        # Dropout
-        if self.training and self.dropout_rate > 0:
-            h_act = F.dropout(h_act, p=self.dropout_rate, training=self.training)
-
-        # Second linear projection
-        out = torch.matmul(h_act, self.w2)
-        if self.use_bias and self.b2 is not None:
-            out += self.b2
-
-        # Residual connection
-        if self.use_residual:
-            out = residual + out
-
-        return out
-
-    def load_pretrained(self, weights, prefix=''):
-        """Load pretrained weights from a dictionary (e.g., from HuggingFace)."""
-        # Map keys
-        w1_key = f'{prefix}intermediate.dense.weight'
-        b1_key = f'{prefix}intermediate.dense.bias'
-        w2_key = f'{prefix}output.dense.weight'
-        b2_key = f'{prefix}output.dense.bias'
-
-        if w1_key in weights:
-            self.w1.data = weights[w1_key].to(self.device)
-        if b1_key in weights and self.use_bias and self.b1 is not None:
-            self.b1.data = weights[b1_key].to(self.device)
-
-        if w2_key in weights:
-            self.w2.data = weights[w2_key].to(self.device)
-        if b2_key in weights and self.use_bias and self.b2 is not None:
-            self.b2.data = weights[b2_key].to(self.device)
+        return {
+            "loaded_keys": tuple(loaded),
+            "missing_keys": tuple(missing),
+        }
 
 
 __all__ = ["FeedForward"]

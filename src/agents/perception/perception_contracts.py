@@ -8,18 +8,14 @@ shape, modality identity, masking, and result semantics explicit.
 
 from __future__ import annotations
 
+import torch
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
-import torch
-
-from .utils.perception_errors import (
-    PerceptionContractError,
-    PerceptionDimensionError,
-    PerceptionShapeError,
-)
-from .utils.perception_helpers import tensor_summary
+from .utils.perception_errors import *
+from .utils.perception_helpers import *
 
 
 class Modality(str, Enum):

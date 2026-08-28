@@ -1,21 +1,22 @@
+"""
+Attention module for the Perception Agent's subsystem
+"""
+
+from __future__ import annotations
+
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from functools import partial
-from typing import Optional, Tuple, Union
-from einops import rearrange, reduce
+from typing import Optional, Tuple
+from einops import rearrange
 from rotary_embedding_torch import RotaryEmbedding
 
 from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.common import *
 from ..utils.perception_errors import *
 from ..utils.perception_helpers import *
-from ...base.modules.activation_engine import (
-    get_activation,
-    he_init, lecun_normal, xavier_uniform, xavier_normal
-)
+from ...base.modules.activation_engine import he_init, lecun_normal, xavier_uniform, xavier_normal
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Attention")
@@ -24,544 +25,739 @@ printer = PrettyPrinter()
 # ===========================
 # Core attention functions (custom)
 # ===========================
-def scaled_dot_product_attention(q, k, v, mask=None, causal=False, attn_bias=None):
-    """Standard scaled dot‑product attention."""
-    scale = q.shape[-1] ** -0.5
-    q = q * scale
-    sim = torch.einsum('b h i d, b h j d -> b h i j', q, k)
-
-    if exists(attn_bias):
-        sim = sim + attn_bias
-
-    mask_value = -torch.finfo(sim.dtype).max
-
-    if exists(mask):
-        if mask.ndim == 2:
-            mask = rearrange(mask, 'b j -> b 1 1 j')
-        sim = sim.masked_fill(~mask, mask_value)
-
-    if causal:
-        i, j = sim.shape[-2:]
-        causal_mask = torch.ones(i, j, device=q.device, dtype=torch.bool).triu(j - i + 1)
-        sim = sim.masked_fill(causal_mask, mask_value)
-
-    attn = sim.softmax(dim=-1)
-    return torch.einsum('b h i j, b h j d -> b h i d', attn, v)
-
-
-def memory_efficient_attention(q, k, v, mask=None, causal=False, attn_bias=None,
-                               q_bucket_size=512, k_bucket_size=1024, eps=1e-8,
-                               dropout=0.0, training=False):
-    """
-    Memory‑efficient attention with chunking and optional checkpointing.
-    """
-    scale = q.shape[-1] ** -0.5
-    q = q * scale
-
-    # Determine if we need gradient checkpointing
-    needs_backward = any(t.requires_grad for t in (q, k, v))
-
-    # Define chunk processing function
-    def summarize_qkv_chunk(q_chunk, k_chunk, v_chunk, mask_chunk, attn_bias_chunk,
-                            causal, q_start, k_start, dropout):
-        q_chunk_size = q_chunk.shape[-2]
-        k_chunk_size = k_chunk.shape[-2]
-        weight = torch.einsum('b h i d, b h j d -> b h i j', q_chunk, k_chunk)
-
-        if exists(attn_bias_chunk):
-            weight = weight + attn_bias_chunk
-
-        mask_value = -torch.finfo(weight.dtype).max
-
-        if exists(mask_chunk):
-            mask_chunk = rearrange(mask_chunk, 'b j -> b 1 1 j')
-            weight = weight.masked_fill(~mask_chunk, mask_value)
-
-        if causal and q_start < (k_start + k_chunk_size - 1):
-            causal_mask = torch.ones((q_chunk_size, k_chunk_size), device=weight.device,
-                                     dtype=torch.bool).triu(q_start - k_start + 1)
-            weight = weight.masked_fill(causal_mask, mask_value)
-
-        weight_max = weight.amax(dim=-1, keepdim=True).detach()
-        weight = weight - weight_max
-        exp_weight = weight.exp()
-        if dropout > 0:
-            exp_weight = F.dropout(exp_weight, p=dropout)
-
-        weighted_value = torch.einsum('b h i j, b h j d -> b h i d', exp_weight, v_chunk)
-        return exp_weight.sum(dim=-1), weighted_value, rearrange(weight_max, '... 1 -> ...')
-
-    checkpointed_summarize = partial(torch.utils.checkpoint.checkpoint, summarize_qkv_chunk)
-    summarize_fn = checkpointed_summarize if needs_backward else summarize_qkv_chunk
-
-    # Split into chunks
-    q_chunks = q.split(q_bucket_size, dim=-2)
-    k_chunks = k.split(k_bucket_size, dim=-2)
-    v_chunks = v.split(k_bucket_size, dim=-2)
-    mask_chunks = mask.split(k_bucket_size, dim=-1) if exists(mask) else [None] * len(k_chunks)
-
-    if exists(attn_bias):
-        attn_bias_chunks = attn_bias.split(q_bucket_size, dim=-2)
-        attn_bias_chunks = [b.split(k_bucket_size, dim=-1) for b in attn_bias_chunks]
-
-    out = []
-    for q_idx, q_chunk in enumerate(q_chunks):
-        exp_weights, weighted_values, weight_maxes = [], [], []
-        q_start = q_idx * q_bucket_size
-
-        for k_idx, (k_chunk, v_chunk, mask_chunk) in enumerate(zip(k_chunks, v_chunks, mask_chunks)):
-            k_start = k_idx * k_bucket_size
-
-            # Skip if causal mask would hide all
-            if causal and k_start > (q_start + q_chunk.shape[-2] - 1):
-                continue
-
-            attn_bias_chunk = attn_bias_chunks[q_idx][k_idx] if exists(attn_bias) else None
-            current_dropout = dropout if training else 0.
-
-            exp_w, wv, wm = summarize_fn(
-                q_chunk, k_chunk, v_chunk, mask_chunk, attn_bias_chunk,
-                causal, q_start, k_start, current_dropout
+def _validate_qkv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
+    for name, tensor in (("q", q), ("k", k), ("v", v)):
+        if not isinstance(tensor, torch.Tensor) or tensor.dim() != 4:
+            raise PerceptionShapeError(
+                f"{name} must have shape (B,H,L,D).",
+                component="attention",
+                details={"shape": list(tensor.shape) if isinstance(tensor, torch.Tensor) else None},
             )
-            exp_weights.append(exp_w)
-            weighted_values.append(wv)
-            weight_maxes.append(wm)
 
-        weight_maxes = torch.stack(weight_maxes, dim=-1)
-        weighted_values = torch.stack(weighted_values, dim=-1)
-        exp_weights = torch.stack(exp_weights, dim=-1)
+    if q.size(0) != k.size(0) or k.size(0) != v.size(0):
+        raise PerceptionDimensionError("Q/K/V batch sizes must match.", component="attention")
+    if k.size(-2) != v.size(-2):
+        raise PerceptionDimensionError("K/V sequence lengths must match.", component="attention")
+    if q.size(-1) != k.size(-1) or k.size(-1) != v.size(-1):
+        raise PerceptionDimensionError("Q/K/V head dimensions must match.", component="attention")
+    if k.size(1) != v.size(1) or k.size(1) not in (1, q.size(1)):
+        raise PerceptionDimensionError(
+            "K/V head count must be 1 or equal to the query head count.",
+            component="attention",
+            details={"q_heads": q.size(1), "kv_heads": k.size(1)},
+        )
 
-        global_max = weight_maxes.amax(dim=-1, keepdim=True)
-        renorm = (weight_maxes - global_max).exp().detach()
 
-        exp_weights = exp_weights * renorm
-        weighted_values = weighted_values * rearrange(renorm, '... c -> ... 1 c')
+def _normalize_mask(
+    mask: Optional[torch.Tensor],
+    *,
+    batch_size: int,
+    query_length: int,
+    key_length: int,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Normalize a keep-mask to a shape broadcastable to (B,H,Q,K)."""
+    if mask is None:
+        return None
+    mask = torch.as_tensor(mask, device=device).bool()
 
-        all_values = weighted_values.sum(dim=-1)
-        all_weights = exp_weights.sum(dim=-1)
+    if mask.dim() == 2:
+        if tuple(mask.shape) != (batch_size, key_length):
+            raise PerceptionShapeError(
+                "2D attention mask must have shape (B,K).",
+                component="attention",
+                details={"shape": list(mask.shape), "expected": [batch_size, key_length]},
+            )
+        return mask[:, None, None, :]
 
-        out.append(all_values / (rearrange(all_weights, '... -> ... 1') + eps))
+    if mask.dim() == 3:
+        if mask.size(0) != batch_size or mask.size(-1) != key_length or mask.size(1) not in (1, query_length):
+            raise PerceptionShapeError(
+                "3D attention mask must have shape (B,1,K) or (B,Q,K).",
+                component="attention",
+                details={"shape": list(mask.shape)},
+            )
+        return mask[:, None, :, :]
 
-    return torch.cat(out, dim=-2)
+    if mask.dim() == 4:
+        if mask.size(0) != batch_size or mask.size(-1) != key_length or mask.size(-2) not in (1, query_length):
+            raise PerceptionShapeError(
+                "4D attention mask must be broadcastable to (B,H,Q,K).",
+                component="attention",
+                details={"shape": list(mask.shape)},
+            )
+        return mask
+
+    raise PerceptionShapeError(
+        "Attention mask must have rank 2, 3, or 4.",
+        component="attention",
+        details={"shape": list(mask.shape)},
+    )
+
+
+def _normalize_bias(
+    bias: Optional[torch.Tensor],
+    *,
+    batch_size: int,
+    query_length: int,
+    key_length: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Optional[torch.Tensor]:
+    if bias is None:
+        return None
+
+    bias = torch.as_tensor(bias, device=device, dtype=dtype)
+    if bias.dim() == 2:
+        if tuple(bias.shape) != (query_length, key_length):
+            raise PerceptionShapeError(
+                "2D attention bias must have shape (Q,K).",
+                component="attention",
+                details={"shape": list(bias.shape)},
+            )
+        return bias[None, None, :, :]
+
+    if bias.dim() == 3:
+        if bias.size(0) not in (1, batch_size) or bias.size(-1) != key_length or bias.size(-2) not in (1, query_length):
+            raise PerceptionShapeError(
+                "3D attention bias must be broadcastable to (B,Q,K).",
+                component="attention",
+                details={"shape": list(bias.shape)},
+            )
+        return bias[:, None, :, :]
+
+    if bias.dim() == 4:
+        if bias.size(0) not in (1, batch_size) or bias.size(-1) != key_length or bias.size(-2) not in (1, query_length):
+            raise PerceptionShapeError(
+                "4D attention bias must be broadcastable to (B,H,Q,K).",
+                component="attention",
+                details={"shape": list(bias.shape)},
+            )
+        return bias
+
+    raise PerceptionShapeError(
+        "Attention bias must have rank 2, 3, or 4.",
+        component="attention",
+        details={"shape": list(bias.shape)},
+    )
+
+
+def _causal_mask(
+    query_length: int,
+    key_length: int,
+    *,
+    device: torch.device,
+    query_offset: int = 0,
+    key_offset: int = 0,
+    total_query_length: Optional[int] = None,
+    total_key_length: Optional[int] = None,
+) -> torch.Tensor:
+    total_q = query_length if total_query_length is None else total_query_length
+    total_k = key_length if total_key_length is None else total_key_length
+    query_base = max(total_k - total_q, 0)
+
+    q_pos = torch.arange(query_length, device=device) + query_offset + query_base
+    k_pos = torch.arange(key_length, device=device) + key_offset
+    return k_pos.unsqueeze(0) > q_pos.unsqueeze(1)
+
+
+def _masked_softmax(scores: torch.Tensor) -> torch.Tensor:
+    weights = torch.softmax(scores, dim=-1)
+    return torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def scaled_dot_product_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    causal: bool = False,
+    attn_bias: Optional[torch.Tensor] = None,
+    dropout: float = 0.0,
+    training: bool = False,
+) -> torch.Tensor:
+    """Exact scaled dot-product attention with boolean keep-mask semantics."""
+    _validate_qkv(q, k, v)
+    if not 0.0 <= float(dropout) < 1.0:
+        raise PerceptionConfigurationError(
+            "Attention dropout must be in [0,1).",
+            component="attention",
+            details={"dropout": dropout},
+        )
+
+    q_len, k_len = q.size(-2), k.size(-2)
+    keep_mask = _normalize_mask(
+        mask,
+        batch_size=q.size(0),
+        query_length=q_len,
+        key_length=k_len,
+        device=q.device,
+    )
+    bias = _normalize_bias(
+        attn_bias,
+        batch_size=q.size(0),
+        query_length=q_len,
+        key_length=k_len,
+        device=q.device,
+        dtype=q.dtype,
+    )
+
+    scores = torch.einsum("b h i d, b h j d -> b h i j", q, k) * (q.size(-1) ** -0.5)
+    if bias is not None:
+        scores = scores + bias
+    if keep_mask is not None:
+        scores = scores.masked_fill(~keep_mask, -torch.inf)
+    if causal:
+        blocked = _causal_mask(q_len, k_len, device=q.device)
+        scores = scores.masked_fill(blocked[None, None], -torch.inf)
+
+    weights = _masked_softmax(scores)
+    used_weights = F.dropout(weights, p=float(dropout), training=True) if training and dropout > 0 else weights
+    return torch.einsum("b h i j, b h j d -> b h i d", used_weights, v)
+
+
+def memory_efficient_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    causal: bool = False,
+    attn_bias: Optional[torch.Tensor] = None,
+    q_bucket_size: int = 512,
+    k_bucket_size: int = 1024,
+    eps: float = 1e-8,
+    dropout: float = 0.0,
+    training: bool = False,
+) -> torch.Tensor:
+    """Exact chunked attention using an online softmax over key chunks.
+
+    When dropout is active, query chunking is used while keys stay intact so
+    dropout is applied after global softmax normalization.
+    """
+    _validate_qkv(q, k, v)
+    if q_bucket_size <= 0 or k_bucket_size <= 0 or eps <= 0:
+        raise PerceptionConfigurationError(
+            "q_bucket_size, k_bucket_size, and eps must be positive.",
+            component="attention",
+        )
+
+    q_len, k_len = q.size(-2), k.size(-2)
+    keep_mask = _normalize_mask(
+        mask,
+        batch_size=q.size(0),
+        query_length=q_len,
+        key_length=k_len,
+        device=q.device,
+    )
+    bias = _normalize_bias(
+        attn_bias,
+        batch_size=q.size(0),
+        query_length=q_len,
+        key_length=k_len,
+        device=q.device,
+        dtype=q.dtype,
+    )
+
+    def slice_qk(value, qs, qe, ks, ke):
+        if value is None:
+            return None
+        q_slice = slice(None) if value.size(-2) == 1 else slice(qs, qe)
+        k_slice = slice(None) if value.size(-1) == 1 else slice(ks, ke)
+        return value[..., q_slice, k_slice]
+
+    scale = q.size(-1) ** -0.5
+    outputs = []
+
+    # Exact attention-dropout semantics require a globally normalized softmax.
+    if training and dropout > 0:
+        for qs in range(0, q_len, q_bucket_size):
+            qe = min(qs + q_bucket_size, q_len)
+            q_chunk = q[..., qs:qe, :]
+            scores = torch.einsum("b h i d, b h j d -> b h i j", q_chunk, k) * scale
+
+            mask_chunk = slice_qk(keep_mask, qs, qe, 0, k_len)
+            bias_chunk = slice_qk(bias, qs, qe, 0, k_len)
+            if bias_chunk is not None:
+                scores = scores + bias_chunk
+            if mask_chunk is not None:
+                scores = scores.masked_fill(~mask_chunk, -torch.inf)
+            if causal:
+                blocked = _causal_mask(
+                    qe - qs,
+                    k_len,
+                    device=q.device,
+                    query_offset=qs,
+                    total_query_length=q_len,
+                    total_key_length=k_len,
+                )
+                scores = scores.masked_fill(blocked[None, None], -torch.inf)
+
+            weights = _masked_softmax(scores)
+            weights = F.dropout(weights, p=float(dropout), training=True)
+            outputs.append(torch.einsum("b h i j, b h j d -> b h i d", weights, v))
+        return torch.cat(outputs, dim=-2)
+
+    # Online log-sum-exp softmax across K chunks.
+    for qs in range(0, q_len, q_bucket_size):
+        qe = min(qs + q_bucket_size, q_len)
+        q_chunk = q[..., qs:qe, :]
+        chunk_q_len = qe - qs
+
+        running_max = torch.full(
+            (q.size(0), q.size(1), chunk_q_len, 1),
+            -torch.inf,
+            device=q.device,
+            dtype=q.dtype,
+        )
+        running_sum = torch.zeros_like(running_max)
+        running_value = torch.zeros(
+            (q.size(0), q.size(1), chunk_q_len, v.size(-1)),
+            device=v.device,
+            dtype=v.dtype,
+        )
+
+        for ks in range(0, k_len, k_bucket_size):
+            ke = min(ks + k_bucket_size, k_len)
+            k_chunk = k[..., ks:ke, :]
+            v_chunk = v[..., ks:ke, :]
+            scores = torch.einsum("b h i d, b h j d -> b h i j", q_chunk, k_chunk) * scale
+
+            mask_chunk = slice_qk(keep_mask, qs, qe, ks, ke)
+            bias_chunk = slice_qk(bias, qs, qe, ks, ke)
+            if bias_chunk is not None:
+                scores = scores + bias_chunk
+            if mask_chunk is not None:
+                scores = scores.masked_fill(~mask_chunk, -torch.inf)
+            if causal:
+                blocked = _causal_mask(
+                    chunk_q_len,
+                    ke - ks,
+                    device=q.device,
+                    query_offset=qs,
+                    key_offset=ks,
+                    total_query_length=q_len,
+                    total_key_length=k_len,
+                )
+                scores = scores.masked_fill(blocked[None, None], -torch.inf)
+
+            block_max = scores.amax(dim=-1, keepdim=True)
+            safe_block_max = torch.where(torch.isfinite(block_max), block_max, torch.zeros_like(block_max))
+            exp_scores = torch.exp(scores - safe_block_max)
+            exp_scores = torch.nan_to_num(exp_scores, nan=0.0, posinf=0.0, neginf=0.0)
+
+            block_sum = exp_scores.sum(dim=-1, keepdim=True)
+            block_value = torch.einsum("b h i j, b h j d -> b h i d", exp_scores, v_chunk)
+
+            new_max = torch.maximum(running_max, block_max)
+            safe_new_max = torch.where(torch.isfinite(new_max), new_max, torch.zeros_like(new_max))
+            old_scale = torch.where(
+                torch.isfinite(running_max),
+                torch.exp(running_max - safe_new_max),
+                torch.zeros_like(running_max),
+            )
+            new_scale = torch.where(
+                torch.isfinite(block_max),
+                torch.exp(block_max - safe_new_max),
+                torch.zeros_like(block_max),
+            )
+
+            running_value = running_value * old_scale.to(running_value.dtype) + block_value * new_scale.to(block_value.dtype)
+            running_sum = running_sum * old_scale + block_sum * new_scale
+            running_max = new_max
+
+        out = running_value / running_sum.clamp_min(float(eps)).to(running_value.dtype)
+        out = torch.where(running_sum > 0, out, torch.zeros_like(out))
+        outputs.append(out)
+
+    return torch.cat(outputs, dim=-2)
+
+
+def _init_linear(layer: nn.Linear, initializer: str) -> None:
+    init_map = {
+        "he": he_init,
+        "he_normal": he_init,
+        "lecun": lecun_normal,
+        "xavier_uniform": xavier_uniform,
+        "xavier_normal": xavier_normal,
+    }
+    init_fn = init_map.get(initializer, xavier_uniform)
+    initialized = init_fn(tuple(layer.weight.shape), device=layer.weight.device)
+    with torch.no_grad():
+        layer.weight.copy_(initialized.to(dtype=layer.weight.dtype, device=layer.weight.device))
+        if layer.bias is not None:
+            layer.bias.zero_()
 
 
 # ===========================
 # Attention Modules
 # ===========================
 class BaseAttention(nn.Module):
-    """Base class for all attention variants with common projections."""
-    def __init__(self):
+    """Multi-head attention with explicit construction-time causality."""
+
+    def __init__(self, *, causal: Optional[bool] = None) -> None:
         super().__init__()
         self.config = load_global_config()
-        self.embed_dim = self.config.get('embed_dim')
-        self.num_heads = self.config.get('num_heads')
-        self.dropout_rate = self.config.get('dropout_rate')
-        self.causal = self.config.get('causal')
-        self.initializer = self.config.get('initializer', 'xavier_uniform')
-        self.device = self.config.get('device', 'cpu')
+        self.attention_config = get_config_section("attention") or {}
 
-        self.attention_config = get_config_section('attention')
-        self.dim_head = self.attention_config.get('dim_head', self.embed_dim // self.num_heads)
-        self.q_bucket_size = self.attention_config.get('q_bucket_size', 512)
-        self.k_bucket_size = self.attention_config.get('k_bucket_size', 1024)
-        self.memory_efficient = self.attention_config.get('memory_efficient', False)
+        self.embed_dim = int(self.config.get("embed_dim", 512))
+        self.num_heads = int(self.config.get("num_heads", 8))
+        self.dropout_rate = float(self.config.get("dropout_rate", 0.1))
+        self.initializer = str(self.config.get("initializer", "xavier_uniform"))
+        self.device = resolve_torch_device(self.config.get("device", "cpu"))
 
-        # Ensure embed_dim is divisible by num_heads
-        assert self.embed_dim % self.num_heads == 0, "embed_dim must be divisible by num_heads"
+        if self.embed_dim <= 0 or self.num_heads <= 0 or self.embed_dim % self.num_heads != 0:
+            raise PerceptionConfigurationError(
+                "embed_dim must be positive and divisible by num_heads.",
+                component="attention",
+                details={"embed_dim": self.embed_dim, "num_heads": self.num_heads},
+            )
+        if not 0.0 <= self.dropout_rate < 1.0:
+            raise PerceptionConfigurationError(
+                "dropout_rate must be in [0,1).",
+                component="attention",
+                details={"dropout_rate": self.dropout_rate},
+            )
+
         self.head_dim = self.embed_dim // self.num_heads
+        configured_head_dim = int(self.attention_config.get("dim_head", self.head_dim))
+        if configured_head_dim != self.head_dim:
+            raise PerceptionConfigurationError(
+                "attention.dim_head must equal embed_dim / num_heads.",
+                component="attention",
+                details={"configured": configured_head_dim, "derived": self.head_dim},
+            )
 
-        # Projections (to be overridden by children if needed)
+        self.q_bucket_size = int(self.attention_config.get("q_bucket_size", 512))
+        self.k_bucket_size = int(self.attention_config.get("k_bucket_size", 1024))
+        self.memory_efficient = bool(self.attention_config.get("memory_efficient", False))
+        self.causal = bool(self.config.get("causal", False)) if causal is None else bool(causal)
+
         self.to_q = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.to_kv = nn.Linear(self.embed_dim, self.embed_dim * 2, bias=False)
         self.to_out = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-
         self.output_attentions = False
+        BaseAttention._init_weights(self)
+        self.to(self.device)
 
-    def _init_weights(self):
-        """Initialize base weights using the configured initializer."""
-        init_map = {
-            'he': he_init,
-            'lecun': lecun_normal,
-            'xavier_uniform': xavier_uniform,
-            'xavier_normal': xavier_normal,
-        }
-        init_fn = init_map.get(self.initializer, xavier_uniform)
+    def _init_weights(self) -> None:
+        for layer in (self.to_q, self.to_kv, self.to_out):
+            _init_linear(layer, self.initializer)
 
-        for layer in [self.to_q, self.to_kv, self.to_out]:
-            weight_shape = layer.weight.shape
-            with torch.no_grad():
-                layer.weight.data = init_fn(weight_shape, device=self.device)
-
-    def forward(self, x, context=None, mask=None, attn_bias=None,
-                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
-        # Handle optional parameters
-        memory_efficient = default(memory_efficient, self.memory_efficient)
-        q_bucket_size = default(q_bucket_size, self.q_bucket_size)
-        k_bucket_size = default(k_bucket_size, self.k_bucket_size)
-        context = default(context, x)
-    
-        # Project inputs
-        q = self.to_q(x)
+    def _project_qkv(self, x: torch.Tensor, context: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q = rearrange(self.to_q(x), "b n (h d) -> b h n d", h=self.num_heads, d=self.head_dim)
         k, v = self.to_kv(context).chunk(2, dim=-1)
-    
-        # Reshape for multi-head attention
-        q = rearrange(q, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-        k = rearrange(k, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-        v = rearrange(v, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-    
+        k = rearrange(k, "b n (h d) -> b h n d", h=self.num_heads, d=self.head_dim)
+        v = rearrange(v, "b n (h d) -> b h n d", h=self.num_heads, d=self.head_dim)
+        return q, k, v
+
+    def _dense_with_weights(self, q, k, v, mask=None, attn_bias=None):
+        q_len, k_len = q.size(-2), k.size(-2)
+        keep_mask = _normalize_mask(mask, batch_size=q.size(0), query_length=q_len, key_length=k_len, device=q.device)
+        bias = _normalize_bias(attn_bias, batch_size=q.size(0), query_length=q_len, key_length=k_len, device=q.device, dtype=q.dtype)
+
+        scores = torch.einsum("b h i d, b h j d -> b h i j", q, k) * (q.size(-1) ** -0.5)
+        if bias is not None:
+            scores = scores + bias
+        if keep_mask is not None:
+            scores = scores.masked_fill(~keep_mask, -torch.inf)
+        if self.causal:
+            scores = scores.masked_fill(_causal_mask(q_len, k_len, device=q.device)[None, None], -torch.inf)
+
+        weights = _masked_softmax(scores)
+        used_weights = F.dropout(weights, p=self.dropout_rate, training=True) if self.training and self.dropout_rate > 0 else weights
+        return torch.einsum("b h i j, b h j d -> b h i d", used_weights, v), weights
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        context: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        attn_bias: Optional[torch.Tensor] = None,
+        memory_efficient: Optional[bool] = None,
+        q_bucket_size: Optional[int] = None,
+        k_bucket_size: Optional[int] = None,
+        **kwargs
+    ):
+        if x.dim() != 3 or x.size(-1) != self.embed_dim:
+            raise PerceptionShapeError(
+                "Attention input must have shape (B,L,embed_dim).",
+                component="attention",
+                details={"shape": list(x.shape), "embed_dim": self.embed_dim},
+            )
+        context = x if context is None else context
+        if context.dim() != 3 or context.size(0) != x.size(0) or context.size(-1) != self.embed_dim:
+            raise PerceptionShapeError(
+                "Attention context must have shape (B,S,embed_dim) with the same batch size.",
+                component="attention",
+                details={"input_shape": list(x.shape), "context_shape": list(context.shape)},
+            )
+
+        q, k, v = self._project_qkv(x, context)
         if self.output_attentions:
-            # Use the custom function that returns both output and weights
-            out, attn_weights = self._attention_with_weights(q, k, v, mask, attn_bias, self.causal)
+            out, weights = self._dense_with_weights(q, k, v, mask=mask, attn_bias=attn_bias)
         else:
-            # Choose attention mechanism based on memory_efficient flag
-            attn_fn = memory_efficient_attention if memory_efficient else scaled_dot_product_attention
-            out = attn_fn(q, k, v, mask=mask, attn_bias=attn_bias, causal=self.causal)
-            attn_weights = None
-    
-        # Combine heads and project
-        out = rearrange(out, 'b h n d -> b n (h d)')
-        out = self.to_out(out)
-    
-        if self.output_attentions:
-            return out, attn_weights
-        return out
+            use_chunked = self.memory_efficient if memory_efficient is None else bool(memory_efficient)
+            fn = memory_efficient_attention if use_chunked else scaled_dot_product_attention
+            kwargs = dict(
+                mask=mask,
+                causal=self.causal,
+                attn_bias=attn_bias,
+                dropout=self.dropout_rate,
+                training=self.training,
+            )
+            if use_chunked:
+                kwargs.update(
+                    q_bucket_size=self.q_bucket_size if q_bucket_size is None else int(q_bucket_size),
+                    k_bucket_size=self.k_bucket_size if k_bucket_size is None else int(k_bucket_size),
+                    eps=float(self.attention_config.get("epsilon", 1e-8)),
+                )
+            out = fn(q, k, v, **kwargs)
+            weights = None
 
-    def _attention(self, q, k, v, mask, attn_bias, causal):
-        # Standard scaled dot‑product attention (no weights returned)
-        scale = q.shape[-1] ** -0.5
-        q = q * scale
-        sim = torch.einsum('b h i d, b h j d -> b h i j', q, k)
-        if attn_bias is not None:
-            sim = sim + attn_bias
-        mask_value = -torch.finfo(sim.dtype).max
-        if mask is not None:
-            if mask.ndim == 2:
-                mask = rearrange(mask, 'b j -> b 1 1 j')
-            sim = sim.masked_fill(~mask, mask_value)
-        if causal:
-            i, j = sim.shape[-2:]
-            causal_mask = torch.ones(i, j, device=q.device, dtype=torch.bool).triu(j - i + 1)
-            sim = sim.masked_fill(causal_mask, mask_value)
-        attn = sim.softmax(dim=-1)
-        return torch.einsum('b h i j, b h j d -> b h i d', attn, v)
-
-    def _attention_with_weights(self, q, k, v, mask, attn_bias, causal):
-        # Same as above but returns (output, attention_weights)
-        scale = q.shape[-1] ** -0.5
-        q = q * scale
-        sim = torch.einsum('b h i d, b h j d -> b h i j', q, k)
-        if attn_bias is not None:
-            sim = sim + attn_bias
-        mask_value = -torch.finfo(sim.dtype).max
-        if mask is not None:
-            if mask.ndim == 2:
-                mask = rearrange(mask, 'b j -> b 1 1 j')
-            sim = sim.masked_fill(~mask, mask_value)
-        if causal:
-            i, j = sim.shape[-2:]
-            causal_mask = torch.ones(i, j, device=q.device, dtype=torch.bool).triu(j - i + 1)
-            sim = sim.masked_fill(causal_mask, mask_value)
-        attn = sim.softmax(dim=-1)
-        out = torch.einsum('b h i j, b h j d -> b h i d', attn, v)
-        return out, attn
-
-    def _split_heads(self, x):
-        """Split last dimension into multiple heads."""
-        batch_size, seq_len, embed_dim = x.shape
-        x = x.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        return x.permute(0, 2, 1, 3)
-
-    def _combine_heads(self, x):
-        """Combine heads back into single embedding."""
-        batch_size, num_heads, seq_len, head_dim = x.shape
-        x = x.permute(0, 2, 1, 3).contiguous()
-        return x.view(batch_size, seq_len, self.embed_dim)
+        out = self.to_out(rearrange(out, "b h n d -> b n (h d)"))
+        return (out, weights) if self.output_attentions else out
 
     @staticmethod
-    def build_attention_mask(input_ids, pad_token_id, masked_token_id=None, is_masked_training=False, device='cpu'):
-        """Build attention mask from token IDs."""
-        if not isinstance(input_ids, torch.Tensor):
-            input_ids = torch.tensor(input_ids, device=device)
-        else:
-            input_ids = input_ids.to(device)
-
-        base_mask = (input_ids != pad_token_id)
+    def build_attention_mask(
+        input_ids,
+        pad_token_id,
+        masked_token_id=None,
+        is_masked_training: bool = False,
+        device: str = "cpu",
+    ) -> torch.Tensor:
+        input_ids = torch.as_tensor(input_ids, device=device)
+        mask = input_ids.ne(pad_token_id)
         if is_masked_training and masked_token_id is not None:
-            masked_positions = (input_ids == masked_token_id)
-            base_mask = base_mask & (~masked_positions)
-
-        # Expand to (batch, 1, 1, seq) for broadcasting
-        return base_mask.unsqueeze(1).unsqueeze(2)
+            mask = mask & input_ids.ne(masked_token_id)
+        return mask
 
 
 class CosineAttention(BaseAttention):
-    """Attention with cosine similarity and learnable scaling."""
-    def __init__(self, seq_len):
-        super().__init__()
-        scale_init = -math.log(math.log2(seq_len ** 2 - seq_len))
-        self.scale = Parameter(torch.full((1, self.num_heads, 1, 1), scale_init))
-        self._init_weights()  # Base has all layers, so this works
+    """Cosine attention with a learned positive logit scale."""
 
-    def forward(self, x, context=None, mask=None, attn_bias=None,
-                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
-        memory_efficient = default(memory_efficient, self.memory_efficient)
-        q_bucket_size = default(q_bucket_size, self.q_bucket_size)
-        k_bucket_size = default(k_bucket_size, self.k_bucket_size)
-        context = default(context, x)
+    def __init__(self, seq_len: int, *, causal: Optional[bool] = None) -> None:
+        if int(seq_len) < 2:
+            raise PerceptionConfigurationError(
+                "CosineAttention requires seq_len >= 2.",
+                component="attention",
+                details={"seq_len": seq_len},
+            )
+        super().__init__(causal=causal)
+        scale_init = -math.log(math.log2(int(seq_len) ** 2 - int(seq_len)))
+        self.scale = nn.Parameter(
+            torch.full(
+                (1, self.num_heads, 1, 1),
+                float(scale_init),
+                device=self.device,
+            )
+        )
 
-        q = self.to_q(x)
-        k, v = self.to_kv(context).chunk(2, dim=-1)
+    def forward(self, x, context=None, mask=None, attn_bias=None, **_):
+        context = x if context is None else context
+        q, k, v = self._project_qkv(x, context)
+        q = F.normalize(q, p=2, dim=-1)
+        k = F.normalize(k, p=2, dim=-1)
 
-        q = rearrange(q, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-        k = rearrange(k, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-        v = rearrange(v, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
+        q_len, k_len = q.size(-2), k.size(-2)
+        keep_mask = _normalize_mask(mask, batch_size=q.size(0), query_length=q_len, key_length=k_len, device=q.device)
+        bias = _normalize_bias(attn_bias, batch_size=q.size(0), query_length=q_len, key_length=k_len, device=q.device, dtype=q.dtype)
 
-        # Cosine attention: normalize q and k, apply scale
-        q, k = map(l2norm, (q, k))
-        q = q * self.scale.exp()
+        scores = torch.einsum("b h i d, b h j d -> b h i j", q, k) * self.scale.exp()
+        if bias is not None:
+            scores = scores + bias
+        if keep_mask is not None:
+            scores = scores.masked_fill(~keep_mask, -torch.inf)
+        if self.causal:
+            scores = scores.masked_fill(_causal_mask(q_len, k_len, device=q.device)[None, None], -torch.inf)
 
-        attn_fn = memory_efficient_attention if memory_efficient else scaled_dot_product_attention
-        out = attn_fn(q, k, v, mask=mask, attn_bias=attn_bias, causal=self.causal)
-
-        out = rearrange(out, 'b h n d -> b n (h d)')
-        out = self.to_out(out)
-        
-        if self.output_attentions:
-            # For cosine attention, we can compute weights similarly, but for simplicity return None
-            return out, None
-        return out
+        weights = _masked_softmax(scores)
+        used_weights = F.dropout(weights, p=self.dropout_rate, training=True) if self.training and self.dropout_rate > 0 else weights
+        out = torch.einsum("b h i j, b h j d -> b h i d", used_weights, v)
+        out = self.to_out(rearrange(out, "b h n d -> b n (h d)"))
+        return (out, weights) if self.output_attentions else out
 
 
 class EfficientAttention(BaseAttention):
-    """Linear‑time attention using random feature maps (Performer style)."""
-    def __init__(self):
-        super().__init__()
-        self.epsilon = self.attention_config.get('epsilon', 1e-8)
-        self.num_features = self.attention_config.get('num_features', 256)
-        self.kernel_fn = self._positive_random_features
+    """Non-causal kernelized linear attention using positive random features.
 
-        # Random projection matrix (dim_head → num_features)
-        self.register_buffer("projection_matrix", self._create_random_projection())
+    It intentionally does not claim exact Performer/FAVOR+ equivalence.
+    """
 
-        # Projections to lower‑rank space (per head)
-        self.query_proj = nn.Linear(self.head_dim, self.num_features, bias=False)
-        self.key_proj = nn.Linear(self.head_dim, self.num_features, bias=False)
-        self.value_proj = nn.Linear(self.head_dim, self.head_dim, bias=False)
+    def __init__(self, *, causal: Optional[bool] = None) -> None:
+        super().__init__(causal=causal)
+        if self.causal:
+            raise UnsupportedPerceptionOptionError(
+                "EfficientAttention does not implement causal linear attention.",
+                component="attention",
+                remediation="Use BaseAttention or MultiQueryAttention for causal decoding.",
+            )
 
-        # Final projection (after mixing heads)
-        self.final_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.epsilon = float(self.attention_config.get("epsilon", 1e-8))
+        self.num_features = int(self.attention_config.get("num_features", 256))
+        if self.epsilon <= 0 or self.num_features <= 0:
+            raise PerceptionConfigurationError(
+                "EfficientAttention epsilon and num_features must be positive.",
+                component="attention",
+            )
 
-        # Initialize all weights (including base and extra)
-        self._init_weights()
+        projection = torch.randn(
+            self.head_dim,
+            self.num_features,
+            dtype=self.to_q.weight.dtype,
+            device=self.device,
+        )
+        projection = F.normalize(projection, p=2, dim=0) * math.sqrt(self.head_dim)
+        self.register_buffer("projection_matrix", projection, persistent=True)
 
-    def _init_weights(self):
-        # First, initialize base layers (to_q, to_kv, to_out)
-        super()._init_weights()
+    def _positive_features(self, x: torch.Tensor) -> torch.Tensor:
+        projection = self.projection_matrix.to(device=x.device, dtype=x.dtype)
+        projected = torch.einsum("b h s d, d f -> b h s f", x, projection)
+        squared_norm = 0.5 * x.square().sum(dim=-1, keepdim=True)
+        exponent = torch.clamp(projected - squared_norm, min=-30.0, max=30.0)
+        return torch.exp(exponent) / math.sqrt(self.num_features)
 
-        # Then initialize the extra layers
-        init_map = {
-            'he': he_init,
-            'lecun': lecun_normal,
-            'xavier_uniform': xavier_uniform,
-            'xavier_normal': xavier_normal,
-        }
-        init_fn = init_map.get(self.initializer, xavier_uniform)
+    def forward(self, x, context=None, mask=None, attn_bias=None, **_):
+        if attn_bias is not None:
+            raise UnsupportedPerceptionOptionError(
+                "EfficientAttention does not support arbitrary additive attention bias.",
+                component="attention",
+            )
 
-        for layer in [self.query_proj, self.key_proj, self.value_proj, self.final_proj]:
-            weight_shape = layer.weight.shape
-            with torch.no_grad():
-                layer.weight.data = init_fn(weight_shape, device=self.device)
+        context = x if context is None else context
+        q, k, v = self._project_qkv(x, context)
+        scale = self.head_dim ** -0.25
+        qf = self._positive_features(q * scale)
+        kf = self._positive_features(k * scale)
 
-    def _create_random_projection(self):
-        """Generate an orthogonal random matrix for kernel mapping."""
-        ortho = torch.randn(self.num_features, self.head_dim)
-        ortho, _ = torch.linalg.qr(ortho)
-        return ortho.T
+        keep_mask = _normalize_mask(
+            mask,
+            batch_size=q.size(0),
+            query_length=q.size(-2),
+            key_length=k.size(-2),
+            device=q.device,
+        )
+        if keep_mask is not None:
+            if keep_mask.size(-2) != 1:
+                raise UnsupportedPerceptionOptionError(
+                    "EfficientAttention supports key-validity masks only.",
+                    component="attention",
+                    remediation="Use a (B,K)/(B,1,K) mask or BaseAttention.",
+                )
+            key_mask = keep_mask[..., 0, :].unsqueeze(-1)
+            kf = kf * key_mask.to(kf.dtype)
+            v = v * key_mask.to(v.dtype)
 
-    def _positive_random_features(self, x):
-        """Apply FAVOR+ kernel: exp(-||x||^2/2) * exp(-||y||^2/2) * exp(x·y)."""
-        x_proj = torch.einsum('b h s d, d f -> b h s f', x, self.projection_matrix)
-        return torch.exp(-x_proj ** 2 / 2)
-
-    def forward(self, x, context=None, mask=None, attn_bias=None,
-                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
-        context = default(context, x)
-
-        # Get base projections (queries, keys, values)
-        q = self.to_q(x)
-        k, v = self.to_kv(context).chunk(2, dim=-1)
-
-        # Reshape to (batch, heads, seq, head_dim)
-        q = rearrange(q, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-        k = rearrange(k, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-        v = rearrange(v, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-
-        # Apply kernel transformation per head
-        q_kernel = self.kernel_fn(q)   # (batch, heads, seq, num_features)
-        k_kernel = self.kernel_fn(k)   # (batch, heads, seq, num_features)
-
-        # Masking: set masked positions to zero
-        if exists(mask):
-            if mask.ndim == 4:
-                mask = mask.squeeze(1).squeeze(1)  # (batch, seq)
-            elif mask.ndim == 3 and mask.size(1) == 1:
-                mask = mask.squeeze(1)            # (batch, seq)
-            if mask.ndim == 2:
-                # Convert to boolean if it's not already
-                mask_bool = mask.to(torch.bool) if mask.dtype != torch.bool else mask
-                mask_expanded = mask_bool.unsqueeze(1).unsqueeze(-1)  # (batch, 1, seq, 1)
-                k_kernel = k_kernel.masked_fill(~mask_expanded, 0.0)
-                v = v.masked_fill(~mask_expanded, 0.0)
-
-        # Compute KV contraction
-        kv = torch.einsum('b h s f, b h s d -> b h f d', k_kernel, v)
-
-        # Denominator: sum of kernel values for each head
-        z = 1 / (torch.einsum('b h s f, b h f -> b h s', q_kernel, k_kernel.sum(dim=2)) + self.epsilon)
-        z = z.unsqueeze(-1)  # (batch, heads, seq, 1)
-
-        # Output = q_kernel @ kv, scaled by 1/z
-        out = torch.einsum('b h s f, b h f d -> b h s d', q_kernel, kv) * z
-
-        # Combine heads and project
-        out = rearrange(out, 'b h s d -> b s (h d)')
-        if self.output_attentions:
-            return out, None
-        return out
+        kv = torch.einsum("b h s f, b h s d -> b h f d", kf, v)
+        key_sum = kf.sum(dim=-2)
+        denominator = torch.einsum("b h s f, b h f -> b h s", qf, key_sum).unsqueeze(-1)
+        numerator = torch.einsum("b h s f, b h f d -> b h s d", qf, kv)
+        out = numerator / denominator.clamp_min(self.epsilon)
+        out = torch.where(denominator > 0, out, torch.zeros_like(out))
+        out = self.to_out(rearrange(out, "b h s d -> b s (h d)"))
+        return (out, None) if self.output_attentions else out
 
 
 class MultiQueryAttention(BaseAttention):
-    """Multi‑query attention: keys and values are shared across heads."""
-    def __init__(self):
-        super().__init__()
-        # Remove the inherited to_kv
-        delattr(self, 'to_kv')
+    """Multi-query attention with shared K/V projections across query heads."""
 
-        # Create separate key and value projections (single head)
-        self.to_k = nn.Linear(self.embed_dim, self.head_dim, bias=False)
-        self.to_v = nn.Linear(self.embed_dim, self.head_dim, bias=False)
+    def __init__(self, *, causal: Optional[bool] = None) -> None:
+        super().__init__(causal=causal)
+        del self.to_kv
 
-        # Rotary embeddings (optional)
-        if self.attention_config.get('positional_encoding') == 'rotary':
-            self.rotary_emb = RotaryEmbedding(dim=self.head_dim)
-        else:
-            self.rotary_emb = None
+        self.to_k = nn.Linear(self.embed_dim, self.head_dim, bias=False).to(self.device)
+        self.to_v = nn.Linear(self.embed_dim, self.head_dim, bias=False).to(self.device)
+        _init_linear(self.to_k, self.initializer)
+        _init_linear(self.to_v, self.initializer)
 
-        # Initialize all weights (including base and new layers)
-        self._init_weights()
+        self.rotary_emb = (
+            RotaryEmbedding(dim=self.head_dim)
+            if self.attention_config.get("positional_encoding") == "rotary"
+            else None
+        )
 
-    def _init_weights(self):
-        # Initialize base layers (to_q, to_out) – note to_kv is gone
-        init_map = {
-            'he': he_init,
-            'lecun': lecun_normal,
-            'xavier_uniform': xavier_uniform,
-            'xavier_normal': xavier_normal,
-        }
-        init_fn = init_map.get(self.initializer, xavier_uniform)
+    def forward(self, x, context=None, mask=None, attn_bias=None, memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
+        context = x if context is None else context
+        q = rearrange(self.to_q(x), "b n (h d) -> b h n d", h=self.num_heads, d=self.head_dim)
+        k = self.to_k(context).unsqueeze(1)
+        v = self.to_v(context).unsqueeze(1)
 
-        for layer in [self.to_q, self.to_out]:
-            weight_shape = layer.weight.shape
-            with torch.no_grad():
-                layer.weight.data = init_fn(weight_shape, device=self.device)
-
-        # Initialize the extra layers (to_k, to_v)
-        for layer in [self.to_k, self.to_v]:
-            weight_shape = layer.weight.shape
-            with torch.no_grad():
-                layer.weight.data = init_fn(weight_shape, device=self.device)
-
-    def forward(self, x, context=None, mask=None, attn_bias=None,
-                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
-        memory_efficient = default(memory_efficient, self.memory_efficient)
-        q_bucket_size = default(q_bucket_size, self.q_bucket_size)
-        k_bucket_size = default(k_bucket_size, self.k_bucket_size)
-        context = default(context, x)
-
-        # Queries: multi‑head
-        q = self.to_q(x)
-        q = rearrange(q, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-
-        # Keys/values: single head
-        k = self.to_k(context)  # (batch, seq, head_dim)
-        v = self.to_v(context)  # (batch, seq, head_dim)
-        # Add head dimension for broadcasting
-        k = k.unsqueeze(1)      # (batch, 1, seq, head_dim)
-        v = v.unsqueeze(1)      # (batch, 1, seq, head_dim)
-
-        # Apply rotary embeddings if present
         if self.rotary_emb is not None:
-            q, k = self.rotary_emb(q, k)
+            q = self.rotary_emb.rotate_queries_or_keys(q)
+            k = self.rotary_emb.rotate_queries_or_keys(k)
 
-        attn_fn = memory_efficient_attention if memory_efficient else scaled_dot_product_attention
-        out = attn_fn(q, k, v, mask=mask, attn_bias=attn_bias, causal=self.causal)
+        # ``expand`` keeps shared K/V storage while making the head dimension
+        # explicit for the common attention kernels.
+        k = k.expand(-1, self.num_heads, -1, -1)
+        v = v.expand(-1, self.num_heads, -1, -1)
 
-        out = rearrange(out, 'b h n d -> b n (h d)')
         if self.output_attentions:
-            return out, None
-        return out
+            out, weights = self._dense_with_weights(q, k, v, mask=mask, attn_bias=attn_bias)
+        else:
+            use_chunked = self.memory_efficient if memory_efficient is None else bool(memory_efficient)
+            fn = memory_efficient_attention if use_chunked else scaled_dot_product_attention
+            kwargs = dict(mask=mask, causal=self.causal, attn_bias=attn_bias, dropout=self.dropout_rate, training=self.training)
+            if use_chunked:
+                kwargs.update(
+                    q_bucket_size=self.q_bucket_size if q_bucket_size is None else int(q_bucket_size),
+                    k_bucket_size=self.k_bucket_size if k_bucket_size is None else int(k_bucket_size),
+                    eps=float(self.attention_config.get("epsilon", 1e-8)),
+                )
+            out = fn(q, k, v, **kwargs)
+            weights = None
+
+        out = self.to_out(rearrange(out, "b h n d -> b n (h d)"))
+        return (out, weights) if self.output_attentions else out
 
 
 class CrossAttention(BaseAttention):
-    """Cross‑attention with separate key/value projections for encoder."""
-    def __init__(self):
-        super().__init__()
-        # Remove inherited to_kv
-        delattr(self, 'to_kv')
+    """Non-causal cross-attention over explicit context states."""
 
-        # Encoder projections
-        self.to_k_enc = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.to_v_enc = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+    def __init__(self) -> None:
+        super().__init__(causal=False)
+        del self.to_kv
 
-        # Initialize all weights (including base and new layers)
-        self._init_weights()
+        self.to_k_enc = nn.Linear(self.embed_dim, self.embed_dim, bias=False).to(self.device)
+        self.to_v_enc = nn.Linear(self.embed_dim, self.embed_dim, bias=False).to(self.device)
+        _init_linear(self.to_k_enc, self.initializer)
+        _init_linear(self.to_v_enc, self.initializer)
 
-    def _init_weights(self):
-        # Initialize base layers (to_q, to_out) – note to_kv is gone
-        init_map = {
-            'he': he_init,
-            'lecun': lecun_normal,
-            'xavier_uniform': xavier_uniform,
-            'xavier_normal': xavier_normal,
-        }
-        init_fn = init_map.get(self.initializer, xavier_uniform)
-
-        for layer in [self.to_q, self.to_out]:
-            weight_shape = layer.weight.shape
-            with torch.no_grad():
-                layer.weight.data = init_fn(weight_shape, device=self.device)
-
-        # Initialize the extra layers (to_k_enc, to_v_enc)
-        for layer in [self.to_k_enc, self.to_v_enc]:
-            weight_shape = layer.weight.shape
-            with torch.no_grad():
-                layer.weight.data = init_fn(weight_shape, device=self.device)
-
-    def forward(self, x, context, mask=None, attn_bias=None,
-                memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
+    def forward(self, x, context=None, mask=None, attn_bias=None, memory_efficient=None, q_bucket_size=None, k_bucket_size=None):
         if context is None:
-            raise ValueError("CrossAttention requires explicit context input")
+            raise PerceptionDimensionError("CrossAttention requires explicit context.", component="attention")
+        if x.dim() != 3 or context.dim() != 3 or x.size(0) != context.size(0):
+            raise PerceptionShapeError(
+                "CrossAttention expects x=(B,Q,D) and context=(B,K,D).",
+                component="attention",
+                details={"x_shape": list(x.shape), "context_shape": list(context.shape)},
+            )
+        if x.size(-1) != self.embed_dim or context.size(-1) != self.embed_dim:
+            raise PerceptionDimensionError(
+                "CrossAttention embedding dimension mismatch.",
+                component="attention",
+                details={"expected": self.embed_dim, "x_dim": x.size(-1), "context_dim": context.size(-1)},
+            )
 
-        memory_efficient = default(memory_efficient, self.memory_efficient)
-        q_bucket_size = default(q_bucket_size, self.q_bucket_size)
-        k_bucket_size = default(k_bucket_size, self.k_bucket_size)
+        q = rearrange(self.to_q(x), "b n (h d) -> b h n d", h=self.num_heads, d=self.head_dim)
+        k = rearrange(self.to_k_enc(context), "b n (h d) -> b h n d", h=self.num_heads, d=self.head_dim)
+        v = rearrange(self.to_v_enc(context), "b n (h d) -> b h n d", h=self.num_heads, d=self.head_dim)
 
-        # Queries from decoder, keys/values from encoder
-        q = self.to_q(x)
-        k = self.to_k_enc(context)
-        v = self.to_v_enc(context)
-
-        q = rearrange(q, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-        k = rearrange(k, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-        v = rearrange(v, 'b n (h d) -> b h n d', h=self.num_heads, d=self.head_dim)
-
-        attn_fn = memory_efficient_attention if memory_efficient else scaled_dot_product_attention
-        out = attn_fn(q, k, v, mask=mask, attn_bias=attn_bias, causal=self.causal)
-
-        out = rearrange(out, 'b h n d -> b n (h d)')
         if self.output_attentions:
-            return out, None
-        return out
+            out, weights = self._dense_with_weights(q, k, v, mask=mask, attn_bias=attn_bias)
+        else:
+            use_chunked = self.memory_efficient if memory_efficient is None else bool(memory_efficient)
+            fn = memory_efficient_attention if use_chunked else scaled_dot_product_attention
+            kwargs = dict(mask=mask, causal=False, attn_bias=attn_bias, dropout=self.dropout_rate, training=self.training)
+            if use_chunked:
+                kwargs.update(
+                    q_bucket_size=self.q_bucket_size if q_bucket_size is None else int(q_bucket_size),
+                    k_bucket_size=self.k_bucket_size if k_bucket_size is None else int(k_bucket_size),
+                    eps=float(self.attention_config.get("epsilon", 1e-8)),
+                )
+            out = fn(q, k, v, **kwargs)
+            weights = None
+
+        out = self.to_out(rearrange(out, "b h n d -> b n (h d)"))
+        return (out, weights) if self.output_attentions else out
 
 
 __all__ = [
@@ -592,10 +788,10 @@ if __name__ == "__main__":
     mqa = MultiQueryAttention()
     cross = CrossAttention()
 
-    printer.pretty("BaseAttention", base, "success")
-    printer.pretty("CosineAttention", cosine, "success")
-    printer.pretty("EfficientAttention", efficient, "success")
-    printer.pretty("MultiQueryAttention", mqa, "success")
-    printer.pretty("CrossAttention", cross, "success")
+    printer.pretty("BaseAttention", base, "success" if base == "success" else "error")
+    printer.pretty("CosineAttention", cosine, "success" if cosine == "success" else "error")
+    printer.pretty("EfficientAttention", efficient, "success" if efficient == "success" else "error")
+    printer.pretty("MultiQueryAttention", mqa, "success" if mqa == "success" else "error")
+    printer.pretty("CrossAttention", cross, "success" if cross == "success" else "error")
 
     print("\n=== Successfully Ran Attention ===\n")

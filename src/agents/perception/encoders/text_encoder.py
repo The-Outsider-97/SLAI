@@ -9,7 +9,9 @@ from rotary_embedding_torch import RotaryEmbedding
 from pathlib import Path
 
 from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.common import TensorOps, Parameter
+from ..utils.common import *
+from ..utils.perception_errors import *
+from ..utils.perception_helpers import *
 from ..modules.transformer import Transformer
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
@@ -35,12 +37,12 @@ class TextEncoder(nn.Module):
         self.text_config = get_config_section('text_encoder')
 
         # Core parameters
-        self.vocab_size = self.config.get('vocab_size')
-        self.embed_dim = self.config.get('embed_dim')
-        self.num_layers = self.config.get('num_layers')
-        self.num_heads = self.config.get('num_heads')
-        self.ff_dim = self.config.get('ff_dim')
-        self.num_styles = self.config.get('num_styles')
+        self.vocab_size = self.config.get('vocab_size', 50000)
+        self.embed_dim = self.config.get('embed_dim', 512)
+        self.num_layers = self.config.get('num_layers', 4)
+        self.num_heads = self.config.get('num_heads', 8)
+        self.ff_dim = self.config.get('ff_dim', 2048)
+        self.num_styles = self.config.get('num_styles', 10)
         self.max_position_embeddings = self.config.get('max_position_embeddings', 5000)
         self.positional_encoding = self.config.get('positional_encoding', 'sinusoidal')
         self.dropout_rate = self.config.get('dropout_rate', 0.1)
@@ -76,9 +78,11 @@ class TextEncoder(nn.Module):
         self.style_embeddings = nn.Embedding(self.num_styles, self.embed_dim)
 
         # Transformer backbone
-        self.transformer = Transformer()
-        self.transformer.return_hidden = True   # <-- always get full sequence
-        self.transformer.output_attentions = False  # will be set by register_attention_hooks
+        self.transformer = Transformer(
+            causal=False,
+            enable_cross_attention=False,
+            return_hidden=True,
+        )
 
     def _init_embeddings(self) -> Parameter:
         """Initialize token embeddings with the configured initializer."""
@@ -230,8 +234,8 @@ class TextEncoder(nn.Module):
         
         # Iterate over transformer layers and attach hooks
         for idx, layer in enumerate(self.transformer.layers):
-            if 'attention' in layer:
-                attn_module = layer['attention']
+            attn_module = getattr(layer, 'attention', None)
+            if attn_module is not None:
                 # Ensure the attention module has output_attentions flag
                 attn_module.output_attentions = True
                 attn_module.register_forward_hook(hook_fn(idx))

@@ -15,13 +15,14 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from .perception_contracts import FusedRepresentation, Modality, ModalityRepresentation
-from .utils.perception_errors import (
-    PerceptionConfigurationError,
-    PerceptionDimensionError,
-    PerceptionFusionError,
-    ensure_one_of,
-)
+from .utils.config_loader import get_config_section, load_global_config
+from .utils.perception_helpers import *
+from .utils.perception_errors import *
+from .perception_contracts import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+
+logger = get_logger("Perception Fusion")
+printer = PrettyPrinter()
 
 
 class PerceptionFusion(nn.Module):

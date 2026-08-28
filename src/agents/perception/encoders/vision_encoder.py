@@ -1,15 +1,26 @@
+"""Vision encoder façade for SLAI perception.
+
+Transformer patch encoding remains local to this façade.  CNN feature extraction
+is delegated to ``encoders.fallbacks.CNNEncoder`` so the backend is registered
+once and can be used consistently by the perception pipeline.
+"""
+
+from __future__ import annotations
+
 import math
 import torch
-import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 from ...base.modules.activation_engine import he_init
 from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.common import TensorOps, Parameter
+from ..utils.common import *
+from ..utils.perception_errors import *
+from ..utils.perception_helpers import *
 from ..modules.transformer import Transformer
+from .fallbacks import CNNEncoder
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Vision Encoder")
@@ -17,392 +28,310 @@ printer = PrettyPrinter
 
 
 class VisionEncoder(nn.Module):
-    """
-    Flexible vision encoder supporting:
-    - Transformer (patch‑based, ViT‑style)
-    - CNN (convolutional backbone with Spatial Pyramid Pooling)
-    """
-    def __init__(self):
+    """Vision feature encoder with Transformer and CNN backends."""
+
+    SUPPORTED_ENCODERS = ("transformer", "cnn")
+
+    def __init__(self) -> None:
         super().__init__()
         self._init_configs()
         self._validate_configs()
         self._init_components()
-        logger.info(f"VisionEncoder initialized: type={self.encoder_type}, "
-                    f"patch_size={self.patch_size}, embed_dim={self.embed_dim}")
-
-    def _init_configs(self):
-        """Load all configurations from global and section."""
-        self.config = load_global_config()
-        
-        # Core parameters – must be set first
-        self.embed_dim = self.config.get('embed_dim')
-        self.encoder_type = self.config.get('encoder_type', 'transformer')
-        self.device = self.config.get('device', 'cpu')
-        self.dropout_rate = self.config.get('dropout_rate', 0.1)
-        self.dynamic_patching = self.config.get('dynamic_patching', True)
-        self.max_position_embeddings = self.config.get('max_position_embeddings', 5000)
-
-        # Vision‑specific parameters (from vision_encoder section)
-        self.vision_config = get_config_section('vision_encoder')
-        self.in_channels = self.config.get('in_channels', 3)
-        self.img_size = self.vision_config.get('img_size', 224)
-        self.patch_size = self.vision_config.get('patch_size', 16)
-        self.positional_encoding = self.vision_config.get('positional_encoding', 'learned')
-        self.output_activation = self.vision_config.get('output_activation', None)
-
-        # Transformer parameters
-        self.num_layers = self.config.get('num_layers', 4)
-        self.num_heads = self.config.get('num_heads', 8)
-        self.num_styles = self.config.get('num_styles', 14)
-        self.ff_dim = self.config.get('ff_dim', 2048)
-        self.return_hidden = self.vision_config.get('return_hidden', False)
-        self.use_checkpointing = self.vision_config.get('use_gradient_checkpointing', True)
-
-        # CNN parameters – only load if needed
-        if self.encoder_type == 'cnn':
-            self.cnn_config = get_config_section('cnn')
-            self.spp_levels = self.cnn_config.get('spp_levels', [1, 2, 4])
-        else:
-            self.cnn_config = {}
-            self.spp_levels = [1, 2, 4]  # default
-
-        # Cache
-        self._cache = {}
-
-    def _validate_configs(self):
-        """Validate critical parameters to avoid runtime errors."""
-        if self.encoder_type == "transformer":
-            if self.patch_size <= 0:
-                raise ValueError("patch_size must be positive")
-            if self.img_size % self.patch_size != 0 and not self.dynamic_patching:
-                logger.warning(f"Image size {self.img_size} not divisible by patch_size {self.patch_size}. "
-                               "Dynamic patching will pad the image.")
-        elif self.encoder_type == "cnn":
-            filters = self.cnn_config.get('filters', [])
-            if not filters:
-                raise ValueError("CNN configuration must include 'filters' list")
-        else:
-            raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
-
-    def _init_components(self):
-        """Initialize encoder‑specific components."""
-        if self.encoder_type == "transformer":
-            self._init_transformer_encoder()
-        elif self.encoder_type == "cnn":
-            self._init_cnn_encoder()
-        else:
-            raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
-
-    def _init_transformer_encoder(self):
-        """Initialize transformer‑based encoder."""
-        # Calculate number of patches
-        if self.dynamic_patching:
-            self.num_patches = None  # computed per forward
-        else:
-            self.num_patches = (self.img_size // self.patch_size) ** 2
-
-        # Projection layer: from patch pixels to embed_dim
-        in_dim = self.in_channels * self.patch_size ** 2
-        self.projection = Parameter(
-            he_init((in_dim, self.embed_dim), fan_in=in_dim, device=self.device)
+        logger.info(
+            "VisionEncoder initialized: type=%s, patch_size=%s, embed_dim=%s",
+            self.encoder_type,
+            self.patch_size,
+            self.embed_dim,
         )
 
-        # Positional encoding
-        pe_len = (self.num_patches + 1) if self.num_patches else self.max_position_embeddings
-        if self.positional_encoding == "sinusoidal":
-            self.position_embed = self._init_sinusoidal_encoding(pe_len, self.embed_dim)
-        elif self.positional_encoding == "rotary":
-            # Rotary embeddings are applied inside attention layers; no position_embed here
-            self.position_embed = None
-            logger.info("Rotary positional encoding will be handled by attention layers")
-        else:  # learned
-            self.position_embed = Parameter(
-                torch.randn(1, pe_len, self.embed_dim, device=self.device) * 0.02
+    def _init_configs(self) -> None:
+        self.config = load_global_config()
+        # Resolve this before reading encoder_type; the uploaded implementation
+        # currently dereferences self.vision_config before assignment.
+        self.vision_config = get_config_section("vision_encoder") or {}
+
+        self.embed_dim = int(self.config.get("embed_dim", 512))
+        self.encoder_type = str(
+            self.vision_config.get(
+                "encoder_type",
+                self.config.get("encoder_type", "transformer"),
+            )
+        ).strip().lower()
+        self.device = resolve_torch_device(self.config.get("device", "cpu"))
+        self.dropout_rate = float(self.config.get("dropout_rate", 0.1))
+        self.dynamic_patching = bool(
+            self.vision_config.get(
+                "dynamic_patching",
+                self.config.get("dynamic_patching", True),
+            )
+        )
+        self.max_position_embeddings = int(
+            self.config.get("max_position_embeddings", 5000)
+        )
+
+        self.in_channels = int(
+            self.vision_config.get("in_channels", self.config.get("in_channels", 3))
+        )
+        self.img_size = int(self.vision_config.get("img_size", 224))
+        self.patch_size = int(self.vision_config.get("patch_size", 16))
+        self.positional_encoding = str(
+            self.vision_config.get("positional_encoding", "learned")
+        ).strip().lower()
+        self.output_activation = self.vision_config.get("output_activation")
+        self.return_hidden = bool(self.vision_config.get("return_hidden", True))
+
+        self.fallback_encoder: Optional[nn.Module] = None
+
+    def _validate_configs(self) -> None:
+        if self.embed_dim <= 0:
+            raise InvalidPerceptionConfigurationError(
+                "embed_dim must be > 0.",
+                component="vision_encoder",
+            )
+        if self.in_channels <= 0:
+            raise InvalidPerceptionConfigurationError(
+                "vision_encoder.in_channels must be > 0.",
+                component="vision_encoder",
+            )
+        if self.img_size <= 0 or self.patch_size <= 0:
+            raise InvalidPerceptionConfigurationError(
+                "vision_encoder.img_size and patch_size must be > 0.",
+                component="vision_encoder",
+                details={"img_size": self.img_size, "patch_size": self.patch_size},
+            )
+        if self.max_position_embeddings <= 0:
+            raise InvalidPerceptionConfigurationError(
+                "max_position_embeddings must be > 0.",
+                component="vision_encoder",
+            )
+        if self.encoder_type not in self.SUPPORTED_ENCODERS:
+            raise UnsupportedPerceptionOptionError(
+                "Unsupported vision encoder backend.",
+                component="vision_encoder",
+                details={
+                    "encoder_type": self.encoder_type,
+                    "supported": list(self.SUPPORTED_ENCODERS),
+                },
+            )
+        if (
+            self.encoder_type == "transformer"
+            and not self.dynamic_patching
+            and self.img_size % self.patch_size != 0
+        ):
+            raise InvalidPerceptionConfigurationError(
+                "Static vision patching requires img_size divisible by patch_size.",
+                component="vision_encoder",
+                details={"img_size": self.img_size, "patch_size": self.patch_size},
             )
 
-        # CLS token
-        self.cls_token = Parameter(torch.randn(1, 1, self.embed_dim, device=self.device) * 0.02)
+    def _init_components(self) -> None:
+        if self.encoder_type == "transformer":
+            self._init_transformer_encoder()
+        else:
+            self.fallback_encoder = CNNEncoder(
+                modality="vision",
+                config=self.config,
+                encoder_config=self.vision_config,
+            )
 
-        # Transformer backbone
-        self.transformer = Transformer()
-        self.transformer.return_hidden = self.return_hidden
+    def _init_transformer_encoder(self) -> None:
+        self.num_patches = (
+            None
+            if self.dynamic_patching
+            else (self.img_size // self.patch_size) ** 2
+        )
 
-    def _init_sinusoidal_encoding(self, max_len: int, embed_dim: int) -> Parameter:
-        """Create sinusoidal positional encoding (non‑trainable)."""
-        pe = torch.zeros(1, max_len, embed_dim, device=self.device)
-        position = torch.arange(0, max_len, dtype=torch.float, device=self.device).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, embed_dim, 2).float() *
-                             (-math.log(10000.0) / embed_dim))
+        projection_input = self.in_channels * self.patch_size**2
+        self.projection = Parameter(
+            he_init(
+                (projection_input, self.embed_dim),
+                fan_in=projection_input,
+                device=str(self.device),
+            )
+        )
+
+        position_count = (
+            self.num_patches + 1
+            if self.num_patches is not None
+            else self.max_position_embeddings
+        )
+        if self.positional_encoding == "sinusoidal":
+            self.position_embed = self._init_sinusoidal_encoding(position_count)
+        elif self.positional_encoding == "rotary":
+            self.position_embed = None
+        else:
+            self.position_embed = Parameter(
+                torch.randn(1, position_count, self.embed_dim, device=self.device) * 0.02
+            )
+
+        self.cls_token = Parameter(
+            torch.randn(1, 1, self.embed_dim, device=self.device) * 0.02
+        )
+        self.transformer = Transformer(
+            causal=False,
+            enable_cross_attention=False,
+            return_hidden=True,
+        )
+
+    def _init_sinusoidal_encoding(self, max_len: int) -> Parameter:
+        pe = torch.zeros(1, max_len, self.embed_dim, device=self.device)
+        position = torch.arange(
+            0,
+            max_len,
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(
+                0,
+                self.embed_dim,
+                2,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            * (-math.log(10000.0) / self.embed_dim)
+        )
         pe[0, :, 0::2] = torch.sin(position * div_term)
         pe[0, :, 1::2] = torch.cos(position * div_term)
         return Parameter(pe, requires_grad=False)
 
-    def _init_cnn_encoder(self):
-        """Initialize CNN‑based encoder with configurable filters and SPP."""
-        filters = self.cnn_config.get('filters', [])
-        self.conv_layers = nn.ModuleList()
-        in_channels = self.in_channels
-
-        for i, f in enumerate(filters):
-            # f format: [kernel_h, kernel_w, out_channels]
-            kernel_h, kernel_w, out_channels = f
-            conv = nn.Conv2d(
-                in_channels, out_channels,
-                kernel_size=(kernel_h, kernel_w),
-                stride=4 if i == 0 else 1,   # first layer stride 4 for downsampling
-                padding=2
-            )
-            self.conv_layers.append(conv)
-            self.conv_layers.append(nn.ReLU(inplace=True))
-            # Add MaxPool after first two conv blocks (optional)
-            if i < 2:
-                self.conv_layers.append(nn.MaxPool2d(kernel_size=3, stride=2))
-            in_channels = out_channels
-
-        # SPP levels (bin sizes)
-        self.spp_levels = self.cnn_config.get('spp_levels', [1, 2, 4])
-
-        # Projection to embed_dim (optional, for compatibility)
-        self.cnn_proj = nn.Linear(in_channels * sum(l**2 for l in self.spp_levels), self.embed_dim)
-
     def extract_patches(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Convert image into patches with optional dynamic padding.
+        x = require_tensor(x, "x", component="vision_encoder")
+        if x.dim() != 4:
+            raise ModalityInputError(
+                "Vision patch extraction expects shape (B,C,H,W).",
+                component="vision_encoder",
+                details={"shape": list(x.shape)},
+            )
+        batch_size, channels, height, width = x.shape
+        if channels != self.in_channels:
+            raise PerceptionDimensionError(
+                "Vision channel count does not match vision_encoder.in_channels.",
+                component="vision_encoder",
+                details={"channels": channels, "expected": self.in_channels},
+            )
 
-        Args:
-            x: Input tensor (batch, channels, height, width)
-
-        Returns:
-            Patch embeddings (batch, num_patches, patch_size**2 * channels)
-        """
-        b, c, h, w = x.shape
-
-        # Dynamic padding to make dimensions divisible by patch_size
         if self.dynamic_patching:
-            pad_h = (self.patch_size - (h % self.patch_size)) % self.patch_size
-            pad_w = (self.patch_size - (w % self.patch_size)) % self.patch_size
-            if pad_h > 0 or pad_w > 0:
+            pad_h = (self.patch_size - height % self.patch_size) % self.patch_size
+            pad_w = (self.patch_size - width % self.patch_size) % self.patch_size
+            if pad_h or pad_w:
                 x = F.pad(x, (0, pad_w, 0, pad_h))
-                h, w = x.shape[2], x.shape[3]
+                height, width = x.shape[-2:]
 
-        # Ensure exact divisibility
-        assert h % self.patch_size == 0 and w % self.patch_size == 0, \
-            f"Height {h} and width {w} must be divisible by patch_size {self.patch_size}"
+        if height % self.patch_size != 0 or width % self.patch_size != 0:
+            raise PerceptionDimensionError(
+                "Vision dimensions must be divisible by patch_size when dynamic padding is disabled.",
+                component="vision_encoder",
+                details={
+                    "height": height,
+                    "width": width,
+                    "patch_size": self.patch_size,
+                },
+            )
 
-        # Extract patches
-        x = x.unfold(2, self.patch_size, self.patch_size)   # (B, C, H_p, W_p, P_h)
-        x = x.unfold(3, self.patch_size, self.patch_size)   # (B, C, H_p, W_p, P_h, P_w)
-        x = x.permute(0, 2, 3, 1, 4, 5).contiguous()       # (B, H_p, W_p, C, P_h, P_w)
-        x = x.view(b, -1, c * self.patch_size ** 2)         # (B, num_patches, patch_dim)
-        return x
+        patches = x.unfold(2, self.patch_size, self.patch_size)
+        patches = patches.unfold(3, self.patch_size, self.patch_size)
+        patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous()
+        return patches.view(batch_size, -1, self.in_channels * self.patch_size**2)
 
-    def forward(self, x: torch.Tensor, style_id: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Process image input through selected encoder.
+    def _forward_transformer(
+        self,
+        x: torch.Tensor,
+        style_id: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        x = require_tensor(x, "x", component="vision_encoder")
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        if x.dim() != 4:
+            raise ModalityInputError(
+                "Vision input must have shape (C,H,W) or (B,C,H,W).",
+                component="vision_encoder",
+                details={"shape": list(x.shape)},
+            )
+        if not torch.is_floating_point(x):
+            x = x.float()
+        x = x.to(self.device)
 
-        Args:
-            x: Input tensor (batch, channels, height, width)
-            style_id: Optional style IDs for transformer conditioning
+        x = torch.matmul(self.extract_patches(x), self.projection)
+        if self.training and self.dropout_rate > 0.0:
+            x = F.dropout(x, p=self.dropout_rate, training=True)
 
-        Returns:
-            Encoded representations (batch, seq_len, embed_dim) for transformer,
-            or (batch, embed_dim) for CNN.
-        """
+        cls = self.cls_token.expand(x.size(0), -1, -1)
+        x = torch.cat([cls, x], dim=1)
+
+        if self.position_embed is not None:
+            if x.size(1) > self.position_embed.size(1):
+                raise PerceptionDimensionError(
+                    "Vision sequence exceeds positional embedding capacity.",
+                    component="vision_encoder",
+                    details={
+                        "sequence_length": int(x.size(1)),
+                        "position_capacity": int(self.position_embed.size(1)),
+                    },
+                    remediation="Increase max_position_embeddings for the intended patch geometry.",
+                )
+            x = x + self.position_embed[:, : x.size(1), :]
+
+        return self.transformer(x, style_id=style_id)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        style_id: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if self.encoder_type == "transformer":
             return self._forward_transformer(x, style_id)
-        elif self.encoder_type == "cnn":
-            return self._forward_cnn(x)
-        else:
-            raise ValueError(f"Unsupported encoder type: {self.encoder_type}")
 
-    def _forward_transformer(self, x: torch.Tensor, style_id: torch.Tensor) -> torch.Tensor:
-        """Transformer‑based forward pass."""
-        # Extract patches
-        x_patched = self.extract_patches(x)   # (B, N, patch_dim)
-        # Project to embedding dimension
-        x = torch.matmul(x_patched, self.projection)  # (B, N, D)
+        if self.fallback_encoder is None:
+            raise RuntimeError("Configured vision CNN encoder was not initialized.")
+        return self.fallback_encoder(x, style_id=style_id)
 
-        # Dropout (if training)
-        if self.training and self.dropout_rate > 0:
-            x = F.dropout(x, p=self.dropout_rate, training=self.training)
-
-        # Add CLS token
-        cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
-        x = torch.cat([cls_tokens, x], dim=1)   # (B, N+1, D)
-
-        # Add positional encoding (if not using rotary)
-        if self.position_embed is not None:
-            # Ensure positional embedding size matches
-            if self.position_embed.size(1) < x.size(1):
-                # Interpolate or expand? For simplicity, we warn and truncate.
-                logger.warning(f"Positional embedding size {self.position_embed.size(1)} "
-                               f"< sequence length {x.size(1)}; truncating sequence.")
-                x = x[:, :self.position_embed.size(1), :]
-            x = x + self.position_embed[:, :x.size(1)]
-
-        # Process through transformer
-        out = self.transformer(x, style_id=style_id)
-
-        return out
-
-    def _forward_cnn(self, x: torch.Tensor) -> torch.Tensor:
-        """CNN‑based forward pass with SPP and optional projection."""
-        # Apply convolutional layers
-        for layer in self.conv_layers:
-            x = layer(x)
-
-        # Spatial Pyramid Pooling
-        spp_features = self._spatial_pyramid_pooling(x, self.spp_levels)
-        # Project to embed_dim
-        out = self.cnn_proj(spp_features)
-
-        # Optional output activation
-        if self.output_activation == 'sigmoid':
-            out = torch.sigmoid(out)
-        elif self.output_activation == 'tanh':
-            out = torch.tanh(out)
-
-        return out
-
-    def _spatial_pyramid_pooling(self, x: torch.Tensor, bin_sizes: List[int]) -> torch.Tensor:
-        """
-        Spatial Pyramid Pooling to create fixed‑length representation.
-
-        Args:
-            x: Input feature maps (B, C, H, W)
-            bin_sizes: List of grid dimensions (e.g., [1, 2, 4])
-
-        Returns:
-            Fixed‑size vector (B, C * sum(bin_sizes[i]^2))
-        """
-        b, c, h, w = x.shape
-        features = []
-
-        for bin_size in bin_sizes:
-            # Calculate bin dimensions
-            bin_h = int(np.ceil(h / bin_size))
-            bin_w = int(np.ceil(w / bin_size))
-
-            # For each bin, apply adaptive max pooling
-            for i in range(bin_size):
-                for j in range(bin_size):
-                    # Compute region boundaries
-                    h_start = min(i * bin_h, h)
-                    h_end = min((i + 1) * bin_h, h)
-                    w_start = min(j * bin_w, w)
-                    w_end = min((j + 1) * bin_w, w)
-
-                    if h_end <= h_start or w_end <= w_start:
-                        continue
-
-                    # Extract region and pool
-                    region = x[:, :, h_start:h_end, w_start:w_end]
-                    pooled = F.adaptive_max_pool2d(region, (1, 1))
-                    features.append(pooled.view(b, c))
-
-        # Concatenate all features
-        return torch.cat(features, dim=1)
-
-    def load_pretrained(self, weights: Dict[str, torch.Tensor]):
-        """Load pretrained weights (e.g., from HuggingFace ViT)."""
+    def load_pretrained(self, weights: Dict[str, torch.Tensor]) -> None:
         if self.encoder_type != "transformer":
-            logger.warning("load_pretrained only supported for transformer encoder")
+            logger.warning("load_pretrained is only defined for the Transformer vision encoder.")
             return
 
-        # Projection weight (convolution to linear)
-        if 'conv_proj' in weights:
-            w = weights['conv_proj'].view(weights['conv_proj'].size(0), -1).t()
-            if w.shape == self.projection.shape:
-                self.projection.data.copy_(w)
+        if "conv_proj" in weights:
+            candidate = weights["conv_proj"].reshape(weights["conv_proj"].shape[0], -1).T
+            if candidate.shape == self.projection.shape:
+                self.projection.data.copy_(candidate.to(self.projection.device))
             else:
-                logger.warning("Projection weight shape mismatch; skipping")
+                logger.warning("Vision projection shape mismatch; skipping conv_proj.")
 
-        # Positional embedding
-        if 'pos_embed' in weights and self.position_embed is not None:
-            loaded_pe = weights['pos_embed']
-            if loaded_pe.size(1) == self.position_embed.size(1):
-                self.position_embed.data.copy_(loaded_pe)
+        if "cls_token" in weights and weights["cls_token"].shape == self.cls_token.shape:
+            self.cls_token.data.copy_(weights["cls_token"].to(self.cls_token.device))
+
+        if "pos_embed" in weights and self.position_embed is not None:
+            if weights["pos_embed"].shape == self.position_embed.shape:
+                self.position_embed.data.copy_(weights["pos_embed"].to(self.position_embed.device))
             else:
-                self._interpolate_positional_embeddings(loaded_pe)
+                logger.warning(
+                    "Vision positional embedding shape mismatch; skipping rather than applying unvalidated interpolation."
+                )
 
-        # CLS token
-        if 'cls_token' in weights:
-            self.cls_token.data.copy_(weights['cls_token'])
-
-        # Transformer weights
-        prefix = 'transformer.'
+        prefix = "transformer."
         transformer_weights = {
-            k[len(prefix):]: v
-            for k, v in weights.items()
-            if k.startswith(prefix)
+            key[len(prefix) :]: value
+            for key, value in weights.items()
+            if key.startswith(prefix)
         }
         if transformer_weights:
             self.transformer.load_pretrained(transformer_weights)
 
-    def _interpolate_positional_embeddings(self, new_pe: torch.Tensor):
-        """
-        Interpolate positional embeddings when size mismatches.
-        new_pe shape: (1, num_patches+1, embed_dim)
-        """
-        # Separate CLS token and patch embeddings
-        cls_pe = new_pe[:, :1, :]
-        patch_pe = new_pe[:, 1:, :]
+    def freeze_feature_extractor(self) -> None:
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        logger.info("Vision feature extractor frozen")
 
-        # Reshape to 2D grid
-        old_num_patches = patch_pe.size(1)
-        old_grid_size = int(math.sqrt(old_num_patches))
-        if old_grid_size ** 2 != old_num_patches:
-            logger.warning("Cannot interpolate non‑square positional embeddings; using truncation.")
-            # Fallback: truncate or pad
-            if self.position_embed.size(1) - 1 <= old_num_patches:
-                self.position_embed.data = torch.cat([cls_pe, patch_pe[:, :self.position_embed.size(1)-1, :]], dim=1)
-            else:
-                # Pad with zeros
-                pad_len = self.position_embed.size(1) - 1 - old_num_patches
-                pad = torch.zeros(1, pad_len, self.embed_dim, device=new_pe.device)
-                patch_pe = torch.cat([patch_pe, pad], dim=1)
-                self.position_embed.data = torch.cat([cls_pe, patch_pe], dim=1)
-            return
-
-        new_grid_size = int(math.sqrt(self.num_patches))
-        patch_pe = patch_pe.view(1, old_grid_size, old_grid_size, self.embed_dim).permute(0, 3, 1, 2)
-        # Interpolate
-        patch_pe = F.interpolate(
-            patch_pe,
-            size=(new_grid_size, new_grid_size),
-            mode='bilinear',
-            align_corners=False
-        ).permute(0, 2, 3, 1).view(1, self.num_patches, self.embed_dim)
-
-        self.position_embed.data = torch.cat([cls_pe, patch_pe], dim=1)
-
-    def freeze_feature_extractor(self):
-        """Freeze all trainable parameters."""
-        for param in self.parameters():
-            param.requires_grad = False
-        logger.info("Feature extractor frozen")
-
-    def unfreeze_feature_extractor(self):
-        """Unfreeze all trainable parameters."""
-        for param in self.parameters():
-            param.requires_grad = True
-        logger.info("Feature extractor unfrozen")
-
-    def train(self, mode: bool = True):
-        """Set training mode for all components."""
-        super().train(mode)
-        if self.encoder_type == "transformer" and hasattr(self, 'transformer'):
-            self.transformer.train(mode)
-        return self
-
-    def eval(self):
-        """Set evaluation mode."""
-        return self.train(False)
+    def unfreeze_feature_extractor(self) -> None:
+        for parameter in self.parameters():
+            parameter.requires_grad = True
+        logger.info("Vision feature extractor unfrozen")
 
 
-# ----------------------------------------------------------------------
-# Test block
-# ----------------------------------------------------------------------
+__all__ = ["VisionEncoder"]
+
+
 if __name__ == "__main__":
     print("\n=== Testing Vision Encoder ===\n")
 
