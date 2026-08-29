@@ -97,6 +97,7 @@ class AdaptiveAgent(BaseAgent):
     DEFAULT_STATE_TTL = int(timedelta(days=30).total_seconds())
     RESERVED_GLOBAL_SKILL_ID = 1_000_000
     CHECKPOINTING_SUPPORTED = True
+    CHECKPOINT_SCHEMA = "slai.adaptive-agent.state.v1"
 
     def __init__(self,
                  shared_memory: Any,
@@ -468,6 +469,62 @@ class AdaptiveAgent(BaseAgent):
     def _warm_state_key(self) -> str:
         return f"warm_state:{self.name}"
 
+    def _runtime_state_payload(self) -> Dict[str, Any]:
+        """Build adaptive runtime state without persistence side effects."""
+        return {
+            "version": self.STATE_VERSION,
+            "episode": int(self.episode),
+            "total_steps": int(self.total_steps),
+            "episode_reward": float(self.episode_reward),
+            "episode_length": int(self.episode_length),
+            "last_reward": float(self.last_reward),
+            "current_state": (
+                None
+                if self.current_state is None
+                else np.asarray(
+                    self.current_state,
+                    dtype=np.float32,
+                ).tolist()
+            ),
+            "current_goal": self.current_goal,
+            "current_task_type": self.current_task_type,
+            "last_episode_summary": self.last_episode_summary,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    
+    
+    def _apply_runtime_state_payload(
+        self,
+        state: Mapping[str, Any],
+    ) -> None:
+        version = state.get("version")
+    
+        if version is not None and version != self.STATE_VERSION:
+            raise CheckpointLoadError(
+                "AdaptiveAgent checkpoint state version is incompatible.",
+                component="adaptive_agent",
+                details={
+                    "expected": self.STATE_VERSION,
+                    "actual": version,
+                },
+            )
+    
+        raw_current_state = state.get("current_state")
+    
+        self.current_state = (
+            None
+            if raw_current_state is None
+            else self._validate_state(raw_current_state)
+        )
+        self.episode = int(state.get("episode", 0))
+        self.total_steps = int(state.get("total_steps", 0))
+        self.episode_reward = float(state.get("episode_reward", 0.0))
+        self.episode_length = int(state.get("episode_length", 0))
+        self.last_reward = float(state.get("last_reward", 0.0))
+        self.current_goal = state.get("current_goal")
+        self.current_task_type = state.get("current_task_type")
+        self.last_episode_summary = state.get("last_episode_summary")
+
     def _load_agent_state(self) -> None:
         cached_state = self.shared_memory.get(self._state_key)
         if not isinstance(cached_state, Mapping):
@@ -479,31 +536,11 @@ class AdaptiveAgent(BaseAgent):
             self.last_reward = 0.0
             return
 
-        self.current_state = None if cached_state.get("current_state") is None else self._validate_state(cached_state.get("current_state"))
-        self.episode = int(cached_state.get("episode", 0))
-        self.total_steps = int(cached_state.get("total_steps", 0))
-        self.episode_reward = float(cached_state.get("episode_reward", 0.0))
-        self.episode_length = int(cached_state.get("episode_length", 0))
-        self.last_reward = float(cached_state.get("last_reward", 0.0))
-        self.current_goal = cached_state.get("current_goal")
-        self.current_task_type = cached_state.get("current_task_type")
-        self.last_episode_summary = cached_state.get("last_episode_summary")
+        self._apply_runtime_state_payload(cached_state)
         logger.info("Loaded adaptive agent state from shared memory")
 
     def _save_agent_state(self) -> Dict[str, Any]:
-        state_data = {
-            "version": self.STATE_VERSION,
-            "episode": int(self.episode),
-            "total_steps": int(self.total_steps),
-            "episode_reward": float(self.episode_reward),
-            "episode_length": int(self.episode_length),
-            "last_reward": float(self.last_reward),
-            "current_state": None if self.current_state is None else np.asarray(self.current_state, dtype=np.float32).tolist(),
-            "current_goal": self.current_goal,
-            "current_task_type": self.current_task_type,
-            "last_episode_summary": self.last_episode_summary,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+        state_data = self._runtime_state_payload()
         self.shared_memory.set(self._state_key, state_data, ttl=self.shared_memory_state_ttl)
         self.shared_memory.set(self._warm_state_key, state_data, ttl=self.shared_memory_state_ttl)
         return state_data
@@ -1501,66 +1538,88 @@ class AdaptiveAgent(BaseAgent):
 
         return int(candidate)
 
-    def save_checkpoint(self, path: str | Path) -> str:
-        checkpoint_path = Path(path)
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": self.STATE_VERSION,
-            "agent_state": self._save_agent_state(),
-            "recovery_history": self._save_recovery_history(),
+    def checkpoint_step(self) -> int:
+        return int(self.total_steps)
+    
+    
+    def _export_checkpoint_state(self) -> Mapping[str, Any]:
+        recovery_history = {
+            str(strategy_name): {
+                "success": int(counts["success"]),
+                "fail": int(counts["fail"]),
+            }
+            for strategy_name, counts in self.recovery_history.items()
+        }
+    
+        return {
+            "schema": self.CHECKPOINT_SCHEMA,
+            "runtime_state": self._runtime_state_payload(),
+            "recovery_history": recovery_history,
             "task_history": list(self.task_history),
             "route_history": list(self.route_history),
             "feedback_history": list(self.feedback_history),
-            "timestamp": datetime.utcnow().isoformat(),
         }
-        try:
-            with checkpoint_path.open("wb") as handle:
-                pickle.dump(payload, handle, protocol=self.checkpoint_protocol)
-        except Exception as exc:
-            raise wrap_exception(
-                exc,
-                CheckpointSaveError,
-                "Failed to save AdaptiveAgent checkpoint.",
+    
+    
+    def _import_checkpoint_state(
+        self,
+        state: Mapping[str, Any],
+    ) -> None:
+        if state.get("schema") != self.CHECKPOINT_SCHEMA:
+            raise CheckpointLoadError(
+                "Unsupported AdaptiveAgent checkpoint schema.",
                 component="adaptive_agent",
-                details={"path": str(checkpoint_path)},
-            ) from exc
-        self.last_checkpoint_path = str(checkpoint_path)
-        return str(checkpoint_path)
-
-    def load_checkpoint(self, path: str | Path) -> "AdaptiveAgent":
-        checkpoint_path = Path(path)
-        if not checkpoint_path.exists():
-            raise CheckpointNotFoundError(
-                f"AdaptiveAgent checkpoint not found: {checkpoint_path}",
-                component="adaptive_agent",
-                details={"path": str(checkpoint_path)},
+                details={
+                    "expected": self.CHECKPOINT_SCHEMA,
+                    "actual": state.get("schema"),
+                },
             )
-        try:
-            with checkpoint_path.open("rb") as handle:
-                payload = pickle.load(handle)
-        except Exception as exc:
-            raise wrap_exception(
-                exc,
-                CheckpointLoadError,
-                "Failed to load AdaptiveAgent checkpoint.",
+    
+        runtime_state = state.get("runtime_state")
+        if not isinstance(runtime_state, Mapping):
+            raise CheckpointLoadError(
+                "AdaptiveAgent checkpoint is missing runtime_state.",
                 component="adaptive_agent",
-                details={"path": str(checkpoint_path)},
-            ) from exc
-
-        ensure_instance(payload, Mapping, "checkpoint_payload", component="adaptive_agent")
-        state = payload.get("agent_state", {})
-        if isinstance(state, Mapping):
-            self.shared_memory.set(self._state_key, dict(state), ttl=self.shared_memory_state_ttl)
-            self._load_agent_state()
-        history = payload.get("recovery_history", {})
-        if isinstance(history, Mapping):
-            self.shared_memory.set(self._recovery_key, dict(history), ttl=self.shared_memory_recovery_ttl)
-            self._load_recovery_history()
-        self.task_history = deque(payload.get("task_history", []), maxlen=self.max_task_history)
-        self.route_history = deque(payload.get("route_history", []), maxlen=self.max_route_history)
-        self.feedback_history = deque(payload.get("feedback_history", []), maxlen=self.max_feedback_history)
-        self.last_checkpoint_path = str(checkpoint_path)
-        return self
+            )
+    
+        self._apply_runtime_state_payload(runtime_state)
+    
+        recovery_state = state.get("recovery_history", {})
+        if not isinstance(recovery_state, Mapping):
+            raise CheckpointLoadError(
+                "AdaptiveAgent checkpoint recovery_history must be a mapping.",
+                component="adaptive_agent",
+            )
+    
+        self.recovery_history = defaultdict(
+            lambda: {"success": 0, "fail": 0}
+        )
+    
+        for strategy_name, counts in recovery_state.items():
+            if not isinstance(counts, Mapping):
+                continue
+    
+            self.recovery_history[str(strategy_name)] = {
+                "success": int(counts.get("success", 0)),
+                "fail": int(counts.get("fail", 0)),
+            }
+    
+        self.task_history = deque(
+            state.get("task_history", []),
+            maxlen=self.max_task_history,
+        )
+        self.route_history = deque(
+            state.get("route_history", []),
+            maxlen=self.max_route_history,
+        )
+        self.feedback_history = deque(
+            state.get("feedback_history", []),
+            maxlen=self.max_feedback_history,
+        )
+    
+        # Keep transient SharedMemory consistent with the restored durable state.
+        self._save_agent_state()
+        self._save_recovery_history()
 
     def get_health_report(self) -> Dict[str, Any]:
         report = self.runtime_status()
@@ -1681,11 +1740,11 @@ if __name__ == "__main__":
     printer.pretty("FALLBACK", fallback, "success")
     printer.pretty("RETRAIN", retrain_result, "success")
 
-    checkpoint_path = Path("/tmp/adaptive_agent_test_checkpoint.pkl")
-    saved_path = agent.save_checkpoint(checkpoint_path)
+    # checkpoint_path = Path("/tmp/adaptive_agent_test_checkpoint.pkl")
+    # saved_path = agent.save_checkpoint(checkpoint_path)
     restored = AdaptiveAgent(shared_memory=shared_memory, agent_factory=agent_factory)
-    restored.load_checkpoint(saved_path)
-    printer.status("TEST", f"Restored checkpoint from {saved_path}", "success")
+    # restored.load_checkpoint(saved_path)
+    # printer.status("TEST", f"Restored checkpoint from {saved_path}", "success")
     printer.pretty("RESTORED_STATE", restored._save_agent_state(), "success")
 
     printer.pretty("FAIL_OPERATIONAL", agent.supports_fail_operational(), "success")

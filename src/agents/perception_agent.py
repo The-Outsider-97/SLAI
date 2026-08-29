@@ -57,7 +57,6 @@ from .perception.perception_trainer import PerceptionTrainer
 from .perception.utils.perception_errors import *
 from .perception.utils.perception_helpers import *
 from .perception.utils.taskheads import *
-from checkpointing.checkpoint_manager import CheckpointManager # pyright: ignore[reportMissingImports]
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Perception Agent")
@@ -284,7 +283,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
         self.vision_perception = VisionPerception(enable_decoder=bool(self.decoder_policy.get("vision", True)), device=self.device)
         self.audio_perception = AudioPerception(enable_decoder=bool(self.decoder_policy.get("audio", True)), device=self.device)
 
-        input_dims = {
+        input_dims: Mapping[Modality | str, int] = {
             Modality.TEXT: self.text_perception.embed_dim,
             Modality.VISION: self.vision_perception.embed_dim,
             Modality.AUDIO: self.audio_perception.embed_dim,
@@ -370,12 +369,13 @@ class PerceptionAgent(BaseAgent, nn.Module):
                 },
             )
 
-    def _modality_pipelines(self) -> dict[Modality, nn.Module]:
-        return {
+    def _modality_pipelines(self) -> Mapping[Modality | str, BasePerceptionModality]:
+        pipelines: dict[Modality | str, BasePerceptionModality] = {
             Modality.TEXT: self.text_perception,
             Modality.VISION: self.vision_perception,
             Modality.AUDIO: self.audio_perception,
         }
+        return pipelines
 
     @property
     def optimizer(self) -> torch.optim.Optimizer:
@@ -546,8 +546,12 @@ class PerceptionAgent(BaseAgent, nn.Module):
             )
         return representations
 
-    def _fuse(self, representations: Mapping[Modality | str, ModalityRepresentation]) -> FusedRepresentation:
-        return self.fusion(representations)
+    def _fuse(self, representations: Mapping[Modality, ModalityRepresentation]) -> FusedRepresentation:
+        fusion_input: dict[Modality | str, ModalityRepresentation] = {
+            modality: representation
+            for modality, representation in representations.items()
+        }
+        return self.fusion(fusion_input)
 
     # ------------------------------------------------------------------
     # Dynamic downstream heads
@@ -620,13 +624,10 @@ class PerceptionAgent(BaseAgent, nn.Module):
             assert num_classes is not None
             head = ClassificationHead(hidden_dim=input_dim)
             classifier = getattr(head, "classifier", None)
-            if (
-                not isinstance(classifier, nn.Sequential)
-                or len(classifier) == 0
-                or not isinstance(classifier[-1], nn.Linear)
-            ):
+            
+            if not isinstance(classifier, nn.Sequential) or len(classifier) == 0:
                 raise PerceptionConfigurationError(
-                    "ClassificationHead does not expose the expected final linear classifier.",
+                    "ClassificationHead does not expose the expected classifier sequence.",
                     component="perception_agent",
                     details={"head_type": type(head).__name__},
                     remediation=(
@@ -634,12 +635,28 @@ class PerceptionAgent(BaseAgent, nn.Module):
                         "guessing how to mutate an unknown head structure."
                     ),
                 )
-            final = classifier[-1]
-            if final.out_features != num_classes:
+            
+            final_layer = classifier[-1]
+            
+            if not isinstance(final_layer, nn.Linear):
+                raise PerceptionConfigurationError(
+                    "ClassificationHead does not expose the expected final linear classifier.",
+                    component="perception_agent",
+                    details={
+                        "head_type": type(head).__name__,
+                        "final_layer_type": type(final_layer).__name__,
+                    },
+                    remediation=(
+                        "Update the subsystem ClassificationHead contract rather than "
+                        "guessing how to mutate an unknown head structure."
+                    ),
+                )
+            
+            if final_layer.out_features != num_classes:
                 classifier[-1] = nn.Linear(
-                    final.in_features,
-                    num_classes,
-                    bias=final.bias is not None,
+                    in_features=final_layer.in_features,
+                    out_features=num_classes,
+                    bias=final_layer.bias is not None,
                 )
             head.num_classes = int(num_classes)
             resolved_num_classes: Optional[int] = int(num_classes)
@@ -1153,6 +1170,41 @@ class PerceptionAgent(BaseAgent, nn.Module):
             "global_step": int(self.trainer.global_step),
         }
 
+    @staticmethod
+    def _validated_optimizer_state_dict(
+        state: Mapping[Any, Any],
+    ) -> dict[str, Any]:
+        """Validate and materialize a PyTorch optimizer StateDict."""
+    
+        normalized: dict[str, Any] = {}
+    
+        for key, value in state.items():
+            if not isinstance(key, str):
+                raise PerceptionStateError(
+                    "Optimizer state contains a non-string top-level key.",
+                    component="perception_agent",
+                    details={
+                        "key": repr(key),
+                        "key_type": type(key).__name__,
+                    },
+                )
+            normalized[key] = value
+    
+        required = {"state", "param_groups"}
+        missing = required - set(normalized)
+    
+        if missing:
+            raise PerceptionStateError(
+                "Optimizer state is missing required fields.",
+                component="perception_agent",
+                details={
+                    "missing": sorted(missing),
+                    "available": sorted(normalized),
+                },
+            )
+    
+        return normalized
+
     def load_state_from_shared_memory(self) -> bool:
         """Restore a transient snapshot after rebuilding dynamic head topology."""
 
@@ -1182,7 +1234,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
                 )
 
             self.load_state_dict(model_state, strict=True)
-            self.trainer.optimizer.load_state_dict(optimizer_state)
+            self.trainer.optimizer.load_state_dict(self._validated_optimizer_state_dict(optimizer_state))
             self.trainer.global_step = int(agent_state.get("global_step", 0))
             logger.info("Loaded complete PerceptionAgent runtime snapshot from SharedMemory")
             return True
@@ -1247,61 +1299,88 @@ class PerceptionAgent(BaseAgent, nn.Module):
     # ------------------------------------------------------------------
     # Durable recovery through central checkpointing
     # ------------------------------------------------------------------
-    def _require_checkpoint_manager(self) -> CheckpointManager:
-        if self.checkpoint_manager is None:
-            raise PerceptionStateError(
-                "Perception durable checkpointing is disabled by agent configuration.",
-                component="perception_agent",
-                remediation=(
-                    "Enable perception_agent.checkpointing.enabled in "
-                    "base/configs/agents_config.yaml to use durable recovery."
-                ),
-            )
-        return self.checkpoint_manager
-
-    def save_checkpoint(self, version: Optional[str] = None, *, metadata: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
-        """Save complete durable model/optimizer/agent state transactionally."""
-
-        if metadata is not None and not isinstance(metadata, Mapping):
-            raise InvalidPerceptionTypeError(
-                "checkpoint metadata must be a mapping.",
-                component="perception_agent",
-            )
-
-        manager = self._require_checkpoint_manager()
+    def checkpoint_components(self) -> Mapping[str, Any]:
+        """Declare Perception-owned durable components."""
         components: dict[str, Any] = {
             "model": self,
             "optimizer": self.trainer.optimizer,
-            "agent_state": self._agent_state_payload(schema=_CHECKPOINT_STATE_SCHEMA),
+            "agent_state": self._agent_state_payload(
+                schema=_CHECKPOINT_STATE_SCHEMA
+            ),
         }
-        codec_ids = {
+    
+        if bool(self.checkpoint_config.get("save_rng", True)):
+            components["rng"] = None
+    
+        return components
+    
+    
+    def checkpoint_codec_ids(self) -> Mapping[str, str]:
+        """Declare the canonical codec for each durable component."""
+        codec_ids: dict[str, str] = {
             "model": "torch",
             "optimizer": "torch",
             "agent_state": "agent-state",
         }
+    
         if bool(self.checkpoint_config.get("save_rng", True)):
-            components["rng"] = None
             codec_ids["rng"] = "rng"
+    
+        return codec_ids
+    
+    
+    def checkpoint_step(self) -> Optional[int]:
+        return int(self.trainer.global_step)
+    
+    
+    def checkpoint_metrics(self) -> Mapping[str, Any]:
+        loss_history = self.performance_metrics.get("loss")
+    
+        if not loss_history:
+            return {}
+    
+        return {
+            "loss": float(loss_history[-1]),
+        }
 
-        try:
-            result = manager.save_components(
-                components,
-                version=version,
-                codec_ids=codec_ids,
-                step=int(self.trainer.global_step),
-                metadata={
-                    "agent": self.name,
-                    "agent_version": __version__,
-                    **dict(metadata or {}),
+    def save_checkpoint(
+        self,
+        version: Optional[str] = None,
+        *,
+        reason: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        overwrite: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        """Save complete durable Perception state through BaseAgent."""
+    
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise InvalidPerceptionTypeError(
+                "checkpoint metadata must be a mapping.",
+                component="perception_agent",
+                details={
+                    "actual_type": type(metadata).__name__,
                 },
             )
+    
+        checkpoint_metadata = dict(metadata or {})
+        checkpoint_metadata["state_schema"] = _CHECKPOINT_STATE_SCHEMA
+    
+        try:
+            result = super().save_checkpoint(
+                version,
+                reason=reason,
+                metadata=checkpoint_metadata,
+                overwrite=overwrite,
+            )
+        except PerceptionError:
+            raise
         except Exception as exc:
             raise PerceptionStateError.from_exception(
                 exc,
                 "Durable PerceptionAgent checkpoint save failed.",
                 component="perception_agent",
             ) from exc
-
+    
         return {
             "status": "success",
             "version": result.record.version,
@@ -1310,7 +1389,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
             "global_step": int(self.trainer.global_step),
         }
 
-    def restore_checkpoint(self, version: Optional[str] = None) -> dict[str, Any]:
+    def restore_checkpoint(self, version: Optional[str] = None, *, verify_integrity: bool = True,) -> dict[str, Any]:
         """Restore durable state using two-phase dynamic-head reconstruction."""
 
         manager = self._require_checkpoint_manager()
@@ -1320,8 +1399,11 @@ class PerceptionAgent(BaseAgent, nn.Module):
             state_result = manager.load_components(
                 version,
                 components=("agent_state",),
+                expected_codecs={
+                    "agent_state": "agent-state",
+                },
                 strict=True,
-                verify_integrity=True,
+                verify_integrity=verify_integrity,
             )
             agent_state = self._validate_restored_agent_state(
                 state_result.components.get("agent_state"),
@@ -1332,8 +1414,14 @@ class PerceptionAgent(BaseAgent, nn.Module):
             saved_components = set(state_result.record.manifest.saved_components)
             restore_components = ["model", "optimizer"]
             restore_rng = "rng" in saved_components
+
+            expected_codecs: dict[str, str] = {
+                "model": "torch",
+                "optimizer": "torch",
+            }
+            
             if restore_rng:
-                restore_components.append("rng")
+                expected_codecs["rng"] = "rng"
 
             # Phase 2: CheckpointManager performs selection, integrity checks,
             # compatibility checks, and safe decoding for every requested
@@ -1344,9 +1432,10 @@ class PerceptionAgent(BaseAgent, nn.Module):
             load_result = manager.load_components(
                 state_result.record.version,
                 components=tuple(restore_components),
+                expected_codecs=expected_codecs,
                 strict=True,
                 restore_rng=restore_rng,
-                verify_integrity=True,
+                verify_integrity=verify_integrity,
             )
 
             model_state = load_result.components.get("model")
@@ -1361,7 +1450,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
                 )
 
             self.load_state_dict(model_state, strict=True)
-            self.trainer.optimizer.load_state_dict(optimizer_state)
+            self.trainer.optimizer.load_state_dict(self._validated_optimizer_state_dict(optimizer_state))
             self.trainer.global_step = int(agent_state.get("global_step", 0))
         except PerceptionError:
             raise
@@ -1412,17 +1501,17 @@ class PerceptionAgent(BaseAgent, nn.Module):
             ),
         )
 
-    def update_projection(self, rewards: Any, lr: float) -> None:
+    def update_projection(self, reward_scores: Sequence[float], lr: float) -> Optional[dict[str, Any]]:
         """Compatibility guard for the removed standalone projection parameter."""
-
+    
+        _ = reward_scores, lr
+    
         raise UnsupportedPerceptionOptionError(
             "PerceptionAgent no longer owns a standalone global_projection_param.",
             component="perception_agent",
-            details={"learning_rate": lr, "reward_type": type(rewards).__name__},
             remediation=(
-                "Route representation learning through PerceptionFusion, "
-                "PerceptionObjectives, and PerceptionTrainer so learned parameters "
-                "remain optimizer-registered and checkpoint-complete."
+                "Update the trainable perception subsystem through PerceptionTrainer "
+                "rather than mutating a removed global projection parameter."
             ),
         )
 

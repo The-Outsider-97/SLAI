@@ -144,6 +144,7 @@ class ReasoningAgent(BaseAgent):
     AGENT_KEY = "reasoning_agent"
     KNOWLEDGE_MEMORY_KEY_DEFAULT = "reasoning_agent:knowledge_base"
     CHECKPOINTING_SUPPORTED = True
+    CHECKPOINT_SCHEMA = "slai.reasoning-agent.state.v1"
 
     _ALLOWED_CONFIG_KEYS = {
         "learning_rate", "decay", "exploration_rate", "max_iterations",
@@ -441,6 +442,125 @@ class ReasoningAgent(BaseAgent):
             os.replace(temp_path, path)
         except Exception as exc:
             raise KnowledgePersistenceError("Failed to persist reasoning-agent knowledge", cause=exc, context={"path": str(path)}) from exc
+
+    def _export_checkpoint_state(self) -> Mapping[str, Any]:
+        knowledge_payload = self._serialize_knowledge_payload(
+            reason="checkpoint"
+        )
+    
+        return json_safe_reasoning_state(
+            {
+                "schema": self.CHECKPOINT_SCHEMA,
+                "agent_version": __version__,
+                "knowledge": knowledge_payload["knowledge"],
+                "rule_weights": dict(self.rule_weights),
+                "registered_rules": [
+                    name
+                    for name, _, _ in self.rules
+                ],
+                "conflict_count": int(self.conflict_count),
+                "forward_chaining_speed": float(
+                    self.forward_chaining_speed
+                ),
+                "operation_counts": dict(self.operation_counts),
+                "reasoning_history": list(self.reasoning_history),
+            }
+        )
+    
+    
+    def _import_checkpoint_state(
+        self,
+        state: Mapping[str, Any],
+    ) -> None:
+        if state.get("schema") != self.CHECKPOINT_SCHEMA:
+            raise KnowledgePersistenceError(
+                "Unsupported ReasoningAgent checkpoint schema.",
+                context={
+                    "expected": self.CHECKPOINT_SCHEMA,
+                    "actual": state.get("schema"),
+                },
+            )
+    
+        restored_knowledge = self._normalize_knowledge_payload(
+            state.get("knowledge", [])
+        )
+    
+        raw_rule_weights = state.get("rule_weights", {})
+        if not isinstance(raw_rule_weights, Mapping):
+            raise KnowledgePersistenceError(
+                "ReasoningAgent checkpoint rule_weights must be a mapping."
+            )
+    
+        saved_rule_names = state.get("registered_rules", [])
+        if (
+            isinstance(saved_rule_names, Sequence)
+            and not isinstance(saved_rule_names, (str, bytes))
+        ):
+            active_rule_names = {
+                name
+                for name, _, _ in self.rules
+            }
+            missing_rules = {
+                str(name)
+                for name in saved_rule_names
+            } - active_rule_names
+    
+            if missing_rules:
+                raise KnowledgePersistenceError(
+                    "Reasoning checkpoint requires rules that are not "
+                    "registered in the active runtime.",
+                    context={
+                        "missing_rules": sorted(missing_rules),
+                    },
+                )
+    
+        restored_weights: Dict[str, float] = {}
+    
+        for name, _, current_weight in self.rules:
+            raw_weight = raw_rule_weights.get(name, current_weight)
+            restored_weights[name] = clamp_confidence(raw_weight)
+    
+        self.knowledge_base = restored_knowledge
+        self.rule_weights = restored_weights
+    
+        # Keep tuple metadata aligned with the authoritative rule-weight map.
+        self.rules = [
+            (name, rule_fn, self.rule_weights.get(name, weight))
+            for name, rule_fn, weight in self.rules
+        ]
+    
+        self.conflict_count = int(state.get("conflict_count", 0))
+        self.forward_chaining_speed = float(state.get("forward_chaining_speed", 0.0))
+    
+        raw_counts = state.get("operation_counts", {})
+        if not isinstance(raw_counts, Mapping):
+            raise KnowledgePersistenceError("ReasoningAgent checkpoint operation_counts must be a mapping.")
+    
+        self.operation_counts = Counter(
+            {
+                str(name): int(count)
+                for name, count in raw_counts.items()
+            }
+        )
+    
+        raw_history = state.get("reasoning_history", [])
+        if (
+            not isinstance(raw_history, Sequence)
+            or isinstance(raw_history, (str, bytes))
+        ):
+            raise KnowledgePersistenceError("ReasoningAgent checkpoint reasoning_history must be a sequence.")
+    
+        self.reasoning_history = deque(
+            (
+                dict(item)
+                for item in raw_history
+                if isinstance(item, Mapping)
+            ),
+            maxlen=self.max_trace_items,
+        )
+    
+        self._sync_component_state()
+        self._persist_state(reason="checkpoint_restore", publish=False)
 
     # ------------------------------------------------------------------
     # Built-in symbolic rules

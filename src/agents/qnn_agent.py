@@ -1717,108 +1717,72 @@ class QNNAgent(BaseAgent):
             "agent_state": self.agent_state(),
         }
 
-    def save_checkpoint(
+    def checkpoint_codec_ids(self) -> Mapping[str, str]:
+        return {
+            "model": "numpy",
+            "agent_state": "agent-state",
+        }
+    
+    
+    def checkpoint_step(self) -> int:
+        return int(self._training_step)
+    
+    
+    def checkpoint_metrics(self) -> Mapping[str, Any]:
+        return self._latest_checkpoint_metrics()
+    
+    
+    def _apply_checkpoint_components(
         self,
-        manager: Any,
-        *,
-        version: str | None = None,
-        metadata: Mapping[str, Any] | None = None,
-        overwrite: bool | None = None,
-    ) -> Any:
-        """Save through an injected CheckpointManager-like boundary.
-
-        QNNAgent intentionally does not import ``src.checkpointing``.
-        """
-        save_components = getattr(manager, "save_components", None)
-        if not callable(save_components):
-            raise TypeError(
-                "checkpoint manager must expose save_components()"
+        components: Mapping[str, Any],
+    ) -> None:
+        model_state = components.get("model")
+        agent_state = components.get("agent_state")
+    
+        if not isinstance(model_state, Mapping):
+            raise QNNInputError(
+                "checkpoint model component must be a mapping"
             )
-
-        try:
-            result = save_components(
-                self.checkpoint_components(),
-                version=version,
-                codec_ids={
-                    "model": "numpy",
-                    "agent_state": "agent-state",
-                },
-                step=self._training_step,
-                metrics=self._latest_checkpoint_metrics(),
-                metadata={
-                    "agent_type": self.name,
-                    "state_schema": _CHECKPOINT_SCHEMA,
-                    **dict(metadata or {}),
-                },
-                overwrite=overwrite,
+    
+        if not isinstance(agent_state, Mapping):
+            raise QNNInputError(
+                "checkpoint agent_state component must be a mapping"
             )
-        except Exception as exc:
-            self._mark_runtime_degraded(
-                "persistence",
-                "qnn.checkpoint.save",
-                exc,
-            )
-            raise
-
-        self._mark_runtime_recovered(
-            "persistence",
-            "qnn.checkpoint.save",
-        )
-        return result
-
-    def load_checkpoint(
+    
+        # Model first: load_agent_state validates agreement with the restored
+        # training step and architecture.
+        self.load_state_dict(model_state, strict=True)
+        self.load_agent_state(agent_state)
+    
+    
+    def _capture_checkpoint_restore_state(
         self,
-        manager: Any,
-        *,
-        version: str | None = None,
-    ) -> Any:
-        """Load through an injected CheckpointManager-like boundary atomically."""
-        load_components = getattr(manager, "load_components", None)
-        if not callable(load_components):
-            raise TypeError(
-                "checkpoint manager must expose load_components()"
+    ) -> Mapping[str, Any]:
+        return {
+            "model": self.state_dict(),
+            "agent_state": self.agent_state(),
+        }
+    
+    
+    def _rollback_checkpoint_restore_state(
+        self,
+        baseline: Mapping[str, Any],
+    ) -> None:
+        model_state = baseline.get("model")
+        agent_state = baseline.get("agent_state")
+    
+        if not isinstance(model_state, Mapping):
+            raise QNNInputError(
+                "rollback model state must be a mapping"
             )
-
-        baseline_model = self.state_dict()
-        baseline_agent_state = self.agent_state()
-        try:
-            result = load_components(
-                version,
-                components=("model", "agent_state"),
-                expected_codecs={
-                    "model": "numpy",
-                    "agent_state": "agent-state",
-                },
+    
+        if not isinstance(agent_state, Mapping):
+            raise QNNInputError(
+                "rollback agent state must be a mapping"
             )
-            components = getattr(result, "components", None)
-            if not isinstance(components, Mapping):
-                raise QNNInputError(
-                    "checkpoint load result does not contain components"
-                )
-            if "model" not in components or "agent_state" not in components:
-                raise QNNInputError(
-                    "checkpoint load result is missing required QNN components"
-                )
-
-            self.load_state_dict(components["model"])
-            self.load_agent_state(components["agent_state"])
-        except Exception as exc:
-            # Restore both model and agent state. Baseline agent_state was
-            # generated from the pre-load model, so load the model first.
-            self.load_state_dict(baseline_model)
-            self.load_agent_state(baseline_agent_state)
-            self._mark_runtime_degraded(
-                "persistence",
-                "qnn.checkpoint.load",
-                exc,
-            )
-            raise
-
-        self._mark_runtime_recovered(
-            "persistence",
-            "qnn.checkpoint.load",
-        )
-        return result
+    
+        self.load_state_dict(model_state, strict=True)
+        self.load_agent_state(agent_state)
 
     def _latest_checkpoint_metrics(self) -> dict[str, float]:
         try:
