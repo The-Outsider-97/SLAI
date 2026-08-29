@@ -1,215 +1,312 @@
-__version__ = "2.1.0"
+from __future__ import annotations
 
-"""
-Perception Agent:
-- Weight initialization
-- Memory-efficient attention
-- Batch processing
-- Pretrained loading
-- Gradient infrastructure
+from torch import random
+
+__version__ = "2.3.0"
+
+"""SLAI Perception Agent.
+
+The PerceptionAgent is the single externally routable orchestration boundary for
+SLAI perception.  Modality-specific computation remains inside the perception
+subsystem:
+
+    PerceptionAgent
+        -> TextPerception / VisionPerception / AudioPerception
+        -> ModalityRepresentation
+        -> PerceptionFusion
+        -> FusedRepresentation
+        -> PerceptionObjectives / downstream task heads
+        -> PerceptionTrainer
+
+Ownership boundaries
+--------------------
+- Agent lifecycle, routing policy, runtime configuration, SharedMemory access,
+  and durable checkpoint orchestration are owned here.
+- Encoder/decoder architecture, tokenization, modality preprocessing, masking,
+  representation construction, objective mathematics, and optimizer-step
+  mechanics are owned by ``src.agents.perception``.
+- ``perception/configs/perception_config.yaml`` is not imported or read here.
+  Lower-level subsystem classes may consume it through their own config loader.
+- ``perception/perception_memory.py`` is not imported or used here.  Agent-level
+  transient state is coordinated through SharedMemory; durable model recovery is
+  delegated to the central CheckpointManager.
+
+The module deliberately uses explicit imports rather than wildcard imports so
+its dependency direction remains visible and circular-import risk stays low.
 """
 
-import random
-import math
+from dataclasses import dataclass
 import hashlib
-import yaml
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
-from collections import OrderedDict
-from typing import Dict, Any, Optional, List, Tuple, Union
+from typing import Any, Optional
 
-from .base.utils.main_config_loader import load_global_config, get_config_section
+from .base.utils.main_config_loader import get_config_section
 from .base_agent import BaseAgent
-from .perception.perception_trainer import *
-from .perception.perception_contracts import *
-from .perception.perception_objectives import *
-from .perception.perception_fusion import *
 from .perception.modalities import *
-from .perception.modules.transformer import Transformer
-from .perception.encoders.text_encoder import TextEncoder
-from .perception.encoders.vision_encoder import VisionEncoder
-from .perception.encoders.audio_encoder import AudioEncoder
-from .perception.decoders.text_decoder import TextDecoder
-from .perception.decoders.vision_decoder import VisionDecoder
-from .perception.decoders.audio_decoder import AudioDecoder
-from .perception.modules.tokenizer import Tokenizer
-from .perception.utils.taskheads import *
+from .perception.perception_contracts import *
+from .perception.perception_fusion import PerceptionFusion
+from .perception.perception_objectives import PerceptionObjectives
+from .perception.perception_trainer import PerceptionTrainer
 from .perception.utils.perception_errors import *
 from .perception.utils.perception_helpers import *
+from .perception.utils.taskheads import *
+from checkpointing.checkpoint_manager import CheckpointManager # pyright: ignore[reportMissingImports]
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Perception Agent")
 printer = PrettyPrinter()
 
-class PerceptionAgent(BaseAgent, nn.Module):
-    def __init__(self, shared_memory, agent_factory, config=None):
-        BaseAgent.__init__(self, shared_memory, agent_factory, config=config)
-        nn.Module.__init__(self)
 
-        self.perceptive_agent = []
-        self.shared_memory = shared_memory
-        self.agent_factory = agent_factory
-        self._init_configs()
+_SHARED_STATE_SCHEMA = "slai.perception-agent.state.v1"
+_CHECKPOINT_STATE_SCHEMA = "slai.perception-agent.checkpoint.v1"
+
+_SUPPORTED_TASK_TYPES = frozenset({"pretrain", "finetune", "inference"})
+_SUPPORTED_PRETRAIN_OBJECTIVES = frozenset(
+    {
+        "mlm",
+        "mpm",
+        "mam",
+        "contrastive_text_image",
+        "contrastive_text_audio",
+        "contrastive_vision_audio",
+        "temporal_vision",
+        "temporal_audio",
+    }
+)
+
+
+class PerceptionAgent(BaseAgent, nn.Module):
+    """Single SLAI orchestration boundary for text, vision, and audio perception."""
+
+    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None) -> None:
+        # PyTorch must be initialized before this object receives any nn.Module
+        # attributes. BaseAgent itself does not inherit nn.Module.
+        nn.Module.__init__(self)
+        BaseAgent.__init__(self,
+                           shared_memory=shared_memory,
+                           agent_factory=agent_factory,
+                           config=config,
+                           )
+
+        self._init_agent_config(config)
         self._init_components()
         self._init_shared_memory_keys()
-        #self.optimizer = self._configure_optimizer()
+        self._init_checkpoint_manager()
+        self._validate_component_contracts()
 
-        assert self.text_encoder.embed_dim == self.embed_dim, "Text encoder dim mismatch!"
-        assert self.audio_encoder.embed_dim == self.embed_dim, "Audio encoder dim mismatch!"
-        assert self.vision_encoder.embed_dim == self.embed_dim, "Vision encoder dim mismatch!"
+        logger.info(
+            "PerceptionAgent initialized: device=%s embed_dim=%s decoders=%s",
+            self.device,
+            self.embed_dim,
+            self.decoder_policy,
+        )
 
-        logger.info(f"PerceptionAgent initialized on device: {self.device}")
+    # ------------------------------------------------------------------
+    # Configuration ownership
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _merge_known_config(
+        base: Mapping[str, Any],
+        override: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Merge only keys already owned by the agent configuration schema.
 
-    def _init_configs(self):
-        """Load global and perception-specific configurations."""
-        self.config = load_global_config()
-        self.perception_config = get_config_section('perception_agent')
+        Constructor overrides are intentionally bounded to fields that already
+        exist in ``agents_config.yaml/perception_agent``.  This prevents an
+        arbitrary constructor mapping from silently becoming a second config
+        schema for perception.
+        """
 
-        self.device = self.perception_config.get('device', 'cpu')
-        self.embed_dim = self.perception_config.get('embed_dim', 512)
-        self.masking_ratio = self.perception_config.get('masking_ratio', 0.15)
-        self.encoder_type  = self.perception_config.get('encoder_type ', 'transformer')
-        self.contrastive_temp = self.perception_config.get('contrastive_temperature', 0.07)
-        
-        # Optimizer related configs
-        self.learning_rate = self.perception_config.get('learning_rate', 1e-4)
-        self.weight_decay = self.perception_config.get('weight_decay', 1e-2)
-        self.adam_betas = tuple(self.perception_config.get('adam_betas', [0.9, 0.999]))
-        self.adam_eps = self.perception_config.get('adam_eps', 1e-8)
-        self.training = self.perception_config.get('training', True)
+        result = deepcopy(dict(base))
+        for key, value in override.items():
+            if key not in result:
+                continue
+            current = result[key]
+            if isinstance(current, Mapping) and isinstance(value, Mapping):
+                result[key] = PerceptionAgent._merge_known_config(current, value)
+            else:
+                result[key] = deepcopy(value)
+        return result
 
-        # Temporal Coherence
-        self.loss_type = self.perception_config.get('loss_type')
-        self.max_scale = self.perception_config.get('max_scale')
-        self.temperature = self.perception_config.get('temperature')
-        self.mse_weight = self.perception_config.get('mse_weight')
-        self.contrastive_weight = self.perception_config.get('contrastive_weight')
+    def _init_agent_config(self, constructor_config: Optional[Mapping[str, Any]] ) -> None:
+        raw_config = get_config_section("perception_agent") or {}
+        if not isinstance(raw_config, Mapping):
+            raise InvalidPerceptionConfigurationError(
+                "agents_config.yaml/perception_agent must be a mapping.",
+                component="perception_agent",
+                details={"actual_type": type(raw_config).__name__},
+            )
 
+        agent_config = dict(raw_config)
+        if constructor_config:
+            if not isinstance(constructor_config, Mapping):
+                raise InvalidPerceptionTypeError(
+                    "PerceptionAgent constructor config must be a mapping.",
+                    component="perception_agent",
+                    details={"actual_type": type(constructor_config).__name__},
+                )
+            nested = constructor_config.get("perception_agent")
+            override = nested if isinstance(nested, Mapping) else constructor_config
+            agent_config = self._merge_known_config(agent_config, override)
+
+        self.agent_config = agent_config
+        self._validate_agent_config()
+
+        self.device = resolve_torch_device(self.agent_config.get("device", "cpu"))
+        self.embed_dim = int(self.agent_config.get("embed_dim", 512))
+        self.masking_ratio = float(self.agent_config.get("masking_ratio", 0.15))
+        self.contrastive_temperature = float(self.agent_config.get("contrastive_temperature", 0.07))
+        self.learning_rate = float(self.agent_config.get("learning_rate", 1e-4))
+        self.weight_decay = float(self.agent_config.get("weight_decay", 1e-2))
+        betas = self.agent_config.get("adam_betas", (0.9, 0.999))
+        self.adam_betas = (float(betas[0]), float(betas[1]))
+        self.adam_eps = float(self.agent_config.get("adam_eps", 1e-7))
+        grad_clip = self.agent_config.get("grad_clip_norm")
+        self.grad_clip_norm = None if grad_clip is None else float(grad_clip)
+        self.decoder_policy = dict(self.agent_config.get("decoders", {}))
+        self.fusion_config = dict(self.agent_config.get("fusion", {}))
+        self.shared_memory_config = dict(self.agent_config.get("shared_memory", {}))
+        self.checkpoint_config = dict(self.agent_config.get("checkpointing", {}))
+
+    def _validate_agent_config(self) -> None:
+        config = self.agent_config
+
+        embed_dim = config.get("embed_dim", 512)
+        if isinstance(embed_dim, bool) or not isinstance(embed_dim, int) or embed_dim <= 0:
+            raise InvalidPerceptionConfigurationError(
+                "perception_agent.embed_dim must be a positive integer.",
+                component="perception_agent",
+                details={"embed_dim": embed_dim},
+            )
+
+        masking_ratio = config.get("masking_ratio", 0.15)
+        try:
+            masking_ratio_value = float(masking_ratio)
+        except (TypeError, ValueError) as exc:
+            raise InvalidPerceptionConfigurationError(
+                "perception_agent.masking_ratio must be numeric.",
+                component="perception_agent",
+                details={"masking_ratio": masking_ratio},
+                cause=exc,
+            ) from exc
+        if not 0.0 <= masking_ratio_value <= 1.0:
+            raise InvalidPerceptionConfigurationError(
+                "perception_agent.masking_ratio must be in [0, 1].",
+                component="perception_agent",
+                details={"masking_ratio": masking_ratio_value},
+            )
+
+        betas = config.get("adam_betas", (0.9, 0.999))
+        if (
+            not isinstance(betas, Sequence)
+            or isinstance(betas, (str, bytes))
+            or len(betas) != 2
+        ):
+            raise InvalidPerceptionConfigurationError(
+                "perception_agent.adam_betas must contain exactly two values.",
+                component="perception_agent",
+                details={"adam_betas": betas},
+            )
+
+        for section_name in ("fusion", "decoders", "shared_memory", "checkpointing"):
+            section = config.get(section_name, {})
+            if section is not None and not isinstance(section, Mapping):
+                raise InvalidPerceptionConfigurationError(
+                    f"perception_agent.{section_name} must be a mapping.",
+                    component="perception_agent",
+                    details={"section": section_name, "actual_type": type(section).__name__},
+                )
+
+        decoder_config = dict(config.get("decoders", {}))
+        for modality in ("text", "vision", "audio"):
+            enabled = decoder_config.get(modality, True)
+            if not isinstance(enabled, bool):
+                raise InvalidPerceptionConfigurationError(
+                    "Decoder enable flags must be booleans.",
+                    component="perception_agent",
+                    details={"modality": modality, "value": enabled},
+                )
+
+        checkpoint_config = dict(config.get("checkpointing", {}))
+        checkpoint_enabled = checkpoint_config.get("enabled", True)
+        if not isinstance(checkpoint_enabled, bool):
+            raise InvalidPerceptionConfigurationError(
+                "perception_agent.checkpointing.enabled must be boolean.",
+                component="perception_agent",
+                details={"value": checkpoint_enabled},
+            )
+        retention = checkpoint_config.get("retention_limit")
+        if retention is not None and (
+            isinstance(retention, bool)
+            or not isinstance(retention, int)
+            or retention < 1
+        ):
+            raise InvalidPerceptionConfigurationError(
+                "checkpointing.retention_limit must be null or a positive integer.",
+                component="perception_agent",
+                details={"retention_limit": retention},
+            )
+
+        for ttl_name in ("snapshot_ttl_seconds", "embedding_cache_ttl_seconds", "training_lock_ttl_seconds"):
+            ttl = dict(config.get("shared_memory", {})).get(ttl_name)
+            if ttl is None:
+                continue
+            if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or float(ttl) <= 0.0:
+                raise InvalidPerceptionConfigurationError(
+                    f"shared_memory.{ttl_name} must be null or > 0 seconds.",
+                    component="perception_agent",
+                    details={ttl_name: ttl},
+                )
+
+    # ------------------------------------------------------------------
+    # Component graph
+    # ------------------------------------------------------------------
     def _init_components(self) -> None:
-        text_encoder = TextEncoder().to(self.device)
-        vision_encoder = VisionEncoder().to(self.device)
-        audio_encoder = AudioEncoder().to(self.device)
-    
-        text_decoder = TextDecoder(
-            encoder=text_encoder
-        ).to(self.device)
-    
-        vision_decoder = VisionDecoder().to(
-            self.device
-        )
-    
-        audio_decoder = AudioDecoder().to(
-            self.device
-        )
-    
-        self.text_perception = TextPerception(
-            encoder=text_encoder,
-            decoder=text_decoder,
-            device=self.device,
-        )
-    
-        self.vision_perception = VisionPerception(
-            encoder=vision_encoder,
-            decoder=vision_decoder,
-            device=self.device,
-        )
-    
-        self.audio_perception = AudioPerception(
-            encoder=audio_encoder,
-            decoder=audio_decoder,
-            device=self.device,
-        )
-    
+        """Construct subsystem boundaries without constructing raw models here."""
+
+        self.text_perception = TextPerception(enable_decoder=bool(self.decoder_policy.get("text", True)), device=self.device)
+        self.vision_perception = VisionPerception(enable_decoder=bool(self.decoder_policy.get("vision", True)), device=self.device)
+        self.audio_perception = AudioPerception(enable_decoder=bool(self.decoder_policy.get("audio", True)), device=self.device)
+
         input_dims = {
             Modality.TEXT: self.text_perception.embed_dim,
             Modality.VISION: self.vision_perception.embed_dim,
             Modality.AUDIO: self.audio_perception.embed_dim,
         }
-    
-        multimodal_config = dict(
-            self.model_config.get(
-                "multimodal",
-                {},
-            )
-        )
-    
+
         self.fusion = PerceptionFusion(
             input_dims=input_dims,
             output_dim=self.embed_dim,
-            fusion_method=multimodal_config.get(
-                "fusion_method",
-                "concat",
-            ),
-            use_attention=multimodal_config.get(
-                "use_attention",
-                True,
-            ),
-            num_heads=int(
-                self.model_config.get(
-                    "num_heads",
-                    8,
-                )
-            ),
-            dropout=float(
-                self.model_config.get(
-                    "dropout_rate",
-                    0.1,
-                )
-            ),
+            fusion_method=str(self.fusion_config.get("method", "concat")),
+            use_attention=bool(self.fusion_config.get("use_attention", True)),
+            num_heads=int(self.fusion_config.get("num_heads", 8)),
+            dropout=float(self.fusion_config.get("dropout", 0.1)),
         )
-    
+
         self.objectives = PerceptionObjectives(
             input_dims=input_dims,
-            contrastive_projection_dim=int(
-                self.perception_config.get(
-                    "contrastive_projection_dim",
-                    256,
-                )
-            ),
-            contrastive_temperature=self.contrastive_temp,
-            temporal_loss_type=self.perception_config.get(
-                "loss_type",
-                "hybrid",
-            ),
-            temporal_max_scale=int(
-                self.perception_config.get(
-                    "max_scale",
-                    3,
-                )
-            ),
-            temporal_temperature=float(
-                self.perception_config.get(
-                    "temperature",
-                    0.1,
-                )
-            ),
-            temporal_mse_weight=float(
-                self.perception_config.get(
-                    "mse_weight",
-                    1.0,
-                )
-            ),
-            temporal_contrastive_weight=float(
-                self.perception_config.get(
-                    "contrastive_weight",
-                    1.0,
-                )
-            ),
+            contrastive_projection_dim=int( self.agent_config.get("contrastive_projection_dim", 256)),
+            contrastive_temperature=self.contrastive_temperature,
+            symmetric_contrastive=bool(self.agent_config.get("symmetric_contrastive", False)),
+            temporal_loss_type=str(self.agent_config.get("loss_type", "hybrid")),
+            temporal_max_scale=int(self.agent_config.get("max_scale", 3)),
+            temporal_temperature=float(self.agent_config.get("temperature", 0.1)),
+            temporal_mse_weight=float(self.agent_config.get("mse_weight", 1.0)),
+            temporal_contrastive_weight=float(self.agent_config.get("contrastive_weight", 1.0)),
         )
-    
+
         self.task_heads = nn.ModuleDict()
-        self._task_head_specs = []
-    
+        self._task_head_specs: list[dict[str, Any]] = []
+
         self.trainer = PerceptionTrainer(
-            modalities={
-                Modality.TEXT: self.text_perception,
-                Modality.VISION: self.vision_perception,
-                Modality.AUDIO: self.audio_perception,
-            },
+            modalities=self._modality_pipelines(),
             fusion=self.fusion,
             objectives=self.objectives,
             task_heads=self.task_heads,
@@ -217,1266 +314,1127 @@ class PerceptionAgent(BaseAgent, nn.Module):
             weight_decay=self.weight_decay,
             adam_betas=self.adam_betas,
             adam_eps=self.adam_eps,
+            grad_clip_norm=self.grad_clip_norm,
             device=self.device,
         )
-    
-        # Backward-compatible attribute only.
-        self.optimizer = self.trainer.optimizer
 
-    def _configure_optimizer(self):
-        """Configures the optimizer for training."""
-        params_to_optimize = list(self.text_encoder.parameters()) + \
-                             list(self.vision_encoder.parameters()) + \
-                             list(self.audio_encoder.parameters()) + \
-                             list(self.text_prediction_head.parameters()) + \
-                             list(self.vision_prediction_head.parameters()) + \
-                             list(self.audio_prediction_head.parameters()) + \
-                             list(self.text_contrastive_proj.parameters()) + \
-                             list(self.vision_contrastive_proj.parameters()) + \
-                             list(self.audio_contrastive_proj.parameters()) + \
-                             list(self.text_generator.parameters()) + \
-                             list(self.vision_generator.parameters()) + \
-                             list(self.audio_generator.parameters()) + \
-                             [self.global_projection_param]
+        # PerceptionTrainer moves every registered trainable subsystem module to
+        # the resolved device before it constructs the optimizer. Do not call
+        # ``self.to(...)`` after optimizer construction, because a post-build
+        # device conversion can make optimizer parameter identity assumptions
+        # unnecessarily fragile.
 
-        return torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, params_to_optimize),
-            lr=self.learning_rate,
-            betas=self.adam_betas,
-            eps=self.adam_eps,
-            weight_decay=self.weight_decay
-        )
-
-    def _init_shared_memory_keys(self):
-        """Initialize standardized keys for shared memory access"""
-        self.sm_keys = {
-            'weights_cache': f"perception:weights:{self.name}",
-            'model_snapshot': f"perception:snapshot:{self.name}",
-            'embeddings': f"perception:embeddings:{self.name}",
-            'training_state': f"perception:training:{self.name}"
+    def _validate_component_contracts(self) -> None:
+        dimensions = {
+            "text": int(self.text_perception.embed_dim),
+            "vision": int(self.vision_perception.embed_dim),
+            "audio": int(self.audio_perception.embed_dim),
         }
+        mismatched = {
+            name: value
+            for name, value in dimensions.items()
+            if value != self.embed_dim
+        }
+        if mismatched:
+            raise PerceptionDimensionError(
+                "Agent embed_dim does not match one or more modality contracts.",
+                component="perception_agent",
+                details={
+                    "agent_embed_dim": self.embed_dim,
+                    "modality_embed_dims": dimensions,
+                    "mismatched": mismatched,
+                },
+                remediation=(
+                    "Align base/configs/agents_config.yaml/perception_agent.embed_dim "
+                    "with the subsystem encoder dimensions. The agent does not read "
+                    "perception_config.yaml to resolve this mismatch."
+                ),
+            )
+
+        if self.fusion.output_dim != self.embed_dim:
+            raise PerceptionDimensionError(
+                "PerceptionFusion output dimension must match PerceptionAgent.embed_dim.",
+                component="perception_agent",
+                details={
+                    "fusion_output_dim": self.fusion.output_dim,
+                    "agent_embed_dim": self.embed_dim,
+                },
+            )
+
+    def _modality_pipelines(self) -> dict[Modality, nn.Module]:
+        return {
+            Modality.TEXT: self.text_perception,
+            Modality.VISION: self.vision_perception,
+            Modality.AUDIO: self.audio_perception,
+        }
+
+    @property
+    def optimizer(self) -> torch.optim.Optimizer:
+        """Backward-compatible view of the trainer-owned optimizer."""
+
+        return self.trainer.optimizer
+
+    @property
+    def tokenizer(self) -> Any:
+        return self.text_perception.tokenizer
 
     @property
     def text_encoder(self) -> nn.Module:
         return self.text_perception.encoder
-    
-    
+
     @property
     def vision_encoder(self) -> nn.Module:
         return self.vision_perception.encoder
-    
-    
+
     @property
     def audio_encoder(self) -> nn.Module:
         return self.audio_perception.encoder
-    
-    
+
     @property
     def text_generator(self) -> nn.Module:
         return self.text_perception.require_decoder()
-    
-    
+
     @property
     def vision_generator(self) -> nn.Module:
         return self.vision_perception.require_decoder()
-    
-    
+
     @property
     def audio_generator(self) -> nn.Module:
         return self.audio_perception.require_decoder()
 
-    # --- Masking Helpers ---
-    def _apply_masking_text(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Applies masking for Masked Language Modeling."""
-        mask_token_id = self.tokenizer.token_to_id(self.tokenizer.mask_token)
-        rand = torch.rand(input_ids.shape, device=self.device)
-        # Where to mask (bernoulli trial for each token)
-        mask_arr = (rand < self.masking_ratio)
-        
-        # Ensure we don't mask special tokens like [CLS], [SEP], [PAD]
-        pad_token_id = self.tokenizer.token_to_id(self.tokenizer.pad_token)
-        cls_token_id = self.tokenizer.token_to_id(self.tokenizer.cls_token)
-        sep_token_id = self.tokenizer.token_to_id(self.tokenizer.sep_token)
+    # ------------------------------------------------------------------
+    # SharedMemory ownership
+    # ------------------------------------------------------------------
+    def _init_shared_memory_keys(self) -> None:
+        prefix = str(self.shared_memory_config.get("key_prefix", "perception")).strip()
+        if not prefix:
+            raise InvalidPerceptionConfigurationError(
+                "shared_memory.key_prefix must not be empty.",
+                component="perception_agent",
+            )
 
-        special_tokens_mask = (input_ids == pad_token_id) | \
-                              (input_ids == cls_token_id) | \
-                              (input_ids == sep_token_id)
-        mask_arr &= ~special_tokens_mask # Don't mask special tokens
+        self.sm_keys = {
+            "model_snapshot": f"{prefix}:snapshot:{self.name}",
+            "embeddings": f"{prefix}:embeddings:{self.name}",
+            "training_state": f"{prefix}:training:{self.name}",
+        }
 
-        masked_input_ids = input_ids.clone()
-        masked_input_ids[mask_arr] = mask_token_id
-        return masked_input_ids, mask_arr
+    @staticmethod
+    def _ttl_from_seconds(value: Any) -> Optional[timedelta]:
+        if value is None:
+            return None
+        return timedelta(seconds=float(value))
 
-    def _apply_masking_vision(self, patches: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Applies masking for Masked Patch Modeling. Patches shape: (B, NumPatches, PatchDim)."""
-        batch_size, num_patches, _ = patches.shape
-        mask = torch.rand(
-            batch_size,
-            num_patches,
-            device=self.device
-        ) < self.masking_ratio
-        masked_patches = patches.clone()
-        masked_patches[mask] = 0
-        return masked_patches, mask
-
-    def _apply_masking_audio(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Applies masking for Masked Audio Modeling (e.g., on spectrogram patches or features)."""
-        batch_size, num_frames, _ = features.shape
-        mask = torch.rand(batch_size, num_frames, device=self.device) < self.masking_ratio
-        masked_features = features.clone()
-        masked_features[mask] = 0
-        return masked_features, mask
-
-    # --- Loss Calculation Helpers ---
-    def _calc_reconstruction_loss_text(self, predictions: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Calculates MLM loss. Predictions: (B, SeqLen, VocabSize), Targets: (B, SeqLen), Mask: (B, SeqLen)"""
-        predictions_masked = predictions[mask] # Select logits for masked tokens
-        targets_masked = targets[mask]       # Select target token IDs for masked tokens
-        if predictions_masked.numel() == 0: # No tokens were masked
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-        loss = F.cross_entropy(predictions_masked.reshape(-1, predictions.size(-1)), targets_masked.reshape(-1))
-        return loss
-
-    def _calc_reconstruction_loss_vision_audio(self, predictions: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Calculates reconstruction loss for vision/audio. Predictions/Targets/Mask: (B, NumPatches/Frames, FeatureDim)"""
-        if mask.sum() == 0 : # No elements masked
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-        expanded_mask = mask.unsqueeze(-1).expand_as(targets)
-        loss = F.mse_loss(predictions[expanded_mask], targets[expanded_mask])
-        return loss
-        
-    def _calc_contrastive_loss(self, emb1: torch.Tensor, emb2: torch.Tensor) -> torch.Tensor:
-        """Calculates InfoNCE contrastive loss. emb1, emb2: (B, ProjDim)"""
-        emb1 = F.normalize(emb1, p=2, dim=-1)
-        emb2 = F.normalize(emb2, p=2, dim=-1)
-
-        # logits: (B, B)
-        logits = torch.matmul(emb1, emb2.t()) / self.contrastive_temp
-        labels = torch.arange(logits.size(0), device=self.device) # Positive pairs are on the diagonal
-        loss = F.cross_entropy(logits, labels)
-        return loss
-
-    def _calc_temporal_coherence_loss(self, sequence_embeddings: torch.Tensor) -> torch.Tensor:
-        """Calculates temporal coherence loss. sequence_embeddings: (B, SeqLen, EmbedDim)"""
-        if sequence_embeddings.size(1) < 2:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-        # Difference between consecutive frame embeddings
-        diffs = sequence_embeddings[:, 1:, :] - sequence_embeddings[:, :-1, :]
-        loss = torch.mean(diffs.pow(2)) # MSE of differences
-        return loss
-
-    # --- Pretraining Steps ---
-    def _pretrain_masked_modality(
-        self,
-        modality: str,
-        inputs: Dict[str, torch.Tensor],
-        mask_ratio: float = 0.15,
-        return_reconstructions: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
-        """
-        Performs masked modality pretraining (MLM, MPM, MAM) using modality-specific
-        encoders and simple prediction heads.
-        """
-        valid_modalities = ['vision', 'audio', 'text']
-        if modality not in valid_modalities:
-            raise ValueError(f"Invalid modality '{modality}'. Must be one of {valid_modalities}")
-
-        device = self.device
-        training = self.training # Agent's training state
-
-        # Get modality-specific components
-        encoder = {
-            'text': self.text_encoder,
-            'vision': self.vision_encoder,
-            'audio': self.audio_encoder
-        }[modality]
-    
-        prediction_head = {
-            'text': self.text_prediction_head,
-            'vision': self.vision_prediction_head,
-            'audio': self.audio_prediction_head
-        }[modality]
-    
-        raw_input_key = self._get_input_key_for_modality(modality)
-        raw_input = inputs[raw_input_key].to(device)
-        style_id = inputs.get('style_id')
-        if style_id is not None:
-            style_id = style_id.to(device)
-            
-        reconstruction_loss = torch.tensor(0.0, device=device, requires_grad=training)
-        reconstructions_dict = {}
-    
-        if modality in ["audio", "vision"] and encoder.encoder_type != "transformer":
-            return 0.0
-
-        with torch.set_grad_enabled(training):
-            if modality == 'text':
-                masked_input_ids, target_mask_indices = self._apply_masking_text(raw_input)
-                encoder_output = encoder(masked_input_ids, style_id=style_id, output_type="full_sequence")
-                predictions_logits = prediction_head(encoder_output) # (B, S, VocabSize)
- 
-                if target_mask_indices.sum() > 0:
-                    # Select logits and labels for masked positions
-                    masked_predictions_logits = predictions_logits[target_mask_indices] # (NumMasked, VocabSize)
-                    masked_target_labels = raw_input[target_mask_indices] # (NumMasked)
-                    
-                    reconstruction_loss = F.cross_entropy(
-                        masked_predictions_logits,
-                        masked_target_labels
+    def _acquire_training_lock(self) -> bool:
+        key = self.sm_keys["training_state"]
+        acquired = bool(self.shared_memory.compare_and_swap(key, None, self.agent_id))
+        if acquired:
+            ttl_seconds = self.shared_memory_config.get("training_lock_ttl_seconds")
+            if ttl_seconds is not None:
+                try:
+                    self.shared_memory.put(
+                        key,
+                        self.agent_id,
+                        ttl=self._ttl_from_seconds(ttl_seconds),
+                        notify=False,
+                        metadata={"owner": self.agent_id, "purpose": "perception_training"},
                     )
-                
-                if return_reconstructions:
-                    reconstructions_dict = {
-                        'original_ids': raw_input.detach(),
-                        'masked_input_ids': masked_input_ids.detach(),
-                        'reconstructed_logits': predictions_logits.detach(),
-                        'mask_indices': target_mask_indices.detach()
-                    }
-    
-            elif modality == 'vision' or modality == 'audio':
+                except Exception:
+                    # Do not strand a lock if TTL/metadata publication fails
+                    # after successful CAS acquisition.
+                    self.shared_memory.compare_and_swap(key, self.agent_id, None)
+                    raise
+        return acquired
 
-                if modality == 'vision':
-                    # raw_input: (B, C, H, W)
-                    raw_patches = encoder.extract_patches(raw_input) # (B, NumPatches, RawPatchDim)
-                    initial_patch_embeddings = torch.matmul(raw_patches, encoder.projection) # (B, NumPatches, EmbedDim)
-                    pos_embed_full = encoder.position_embed # (1, BaseNumPatches+1, EmbedDim) or (1, MaxPosEmbed, EmbedDim)
-                    cls_token_emb = encoder.cls_token # (1, 1, EmbedDim)
-                    mask_token_for_modality = self.mask_tokens['vision'] # (1, EmbedDim)
-                else: # modality == 'audio'
-                    # raw_input: (B, C, T_audio) or (B, T_audio)
-                    raw_patches = encoder.extract_patches(raw_input) # (B, NumFrames, RawFrameDim)
-                    initial_patch_embeddings = torch.matmul(raw_patches, encoder.projection) # (B, NumFrames, EmbedDim)
-                    pos_embed_full = encoder.position_embed # (1, MaxPosEmbed, EmbedDim)
-                    cls_token_emb = encoder.cls_token # (1, 1, EmbedDim) - Assuming audio encoder also has it
-                    mask_token_for_modality = self.mask_tokens['audio'] # (1, EmbedDim)
-    
-                batch_size, num_patches_or_frames, _ = initial_patch_embeddings.shape
-                
-                # Create mask for actual patches/frames
-                target_mask_indices = torch.rand(batch_size, num_patches_or_frames, device=device) < mask_ratio
-                
-                masked_initial_embeddings = initial_patch_embeddings.clone()
-                # Efficiently apply mask token using torch.where or direct assignment
-                # Ensure mask_token_for_modality is correctly broadcasted/expanded
-                expanded_mask_fill = mask_token_for_modality.expand(batch_size, num_patches_or_frames, -1)
-                masked_initial_embeddings = torch.where(target_mask_indices.unsqueeze(-1), 
-                                                        expanded_mask_fill, 
-                                                        masked_initial_embeddings)
-    
-                # Add CLS token
-                cls_tokens_expanded = cls_token_emb.expand(batch_size, -1, -1)
-                transformer_input_embeddings = torch.cat([cls_tokens_expanded, masked_initial_embeddings], dim=1) # (B, NumPatches+1, EmbedDim)
-                
-                current_seq_len = transformer_input_embeddings.size(1)
-                
-                # Add positional embeddings (handle potential size mismatch carefully)
-                # Encoders should ideally handle dynamic PE sizing or use PE up to max_position_embeddings
-                if pos_embed_full.size(1) < current_seq_len:
-                    # Fallback: Use available part and warn. Proper fix is PE interpolation or larger PE table.
-                    logger.warning(f"Positional embedding table size ({pos_embed_full.size(1)}) is smaller than "
-                                   f"current sequence length ({current_seq_len}) for modality {modality}. Truncating/Padding PE.")
-                    pe_to_add = torch.zeros_like(transformer_input_embeddings)
-                    len_to_copy = min(pos_embed_full.size(1), current_seq_len)
-                    pe_to_add[:, :len_to_copy, :] = pos_embed_full[:, :len_to_copy, :]
-                else:
-                    pe_to_add = pos_embed_full[:, :current_seq_len, :]
-                
-                transformer_input_with_pe = transformer_input_embeddings + pe_to_add
-                
-                # Pass through the encoder's transformer component
-                encoder_transformer_output = encoder.transformer(transformer_input_with_pe, style_id=style_id) # (B, NumPatches+1, EmbedDim)
-                
-                if target_mask_indices.sum() > 0:
-                    output_at_masked_positions = encoder_transformer_output[:, 1:, :][target_mask_indices] # (TotalNumMasked, EmbedDim)
-                    
-                    # Predict raw patches/frames from these outputs
-                    predictions_raw = prediction_head(output_at_masked_positions) # (TotalNumMasked, RawPatchDim)
-                    
-                    # Targets are the original raw patches/frames at masked positions
-                    target_raw_values = raw_patches[target_mask_indices] # (TotalNumMasked, RawPatchDim)
-                    
-                    reconstruction_loss = F.mse_loss(predictions_raw, target_raw_values)
-                
-                if return_reconstructions:
-                    reconstructions_dict = {
-                        'original_raw_patches_or_frames': raw_patches.detach(),
-                        'masked_input_embeddings_to_transformer': masked_initial_embeddings.detach(), # These are EmbedDim
-                        'reconstructed_raw_predictions_at_mask': predictions_raw.detach() if target_mask_indices.sum() > 0 else torch.empty(0),
-                        'mask_indices': target_mask_indices.detach()
-                    }
-            
-            # Ensure loss requires grad if in training and it turned out to be 0 (e.g. no tokens masked)
-            if training and not reconstruction_loss.requires_grad and reconstruction_loss.item() == 0.0:
-                reconstruction_loss = reconstruction_loss.clone().requires_grad_(True)
-                
-            if return_reconstructions:
-                return reconstruction_loss, reconstructions_dict
-            
-            return reconstruction_loss
+    def _release_training_lock(self) -> None:
+        # CAS makes release ownership-aware. Storing None is intentional: a
+        # subsequent owner can atomically acquire from the unlocked state.
+        self.shared_memory.compare_and_swap(
+            self.sm_keys["training_state"],
+            self.agent_id,
+            None,
+        )
 
-    def _pretrain_contrastive(self, data_mod1: Dict, data_mod2: Dict, mod1_type: str, mod2_type: str) -> torch.Tensor:
-        """Performs cross-modal contrastive learning."""
-        encoders = {'text': self.text_encoder, 'vision': self.vision_encoder, 'audio': self.audio_encoder}
-        projections = {'text': self.text_contrastive_proj, 
-                       'vision': self.vision_contrastive_proj, 
-                       'audio': self.audio_contrastive_proj}
+    # ------------------------------------------------------------------
+    # Canonical representation routing
+    # ------------------------------------------------------------------
+    def _pipeline_for(self, modality: Modality | str) -> Any:
+        active = Modality.parse(modality)
+        pipeline = self._modality_pipelines().get(active)
+        if pipeline is None:  # defensive; Modality.parse already bounds values
+            raise ModalityInputError(
+                f"No perception pipeline is registered for '{active.value}'.",
+                component="perception_agent",
+            )
+        return pipeline
 
-        # Extract input data for each modality
-        input1 = data_mod1[self._get_input_key_for_modality(mod1_type)].to(self.device)
-        input2 = data_mod2[self._get_input_key_for_modality(mod2_type)].to(self.device)
+    def _encode_modality(self, modality: Modality | str, payload: Any, *, style_id: Any = None) -> ModalityRepresentation:
+        active = Modality.parse(modality)
+        pipeline = self._pipeline_for(active)
+        return pipeline.encode(payload, style_id=style_id)
 
-        style_id1 = data_mod1.get('style_id')
-        style_id2 = data_mod2.get('style_id')
+    def _encode_multimodal(self, payload: Mapping[str, Any]) -> dict[Modality, ModalityRepresentation]:
+        if not isinstance(payload, Mapping):
+            raise ModalityInputError(
+                "Multimodal input_data must be a mapping keyed by text/vision/audio.",
+                component="perception_agent",
+                details={"actual_type": type(payload).__name__},
+            )
 
-        # Encode features
-        emb1_full = encoders[mod1_type](input1, style_id=style_id1)
-        emb2_full = encoders[mod2_type](input2, style_id=style_id2)
+        shared_style = payload.get("style_id")
+        representations: dict[Modality, ModalityRepresentation] = {}
+        for modality in (Modality.TEXT, Modality.VISION, Modality.AUDIO):
+            if modality.value not in payload or payload[modality.value] is None:
+                continue
+            representations[modality] = self._encode_modality(
+                modality,
+                payload[modality.value],
+                style_id=shared_style,
+            )
 
-        emb1 = emb1_full[:, 0, :] if emb1_full.ndim == 3 else emb1_full # (B, EmbedDim)
-        emb2 = emb2_full[:, 0, :] if emb2_full.ndim == 3 else emb2_full # (B, EmbedDim)
+        if not representations:
+            raise ModalityInputError(
+                "Multimodal input contains no text, vision, or audio payload.",
+                component="perception_agent",
+                details={"keys": sorted(str(key) for key in payload.keys())},
+            )
+        return representations
 
-        # Project to common contrastive space
-        proj_emb1 = projections[mod1_type](emb1)
-        proj_emb2 = projections[mod2_type](emb2)
-        
-        return self._calc_contrastive_loss(proj_emb1, proj_emb2)
+    def _representations_from_task(self, task_data: Mapping[str, Any]) -> dict[Modality, ModalityRepresentation]:
+        """Normalize fine-tuning input without duplicating modality preprocessing."""
 
-    def _get_input_key_for_modality(self, modality_type: str) -> str:
-        if modality_type == 'text': return 'input_ids'
-        if modality_type == 'vision': return 'pixel_values'
-        if modality_type == 'audio': return 'audio_values'
-        raise ValueError(f"Unknown modality type: {modality_type}")
+        if "input_data" in task_data:
+            modality_name = task_data.get("modality")
+            if modality_name is None:
+                raise ModalityInputError(
+                    "'modality' is required when fine-tuning uses 'input_data'.",
+                    component="perception_agent",
+                )
+            if str(modality_name).strip().lower() == "multimodal":
+                return self._encode_multimodal(task_data["input_data"])
+            modality = Modality.parse(modality_name)
+            return {
+                modality: self._encode_modality(modality, task_data["input_data"])
+            }
 
-    def _encode_midi_events(self, midi_events: Union[List[Dict[str, Any]], torch.Tensor]) -> torch.Tensor:
-        """
-        Convert MIDI events into a compact numeric tensor usable by audio encoders.
-        Expected event fields: note, velocity, delta_time, channel.
-        """
-        if isinstance(midi_events, torch.Tensor):
-            return midi_events.float()
+        legacy_keys = {
+            Modality.TEXT: "text_data",
+            Modality.VISION: "vision_data",
+            Modality.AUDIO: "audio_data",
+        }
+        representations: dict[Modality, ModalityRepresentation] = {}
+        for modality, key in legacy_keys.items():
+            if key in task_data and task_data[key] is not None:
+                representations[modality] = self._encode_modality(
+                    modality,
+                    task_data[key],
+                )
 
-        if not midi_events:
-            return torch.zeros((1, 4), dtype=torch.float32)
+        if not representations:
+            raise ModalityInputError(
+                "Fine-tuning requires input_data+modality or at least one modality payload.",
+                component="perception_agent",
+            )
+        return representations
 
-        rows = []
-        for event in midi_events:
-            rows.append([
-                float(event.get('note', 0)),
-                float(event.get('velocity', 0)),
-                float(event.get('delta_time', 0.0)),
-                float(event.get('channel', 0)),
-            ])
-        return torch.tensor(rows, dtype=torch.float32)
+    def _fuse(self, representations: Mapping[Modality | str, ModalityRepresentation]) -> FusedRepresentation:
+        return self.fusion(representations)
 
-    def _normalize_modality_input(self, modality: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Normalize heterogeneous payload keys into a stable PerceptionAgent API.
-        Supports microphone, MIDI, and video-oriented ingress aliases.
-        """
-        if modality == "text":
-            if 'input_ids' not in input_data:
-                if 'tokens' in input_data:
-                    input_data['input_ids'] = input_data['tokens']
-            return input_data
+    # ------------------------------------------------------------------
+    # Dynamic downstream heads
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _safe_task_key(value: str) -> str:
+        normalized = str(value).strip().lower()
+        safe = "".join(
+            char if char.isalnum() or char in {"_", "-"} else "_"
+            for char in normalized
+        )
+        return safe.strip("_") or "task"
 
-        if modality == "vision":
-            if 'pixel_values' not in input_data:
-                for alias in ('video_frames', 'frames', 'frame_sequence'):
-                    if alias in input_data:
-                        input_data['pixel_values'] = input_data[alias]
-                        break
-            return input_data
+    @staticmethod
+    def _task_head_type(downstream_task: str) -> str:
+        normalized = str(downstream_task).strip().lower()
+        if "classification" in normalized:
+            return "classification"
+        if "regression" in normalized:
+            return "regression"
+        raise UnsupportedPerceptionOptionError(
+            "Perception fine-tuning currently supports classification and regression heads.",
+            component="perception_agent",
+            details={"downstream_task": downstream_task},
+        )
 
-        if modality == "audio":
-            if 'audio_values' not in input_data:
-                for alias in ('waveform', 'microphone_buffer', 'mic_buffer', 'audio_stream'):
-                    if alias in input_data:
-                        input_data['audio_values'] = input_data[alias]
-                        break
-            if 'midi_events' in input_data and 'audio_values' not in input_data:
-                input_data['audio_values'] = self._encode_midi_events(input_data['midi_events'])
-            return input_data
-
-        if modality == "multimodal":
-            for sub_modality in ('text', 'vision', 'audio'):
-                if sub_modality in input_data and isinstance(input_data[sub_modality], dict):
-                    input_data[sub_modality] = self._normalize_modality_input(sub_modality, input_data[sub_modality])
-            return input_data
-
-        return input_data
-
-    def _pretrain_temporal_coherence(self, sequence_data: torch.Tensor, modality: str) -> torch.Tensor:
-        """
-        Enhanced temporal coherence learning with configurable loss types,
-        multi-scale coherence, and efficient batched processing.
-
-        """
-        encoders = {'vision': self.vision_encoder, 'audio': self.audio_encoder}
-        if modality not in encoders:
-            raise ValueError(f"Temporal coherence not supported for modality: {modality}")
-        
-        batch_size, num_frames = sequence_data.shape[:2]
-        
-        # Handle short sequences
-        if num_frames < 2:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-        
-        # Efficient batched encoding - (B*T, ...) -> (B*T, D) -> (B, T, D)
-        flat_sequence = sequence_data.view(-1, *sequence_data.shape[2:])
-        encoded_frames = encoders[modality](flat_sequence)  # (B*T, ...)
-        
-        # Handle different encoder output types
-        if encoded_frames.dim() == 3:  # Sequence output (B*T, S, D)
-            frame_embeddings = encoded_frames[:, 0, :]  # Use CLS token
-        else:  # Pooled output (B*T, D)
-            frame_embeddings = encoded_frames
-        
-        embeddings = frame_embeddings.view(batch_size, num_frames, -1)  # (B, T, D)
-        
-        total_loss = torch.tensor(0.0, device=self.device)
-        
-        # Multi-scale MSE loss (captures both short and long-term coherence)
-        if self.loss_type in ['mse', 'hybrid']:
-            mse_loss = torch.tensor(0.0, device=self.device)
-            valid_scale_count = 0
-            
-            for scale in range(1, min(self.max_scale + 1, num_frames)):
-                if num_frames - scale < 1:
-                    continue
-                    
-                # Calculate differences at current temporal scale
-                emb1 = embeddings[:, :-scale, :]
-                emb2 = embeddings[:, scale:, :]
-                diffs = emb2 - emb1
-                
-                # Accumulate MSE loss
-                scale_loss = torch.mean(diffs.pow(2))
-                mse_loss += scale_loss
-                valid_scale_count += 1
-            
-            if valid_scale_count > 0:
-                mse_loss /= valid_scale_count
-                total_loss += self.mse_weight * mse_loss
-        
-        # Contrastive loss (distinguishes adjacent vs distant frames)
-        if self.loss_type in ['contrastive', 'hybrid']:
-            # Only use consecutive pairs for anchor-positive
-            anchors = embeddings[:, :-1, :].reshape(-1, embeddings.size(-1))  # (B*(T-1), D)
-            positives = embeddings[:, 1:, :].reshape(-1, embeddings.size(-1))  # (B*(T-1), D)
-            
-            # Generate negatives - same sequence but distant frames
-            all_negatives = []
-            for i in range(batch_size):
-                # Get random distant frames from same sequence
-                time_indices = torch.randint(0, num_frames, (num_frames - 1,))
-                distant_frames = embeddings[i, time_indices, :]
-                all_negatives.append(distant_frames)
-            
-            negatives = torch.cat(all_negatives, dim=0)  # (B*(T-1), D)
-            
-            # Normalize embeddings
-            anchors_norm = F.normalize(anchors, dim=-1)
-            positives_norm = F.normalize(positives, dim=-1)
-            negatives_norm = F.normalize(negatives, dim=-1)
-            
-            # Calculate similarities
-            pos_sim = torch.sum(anchors_norm * positives_norm, dim=-1) / self.temperature
-            neg_sim = torch.sum(anchors_norm[:, None] * negatives_norm[None, :], dim=-1) / self.temperature
-            
-            # Contrastive loss (InfoNCE)
-            logits = torch.cat([pos_sim[:, None], neg_sim], dim=1)
-            labels = torch.zeros(logits.size(0), dtype=torch.long, device=self.device)
-            contrastive_loss = F.cross_entropy(logits, labels)
-            
-            total_loss += self.contrastive_weight * contrastive_loss
-        
-        return total_loss
-
-    def _pretraining_step(self, task_data: Dict) -> Dict[str, torch.Tensor]:
-        """Orchestrates a single pretraining step based on the objective."""
-        if self.shared_memory.get(self.sm_keys['training_state']):
-            logger.info("Training paused - another agent is currently training")
-            return {'status': 'paused'}
-            
-        try:
-            # Set training lock
-            self.shared_memory.put(self.sm_keys['training_state'], True)
-
-            self.train() # Set agent to training mode
-            self.optimizer.zero_grad()
-            
-            objective = task_data['objective']
-            total_loss = torch.tensor(0.0, device=self.device)
-
-            if objective == 'mlm': # Masked Language Modeling
-                loss = self._pretrain_masked_modality('text', task_data['text_data'])
-                total_loss = total_loss + loss
-            elif objective == 'mpm': # Masked Patch Modeling
-                loss = self._pretrain_masked_modality('vision', task_data['vision_data'])
-                total_loss = total_loss + loss
-            elif objective == 'mam': # Masked Audio Modeling
-                loss = self._pretrain_masked_modality('audio', task_data['audio_data'])
-                total_loss = total_loss + loss
-            elif objective == 'contrastive_text_image':
-                loss = self._pretrain_contrastive(task_data['text_data'], task_data['vision_data'], 'text', 'vision')
-                total_loss = total_loss + loss
-            elif objective == 'contrastive_text_audio':
-                loss = self._pretrain_contrastive(task_data['text_data'], task_data['audio_data'], 'text', 'audio')
-                total_loss = total_loss + loss
-            elif objective == 'contrastive_vision_audio':
-                loss = self._pretrain_contrastive(task_data['vision_data'], task_data['audio_data'], 'vision', 'audio')
-                total_loss = total_loss + loss
-            elif objective == 'temporal_vision': # Temporal coherence for video
-                loss = self._pretrain_temporal_coherence(task_data['video_data']['frame_sequence'], 'vision') # video_data.frame_sequence: (B, NumFrames, C, H, W)
-                total_loss = total_loss + loss
-            elif objective == 'temporal_audio': # Temporal coherence for audio
-                loss = self._pretrain_temporal_coherence(task_data['audio_sequence_data']['segment_sequence'], 'audio') # audio_sequence_data.segment_sequence: (B, NumSegments, C, T_segment)
-                total_loss = total_loss + loss
-            else:
-                logger.warning(f"Unknown pretraining objective: {objective}")
-                return {'loss': total_loss, 'status': 'unknown_objective'}
-
-            if total_loss.requires_grad: # Ensure loss requires grad before backward
-                total_loss.backward()
-                self.optimizer.step()
-            
-            return {'loss': total_loss.item(), 'status': 'success'}
-
-        finally:
-            # Release training lock
-            self.shared_memory.put(self.sm_keys['training_state'], False)
-
-    def train(self, mode: bool = True):
-        """
-        Match nn.Module.train signature so internal calls like self.eval()
-        (which invokes self.train(False)) keep working.
-        """
-        super().train(mode)
-        for module in [
-            self.text_encoder,
-            self.vision_encoder,
-            self.audio_encoder,
-            self.text_generator,
-            self.vision_generator,
-            self.audio_generator,
-            self.text_prediction_head,
-            self.vision_prediction_head,
-            self.audio_prediction_head,
-            self.text_contrastive_proj,
-            self.vision_contrastive_proj,
-            self.audio_contrastive_proj,
-            self.multi_modal_projector,
-        ]:
-            if isinstance(module, torch.nn.Module):
-                module.train(mode)
-        return self
-
-    def _apply_agent_state_dict(self, model_state_dict: Dict[str, Any]) -> None:
-        """
-        Load either:
-        1) a full flattened PerceptionAgent state_dict
-        2) a legacy nested component dict {text_encoder: ..., ...}
-        """
-        if not isinstance(model_state_dict, dict):
-            raise TypeError("model_state_dict must be a dictionary")
-
-        nested_keys = {"text_encoder", "vision_encoder", "audio_encoder", "text_decoder", "vision_decoder", "audio_decoder"}
-        if nested_keys.intersection(model_state_dict.keys()):
-            if "text_encoder" in model_state_dict:
-                self.text_encoder.load_state_dict(model_state_dict["text_encoder"])
-            if "vision_encoder" in model_state_dict:
-                self.vision_encoder.load_state_dict(model_state_dict["vision_encoder"])
-            if "audio_encoder" in model_state_dict:
-                self.audio_encoder.load_state_dict(model_state_dict["audio_encoder"])
-            if "text_decoder" in model_state_dict:
-                self.text_generator.load_state_dict(model_state_dict["text_decoder"])
-            if "vision_decoder" in model_state_dict:
-                self.vision_generator.load_state_dict(model_state_dict["vision_decoder"])
-            if "audio_decoder" in model_state_dict:
-                self.audio_generator.load_state_dict(model_state_dict["audio_decoder"])
-            return
-
-        self.load_state_dict(model_state_dict)
+    def _task_head_key(self, downstream_task: str, input_dim: int, num_classes: Optional[int]) -> str:
+        head_type = self._task_head_type(downstream_task)
+        task_key = self._safe_task_key(downstream_task)
+        class_suffix = "na" if num_classes is None else str(int(num_classes))
+        return f"{head_type}__{task_key}__d{int(input_dim)}__c{class_suffix}"
 
     def _get_task_head(
         self,
         downstream_task: str,
         input_dim: int,
         num_classes: Optional[int] = None,
-    ) -> nn.Module:
-
-        normalized = downstream_task.strip().lower()
-
-        if "classification" in normalized:
-            head_type = "classification"
-        elif "regression" in normalized:
-            head_type = "regression"
-        else:
-            raise UnsupportedPerceptionOptionError(
-                "Perception fine-tuning currently supports "
-                "classification and regression task heads.",
+    ) -> tuple[str, nn.Module]:
+        head_type = self._task_head_type(downstream_task)
+        input_dim = int(input_dim)
+        if input_dim <= 0:
+            raise InvalidPerceptionValueError(
+                "Task-head input_dim must be positive.",
                 component="perception_agent",
-                details={
-                    "downstream_task": downstream_task
-                },
+                details={"input_dim": input_dim},
             )
-
-        key = (
-            f"{head_type}:"
-            f"{int(input_dim)}:"
-            f"{num_classes}"
-        )
-
-        if key in self.task_heads:
-            return self.task_heads[key]
 
         if head_type == "classification":
-            head = ClassificationHead(
-                hidden_dim=input_dim
-            )
+            if (
+                num_classes is None
+                or isinstance(num_classes, bool)
+                or not isinstance(num_classes, int)
+                or num_classes < 2
+            ):
+                raise InvalidPerceptionValueError(
+                    "Classification fine-tuning requires num_classes >= 2.",
+                    component="perception_agent",
+                    details={"num_classes": num_classes},
+                )
+        elif num_classes is not None:
+            # num_classes has no semantic role for regression and must not alter
+            # the identity of the regression head.
+            num_classes = None
 
-            if num_classes is not None:
-                classifier = head.classifier
+        key = self._task_head_key(downstream_task, input_dim, num_classes)
+        if key in self.task_heads:
+            return key, self.task_heads[key]
 
-                if (
-                    isinstance(classifier, nn.Sequential)
-                    and isinstance(classifier[-1], nn.Linear)
-                ):
-                    classifier[-1] = nn.Linear(classifier[-1].in_features, int(num_classes))
-
-                resolved_num_classes = int(num_classes)
-
-            else:
-                resolved_num_classes = int(head.num_classes)
-
+        if head_type == "classification":
+            assert num_classes is not None
+            head = ClassificationHead(hidden_dim=input_dim)
+            classifier = getattr(head, "classifier", None)
+            if (
+                not isinstance(classifier, nn.Sequential)
+                or len(classifier) == 0
+                or not isinstance(classifier[-1], nn.Linear)
+            ):
+                raise PerceptionConfigurationError(
+                    "ClassificationHead does not expose the expected final linear classifier.",
+                    component="perception_agent",
+                    details={"head_type": type(head).__name__},
+                    remediation=(
+                        "Update the subsystem ClassificationHead contract rather than "
+                        "guessing how to mutate an unknown head structure."
+                    ),
+                )
+            final = classifier[-1]
+            if final.out_features != num_classes:
+                classifier[-1] = nn.Linear(
+                    final.in_features,
+                    num_classes,
+                    bias=final.bias is not None,
+                )
+            head.num_classes = int(num_classes)
+            resolved_num_classes: Optional[int] = int(num_classes)
         else:
             head = RegressionHead(hidden_dim=input_dim)
             resolved_num_classes = None
 
         self.trainer.register_task_head(key, head)
-        self._task_head_specs.append({
+        spec = {
             "key": key,
+            "downstream_task": str(downstream_task),
             "type": head_type,
-            "input_dim": int(input_dim),
+            "input_dim": input_dim,
             "num_classes": resolved_num_classes,
-        })
+        }
+        self._task_head_specs.append(spec)
+        return key, self.task_heads[key]
 
-        return self.task_heads[key]
+    def _get_existing_task_head(
+        self,
+        downstream_task: str,
+        input_dim: int,
+        num_classes: Optional[int] = None,
+    ) -> tuple[str, nn.Module]:
+        """Resolve a trained/restored head without creating parameters at inference."""
 
-    def _finetune_step(self, task_data: Dict) -> Dict[str, Any]:
-        self.train()
-        self.optimizer.zero_grad()
-
-        downstream_task = task_data['downstream_task'] # e.g., 'image_classification', 'text_regression'
-        labels = task_data['labels'].to(self.device)
-        
-        embeddings = None
-        if 'text_data' in task_data:
-            input_ids = task_data['text_data']['input_ids'].to(self.device)
-            embeddings = self.text_encoder(input_ids, style_id=task_data['text_data'].get('style_id'))
-        elif 'vision_data' in task_data:
-            pixel_values = task_data['vision_data']['pixel_values'].to(self.device)
-            embeddings = self.vision_encoder(pixel_values, style_id=task_data['vision_data'].get('style_id'))
-        elif 'audio_data' in task_data:
-            audio_data = self._normalize_modality_input('audio', task_data['audio_data'])
-            audio_values = audio_data['audio_values'].to(self.device)
-            embeddings = self.audio_encoder(audio_values, style_id=audio_data.get('style_id'))
-        # Add handling for multimodal fine-tuning if necessary, by concatenating/fusing embeddings
-        
-        if embeddings is None:
-            return {'loss': 0, 'status': 'no_input_data'}
-
-        # Use CLS token or mean pooled output for sequence tasks
-        if embeddings.ndim == 3: # (B, SeqLen, EmbedDim)
-            pooled_embeddings = embeddings[:, 0, :] # Assuming CLS token
-        else: # (B, EmbedDim)
-            pooled_embeddings = embeddings
-
-        # Get task head
-        num_classes = task_data.get('num_classes') # Required for classification
-        task_head = self._get_task_head(
-            downstream_task=downstream_task,
-            input_dim=pooled_embeddings.size(-1),
-            num_classes=num_classes
-        )
-        
-        logits_or_values = task_head(pooled_embeddings)
-
-        loss = None
-        if "classification" in downstream_task.lower():
-            loss = F.cross_entropy(logits_or_values, labels)
-        elif "regression" in downstream_task.lower():
-            loss = F.mse_loss(logits_or_values.squeeze(), labels.float()) # Ensure labels are float for MSE
+        head_type = self._task_head_type(downstream_task)
+        if head_type == "classification":
+            if (
+                num_classes is None
+                or isinstance(num_classes, bool)
+                or not isinstance(num_classes, int)
+                or num_classes < 2
+            ):
+                raise InvalidPerceptionValueError(
+                    "Classification inference requires num_classes >= 2 to identify the trained head.",
+                    component="perception_agent",
+                    details={"num_classes": num_classes},
+                )
         else:
-            return {'loss': 0, 'status': f'unsupported_task_type:{downstream_task}'}
-        
-        if loss is not None and loss.requires_grad:
-            loss.backward()
-            self.optimizer.step()
-            return {'loss': loss.item(), 'status': 'success', 'predictions': logits_or_values.detach()}
-        return {'loss': 0, 'status': 'loss_not_computed', 'predictions': logits_or_values.detach()}
+            num_classes = None
 
-    def _inference_step(self, task_data: Dict) -> Dict[str, Any]:
-        self.eval() # Set agent to evaluation mode
-        with torch.no_grad():
-            modality = task_data['modality']
-            input_data = self._normalize_modality_input(modality, task_data['input_data'])
-            downstream_task = task_data.get('downstream_task', None) # Optional: for task-specific heads
+        key = self._task_head_key(downstream_task, int(input_dim), num_classes)
+        if key not in self.task_heads:
+            raise PerceptionStateError(
+                "Requested downstream head is not registered in the active PerceptionAgent state.",
+                component="perception_agent",
+                details={
+                    "requested_head": key,
+                    "available_heads": list(self.task_heads.keys()),
+                },
+                remediation=(
+                    "Fine-tune the downstream task first or restore a checkpoint/shared "
+                    "snapshot containing the trained head. Inference does not create an "
+                    "untrained head implicitly."
+                ),
+            )
+        return key, self.task_heads[key]
 
-            embeddings = None
-            style_id = input_data.get('style_id')
+    def _restore_task_head_structure(self, specs: Any) -> None:
+        if specs is None:
+            specs = []
+        if not isinstance(specs, Sequence) or isinstance(specs, (str, bytes)):
+            raise PerceptionStateError(
+                "task_head_specs must be a sequence of mappings.",
+                component="perception_agent",
+                details={"actual_type": type(specs).__name__},
+            )
 
-            if modality == 'text':
-                input_ids = input_data['input_ids'].to(self.device)
-                embeddings = self.text_encoder(input_ids, style_id=style_id)
-            elif modality == 'vision':
-                pixel_values = input_data['pixel_values'].to(self.device)
-                embeddings = self.vision_encoder(pixel_values, style_id=style_id)
-            elif modality == 'audio':
-                audio_values = input_data['audio_values'].to(self.device)
-                embeddings = self.audio_encoder(audio_values, style_id=style_id)
-            elif modality == 'multimodal': # Example for multimodal inference
-                text_emb = self.text_encoder(input_data['text']['input_ids'].to(self.device), style_id=input_data['text'].get('style_id'))[:,0,:]
-                vis_emb = self.vision_encoder(input_data['vision']['pixel_values'].to(self.device), style_id=input_data['vision'].get('style_id'))[:,0,:]
-                if 'audio' in input_data and 'audio_values' in input_data['audio']:
-                    aud_emb = self.audio_encoder(input_data['audio']['audio_values'].to(self.device), style_id=input_data['audio'].get('style_id'))
-                    aud_emb = aud_emb[:, 0, :] if aud_emb.ndim == 3 else aud_emb
-                    embeddings = torch.cat((text_emb, vis_emb, aud_emb), dim=-1)
-                else:
-                    # Simple concatenation for fusion, more sophisticated fusion can be added
-                    embeddings = torch.cat((text_emb, vis_emb), dim=-1) 
+        # Model topology must be reconstructed before optimizer moments are
+        # loaded.  Rebuilding here intentionally resets only the in-memory
+        # optimizer being replaced by checkpoint/shared-state restoration.
+        self.task_heads = nn.ModuleDict()
+        self.trainer.task_heads = self.task_heads
+        self._task_head_specs = []
+        self.trainer.rebuild_optimizer()
 
+        for index, raw_spec in enumerate(specs):
+            if not isinstance(raw_spec, Mapping):
+                raise PerceptionStateError(
+                    "Each task-head specification must be a mapping.",
+                    component="perception_agent",
+                    details={"index": index, "actual_type": type(raw_spec).__name__},
+                )
+
+            required = {"key", "downstream_task", "type", "input_dim", "num_classes"}
+            missing = required - set(raw_spec)
+            if missing:
+                raise PerceptionStateError(
+                    "Task-head specification is incomplete.",
+                    component="perception_agent",
+                    details={"index": index, "missing": sorted(missing)},
+                )
+
+            expected_type = self._task_head_type(str(raw_spec["downstream_task"]))
+            if expected_type != str(raw_spec["type"]):
+                raise PerceptionStateError(
+                    "Saved task-head type conflicts with downstream_task.",
+                    component="perception_agent",
+                    details={
+                        "index": index,
+                        "saved_type": raw_spec["type"],
+                        "derived_type": expected_type,
+                    },
+                )
+
+            key, _ = self._get_task_head(
+                downstream_task=str(raw_spec["downstream_task"]),
+                input_dim=int(raw_spec["input_dim"]),
+                num_classes=(
+                    None
+                    if raw_spec["num_classes"] is None
+                    else int(raw_spec["num_classes"])
+                ),
+            )
+            if key != str(raw_spec["key"]):
+                raise PerceptionStateError(
+                    "Saved task-head identity does not match reconstructed identity.",
+                    component="perception_agent",
+                    details={"saved_key": raw_spec["key"], "reconstructed_key": key},
+                )
+
+    # ------------------------------------------------------------------
+    # Training orchestration
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _require_field(mapping: Mapping[str, Any], key: str, *, context: str) -> Any:
+        if key not in mapping:
+            raise ModalityInputError(
+                f"Missing required field '{key}' for {context}.",
+                component="perception_agent",
+                details={"available": sorted(str(item) for item in mapping.keys())},
+            )
+        return mapping[key]
+
+    def _pretraining_step(self, task_data: Mapping[str, Any]) -> dict[str, Any]:
+        objective = str(self._require_field(task_data, "objective", context="pretraining")).strip().lower()
+        if objective not in _SUPPORTED_PRETRAIN_OBJECTIVES:
+            raise UnsupportedPerceptionOptionError(
+                f"Unsupported perception pretraining objective: {objective!r}.",
+                component="perception_agent",
+                details={"supported": sorted(_SUPPORTED_PRETRAIN_OBJECTIVES)},
+            )
+
+        if not self._acquire_training_lock():
+            return {
+                "status": "paused",
+                "reason": "perception_training_lock_held",
+                "lock_owner": self.shared_memory.get(self.sm_keys["training_state"]),
+            }
+
+        try:
+            self.train(True)
+
+            if objective == "mlm":
+                result = self.trainer.masked_step(
+                    Modality.TEXT,
+                    self._require_field(task_data, "text_data", context=objective),
+                    mask_ratio=self.masking_ratio,
+                )
+            elif objective == "mpm":
+                result = self.trainer.masked_step(
+                    Modality.VISION,
+                    self._require_field(task_data, "vision_data", context=objective),
+                    mask_ratio=self.masking_ratio,
+                )
+            elif objective == "mam":
+                result = self.trainer.masked_step(
+                    Modality.AUDIO,
+                    self._require_field(task_data, "audio_data", context=objective),
+                    mask_ratio=self.masking_ratio,
+                )
+            elif objective == "contrastive_text_image":
+                result = self.trainer.contrastive_step(
+                    Modality.TEXT,
+                    self._require_field(task_data, "text_data", context=objective),
+                    Modality.VISION,
+                    self._require_field(task_data, "vision_data", context=objective),
+                )
+            elif objective == "contrastive_text_audio":
+                result = self.trainer.contrastive_step(
+                    Modality.TEXT,
+                    self._require_field(task_data, "text_data", context=objective),
+                    Modality.AUDIO,
+                    self._require_field(task_data, "audio_data", context=objective),
+                )
+            elif objective == "contrastive_vision_audio":
+                result = self.trainer.contrastive_step(
+                    Modality.VISION,
+                    self._require_field(task_data, "vision_data", context=objective),
+                    Modality.AUDIO,
+                    self._require_field(task_data, "audio_data", context=objective),
+                )
+            elif objective == "temporal_vision":
+                video_data = self._require_field(task_data, "video_data", context=objective)
+                if not isinstance(video_data, Mapping):
+                    raise ModalityInputError(
+                        "video_data must be a mapping containing frame_sequence.",
+                        component="perception_agent",
+                    )
+                result = self.trainer.temporal_step(
+                    Modality.VISION,
+                    self._require_field(video_data, "frame_sequence", context=objective),
+                )
+            else:  # temporal_audio
+                sequence_data = self._require_field(
+                    task_data,
+                    "audio_sequence_data",
+                    context=objective,
+                )
+                if not isinstance(sequence_data, Mapping):
+                    raise ModalityInputError(
+                        "audio_sequence_data must be a mapping containing segment_sequence.",
+                        component="perception_agent",
+                    )
+                result = self.trainer.temporal_step(
+                    Modality.AUDIO,
+                    self._require_field(sequence_data, "segment_sequence", context=objective),
+                )
+
+            return {"status": "success", **result.to_dict()}
+        finally:
+            self._release_training_lock()
+
+    @staticmethod
+    def _classification_loss(
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        if targets.dim() != 1:
+            raise PerceptionDimensionError(
+                "Classification labels must have shape (B,).",
+                component="perception_agent",
+                details={"target_shape": list(targets.shape)},
+            )
+        if predictions.size(0) != targets.size(0):
+            raise PerceptionDimensionError(
+                "Classification prediction and label batch sizes differ.",
+                component="perception_agent",
+                details={
+                    "prediction_batch": predictions.size(0),
+                    "target_batch": targets.size(0),
+                },
+            )
+        return F.cross_entropy(predictions, targets.long())
+
+    @staticmethod
+    def _regression_loss(
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        targets = targets.to(dtype=predictions.dtype, device=predictions.device)
+        if predictions.dim() == 2 and predictions.size(-1) == 1 and targets.dim() == 1:
+            targets = targets.unsqueeze(-1)
+        if tuple(predictions.shape) != tuple(targets.shape):
+            raise PerceptionDimensionError(
+                "Regression labels must match the prediction shape.",
+                component="perception_agent",
+                details={
+                    "prediction_shape": list(predictions.shape),
+                    "target_shape": list(targets.shape),
+                },
+            )
+        return F.mse_loss(predictions, targets)
+
+    def _finetune_step(self, task_data: Mapping[str, Any]) -> dict[str, Any]:
+        if not self._acquire_training_lock():
+            return {
+                "status": "paused",
+                "reason": "perception_training_lock_held",
+                "lock_owner": self.shared_memory.get(self.sm_keys["training_state"]),
+            }
+
+        try:
+            self.train(True)
+            downstream_task = str(
+                self._require_field(task_data, "downstream_task", context="fine-tuning")
+            )
+            head_type = self._task_head_type(downstream_task)
+            representations = self._representations_from_task(task_data)
+            fused = self._fuse(representations)
+
+            labels = self._require_field(task_data, "labels", context="fine-tuning")
+            if not isinstance(labels, torch.Tensor):
+                labels = torch.as_tensor(labels)
+            labels = labels.to(self.device)
+
+            num_classes = task_data.get("num_classes")
+            if num_classes is not None and not isinstance(num_classes, int):
+                raise InvalidPerceptionValueError(
+                    "num_classes must be an integer when provided.",
+                    component="perception_agent",
+                    details={"num_classes": num_classes},
+                )
+
+            head_name, _ = self._get_task_head(
+                downstream_task=downstream_task,
+                input_dim=fused.embedding_dim,
+                num_classes=num_classes,
+            )
+            loss_fn = (
+                self._classification_loss
+                if head_type == "classification"
+                else self._regression_loss
+            )
+            result = self.trainer.supervised_step(
+                head_name,
+                fused,
+                labels,
+                loss_fn,
+            )
+            return {
+                "status": "success",
+                "head": head_name,
+                "modalities": [item.value for item in representations],
+                **result.to_dict(),
+            }
+        finally:
+            self._release_training_lock()
+
+    # ------------------------------------------------------------------
+    # Inference / generation
+    # ------------------------------------------------------------------
+    def _inference_step(self, task_data: Mapping[str, Any]) -> dict[str, Any]:
+        self.eval()
+        modality_name = str(
+            self._require_field(task_data, "modality", context="inference")
+        ).strip().lower()
+        input_data = self._require_field(task_data, "input_data", context="inference")
+
+        with torch.inference_mode():
+            if modality_name == "multimodal":
+                representations = self._encode_multimodal(input_data)
+                fused = self._fuse(representations)
+                canonical_output: torch.Tensor = fused.pooled
+                representation_summary: dict[str, Any] = fused.summary()
+                single_representation: Optional[ModalityRepresentation] = None
             else:
-                return {'output': None, 'status': f'unknown_modality:{modality}'}
-
-            if downstream_task:
-                if embeddings.ndim == 3: # (B, SeqLen, EmbedDim)
-                    pooled_embeddings = embeddings[:, 0, :] # CLS token
-                else: # (B, EmbedDim)
-                    pooled_embeddings = embeddings
-                
-                # Adjust input_dim for multimodal concatenated embeddings
-                current_embed_dim = embeddings.size(-1) if modality == 'multimodal' else self.embed_dim
-
-                task_head = self._get_task_head(downstream_task, input_dim=current_embed_dim, num_classes=task_data.get('num_classes'))
-                output = task_head(pooled_embeddings)
-            else: # Return raw embeddings or pass through a generator
-                if task_data.get('generate', False): # For generative tasks like text generation
-                    if modality == 'text' and 'memory_for_decoder' in input_data: # Assuming memory comes from another encoder
-                        memory = input_data['memory_for_decoder'].to(self.device)
-                        output = self.text_generator.inference(memory=memory, style_id=style_id)
-                    # Add similar generation for vision/audio if applicable
-                    else:
-                        output = embeddings # Fallback to embeddings if generation setup is incomplete
+                modality = Modality.parse(modality_name)
+                single_representation = self._encode_modality(modality, input_data)
+                representations = {modality: single_representation}
+                fused = None
+                if task_data.get("return_sequence", False) and single_representation.sequence is not None:
+                    canonical_output = single_representation.sequence
                 else:
-                    output = embeddings
-            
-            return {'output': output.cpu(), 'status': 'success'}
+                    canonical_output = single_representation.pooled
+                representation_summary = single_representation.summary()
 
-    # --- Main perform_task method ---
-    def perform_task(self, task_data: Dict) -> Dict[str, Any]:
-        """
-        Main entry point for the PerceptionAgent.
-        Dispatches to pretraining, fine-tuning, or inference based on task_data.
-        """
-        # Try loading state from shared memory before execution
-        if task_data.get('use_cached_state', False):
-            if self.load_state_from_shared_memory():
-                logger.info("Using model state from shared memory")
-        task_type = task_data.get('task_type')
-        if task_type == 'pretrain':
+            downstream_task = task_data.get("downstream_task")
+            if downstream_task:
+                # Downstream heads always consume the fixed-width fusion contract,
+                # including single-modality tasks.  This keeps one stable head
+                # interface and prevents modality-specific head dimensions.
+                if fused is None:
+                    fused = self._fuse(representations)
+                head_name, _ = self._get_existing_task_head(
+                    downstream_task=str(downstream_task),
+                    input_dim=fused.embedding_dim,
+                    num_classes=task_data.get("num_classes"),
+                )
+                output = self.trainer.forward_task(head_name, fused)
+            elif bool(task_data.get("generate", False)):
+                if modality_name == "multimodal":
+                    raise UnsupportedPerceptionOptionError(
+                        "Multimodal generation requires an explicit learned decoding contract and is not inferred by the agent.",
+                        component="perception_agent",
+                        remediation=(
+                            "Decode a specific ModalityRepresentation with its subsystem "
+                            "pipeline, or add an explicit multimodal decoder before routing "
+                            "fused representations to generation."
+                        ),
+                    )
+                assert single_representation is not None
+                modality = single_representation.modality
+                pipeline = self._pipeline_for(modality)
+                if modality is Modality.TEXT:
+                    output = pipeline.reconstruct(
+                        single_representation,
+                        strategy=str(task_data.get("generation_strategy", "greedy")),
+                    )
+                else:
+                    output = pipeline.reconstruct(single_representation)
+            else:
+                output = canonical_output
+
+            return {
+                "status": "success",
+                "output": detach_tree(output, cpu=True),
+                "representation": representation_summary,
+            }
+
+    # ------------------------------------------------------------------
+    # Public task boundary
+    # ------------------------------------------------------------------
+    def perform_task(self, task_data: Mapping[str, Any]) -> dict[str, Any]:
+        """Dispatch an SLAI perception request to pretrain, fine-tune, or infer."""
+
+        if not isinstance(task_data, Mapping):
+            raise ModalityInputError(
+                "PerceptionAgent task_data must be a mapping.",
+                component="perception_agent",
+                details={"actual_type": type(task_data).__name__},
+            )
+
+        if bool(task_data.get("use_cached_state", False)):
+            restored = self.load_state_from_shared_memory()
+            if restored:
+                logger.info("Restored transient PerceptionAgent state from SharedMemory")
+
+        task_type = str(task_data.get("task_type", "")).strip().lower()
+        if task_type not in _SUPPORTED_TASK_TYPES:
+            raise UnsupportedPerceptionOptionError(
+                f"Unsupported perception task_type: {task_type!r}.",
+                component="perception_agent",
+                details={"supported": sorted(_SUPPORTED_TASK_TYPES)},
+            )
+
+        if task_type == "pretrain":
             result = self._pretraining_step(task_data)
-        elif task_type == 'finetune':
+        elif task_type == "finetune":
             result = self._finetune_step(task_data)
-        elif task_type == 'inference':
-            result = self._inference_step(task_data)
         else:
-            logger.error(f"Unsupported task_type: {task_type}")
-            result = {'status': 'error', 'message': f"Unsupported task_type: {task_type}"}
+            result = self._inference_step(task_data)
 
-        # Save state after critical operations
-        if task_data.get('save_state_after', False):
+        if bool(task_data.get("save_state_after", False)):
             self.save_state_to_shared_memory()
-            
         return result
 
-    def update_projection(self, rewards: Union[List[float], torch.Tensor], lr: float):
-        """
-        Updates the global_projection_param using a custom rule.
-        This is separate from the main optimizer.
-        """
-        if not isinstance(rewards, torch.Tensor):
-            rewards = torch.tensor(rewards, device=self.device, dtype=torch.float32)
-        
-        # Ensure global_projection_param requires grad for this update logic
-        if not self.global_projection_param.requires_grad:
-            self.global_projection_param.requires_grad_(True)
+    def extract_performance_metrics(self, result: Any) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        if not isinstance(result, Mapping):
+            return metrics
 
-        # Simplified reward-based scaling for the gradient
-        # The gradient here is a pseudo-gradient based on rewards
-        pseudo_grad = rewards.mean() * torch.sign(self.global_projection_param)
-        
-        if self.global_projection_param.grad is None:
-            self.global_projection_param.grad = pseudo_grad
-        else:
-            self.global_projection_param.grad.data.add_(pseudo_grad) # Accumulate pseudo-gradient
-
-        # Apply update (manual SGD step for this parameter)
-        with torch.no_grad():
-            self.global_projection_param.sub_(lr * self.global_projection_param.grad.data)
-        
-        # Zero out the pseudo-gradient after update
-        if self.global_projection_param.grad is not None:
-            self.global_projection_param.grad.detach_() # Detach from computation graph
-            self.global_projection_param.grad.zero_()
-        
-        logger.debug("Updated global_projection_param with reward-driven pseudo-gradient")
-
-    def load_pretrained_weights(self, checkpoint_path: Union[str, Path], source_format: str = "custom_audio"):
-        """Loads pretrained weights, handling different source formats."""
-        logger.info(f"Loading pretrained weights from: {checkpoint_path} (format: {source_format})")
-
-        # First check shared memory cache
-        cache_key = f"{self.sm_keys['weights_cache']}:{source_format}:{checkpoint_path}"
-        cached_weights = self.shared_memory.get(cache_key)
-    
-        path = Path(checkpoint_path)
-        if not path.exists():
-            logger.warning(f"Checkpoint file not found: {checkpoint_path}. Creating new checkpoint.")
-            checkpoint_dir = path.parent
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            
-            weights_data = {
-                'model_state_dict': {
-                    'text_encoder': self.text_encoder.state_dict(),
-                    'vision_encoder': self.vision_encoder.state_dict(),
-                    'audio_encoder': self.audio_encoder.state_dict(),
-                    #'transformer': self.transformer.state_dict(),
-                    'text_decoder': self.text_generator.state_dict(),
-                    'vision_decoder': self.vision_generator.state_dict(),
-                    'audio_decoder': self.audio_generator.state_dict(),
-                },
-                'optimizer_state_dict': self.optimizer.state_dict() if hasattr(self, 'optimizer') else {}
-            }
-            torch.save(weights_data, path)
-            logger.info(f"New checkpoint created at: {checkpoint_path}")
-            return weights_data
-        if path.is_dir():
-            logger.error(f"Checkpoint path is a directory, not a file: {checkpoint_path}")
-            return
-
-        if not Path(checkpoint_path).exists():
-            logger.error(f"Checkpoint file not found: {checkpoint_path}")
-            return
-        if cached_weights:
-            logger.info(f"Using cached weights from shared memory: {cache_key}")
-            weights_data = cached_weights
-        else:
-            # Load weights if not cached
-            weights_data = torch.load(checkpoint_path, map_location=self.device)
-            # Store loaded weights in shared memory
-            self.shared_memory.put(cache_key, weights_data, ttl=timedelta(days=7))
-            logger.info(f"Cached weights in shared memory: {cache_key}")
-        
-        if source_format == "custom_audio":
-            converted_weights = self._convert_custom_audio_weights(weights_data)
-            self.audio_encoder.load_pretrained(converted_weights)
-            # Potentially load for audio_generator too if structure is similar
-            # self.audio_generator.load_pretrained(weights)
-        elif source_format == "vision_language_model":
-            vision_weights, text_weights = self._convert_vision_language_weights(weights_data)
-            self.vision_encoder.load_pretrained(vision_weights)
-            self.text_encoder.load_pretrained_embeddings(text_weights.get('token_embeddings.weight')) # Example
-            # self.text_encoder.transformer.load_pretrained(weights) if text transformer weights are separate
-        elif source_format == "text_encoder_only":
-            self.text_encoder.load_pretrained_embeddings(weights_data.get('token_embeddings.weight'))
-            # Potentially load transformer part of text_encoder
-            # self.text_encoder.transformer.load_pretrained(weights_data.get('transformer_weights', {}))
-        elif source_format == "perception_agent_checkpoint": # Loading a full agent checkpoint
-            self._apply_agent_state_dict(weights_data['model_state_dict'])
-            self.optimizer.load_state_dict(weights_data['optimizer_state_dict'])
-            logger.info("Loaded full PerceptionAgent checkpoint.")
-        else:
-            logger.warning(f"Unsupported pretrained weight format: {source_format}")
-
-    def _convert_custom_audio_weights(self, custom_weights: Dict) -> Dict:
-        """Converts custom audio model weights to a format expected by AudioEncoder/Transformer.
-        
-        Handles common architectures:
-        - Wav2Vec 2.0
-        - HuBERT
-        - Speech2Vec
-        - Custom CNN-RNN hybrids
-        
-        Conversion strategies:
-        1. Direct key mapping for standard architectures
-        2. Tensor reshaping for dimension mismatches
-        3. Layer skipping for incompatible components
-        """
-        hf_style_weights = {}
-        config = self.perception_config.get('weight_conversion', {})
-        skip_mismatched = config.get('skip_mismatched', True)
-        reshape_mode = config.get('reshape_mode', 'auto')
-        
-        # Architecture detection
-        arch = None
-        if any(k.startswith('w2v2.') for k in custom_weights):
-            arch = 'wav2vec2'
-        elif any(k.startswith('hubert.') for k in custom_weights):
-            arch = 'hubert'
-        elif any('cnn' in k and 'rnn' in k for k in custom_weights):
-            arch = 'cnn_rnn'
-
-        # Mapping tables for known architectures
-        mapping_tables = {
-            'wav2vec2': {
-                'w2v2.encoder.pos_conv.0.weight': 'position_embed',
-                'w2v2.feature_extractor.conv_layers.0.conv.weight': 'conv_layers.0.weight',
-                'w2v2.post_extract_proj.weight': 'projection.weight',
-                'w2v2.mask_emb': 'mask_tokens.audio',
-                'w2v2.encoder.layers.{}.self_attn.k_proj.weight': 'transformer.layers.{}.attention.k_proj.weight',
-                'w2v2.encoder.layers.{}.self_attn.out_proj.weight': 'transformer.layers.{}.attention.out_proj.weight',
-                'w2v2.encoder.layers.{}.fc1.weight': 'transformer.layers.{}.ff.0.weight'
-            },
-            'hubert': {
-                'hubert.encoder.pos_conv.0.weight': 'position_embed',
-                'hubert.feature_projection.projection.weight': 'projection.weight',
-                'hubert.mask_emb': 'mask_tokens.audio',
-                'hubert.encoder.layers.{}.self_attn.k_proj.weight': 'transformer.layers.{}.attention.k_proj.weight'
-            },
-            'cnn_rnn': {
-                'cnn.conv1.weight': 'conv_layers.0.weight',
-                'rnn.rnn.weight_ih_l0': 'recurrent_layer.weight_ih',
-                'rnn.rnn.weight_hh_l0': 'recurrent_layer.weight_hh',
-                'projection_layer.weight': 'projection.weight'
-            }
-        }
-        
-        # Handle unknown architectures with pattern matching
-        if not arch:
-            logger.warning("Custom audio architecture not recognized - using heuristic mapping")
-            mapping_tables['unknown'] = {
-                r'conv(\d+)\.weight': 'conv_layers.\\1.weight',
-                r'pos_?emb': 'position_embed',
-                r'proj': 'projection',
-                r'transformer\.layer_(\d+)\.attention': 'transformer.layers.\\1.attention',
-                r'mask_?token': 'mask_tokens.audio'
-            }
-            arch = 'unknown'
-        
-        # Conversion process
-        for custom_name, tensor in custom_weights.items():
-            matched = False
-            target_name = None
-            
-            # Try known mappings first
-            for pattern, target_pattern in mapping_tables[arch].items():
-                if arch in ['wav2vec2', 'hubert']:
-                    # Handle layer-indexed patterns
-                    if '{}' in pattern:
-                        for layer_idx in range(self.audio_encoder.transformer.num_layers):
-                            if pattern.format(layer_idx) in custom_name:
-                                target_name = target_pattern.format(layer_idx)
-                                matched = True
-                                break
-                    elif pattern in custom_name:
-                        target_name = target_pattern
-                        matched = True
-                elif arch == 'cnn_rnn':
-                    # Direct mapping
-                    if pattern in custom_name:
-                        target_name = target_pattern
-                        matched = True
-                else:  # Heuristic matching
-                    import re
-                    match = re.match(pattern, custom_name)
-                    if match:
-                        target_name = re.sub(pattern, target_pattern, custom_name)
-                        matched = True
-            
-            # Skip unmapped parameters
-            if not matched:
-                if config.get('log_skipped_weights', False):
-                    logger.debug(f"Skipping unmapped audio weight: {custom_name}")
-                continue
-            
-            # Check tensor compatibility
-            current_shape = tensor.shape
-            try:
-                target_param = self.audio_encoder.get_parameter(target_name)
-                target_shape = target_param.shape
-            except AttributeError:
-                logger.warning(f"Target parameter {target_name} not found in model")
-                continue
-            
-            # Reshape tensors if needed
-            if current_shape != target_shape:
-                if reshape_mode == 'skip':
-                    logger.info(f"Skipping {custom_name} due to shape mismatch "
-                               f"({current_shape} vs {target_shape})")
-                    continue
-                    
-                tensor = self._reshape_tensor(tensor, target_shape, 
-                                             mode=reshape_mode,
-                                             custom_name=custom_name,
-                                             target_name=target_name)
-            
-            hf_style_weights[target_name] = tensor
-        
-        logger.info(f"Converted {len(hf_style_weights)}/{len(custom_weights)} "
-                   f"audio weights ({arch} format)")
-        return hf_style_weights
-    
-    def _reshape_tensor(self, tensor: torch.Tensor, target_shape: Tuple[int], 
-                       mode: str = 'auto', **kwargs) -> torch.Tensor:
-        """Reshapes tensors using various strategies"""
-        if mode == 'auto':
-            if tensor.dim() == 2 and target_shape[0] == target_shape[1]:    # Automatic reshaping heuristics
-                if tensor.shape[0] == target_shape[1] and tensor.shape[1] == target_shape[0]:    # Handle square matrix transpose
-                    return tensor.t()
-            elif tensor.numel() == math.prod(target_shape):
-                return tensor.view(target_shape)
-        
-        elif mode == 'pad':
-            # Zero-padding strategy
-            new_tensor = torch.zeros(target_shape, dtype=tensor.dtype, device=tensor.device)
-            slices = tuple(slice(0, min(dim, t_dim)) for dim, t_dim in zip(tensor.shape, target_shape))
-            new_tensor[slices] = tensor[slices]
-            return new_tensor
-        
-        elif mode == 'crop':
-            # Cropping strategy
-            slices = tuple(slice(0, min(dim, t_dim)) for dim, t_dim in zip(target_shape, tensor.shape))
-            return tensor[slices].clone()
-        
-        logger.warning(f"Could not reshape {kwargs.get('custom_name')} from "
-                      f"{tensor.shape} to {target_shape} using {mode} mode")
-        return tensor
-
-    def _convert_vision_language_weights(self, custom_weights: Dict) -> Tuple[Dict, Dict]:
-        """Separates and converts vision-language weights for VisionEncoder and TextEncoder.
-        
-        Supports models:
-        - CLIP
-        - ALIGN
-        - FLAVA
-        - ALBEF
-        - Custom dual-encoder architectures
-        
-        Handles:
-        - Component separation (vision/text)
-        - Cross-attention redistribution
-        - Modality-specific projection layers
-        """
-        vision_weights = {}
-        text_weights = {}
-        config = self.perception_config.get('weight_conversion', {})
-        fusion_handling = config.get('fusion_handling', 'distribute')
-        
-        # Architecture detection
-        arch = None
-        if any(k.startswith('visual.') or k.startswith('text.') for k in custom_weights):
-            arch = 'clip_style'
-        elif any('image_encoder' in k and 'text_encoder' in k for k in custom_weights):
-            arch = 'dual_encoder'
-        elif any('cross_attention' in k for k in custom_weights):
-            arch = 'fusion_model'
-        
-        # Key classification patterns
-        vision_patterns = [
-            'visual.', 'image_encoder.', 'vision.', 
-            'conv', 'resblocks', 'patch_embed', 'pos_embed',
-            'img_', 'spatial.', 'pixel_'
-        ]
-        text_patterns = [
-            'text.', 'token_embed', 'positional_embedding',
-            'transformer.text.', 'word_embed', 'txt_',
-            'language_encoder', 'bert.'
-        ]
-        fusion_patterns = [
-            'cross_attention', 'fusion', 'multihead_attn',
-            'modality_combine', 'concat'
-        ]
-        
-        # Special handling for known architectures
-        if arch == 'clip_style':
-            # CLIP-style explicit naming
-            for k, v in custom_weights.items():
-                if k.startswith('visual.'):
-                    vision_weights[k.replace('visual.', '')] = v
-                elif k.startswith('text.'):
-                    text_weights[k.replace('text.', '')] = v
-                elif 'positional_embedding' in k:
-                    if 'visual.positional_embedding' in k:
-                        vision_weights['position_embed'] = v
-                    else:
-                        text_weights['position_embeddings'] = v
-        
-        else:
-            # Generic heuristic-based separation
-            for custom_name, tensor in custom_weights.items():
-                # Classify as vision, text, or fusion
-                is_vision = any(p in custom_name for p in vision_patterns)
-                is_text = any(p in custom_name for p in text_patterns)
-                is_fusion = any(p in custom_name for p in fusion_patterns)
-                
-                # Fusion component handling
-                if is_fusion:
-                    if fusion_handling == 'distribute':
-                        # Distribute fusion components proportionally
-                        if is_vision or ('image' in custom_name.lower()):
-                            vision_weights[custom_name] = tensor
-                        elif is_text or ('text' in custom_name.lower()):
-                            text_weights[custom_name] = tensor
-                        else:
-                            # Split evenly between modalities
-                            vision_weights[custom_name] = tensor[:tensor.shape[0]//2]
-                            text_weights[custom_name] = tensor[tensor.shape[0]//2:]
-                    elif fusion_handling == 'discard':
-                        logger.info(f"Discarding fusion weight: {custom_name}")
-                        continue
-                    elif fusion_handling == 'vision':
-                        vision_weights[custom_name] = tensor
-                    elif fusion_handling == 'text':
-                        text_weights[custom_name] = tensor
-                
-                # Direct classification
-                elif is_vision:
-                    vision_weights[custom_name] = tensor
-                elif is_text:
-                    text_weights[custom_name] = tensor
-                else:
-                    logger.warning(f"Unclassified weight: {custom_name} - assigning to both")
-                    vision_weights[custom_name] = tensor
-                    text_weights[custom_name] = tensor.clone()
-        
-        # Post-processing for each modality
-        vision_weights = self._post_process_vision_weights(vision_weights)
-        text_weights = self._post_process_text_weights(text_weights)
-        
-        logger.info(f"Converted weights: {len(vision_weights)} vision, "
-                   f"{len(text_weights)} text, {arch} format")
-        return vision_weights, text_weights
-    
-    def _post_process_vision_weights(self, weights: Dict) -> Dict:
-        """Applies vision-specific weight transformations"""
-        processed = {}
-        for k, v in weights.items():
-            # Handle different position embedding formats
-            if 'pos_embed' in k and v.dim() == 2:
-                processed[k] = v.unsqueeze(0)  # Add batch dimension
-            
-            # Adapt convolutional weights
-            elif 'conv' in k and v.dim() == 4:
-                # Convert from (out, in, h, w) to (out, in, h, w)
-                if self.vision_encoder.encoder_type == 'transformer' and 'patch_embed' not in k:
-                    # No transformation needed
-                    processed[k] = v
-                else:
-                    # Permute dimensions if needed
-                    processed[k] = v.permute(2, 3, 1, 0) if self.config.get('channels_last') else v
-            
-            # Handle projection layers
-            elif 'proj' in k and v.dim() == 2:
-                target_shape = self.vision_encoder.projection.shape
-                if v.shape != target_shape:
-                    if v.shape[1] == target_shape[1]:
-                        processed[k] = v[:target_shape[0]]
-                    else:
-                        logger.warning(f"Projection shape mismatch: {v.shape} vs {target_shape}")
-            
-            else:
-                processed[k] = v
-        
-        return processed
-    
-    def _post_process_text_weights(self, weights: Dict) -> Dict:
-        """Applies text-specific weight transformations"""
-        processed = {}
-        vocab_size = self.tokenizer.get_vocab_size()
-        
-        for k, v in weights.items():
-            # Handle embedding layers
-            if 'embed' in k:
-                # Adapt to our vocabulary size
-                if v.shape[0] > vocab_size:
-                    processed[k] = v[:vocab_size]
-                elif v.shape[0] < vocab_size:
-                    # Pad with random initialization
-                    new_emb = torch.randn(vocab_size, v.shape[1])
-                    new_emb[:v.shape[0]] = v
-                    processed[k] = new_emb
-                else:
-                    processed[k] = v
-            
-            # Handle position embeddings
-            elif 'position' in k and v.dim() == 1:
-                processed[k] = v.unsqueeze(0)  # Add sequence dimension
-            
-            else:
-                processed[k] = v
-        
-        return processed
-
-    def extract_performance_metrics(self, result: Any) -> dict:
-        """Extracts performance metrics from the result of perform_task."""
-
-        metrics = {}
-        if isinstance(result, dict):
-            if 'loss' in result:
-                metrics['loss'] = result['loss']
-            if 'status' in result and result['status'] == 'success':
-                metrics['task_successful'] = 1.0
-            else:
-                metrics['task_successful'] = 0.0
-
+        loss = result.get("loss")
+        if isinstance(loss, (int, float)) and not isinstance(loss, bool):
+            metrics["loss"] = float(loss)
+        metrics["task_successful"] = 1.0 if result.get("status") == "success" else 0.0
         return metrics
 
-    def save_state_to_shared_memory(self):
-        """Save current model state to shared memory"""
-        snapshot = {
-            'model_state_dict': {
-                'text_encoder': self.text_encoder.state_dict(),
-                'vision_encoder': self.vision_encoder.state_dict(),
-                'audio_encoder': self.audio_encoder.state_dict(),
-                #'transformer': self.transformer.state_dict(),
-                'text_decoder': self.text_generator.state_dict(),
-                'vision_decoder': self.vision_generator.state_dict(),
-                'audio_decoder': self.audio_generator.state_dict(),
-            },
-            'optimizer_state': self.optimizer.state_dict(),
-            'config': self.perception_config
+    # ------------------------------------------------------------------
+    # Transient SharedMemory state
+    # ------------------------------------------------------------------
+    def _agent_state_payload(self, *, schema: str) -> dict[str, Any]:
+        return {
+            "schema_version": schema,
+            "agent_version": __version__,
+            "global_step": int(self.trainer.global_step),
+            "task_head_specs": deepcopy(self._task_head_specs),
+            "agent_config": deepcopy(self.agent_config),
         }
+
+    def _validate_restored_agent_state(
+        self,
+        state: Any,
+        *,
+        expected_schema: str,
+    ) -> Mapping[str, Any]:
+        if not isinstance(state, Mapping):
+            raise PerceptionStateError(
+                "Perception agent state must be a mapping.",
+                component="perception_agent",
+                details={"actual_type": type(state).__name__},
+            )
+        if state.get("schema_version") != expected_schema:
+            raise PerceptionStateError(
+                "Perception state schema is incompatible with this loader.",
+                component="perception_agent",
+                details={
+                    "expected": expected_schema,
+                    "actual": state.get("schema_version"),
+                },
+            )
+
+        saved_config = state.get("agent_config")
+        if isinstance(saved_config, Mapping) and "embed_dim" in saved_config:
+            saved_dim = int(saved_config["embed_dim"])
+            if saved_dim != self.embed_dim:
+                raise PerceptionStateError(
+                    "Saved PerceptionAgent embed_dim is incompatible with the active runtime.",
+                    component="perception_agent",
+                    details={"saved_embed_dim": saved_dim, "active_embed_dim": self.embed_dim},
+                    remediation=(
+                        "Restore with a compatible agent/subsystem architecture; do not "
+                        "silently reshape learned perception state."
+                    ),
+                )
+        return state
+
+    def save_state_to_shared_memory(self) -> dict[str, Any]:
+        """Publish a complete transient runtime snapshot to SharedMemory."""
+
+        snapshot = {
+            "model_state_dict": detach_tree(self.state_dict(), cpu=True),
+            "optimizer_state_dict": detach_tree(self.trainer.optimizer.state_dict(), cpu=True),
+            "agent_state": self._agent_state_payload(schema=_SHARED_STATE_SCHEMA),
+        }
+        ttl = self._ttl_from_seconds(
+            self.shared_memory_config.get("snapshot_ttl_seconds", 86400)
+        )
         self.shared_memory.put(
-            self.sm_keys['model_snapshot'], 
+            self.sm_keys["model_snapshot"],
             snapshot,
-            ttl=timedelta(days=1))
-        logger.info(f"Saved model snapshot to shared memory")
+            ttl=ttl,
+            tags=("perception", "model_snapshot", self.name),
+            metadata={"agent_id": self.agent_id, "schema": _SHARED_STATE_SCHEMA},
+        )
+        logger.info("Saved complete PerceptionAgent runtime snapshot to SharedMemory")
+        return {
+            "status": "success",
+            "key": self.sm_keys["model_snapshot"],
+            "global_step": int(self.trainer.global_step),
+        }
 
-    def load_state_from_shared_memory(self):
-        """Load model state from shared memory"""
-        snapshot = self.shared_memory.get(self.sm_keys['model_snapshot'])
-        if snapshot:
-            self._apply_agent_state_dict(snapshot['model_state_dict'])
-            self.optimizer.load_state_dict(snapshot['optimizer_state'])
-            logger.info(f"Loaded model state from shared memory")
+    def load_state_from_shared_memory(self) -> bool:
+        """Restore a transient snapshot after rebuilding dynamic head topology."""
+
+        snapshot = self.shared_memory.get(self.sm_keys["model_snapshot"])
+        if snapshot is None:
+            return False
+        if not isinstance(snapshot, Mapping):
+            raise PerceptionStateError(
+                "SharedMemory perception snapshot must be a mapping.",
+                component="perception_agent",
+                details={"actual_type": type(snapshot).__name__},
+            )
+
+        try:
+            agent_state = self._validate_restored_agent_state(
+                snapshot.get("agent_state"),
+                expected_schema=_SHARED_STATE_SCHEMA,
+            )
+            self._restore_task_head_structure(agent_state.get("task_head_specs", []))
+
+            model_state = snapshot.get("model_state_dict")
+            optimizer_state = snapshot.get("optimizer_state_dict")
+            if not isinstance(model_state, Mapping) or not isinstance(optimizer_state, Mapping):
+                raise PerceptionStateError(
+                    "SharedMemory snapshot is missing model or optimizer state.",
+                    component="perception_agent",
+                )
+
+            self.load_state_dict(model_state, strict=True)
+            self.trainer.optimizer.load_state_dict(optimizer_state)
+            self.trainer.global_step = int(agent_state.get("global_step", 0))
+            logger.info("Loaded complete PerceptionAgent runtime snapshot from SharedMemory")
             return True
-        return False
+        except PerceptionError:
+            raise
+        except Exception as exc:
+            raise PerceptionStateError.from_exception(
+                exc,
+                "Failed to restore PerceptionAgent SharedMemory state.",
+                component="perception_agent",
+            ) from exc
 
-    def cache_embeddings(self, modality: str, inputs: torch.Tensor, embeddings: torch.Tensor):
-        """Cache computed embeddings in shared memory"""
-        serialized = inputs.detach().cpu().numpy().tobytes()
-        digest = hashlib.sha1(serialized).hexdigest()
-        key = f"{self.sm_keys['embeddings']}:{modality}:{digest}"
-        self.shared_memory.put(key, embeddings.detach().cpu())
-        logger.debug(f"Cached embeddings: {key}")
+    @staticmethod
+    def _tensor_digest(tensor: torch.Tensor) -> str:
+        if not isinstance(tensor, torch.Tensor):
+            raise InvalidPerceptionTypeError(
+                "Embedding-cache inputs must be tensors.",
+                component="perception_agent",
+                details={"actual_type": type(tensor).__name__},
+            )
+        cpu = tensor.detach().cpu().contiguous()
+        digest = hashlib.sha256()
+        digest.update(str(tuple(cpu.shape)).encode("utf-8"))
+        digest.update(str(cpu.dtype).encode("utf-8"))
+        digest.update(cpu.view(torch.uint8).numpy().tobytes())
+        return digest.hexdigest()
 
-    def get_cached_embeddings(self, modality: str, inputs: torch.Tensor):
-        """Retrieve cached embeddings if available"""
-        serialized = inputs.detach().cpu().numpy().tobytes()
-        digest = hashlib.sha1(serialized).hexdigest()
-        key = f"{self.sm_keys['embeddings']}:{modality}:{digest}"
-        return self.shared_memory.get(key)
+    def cache_embeddings( self, modality: Modality | str, inputs: torch.Tensor, embeddings: torch.Tensor) -> str:
+        active = Modality.parse(modality)
+        if not isinstance(embeddings, torch.Tensor):
+            raise InvalidPerceptionTypeError(
+                "embeddings must be a tensor.",
+                component="perception_agent",
+            )
+        key = f"{self.sm_keys['embeddings']}:{active.value}:{self._tensor_digest(inputs)}"
+        ttl = self._ttl_from_seconds(
+            self.shared_memory_config.get("embedding_cache_ttl_seconds")
+        )
+        self.shared_memory.put(
+            key,
+            embeddings.detach().cpu(),
+            ttl=ttl,
+            tags=("perception", "embedding", active.value),
+            metadata={"agent_id": self.agent_id},
+        )
+        return key
+
+    def get_cached_embeddings(self, modality: Modality | str, inputs: torch.Tensor) -> Optional[torch.Tensor]:
+        active = Modality.parse(modality)
+        key = f"{self.sm_keys['embeddings']}:{active.value}:{self._tensor_digest(inputs)}"
+        cached = self.shared_memory.get(key)
+        if cached is None:
+            return None
+        if not isinstance(cached, torch.Tensor):
+            raise PerceptionStateError(
+                "Shared embedding cache contains a non-tensor value.",
+                component="perception_agent",
+                details={"key": key, "actual_type": type(cached).__name__},
+            )
+        return cached
+
+    # ------------------------------------------------------------------
+    # Durable recovery through central checkpointing
+    # ------------------------------------------------------------------
+    def _init_checkpoint_manager(self) -> None:
+        enabled = bool(self.checkpoint_config.get("enabled", True))
+        self.checkpoint_manager: Optional[CheckpointManager]
+        if not enabled:
+            self.checkpoint_manager = None
+            return
+
+        base_dir = Path(
+            str(self.checkpoint_config.get("base_dir", "src/checkpoints/perception"))
+        )
+        retention_limit = self.checkpoint_config.get("retention_limit")
+        self.checkpoint_manager = CheckpointManager(
+            base_dir=base_dir,
+            retention_limit=retention_limit,
+        )
+
+    def _require_checkpoint_manager(self) -> CheckpointManager:
+        if self.checkpoint_manager is None:
+            raise PerceptionStateError(
+                "Perception durable checkpointing is disabled by agent configuration.",
+                component="perception_agent",
+                remediation=(
+                    "Enable perception_agent.checkpointing.enabled in "
+                    "base/configs/agents_config.yaml to use durable recovery."
+                ),
+            )
+        return self.checkpoint_manager
+
+    def save_checkpoint(self, version: Optional[str] = None, *, metadata: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+        """Save complete durable model/optimizer/agent state transactionally."""
+
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise InvalidPerceptionTypeError(
+                "checkpoint metadata must be a mapping.",
+                component="perception_agent",
+            )
+
+        manager = self._require_checkpoint_manager()
+        components: dict[str, Any] = {
+            "model": self,
+            "optimizer": self.trainer.optimizer,
+            "agent_state": self._agent_state_payload(schema=_CHECKPOINT_STATE_SCHEMA),
+        }
+        codec_ids = {
+            "model": "torch",
+            "optimizer": "torch",
+            "agent_state": "agent-state",
+        }
+        if bool(self.checkpoint_config.get("save_rng", True)):
+            components["rng"] = None
+            codec_ids["rng"] = "rng"
+
+        try:
+            result = manager.save_components(
+                components,
+                version=version,
+                codec_ids=codec_ids,
+                step=int(self.trainer.global_step),
+                metadata={
+                    "agent": self.name,
+                    "agent_version": __version__,
+                    **dict(metadata or {}),
+                },
+            )
+        except Exception as exc:
+            raise PerceptionStateError.from_exception(
+                exc,
+                "Durable PerceptionAgent checkpoint save failed.",
+                component="perception_agent",
+            ) from exc
+
+        return {
+            "status": "success",
+            "version": result.record.version,
+            "checkpoint_id": result.record.checkpoint_id,
+            "committed": bool(result.committed),
+            "global_step": int(self.trainer.global_step),
+        }
+
+    def restore_checkpoint(self, version: Optional[str] = None) -> dict[str, Any]:
+        """Restore durable state using two-phase dynamic-head reconstruction."""
+
+        manager = self._require_checkpoint_manager()
+        try:
+            # Phase 1: decode state metadata only. No model/optimizer target is
+            # mutated until the dynamic task-head topology is reconstructed.
+            state_result = manager.load_components(
+                version,
+                components=("agent_state",),
+                strict=True,
+                verify_integrity=True,
+            )
+            agent_state = self._validate_restored_agent_state(
+                state_result.components.get("agent_state"),
+                expected_schema=_CHECKPOINT_STATE_SCHEMA,
+            )
+            self._restore_task_head_structure(agent_state.get("task_head_specs", []))
+
+            saved_components = set(state_result.record.manifest.saved_components)
+            restore_components = ["model", "optimizer"]
+            restore_rng = "rng" in saved_components
+            if restore_rng:
+                restore_components.append("rng")
+
+            # Phase 2: CheckpointManager performs selection, integrity checks,
+            # compatibility checks, and safe decoding for every requested
+            # component before model state is mutated. The decoded optimizer is
+            # then applied explicitly because the current generic Torch codec
+            # target adapter passes ``strict=`` to load_state_dict(), while
+            # torch.optim.Optimizer.load_state_dict() has no strict parameter.
+            load_result = manager.load_components(
+                state_result.record.version,
+                components=tuple(restore_components),
+                strict=True,
+                restore_rng=restore_rng,
+                verify_integrity=True,
+            )
+
+            model_state = load_result.components.get("model")
+            optimizer_state = load_result.components.get("optimizer")
+            if not isinstance(model_state, Mapping) or not isinstance(optimizer_state, Mapping):
+                raise PerceptionStateError(
+                    "Checkpoint is missing decoded model or optimizer state.",
+                    component="perception_agent",
+                    details={
+                        "decoded_components": sorted(load_result.components.keys()),
+                    },
+                )
+
+            self.load_state_dict(model_state, strict=True)
+            self.trainer.optimizer.load_state_dict(optimizer_state)
+            self.trainer.global_step = int(agent_state.get("global_step", 0))
+        except PerceptionError:
+            raise
+        except Exception as exc:
+            raise PerceptionStateError.from_exception(
+                exc,
+                "Durable PerceptionAgent checkpoint restore failed.",
+                component="perception_agent",
+            ) from exc
+
+        return {
+            "status": "success",
+            "version": load_result.record.version,
+            "checkpoint_id": load_result.record.checkpoint_id,
+            "loaded_components": list(load_result.loaded_components),
+            "restored_rng": bool(load_result.restored_rng),
+            "global_step": int(self.trainer.global_step),
+        }
+
+    # ------------------------------------------------------------------
+    # Explicitly retired legacy mutation/import paths
+    # ------------------------------------------------------------------
+    def load_pretrained_weights(
+        self,
+        checkpoint_path: str | Path,
+        source_format: str = "perception_agent_checkpoint",
+    ) -> None:
+        """Fail safely instead of performing heuristic cross-architecture mapping.
+
+        The previous agent implementation guessed external parameter mappings,
+        split ambiguous fusion tensors, and sometimes assigned unknown tensors to
+        multiple modalities.  Such conversion belongs in an explicit,
+        format-specific subsystem adapter with a validated schema—not in the
+        agent orchestration boundary.
+        """
+
+        raise UnsupportedPerceptionOptionError(
+            "Direct external-format pretrained-weight conversion is not an agent responsibility in v2.3.",
+            component="perception_agent",
+            details={
+                "checkpoint_path": str(checkpoint_path),
+                "source_format": source_format,
+            },
+            remediation=(
+                "Use restore_checkpoint() for SLAI checkpoints. For third-party "
+                "weights, implement or use an explicit subsystem-owned adapter that "
+                "validates the source architecture and target parameter schema."
+            ),
+        )
+
+    def update_projection(self, rewards: Any, lr: float) -> None:
+        """Compatibility guard for the removed standalone projection parameter."""
+
+        raise UnsupportedPerceptionOptionError(
+            "PerceptionAgent no longer owns a standalone global_projection_param.",
+            component="perception_agent",
+            details={"learning_rate": lr, "reward_type": type(rewards).__name__},
+            remediation=(
+                "Route representation learning through PerceptionFusion, "
+                "PerceptionObjectives, and PerceptionTrainer so learned parameters "
+                "remain optimizer-registered and checkpoint-complete."
+            ),
+        )
+
+
+__all__ = ["PerceptionAgent"]
 
 
 if __name__ == "__main__":
@@ -1488,8 +1446,8 @@ if __name__ == "__main__":
     """
     print("\n=== PerceptionAgent integration smoke test ===")
     printer.status("TEST", "Starting Task Coordinator tests", "info")
-    from src.agents.collaborative.shared_memory import SharedMemory
-    from src.agents.agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+    from .agent_factory import AgentFactory
 
     shared_memory = SharedMemory()
     agent_factory = AgentFactory()
