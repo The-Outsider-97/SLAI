@@ -96,10 +96,17 @@ class AdaptiveAgent(BaseAgent):
     DEFAULT_RECOVERY_TTL = int(timedelta(days=7).total_seconds())
     DEFAULT_STATE_TTL = int(timedelta(days=30).total_seconds())
     RESERVED_GLOBAL_SKILL_ID = 1_000_000
+    CHECKPOINTING_SUPPORTED = True
 
-    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None,
-                 args: Sequence[Any] = (), kwargs: Optional[Mapping[str, Any]] = None) -> None:
-        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
+    def __init__(self,
+                 shared_memory: Any,
+                 agent_factory: Any,
+                 config: Optional[Mapping[str, Any]] = None,
+                 args: Sequence[Any] = (), kwargs: Optional[Mapping[str, Any]] = None,
+                 *,
+                 checkpoint_manager: Any = None,
+                 ) -> None:
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config, checkpoint_manager=checkpoint_manager)
 
         self.global_config = load_global_config()
         self.agent_config = dict(get_config_section("adaptive_agent") or {})

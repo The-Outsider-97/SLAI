@@ -93,14 +93,18 @@ class ExecutionAgent(BaseAgent):
         "led": LedAction,
         "sequence": SequenceAction,
     }
+    CHECKPOINTING_SUPPORTED = True
 
 
     def __init__(self, shared_memory, agent_factory, config: Optional[Mapping[str, Any]]=None,
                  execution_memory: Optional[ExecutionMemory] = None, task_coordinator: Optional[TaskCoordinator] = None,
                  action_selector: Optional[ActionSelector] = None, validator: Optional[ExecutionValidator] = None,
                  recovery: Optional[ExecutionRecovery] = None, scheduler: Optional[DeadlineAwareScheduler] = None,
-                 robot: Optional[RobotInterface] = None, action_registry: Optional[Mapping[str, Type[BaseAction]]] = None,):
-        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
+                 robot: Optional[RobotInterface] = None, action_registry: Optional[Mapping[str, Type[BaseAction]]] = None,
+                 *,
+                 checkpoint_manager: Any = None,
+                 ):
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config, checkpoint_manager=checkpoint_manager)
         self.adaptive_agent = None
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory

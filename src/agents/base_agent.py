@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 """
 SLAI Base Agent
@@ -44,13 +44,8 @@ from .base.issue_handler import *
 from .base.lazy_agent import LazyAgent
 from .base.light_metric_store import LightMetricStore
 from .collaborative.shared_memory import SharedMemory
-from .runtime_contracts import (
-    AgentRuntimeIdentity,
-    RuntimeContractViolation,
-    RuntimeLifecycle,
-    RuntimeStatus,
-    build_runtime_scope_id,
-)
+from .runtime_contracts import *
+from checkpointing.checkpoint_manager import CheckpointManager # pyright: ignore[reportMissingImports]
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("SLAI Base Agent")
@@ -141,8 +136,17 @@ class BaseAgent(abc.ABC):
 
     DEFAULT_CAPABILITY_ORDER: Tuple[str, ...] = ("predict", "get_action", "act")
     DEFAULT_CONTENT_KEYS: Tuple[str, ...] = ("text", "query", "input", "message", "data", "payload")
+    CHECKPOINTING_SUPPORTED: bool = False
 
-    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None) -> None:
+
+    def __init__(
+            self,
+            shared_memory: Any,
+            agent_factory: Any,
+            config: Optional[Mapping[str, Any]] = None,
+            *,
+            checkpoint_manager: Any = None,
+            ) -> None:
         self.logger = get_logger(self.__class__.__name__)
         self.name = self.__class__.__name__
         self.agent_id = f"{self.name}:{uuid.uuid4().hex[:12]}"
@@ -155,8 +159,11 @@ class BaseAgent(abc.ABC):
         )
         self._runtime_status = RuntimeStatus()
 
-        self.shared_memory = shared_memory if shared_memory is not None else SharedMemory()
         self.agent_factory = agent_factory
+        self.shared_memory = shared_memory if shared_memory is not None else SharedMemory()
+        self._checkpoint_manager = checkpoint_manager
+        self._validate_checkpoint_manager_contract()
+        self._checkpoint_enabled = False
 
         self.config = load_global_config()
         self.global_config = self.config
@@ -201,6 +208,513 @@ class BaseAgent(abc.ABC):
         self._init_core_components()
         self._publish_lifecycle_event("initialized", {"agent_id": self.agent_id})
         self._transition_runtime_lifecycle(RuntimeLifecycle.ACTIVE)
+
+    # ==========================================================
+    # Durable checkpoint integration
+    #
+    # BaseAgent owns:
+    #   - the common agent-facing checkpoint API
+    #   - manager contract validation
+    #   - common metadata / health reporting
+    #   - generic agent-state save/load/restore orchestration
+    #
+    # Concrete agents own:
+    #   - which state is checkpointable
+    #   - component extraction
+    #   - codec declarations
+    #   - state application
+    #   - specialized restore ordering when required
+    #
+    # CheckpointManager owns:
+    #   - serialization
+    #   - integrity verification
+    #   - manifests
+    #   - storage / atomic commit
+    #   - selection / compatibility
+    #   - policy / retention
+    # ==========================================================
+
+    @property
+    def supports_checkpointing(self) -> bool:
+        """Whether this agent declares durable checkpoint participation."""
+        return bool(self.CHECKPOINTING_SUPPORTED)
+
+    @property
+    def checkpointing_enabled(self) -> bool:
+        """Whether checkpointing is both supported and currently available."""
+        return (
+            self.supports_checkpointing
+            and self._checkpoint_manager is not None
+        )
+
+    @property
+    def checkpoint_manager(self) -> Any:
+        """Return the injected checkpoint service without transferring ownership."""
+        return self._checkpoint_manager
+
+    def _validate_checkpoint_manager_contract(self) -> None:
+        """Validate an injected checkpoint manager structurally.
+
+        BaseAgent intentionally depends only on the canonical component-oriented
+        checkpoint boundary rather than the concrete CheckpointManager class.
+        """
+        manager = self._checkpoint_manager
+        if manager is None:
+            return
+
+        missing = tuple(
+            method_name
+            for method_name in ("save_components", "load_components")
+            if not callable(getattr(manager, method_name, None))
+        )
+
+        if missing:
+            raise BaseConfigurationError(
+                "checkpoint_manager does not satisfy the required checkpoint contract.",
+                component=self.name,
+                details={
+                    "manager_type": type(manager).__name__,
+                    "missing_methods": list(missing),
+                    "required_methods": [
+                        "save_components",
+                        "load_components",
+                    ],
+                },
+            )
+
+    def _require_checkpoint_manager(self) -> Any:
+        """Return the injected checkpoint manager or fail explicitly."""
+        if not self.supports_checkpointing:
+            raise BaseStateError(
+                f"{self.name} does not declare durable checkpoint support.",
+                component=self.name,
+                details={
+                    "checkpointing_supported": False,
+                },
+            )
+
+        manager = self._checkpoint_manager
+        if manager is None:
+            raise BaseStateError(
+                f"Checkpointing is unavailable for {self.name}: "
+                "no checkpoint manager was injected.",
+                component=self.name,
+                details={
+                    "checkpointing_supported": True,
+                    "checkpoint_manager_available": False,
+                },
+            )
+
+        return manager
+
+    # ----------------------------------------------------------
+    # Checkpoint declaration hooks
+    # ----------------------------------------------------------
+
+    def checkpoint_components(self) -> Mapping[str, Any]:
+        """Return named components owned by this agent for durable persistence.
+
+        The default BaseAgent implementation persists only the agent-specific
+        state exported by ``_export_checkpoint_state``.
+
+        Agents with models, optimizers, schedulers, RNG state, tokenizers, or
+        other independently serialized components should override this method.
+        """
+        state = self._export_checkpoint_state()
+
+        if not isinstance(state, Mapping):
+            raise BaseStateError(
+                "_export_checkpoint_state() must return a mapping.",
+                component=self.name,
+                details={
+                    "actual_type": type(state).__name__,
+                },
+            )
+
+        return {
+            "agent_state": dict(state),
+        }
+
+    def checkpoint_codec_ids(self) -> Mapping[str, str]:
+        """Declare the codec expected for each checkpoint component.
+
+        Override together with ``checkpoint_components`` when an agent saves
+        components other than generic agent state.
+        """
+        return {
+            "agent_state": "agent-state",
+        }
+
+    def checkpoint_restore_components(self) -> Tuple[str, ...]:
+        """Return the components required for a normal agent restore."""
+        return tuple(self.checkpoint_codec_ids().keys())
+
+    def checkpoint_step(self) -> Optional[int]:
+        """Return an agent-defined monotonically meaningful step, if any."""
+        return None
+
+    def checkpoint_metrics(self) -> Mapping[str, Any]:
+        """Return checkpoint-associated metrics, if meaningful for the agent."""
+        return {}
+
+    def _checkpoint_metadata(
+        self,
+        *,
+        reason: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build common checkpoint metadata without overriding caller metadata."""
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise BaseValidationError(
+                "checkpoint metadata must be a mapping.",
+                component=self.name,
+                details={
+                    "actual_type": type(metadata).__name__,
+                },
+            )
+
+        payload = dict(metadata or {})
+
+        if reason is not None:
+            if not isinstance(reason, str) or not reason.strip():
+                raise BaseValidationError(
+                    "checkpoint reason must be a non-empty string when provided.",
+                    component=self.name,
+                )
+            payload["reason"] = reason.strip()
+
+        # Reserved identity fields are written last so caller metadata cannot
+        # silently impersonate another agent/runtime.
+        payload.update(
+            {
+                "agent": self.name,
+                "agent_id": self.agent_id,
+                "agent_version": __version__,
+                "runtime_scope_id": self.runtime_identity.scope_id,
+            }
+        )
+
+        return payload
+
+    # ----------------------------------------------------------
+    # Public checkpoint API
+    # ----------------------------------------------------------
+
+    def save_checkpoint(
+        self,
+        version: Optional[str] = None,
+        *,
+        reason: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        overwrite: Optional[bool] = None,
+    ) -> Any:
+        """Persist this agent through the injected checkpoint manager."""
+        manager = self._require_checkpoint_manager()
+
+        components = self.checkpoint_components()
+        codec_ids = self.checkpoint_codec_ids()
+
+        if not isinstance(components, Mapping) or not components:
+            raise BaseStateError(
+                "checkpoint_components() must return a non-empty mapping.",
+                component=self.name,
+            )
+
+        if not isinstance(codec_ids, Mapping):
+            raise BaseStateError(
+                "checkpoint_codec_ids() must return a mapping.",
+                component=self.name,
+            )
+
+        component_names = set(components)
+        codec_names = set(codec_ids)
+
+        if component_names != codec_names:
+            raise BaseStateError(
+                "Checkpoint components and codec declarations must match exactly.",
+                component=self.name,
+                details={
+                    "components": sorted(component_names),
+                    "codec_components": sorted(codec_names),
+                    "missing_codec_ids": sorted(component_names - codec_names),
+                    "orphan_codec_ids": sorted(codec_names - component_names),
+                },
+            )
+
+        step = self.checkpoint_step()
+        if step is not None and (
+            isinstance(step, bool)
+            or not isinstance(step, int)
+            or step < 0
+        ):
+            raise BaseStateError(
+                "checkpoint_step() must return None or a non-negative integer.",
+                component=self.name,
+                details={"checkpoint_step": step},
+            )
+
+        metrics = self.checkpoint_metrics()
+        if not isinstance(metrics, Mapping):
+            raise BaseStateError(
+                "checkpoint_metrics() must return a mapping.",
+                component=self.name,
+                details={
+                    "actual_type": type(metrics).__name__,
+                },
+            )
+
+        try:
+            result = manager.save_components(
+                components,
+                version=version,
+                codec_ids=codec_ids,
+                step=step,
+                metrics=dict(metrics),
+                metadata=self._checkpoint_metadata(
+                    reason=reason,
+                    metadata=metadata,
+                ),
+                overwrite=overwrite,
+            )
+        except Exception as exc:
+            self._mark_runtime_degraded(
+                "persistence",
+                "checkpoint.save",
+                exc,
+            )
+            raise
+
+        self._mark_runtime_recovered(
+            "persistence",
+            "checkpoint.save",
+        )
+
+        return result
+
+    def load_checkpoint(
+        self,
+        version: Optional[str] = None,
+        *,
+        verify_integrity: bool = True,
+    ) -> Any:
+        """Decode a checkpoint without mutating the live agent.
+
+        ``version=None`` deliberately delegates checkpoint selection to
+        CheckpointManager.  This method is therefore distinct from
+        ``restore_checkpoint``: load performs durable selection/verification/
+        decoding; restore additionally applies the decoded state.
+        """
+        manager = self._require_checkpoint_manager()
+
+        codec_ids = self.checkpoint_codec_ids()
+        components = self.checkpoint_restore_components()
+
+        if not isinstance(components, tuple):
+            components = tuple(components)
+
+        if not components:
+            raise BaseStateError(
+                "checkpoint_restore_components() must not be empty.",
+                component=self.name,
+            )
+
+        unknown = set(components) - set(codec_ids)
+        if unknown:
+            raise BaseStateError(
+                "Restore components have no declared checkpoint codec.",
+                component=self.name,
+                details={
+                    "unknown_components": sorted(unknown),
+                },
+            )
+
+        try:
+            result = manager.load_components(
+                version,
+                components=components,
+                expected_codecs={
+                    name: codec_ids[name]
+                    for name in components
+                },
+                strict=True,
+                verify_integrity=verify_integrity,
+            )
+        except Exception as exc:
+            self._mark_runtime_degraded(
+                "persistence",
+                "checkpoint.load",
+                exc,
+            )
+            raise
+
+        self._mark_runtime_recovered(
+            "persistence",
+            "checkpoint.load",
+        )
+
+        return result
+
+    def restore_checkpoint(
+        self,
+        version: Optional[str] = None,
+        *,
+        verify_integrity: bool = True,
+    ) -> Any:
+        """Load and apply a checkpoint to the live agent.
+
+        The BaseAgent implementation provides rollback for the generic
+        agent-state boundary. Agents with multi-component or topology-sensitive
+        restoration should override the relevant restore hooks rather than
+        reimplementing checkpoint storage or selection.
+        """
+        baseline = self._capture_checkpoint_restore_state()
+
+        try:
+            result = self.load_checkpoint(
+                version,
+                verify_integrity=verify_integrity,
+            )
+
+            components = getattr(result, "components", None)
+            if not isinstance(components, Mapping):
+                raise BaseStateError(
+                    "Checkpoint load result does not expose a component mapping.",
+                    component=self.name,
+                    details={
+                        "result_type": type(result).__name__,
+                    },
+                )
+
+            self._apply_checkpoint_components(components)
+
+        except Exception as exc:
+            try:
+                self._rollback_checkpoint_restore_state(baseline)
+            except Exception as rollback_exc:
+                self._mark_runtime_degraded(
+                    "persistence",
+                    "checkpoint.restore.rollback",
+                    rollback_exc,
+                    retryable=False,
+                )
+                raise BaseStateError(
+                    "Checkpoint restore failed and the live-state rollback also failed.",
+                    component=self.name,
+                    details={
+                        "restore_error_type": type(exc).__name__,
+                        "restore_error": str(exc),
+                        "rollback_error_type": type(rollback_exc).__name__,
+                        "rollback_error": str(rollback_exc),
+                    },
+                    cause=exc,
+                ) from exc
+
+            self._mark_runtime_degraded(
+                "persistence",
+                "checkpoint.restore",
+                exc,
+            )
+            raise
+
+        self._mark_runtime_recovered(
+            "persistence",
+            "checkpoint.restore",
+        )
+
+        return result
+
+    # ----------------------------------------------------------
+    # Agent-specific state hooks
+    # ----------------------------------------------------------
+
+    def _export_checkpoint_state(self) -> Mapping[str, Any]:
+        """Return a self-contained snapshot of BaseAgent-owned durable state.
+
+        Concrete checkpoint-capable agents must override this method unless
+        they override ``checkpoint_components`` completely.
+        """
+        raise NotImplementedError(
+            f"{self.name} declares checkpoint support but does not implement "
+            "_export_checkpoint_state()."
+        )
+
+    def _import_checkpoint_state(
+        self,
+        state: Mapping[str, Any],
+    ) -> None:
+        """Apply a previously exported agent-state payload."""
+        raise NotImplementedError(
+            f"{self.name} declares checkpoint support but does not implement "
+            "_import_checkpoint_state()."
+        )
+
+    def _apply_checkpoint_components(
+        self,
+        components: Mapping[str, Any],
+    ) -> None:
+        """Apply decoded components for the default agent-state-only contract."""
+        required = set(self.checkpoint_restore_components())
+        missing = required - set(components)
+
+        if missing:
+            raise BaseStateError(
+                "Checkpoint is missing required agent components.",
+                component=self.name,
+                details={
+                    "missing_components": sorted(missing),
+                    "available_components": sorted(components),
+                },
+            )
+
+        # BaseAgent can safely define only the generic agent_state application.
+        # Model/optimizer/topology-specific semantics belong to the concrete
+        # agent.
+        if required != {"agent_state"}:
+            raise BaseStateError(
+                "This agent declares specialized checkpoint components but "
+                "does not implement specialized checkpoint application.",
+                component=self.name,
+                details={
+                    "restore_components": sorted(required),
+                    "required_override": "_apply_checkpoint_components",
+                },
+            )
+
+        state = components["agent_state"]
+        if not isinstance(state, Mapping):
+            raise BaseStateError(
+                "Decoded agent_state checkpoint component must be a mapping.",
+                component=self.name,
+                details={
+                    "actual_type": type(state).__name__,
+                },
+            )
+
+        self._import_checkpoint_state(state)
+
+    def _capture_checkpoint_restore_state(self) -> Mapping[str, Any]:
+        """Capture the live state required to roll back a failed restore.
+
+        The exported state must be self-contained rather than a collection of
+        references into mutable live state.
+        """
+        state = self._export_checkpoint_state()
+
+        if not isinstance(state, Mapping):
+            raise BaseStateError(
+                "_export_checkpoint_state() must return a mapping.",
+                component=self.name,
+            )
+
+        return dict(state)
+
+    def _rollback_checkpoint_restore_state(
+        self,
+        baseline: Mapping[str, Any],
+    ) -> None:
+        """Restore the pre-load state after failed checkpoint application."""
+        self._import_checkpoint_state(baseline)
+    # ===============================================
 
     def bind_runtime_identity(self, identity: AgentRuntimeIdentity) -> None:
         """Bind the exact factory definition/scope identity after construction."""

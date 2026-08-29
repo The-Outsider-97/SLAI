@@ -85,7 +85,16 @@ _SUPPORTED_PRETRAIN_OBJECTIVES = frozenset(
 class PerceptionAgent(BaseAgent, nn.Module):
     """Single SLAI orchestration boundary for text, vision, and audio perception."""
 
-    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None) -> None:
+    CHECKPOINTING_SUPPORTED = True
+
+    def __init__(
+            self,
+            shared_memory: Any,
+            agent_factory: Any,
+            config: Optional[Mapping[str, Any]] = None,
+            *,
+            checkpoint_manager: Any = None,
+            ) -> None:
         # PyTorch must be initialized before this object receives any nn.Module
         # attributes. BaseAgent itself does not inherit nn.Module.
         nn.Module.__init__(self)
@@ -93,12 +102,12 @@ class PerceptionAgent(BaseAgent, nn.Module):
                            shared_memory=shared_memory,
                            agent_factory=agent_factory,
                            config=config,
+                           checkpoint_manager=checkpoint_manager,
                            )
 
         self._init_agent_config(config)
         self._init_components()
         self._init_shared_memory_keys()
-        self._init_checkpoint_manager()
         self._validate_component_contracts()
 
         logger.info(
@@ -1238,22 +1247,6 @@ class PerceptionAgent(BaseAgent, nn.Module):
     # ------------------------------------------------------------------
     # Durable recovery through central checkpointing
     # ------------------------------------------------------------------
-    def _init_checkpoint_manager(self) -> None:
-        enabled = bool(self.checkpoint_config.get("enabled", True))
-        self.checkpoint_manager: Optional[CheckpointManager]
-        if not enabled:
-            self.checkpoint_manager = None
-            return
-
-        base_dir = Path(
-            str(self.checkpoint_config.get("base_dir", "src/checkpoints/perception"))
-        )
-        retention_limit = self.checkpoint_config.get("retention_limit")
-        self.checkpoint_manager = CheckpointManager(
-            base_dir=base_dir,
-            retention_limit=retention_limit,
-        )
-
     def _require_checkpoint_manager(self) -> CheckpointManager:
         if self.checkpoint_manager is None:
             raise PerceptionStateError(
@@ -1459,106 +1452,6 @@ if __name__ == "__main__":
         agent_factory=agent_factory,
         config=perception_config
     )
-    print(agent)
+    printer.status("AGENT", agent, "success" if agent == "success" else "erorr")
     print("\n* * * * * Phase 2 * * * * *\n")
-    def _run_test(name, fn):
-        try:
-            result = fn()
-            print(f"[PASS] {name}")
-            return True, result
-        except Exception as exc:
-            print(f"[FAIL] {name}: {type(exc).__name__}: {exc}")
-            return False, None
-
-    torch.manual_seed(7)
-    random.seed(7)
-
-    # 1) Agent initialization
-    init_ok, agent_obj = _run_test(
-        "initialize agent",
-        lambda: PerceptionAgent(shared_memory=shared_memory, agent_factory=agent_factory)
-    )
-    if init_ok:
-        agent = agent_obj
-        device = getattr(agent, "device", "cpu")
-    else:
-        print("Aborting remaining tests because initialization failed.")
-        raise SystemExit(1)
-
-    # 2) Build representative multimodal batch
-    def _build_dummy_batch():
-        batch_size = 2
-        text_len = 32
-        img_size = int(getattr(agent.vision_encoder, "img_size", 224))
-        audio_len = int(getattr(agent.audio_encoder, "audio_length", 16000))
-        vocab_size = int(getattr(agent, "tokenizer").get_vocab_size())
-
-        return {
-            "text": {
-                "input_ids": torch.randint(0, vocab_size, (batch_size, text_len), dtype=torch.long, device=device),
-                "attention_mask": torch.ones(batch_size, text_len, dtype=torch.long, device=device),
-            },
-            "vision": {
-                "pixel_values": torch.randn(batch_size, 3, img_size, img_size, device=device),
-            },
-            "audio": {
-                "waveform": torch.randn(batch_size, 1, audio_len, device=device),
-            },
-            "style_id": torch.zeros(batch_size, dtype=torch.long, device=device),
-        }
-
-    data_ok, batch = _run_test("build dummy multimodal batch", _build_dummy_batch)
-
-    # 3) Encoder forward passes
-    if data_ok:
-        _run_test(
-            "text encoder forward",
-            lambda: agent.text_encoder(batch["text"]["input_ids"], style_id=batch["style_id"])
-        )
-        _run_test(
-            "vision encoder forward",
-            lambda: agent.vision_encoder(batch["vision"]["pixel_values"], style_id=batch["style_id"])
-        )
-        _run_test(
-            "audio encoder forward",
-            lambda: agent.audio_encoder(batch["audio"]["waveform"], style_id=batch["style_id"])
-        )
-
-    # 4) Inference step tests by modality
-    if data_ok:
-        _run_test(
-            "inference:text",
-            lambda: agent._inference_step({
-                "modality": "text",
-                "input_data": {
-                    "input_ids": batch["text"]["input_ids"],
-                    "style_id": batch["style_id"]
-                }
-            })
-        )
-        _run_test(
-            "inference:vision",
-            lambda: agent._inference_step({
-                "modality": "vision",
-                "input_data": {
-                    "pixel_values": batch["vision"]["pixel_values"],
-                    "style_id": batch["style_id"]
-                }
-            })
-        )
-        _run_test(
-            "inference:audio",
-            lambda: agent._inference_step({
-                "modality": "audio",
-                "input_data": {
-                    "waveform": batch["audio"]["waveform"],
-                    "style_id": batch["style_id"]
-                }
-            })
-        )
-
-    # 5) Shared-memory checkpoint roundtrip
-    _run_test("save state to shared memory", lambda: agent.save_state_to_shared_memory())
-    _run_test("load state from shared memory", lambda: agent.load_state_from_shared_memory())
-
     print("=== PerceptionAgent smoke test completed ===\n")

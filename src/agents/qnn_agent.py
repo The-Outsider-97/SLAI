@@ -612,12 +612,15 @@ class QNNAgent(BaseAgent):
         "summary_key_prefix": "qnn:summary",
         "event_channel": "qnn.events",
     }
+    CHECKPOINTING_SUPPORTED = True
 
     def __init__(
         self,
         shared_memory: Any = None,
         agent_factory: Any = None,
         config: Mapping[str, Any] | None = None,
+        *,
+        checkpoint_manager: Any = None,
     ) -> None:
         if config is not None and not isinstance(config, Mapping):
             raise QNNConfigurationError("QNN config override must be a mapping")
@@ -626,6 +629,7 @@ class QNNAgent(BaseAgent):
             shared_memory=shared_memory,
             agent_factory=agent_factory,
             config=config,
+            checkpoint_manager=checkpoint_manager,
         )
 
         resolved = dict(

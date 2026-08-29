@@ -143,6 +143,7 @@ class ReasoningAgent(BaseAgent):
 
     AGENT_KEY = "reasoning_agent"
     KNOWLEDGE_MEMORY_KEY_DEFAULT = "reasoning_agent:knowledge_base"
+    CHECKPOINTING_SUPPORTED = True
 
     _ALLOWED_CONFIG_KEYS = {
         "learning_rate", "decay", "exploration_rate", "max_iterations",
@@ -158,8 +159,20 @@ class ReasoningAgent(BaseAgent):
         "tuple_key", "hypothesis_graph", "glove_path", "ner_tag", "embedding",
     }
 
-    def __init__(self, shared_memory, agent_factory, config = None) -> None:
-        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
+    def __init__(
+            self,
+            shared_memory,
+            agent_factory,
+            config = None,
+            *,
+            checkpoint_manager: Any = None,
+            ) -> None:
+        super().__init__(
+        shared_memory=shared_memory,
+        agent_factory=agent_factory,
+        config=config,
+        checkpoint_manager=checkpoint_manager,
+        )
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self._reasoning_lock = RLock()
