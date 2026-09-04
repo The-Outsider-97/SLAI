@@ -19,11 +19,11 @@ from enum import Enum
 from typing import Any, ClassVar, Deque, Dict, Iterable, List, Mapping, Optional, Type
 
 from .utils.config_loader import get_config_section
-from .utils.functions_error import TransportChannelError, TransportError, TransportRetryExhausted
-from logs.logger import get_logger, PrettyPrinter
+from .utils.functions_error import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Transport Service")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 _UNSET = object()
 _DEFAULT_MAX_RECEIVE_BUFFER = 1024
@@ -422,7 +422,8 @@ class TransportAdapter(ABC):
 
         summary = " | ".join(errors) if errors else "unknown transport error"
         raise TransportRetryExhausted(
-            f"Adapter '{self.name}' failed after {attempts} attempts: {summary}"
+            f"Adapter '{self.name}' failed after {attempts} attempts: {summary}",
+            attempts=attempts,
         ) from last_error
 
     def inject_received(self, packet: TransportPacket) -> None:

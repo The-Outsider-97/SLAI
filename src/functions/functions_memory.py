@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
 import tempfile
@@ -21,27 +22,57 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Dict, Generic, Iterable, Iterator, Mapping, Optional, Tuple, TypeVar
 
-import portalocker  # type: ignore
-
-from .utils.config_loader import get_config_section, load_global_config
-from .utils.functions_error import (
-    CacheConfigurationError,
-    CredentialPolicyError,
-    PasswordHashingError,
-    StoreLoadError,
-    StoreLockError,
-    StoreSaveError,
-    StoreSerializationError,
-)
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import *
+from .utils.functions_error import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Functions Memory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 T = TypeVar("T")
+
+
+@contextmanager
+def _process_file_lock(lock_path: Path, timeout: float) -> Iterator[None]:
+    """Acquire an advisory process lock using only the Python standard library."""
+    deadline = monotonic() + timeout
+    with lock_path.open("a+b") as handle:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    if not handle.read(1):
+                        handle.write(b"0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError) as exc:
+                if monotonic() >= deadline:
+                    raise TimeoutError(f"lock timed out after {timeout}s") from exc
+                sleep(0.05)
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -76,8 +107,11 @@ class CredentialPolicy:
         Raises:
             CredentialPolicyError: if the password is invalid.
         """
+        if not isinstance(password, str):
+            raise CredentialPolicyError("Password must be a string")
+
         violations: list[str] = []
-    
+
         if len(password) < self.min_length:
             violations.append(f"Password must be at least {self.min_length} characters")
         if self.require_upper and not any(c.isupper() for c in password):
@@ -88,7 +122,7 @@ class CredentialPolicy:
             violations.append("Password must include a digit")
         if self.require_symbol and not any(not c.isalnum() for c in password):
             violations.append("Password must include a symbol")
-    
+
         if violations:
             raise CredentialPolicyError(
                 reason="Password failed credential policy validation",
@@ -139,28 +173,28 @@ class PasswordHasher:
 
     def _validate_parameters(self) -> None:
         if self._n <= 1 or (self._n & (self._n - 1)) != 0:
-            raise PasswordHashingError("password_hasher.n must be a power of 2 greater than 1")
+            raise PasswordHashingError("parameter_validation", "n must be a power of 2 greater than 1")
         if self._r < 1:
-            raise PasswordHashingError("password_hasher.r must be >= 1")
+            raise PasswordHashingError("parameter_validation", "r must be >= 1")
         if self._p < 1:
-            raise PasswordHashingError("password_hasher.p must be >= 1")
+            raise PasswordHashingError("parameter_validation", "p must be >= 1")
         if self._salt_bytes < 16:
-            raise PasswordHashingError("password_hasher.salt_bytes must be >= 16")
+            raise PasswordHashingError("parameter_validation", "salt_bytes must be >= 16")
         if self._dklen < 32:
-            raise PasswordHashingError("password_hasher.dklen must be >= 32")
+            raise PasswordHashingError("parameter_validation", "dklen must be >= 32")
         if self._maxmem < 0:
-            raise PasswordHashingError("password_hasher.maxmem must be >= 0")
+            raise PasswordHashingError("parameter_validation", "maxmem must be >= 0")
 
     def _derive_hash(self, password: str, salt_hex: str) -> str:
         if not isinstance(password, str):
-            raise PasswordHashingError("Password must be a string")
+            raise PasswordHashingError("derive", "password must be a string")
         if not isinstance(salt_hex, str) or not salt_hex:
-            raise PasswordHashingError("Salt must be a non-empty hex string")
+            raise PasswordHashingError("derive", "salt must be a non-empty hex string")
 
         try:
             salt = bytes.fromhex(salt_hex)
         except ValueError as exc:
-            raise PasswordHashingError("Salt must be valid hexadecimal") from exc
+            raise PasswordHashingError("derive", "salt must be valid hexadecimal") from exc
 
         try:
             derived = hashlib.scrypt(
@@ -173,7 +207,7 @@ class PasswordHasher:
                 dklen=self._dklen,
             )
         except (TypeError, ValueError) as exc:
-            raise PasswordHashingError(f"Failed to derive password hash: {exc}") from exc
+            raise PasswordHashingError("derive", str(exc)) from exc
 
         return derived.hex()
 
@@ -210,9 +244,9 @@ class TTLCache(Generic[T]):
         self.ttl_seconds = int(ttl_seconds if ttl_seconds is not None else config.get("ttl_seconds", 300))
 
         if self.max_size < 1:
-            raise CacheConfigurationError("ttl_cache.max_size must be >= 1")
+            raise CacheConfigurationError("max_size", self.max_size, "must be >= 1")
         if self.ttl_seconds < 0:
-            raise CacheConfigurationError("ttl_cache.ttl_seconds must be >= 0")
+            raise CacheConfigurationError("ttl_seconds", self.ttl_seconds, "must be >= 0")
 
         self._data: "OrderedDict[str, Tuple[float, T]]" = OrderedDict()
         self._lock = RLock()
@@ -223,7 +257,7 @@ class TTLCache(Generic[T]):
         )
 
     def _expiry_for_new_value(self) -> float:
-        return monotonic() + float(self.ttl_seconds)
+        return math.inf if self.ttl_seconds == 0 else monotonic() + float(self.ttl_seconds)
 
     def _purge_expired_unlocked(self) -> int:
         if not self._data:
@@ -293,7 +327,9 @@ class TTLCache(Generic[T]):
     def __contains__(self, key: object) -> bool:
         if not isinstance(key, str):
             return False
-        return self.get(key) is not None
+        with self._lock:
+            self._purge_expired_unlocked()
+            return key in self._data
 
     def __len__(self) -> int:
         with self._lock:
@@ -326,9 +362,9 @@ class PortableStore:
         )
 
         if self.lock_timeout <= 0:
-            raise StoreLockError("portable_store.lock_timeout must be > 0")
+            raise StoreLockError(str(self.path), "lock_timeout must be > 0", self.lock_timeout)
         if self.indent < 0:
-            raise StoreSaveError("portable_store.indent must be >= 0")
+            raise StoreSaveError(str(self.path), "indent must be >= 0")
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._thread_lock = RLock()
@@ -336,12 +372,16 @@ class PortableStore:
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._thread_lock:
+            process_lock = _process_file_lock(self.lock_path, self.lock_timeout)
             try:
-                with portalocker.Lock(str(self.lock_path), mode="a+", timeout=self.lock_timeout):
-                    yield
-            except portalocker.exceptions.LockException as exc:
+                process_lock.__enter__()
+            except (OSError, TimeoutError) as exc:
                 logger.error("Failed to acquire lock for %s: %s", self.path, exc)
-                raise StoreLockError(f"Failed to acquire lock for {self.path}: {exc}") from exc
+                raise StoreLockError(str(self.path), str(exc), self.lock_timeout) from exc
+            try:
+                yield
+            finally:
+                process_lock.__exit__(None, None, None)
 
     def _serialize_payload(self, payload: Mapping[str, object]) -> str:
         try:
@@ -352,7 +392,7 @@ class PortableStore:
                 sort_keys=self.sort_keys,
             )
         except (TypeError, ValueError) as exc:
-            raise StoreSerializationError(f"Payload for {self.path} is not JSON serializable: {exc}") from exc
+            raise StoreSerializationError(str(self.path), str(exc)) from exc
 
     def save(self, payload: Mapping[str, object]) -> None:
         serialized = self._serialize_payload(payload)
@@ -376,7 +416,7 @@ class PortableStore:
                 raise
             except OSError as exc:
                 logger.error("Failed to save state to %s: %s", self.path, exc)
-                raise StoreSaveError(f"Failed to save store at {self.path}: {exc}") from exc
+                raise StoreSaveError(str(self.path), str(exc)) from exc
             finally:
                 if temp_path is not None and temp_path.exists():
                     temp_path.unlink(missing_ok=True)
@@ -399,14 +439,15 @@ class PortableStore:
                 payload = json.loads(raw)
             except json.JSONDecodeError as exc:
                 logger.error("Failed to decode JSON from %s: %s", self.path, exc)
-                raise StoreLoadError(f"Store at {self.path} contains invalid JSON: {exc}") from exc
+                raise StoreLoadError(str(self.path), f"invalid JSON: {exc}") from exc
             except OSError as exc:
                 logger.error("Failed to read store %s: %s", self.path, exc)
-                raise StoreLoadError(f"Failed to read store at {self.path}: {exc}") from exc
+                raise StoreLoadError(str(self.path), str(exc)) from exc
 
         if not isinstance(payload, dict):
             raise StoreLoadError(
-                f"Store at {self.path} must deserialize to a JSON object, got {type(payload).__name__}"
+                str(self.path),
+                f"expected a JSON object, got {type(payload).__name__}",
             )
 
         logger.debug("Loaded state from %s", self.path)
@@ -419,10 +460,19 @@ class PortableStore:
                 logger.debug("Deleted store file %s", self.path)
             except OSError as exc:
                 logger.error("Failed to delete store %s: %s", self.path, exc)
-                raise StoreSaveError(f"Failed to delete store at {self.path}: {exc}") from exc
+                raise StoreSaveError(str(self.path), str(exc)) from exc
 
     def export_items(self, items: Iterable[Tuple[str, object]]) -> None:
         self.save({key: value for key, value in items})
+
+
+
+__all__ = [
+    "CredentialPolicy",
+    "PasswordHasher",
+    "TTLCache",
+    "PortableStore",
+]
 
 
 if __name__ == "__main__":

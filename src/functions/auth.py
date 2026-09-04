@@ -11,18 +11,13 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Dict, Optional
 
-from .utils.config_loader import get_config_section, load_global_config
-from .utils.functions_error import (
-    AccountLockedError,
-    InvalidCredentialsError,
-    InvalidTokenError,
-    UserAlreadyExistsError,
-)
-from .functions_memory import CredentialPolicy, PasswordHasher, PortableStore, TTLCache
-from logs.logger import PrettyPrinter, get_logger
+from .utils.config_loader import *
+from .utils.functions_error import *
+from .functions_memory import *
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Authentication Service")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass(frozen=True)
@@ -30,6 +25,7 @@ class AuthToken:
     token: str
     user_id: str
     expires_at: datetime
+    session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -37,6 +33,7 @@ class RefreshToken:
     token: str
     user_id: str
     expires_at: datetime
+    session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -75,18 +72,63 @@ class AuthService:
 
     def __init__(
         self,
-        token_ttl_minutes: int = 15,
-        refresh_ttl_days: int = 14,
-        max_failed_attempts: int = 5,
-        lockout_minutes: int = 15,
-        memory_path: str = "data/processed/functions_auth.json",
+        token_ttl_minutes: Optional[int] = None,
+        refresh_ttl_days: Optional[int] = None,
+        max_failed_attempts: Optional[int] = None,
+        lockout_minutes: Optional[int] = None,
+        memory_path: Optional[str] = None,
         pepper: Optional[str] = None,
-        inactivity_hours: int = 24,
+        inactivity_hours: Optional[int] = None,
+        require_verified: Optional[bool] = None,
     ) -> None:
         self.config = load_global_config()
-        self.auth_config = get_config_section("authentication")
+        self.auth_config = get_config_section("authentication", self.config)
 
-        self._policy = CredentialPolicy()
+        token_ttl_minutes = int(
+            token_ttl_minutes
+            if token_ttl_minutes is not None
+            else self.auth_config.get("token_ttl_minutes", 15)
+        )
+        refresh_ttl_days = int(
+            refresh_ttl_days
+            if refresh_ttl_days is not None
+            else self.auth_config.get("refresh_ttl_days", 14)
+        )
+        max_failed_attempts = int(
+            max_failed_attempts
+            if max_failed_attempts is not None
+            else self.auth_config.get("max_failed_attempts", 5)
+        )
+        lockout_minutes = int(
+            lockout_minutes
+            if lockout_minutes is not None
+            else self.auth_config.get("lockout_minutes", 15)
+        )
+        inactivity_hours = int(
+            inactivity_hours
+            if inactivity_hours is not None
+            else self.auth_config.get("inactivity_hours", 24)
+        )
+        self._require_verified = bool(
+            require_verified
+            if require_verified is not None
+            else self.auth_config.get("require_verified", True)
+        )
+        memory_path = str(
+            memory_path
+            if memory_path is not None
+            else self.auth_config.get(
+                "checkpoint_path",
+                self.auth_config.get("checkpoint_dir", "data/processed/functions_auth.json"),
+            )
+        )
+
+        if token_ttl_minutes <= 0 or refresh_ttl_days <= 0:
+            raise ValueError("token and refresh TTL values must be > 0")
+        if max_failed_attempts <= 0 or lockout_minutes <= 0 or inactivity_hours <= 0:
+            raise ValueError("authentication limits must be > 0")
+
+        self._policy = CredentialPolicy.from_config()
         self._hasher = PasswordHasher(pepper=pepper)
         self._token_ttl = timedelta(minutes=token_ttl_minutes)
         self._refresh_ttl = timedelta(days=refresh_ttl_days)
@@ -97,15 +139,10 @@ class AuthService:
 
         self._users: Dict[str, UserRecord] = {}
         self._verification_challenges: Dict[str, VerificationChallenge] = {}
-        self._access_tokens: TTLCache[dict] = TTLCache(
-            max_size=20_000,
-            ttl_seconds=int(self._token_ttl.total_seconds()),
-        )
-        self._refresh_tokens: TTLCache[dict] = TTLCache(
-            max_size=20_000,
-            ttl_seconds=int(self._refresh_ttl.total_seconds()),
-        )
+        self._access_tokens: TTLCache[dict] = TTLCache(max_size=20_000, ttl_seconds=int(self._token_ttl.total_seconds()))
+        self._refresh_tokens: TTLCache[dict] = TTLCache(max_size=20_000, ttl_seconds=int(self._refresh_ttl.total_seconds()))
         self._revoked: Dict[str, datetime] = {}
+        self._refresh_successors: Dict[str, str] = {}
         self._load_state()
         self._lock = RLock()
 
@@ -147,6 +184,12 @@ class AuthService:
 
         raw_revoked = state.get("revoked", {})
         self._revoked = {h: datetime.fromisoformat(exp) for h, exp in raw_revoked.items()}
+        raw_successors = state.get("refresh_successors", {})
+        if isinstance(raw_successors, dict):
+            self._refresh_successors = {
+                str(old_hash): str(new_hash)
+                for old_hash, new_hash in raw_successors.items()
+            }
         self._purge_expired_revoked()
         self._purge_old_challenges()
 
@@ -176,13 +219,16 @@ class AuthService:
                     for cid, challenge in self._verification_challenges.items()
                 },
                 "revoked": {h: exp.isoformat() for h, exp in self._revoked.items()},
+                "refresh_successors": dict(self._refresh_successors),
             }
             self._store.save(payload)
 
     def _purge_expired_revoked(self) -> None:
         now = datetime.now(timezone.utc)
-        for token_hash in [h for h, exp in self._revoked.items() if exp < now]:
+        expired_hashes = [h for h, exp in self._revoked.items() if exp < now]
+        for token_hash in expired_hashes:
             del self._revoked[token_hash]
+            self._refresh_successors.pop(token_hash, None)
 
     def _purge_old_challenges(self) -> None:
         now = datetime.now(timezone.utc)
@@ -218,7 +264,7 @@ class AuthService:
     def _get_user(self, username: str) -> UserRecord:
         user = self._users.get(username)
         if not user:
-            raise InvalidCredentialsError("Invalid username or password")
+            raise InvalidCredentialsError()
         return user
 
     # --- Public Methods ---
@@ -227,7 +273,7 @@ class AuthService:
         self._policy.validate(password)
         with self._lock:
             if username in self._users:
-                raise UserAlreadyExistsError("Username already exists")
+                raise UserAlreadyExistsError(username=username)
             salt, password_hash = self._hasher.hash_password(password)
             user = UserRecord(
                 user_id=secrets.token_hex(12),
@@ -249,14 +295,23 @@ class AuthService:
                 self._persist_state()
 
             if self._is_locked_out(user):
-                raise AccountLockedError("Account temporarily locked due to repeated failed attempts")
+                now = datetime.now(timezone.utc)
+                retry_after = max(0.0, (user.lockout_until - now).total_seconds()) if user.lockout_until else None
+                raise AccountLockedError(
+                    username=username,
+                    retry_after_seconds=retry_after,
+                    lockout_until=user.lockout_until,
+                )
 
             if not self._hasher.verify_password(password, user.salt, user.password_hash):
                 user.failed_attempts += 1
                 if user.failed_attempts >= self._max_failed_attempts:
                     user.lockout_until = datetime.now(timezone.utc) + timedelta(minutes=self._lockout_minutes)
                 self._persist_state()
-                raise InvalidCredentialsError("Invalid username or password")
+                raise InvalidCredentialsError()
+
+            if self._require_verified and not user.is_verified:
+                raise InvalidCredentialsError(message="Account verification required")
 
             user.failed_attempts = 0
             user.lockout_until = None
@@ -328,13 +383,11 @@ class AuthService:
             self._persist_state()
             return False
 
-    def complete_login(self, username: str) -> AuthToken:
-        with self._lock:
-            user = self._get_user(username)
-            now = datetime.now(timezone.utc)
-            user.last_activity_at = now
-            self._persist_state()
-            return self._mint_session(user.user_id).access
+    def complete_login(self, username: str, password: Optional[str] = None) -> AuthToken:
+        """Compatibility entry point that now requires credential proof."""
+        if password is None:
+            raise InvalidCredentialsError(message="Credential proof is required")
+        return self.log_in(username, password)
 
     def requires_reverification(self, username: str) -> bool:
         with self._lock:
@@ -361,75 +414,82 @@ class AuthService:
 
     # Backward compatibility methods
     def log_in(self, username: str, password: str) -> AuthToken:
-        self.verify_credentials(username, password)
-        return self.complete_login(username)
+        user_id = self.verify_credentials(username, password)
+        with self._lock:
+            self._users[username].last_activity_at = datetime.now(timezone.utc)
+            token = self._mint_access_token(user_id)
+            self._persist_state()
+            return token
 
     def log_in_with_refresh(self, username: str, password: str) -> AuthSession:
-        self.verify_credentials(username, password)
-        token = self.complete_login(username)
-        now = datetime.now(timezone.utc)
-        refresh_raw = secrets.token_urlsafe(48)
-        refresh_hash = self._hash_token_key(refresh_raw)
-        self._refresh_tokens.set(
-            refresh_hash,
-            {"user_id": token.user_id, "expires_at": now + self._refresh_ttl},
-        )
-        return AuthSession(
-            access=token,
-            refresh=RefreshToken(token=refresh_raw, user_id=token.user_id, expires_at=now + self._refresh_ttl),
-        )
+        user_id = self.verify_credentials(username, password)
+        with self._lock:
+            self._users[username].last_activity_at = datetime.now(timezone.utc)
+            session = self._mint_session(user_id)
+            self._persist_state()
+            return session
+
+    def complete_passcode_login(
+        self,
+        username: str,
+        passcode: str,
+        purpose: Optional[str] = None,
+    ) -> AuthSession:
+        """Atomically verify a one-time passcode and mint one session family."""
+        with self._lock:
+            if not self.verify_passcode(username, passcode, purpose):
+                raise InvalidCredentialsError(message="Invalid or expired passcode")
+            user = self._get_user(username)
+            session = self._mint_session(user.user_id)
+            self._persist_state()
+            return session
 
     def revoke_token(self, token: str) -> None:
         token_hash = self._hash_token_key(token)
         with self._lock:
-            expiry = None
-            access = self._access_tokens.get(token_hash)
-            if access:
-                expiry = access["expires_at"]
-            else:
-                refresh = self._refresh_tokens.get(token_hash)
-                if refresh:
-                    expiry = refresh["expires_at"]
-            if expiry is None:
-                expiry = datetime.now(timezone.utc) + max(self._token_ttl, self._refresh_ttl)
-
-            self._revoked[token_hash] = expiry
-            self._access_tokens.invalidate(token_hash)
-            self._refresh_tokens.invalidate(token_hash)
+            record = self._access_tokens.get(token_hash)
+            source = "access"
+            if record is None:
+                record = self._refresh_tokens.get(token_hash)
+                source = "refresh"
+            self._revoke_session_family_unlocked(token_hash, record, source)
             self._persist_state()
 
     def rotate_refresh_token(self, refresh_token: str) -> AuthSession:
         old_hash = self._hash_token_key(refresh_token)
         with self._lock:
             if old_hash in self._revoked:
+                self._revoke_latest_successor_unlocked(old_hash)
+                self._persist_state()
                 raise InvalidTokenError("Refresh token revoked")
 
             stored = self._refresh_tokens.get(old_hash)
             if not stored:
                 raise InvalidTokenError("Invalid or expired refresh token")
 
-            self._revoked[old_hash] = stored["expires_at"]
-            self._refresh_tokens.invalidate(old_hash)
+            self._revoke_session_family_unlocked(old_hash, stored, "refresh")
+            session = self._mint_session(stored["user_id"])
+            self._refresh_successors[old_hash] = self._hash_token_key(session.refresh.token)
             self._persist_state()
-            return self._mint_session(stored["user_id"])
+            return session
 
     def is_token_valid(self, token: str) -> bool:
         token_hash = self._hash_token_key(token)
-        if token_hash in self._revoked:
-            return False
-        stored = self._access_tokens.get(token_hash)
-        if not stored:
-            return False
-        return datetime.now(timezone.utc) <= stored["expires_at"]
+        with self._lock:
+            self._purge_expired_revoked()
+            if token_hash in self._revoked:
+                return False
+            stored = self._access_tokens.get(token_hash)
+            return bool(stored and datetime.now(timezone.utc) <= stored["expires_at"])
 
     def is_refresh_token_valid(self, refresh_token: str) -> bool:
         token_hash = self._hash_token_key(refresh_token)
-        if token_hash in self._revoked:
-            return False
-        stored = self._refresh_tokens.get(token_hash)
-        if not stored:
-            return False
-        return datetime.now(timezone.utc) <= stored["expires_at"]
+        with self._lock:
+            self._purge_expired_revoked()
+            if token_hash in self._revoked:
+                return False
+            stored = self._refresh_tokens.get(token_hash)
+            return bool(stored and datetime.now(timezone.utc) <= stored["expires_at"])
 
     def log_out(self, token: str) -> None:
         self.revoke_token(token)
@@ -440,6 +500,7 @@ class AuthService:
 
     def _mint_session(self, user_id: str) -> AuthSession:
         now = datetime.now(timezone.utc)
+        session_id = secrets.token_hex(16)
         access_raw = secrets.token_urlsafe(32)
         refresh_raw = secrets.token_urlsafe(48)
 
@@ -448,17 +509,112 @@ class AuthService:
 
         self._access_tokens.set(
             access_hash,
-            {"user_id": user_id, "expires_at": now + self._token_ttl},
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "peer_hash": refresh_hash,
+                "peer_expires_at": now + self._refresh_ttl,
+                "expires_at": now + self._token_ttl,
+            },
         )
         self._refresh_tokens.set(
             refresh_hash,
-            {"user_id": user_id, "expires_at": now + self._refresh_ttl},
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "peer_hash": access_hash,
+                "peer_expires_at": now + self._token_ttl,
+                "expires_at": now + self._refresh_ttl,
+            },
         )
 
-        access = AuthToken(token=access_raw, user_id=user_id, expires_at=now + self._token_ttl)
-        refresh = RefreshToken(token=refresh_raw, user_id=user_id, expires_at=now + self._refresh_ttl)
+        access = AuthToken(
+            token=access_raw,
+            user_id=user_id,
+            expires_at=now + self._token_ttl,
+            session_id=session_id,
+        )
+        refresh = RefreshToken(
+            token=refresh_raw,
+            user_id=user_id,
+            expires_at=now + self._refresh_ttl,
+            session_id=session_id,
+        )
         return AuthSession(access=access, refresh=refresh)
 
+    def _mint_access_token(self, user_id: str) -> AuthToken:
+        now = datetime.now(timezone.utc)
+        session_id = secrets.token_hex(16)
+        access_raw = secrets.token_urlsafe(32)
+        access_hash = self._hash_token_key(access_raw)
+        expires_at = now + self._token_ttl
+        self._access_tokens.set(
+            access_hash,
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "expires_at": expires_at,
+            },
+        )
+        return AuthToken(
+            token=access_raw,
+            user_id=user_id,
+            expires_at=expires_at,
+            session_id=session_id,
+        )
+
+    def _revoke_session_family_unlocked(
+        self,
+        token_hash: str,
+        record: Optional[dict],
+        source: str,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        expiry = record.get("expires_at") if record else None
+        self._revoked[token_hash] = expiry or now + max(self._token_ttl, self._refresh_ttl)
+
+        if source == "access":
+            self._access_tokens.invalidate(token_hash)
+        else:
+            self._refresh_tokens.invalidate(token_hash)
+
+        if not record:
+            return
+
+        peer_hash = record.get("peer_hash")
+        if not peer_hash:
+            return
+
+        peer_expiry = record.get("peer_expires_at") or now + max(self._token_ttl, self._refresh_ttl)
+        self._revoked[peer_hash] = peer_expiry
+        if source == "access":
+            self._refresh_tokens.invalidate(peer_hash)
+        else:
+            self._access_tokens.invalidate(peer_hash)
+
+    def _revoke_latest_successor_unlocked(self, old_hash: str) -> None:
+        seen = {old_hash}
+        successor_hash = self._refresh_successors.get(old_hash)
+        while successor_hash and successor_hash not in seen:
+            seen.add(successor_hash)
+            next_hash = self._refresh_successors.get(successor_hash)
+            if next_hash is None:
+                break
+            successor_hash = next_hash
+
+        if not successor_hash:
+            return
+        record = self._refresh_tokens.get(successor_hash)
+        if record is not None:
+            self._revoke_session_family_unlocked(successor_hash, record, "refresh")
+
+__all__ = [
+    "AuthService",
+    "AuthSession",
+    "AuthToken",
+    "RefreshToken",
+    "UserRecord",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Authentication service ===\n")

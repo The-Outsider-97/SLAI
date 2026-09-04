@@ -1,10 +1,48 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+class FunctionsError(Exception):
+    """Stable base exception for the reusable functions package."""
+
+    default_code = "functions_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code or self.default_code
+        self.details = details or {}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "error": self.message,
+            "type": self.__class__.__name__,
+            "code": self.error_code,
+            "details": _json_safe(self.details),
+        }
+
 # ============================================================================
 # Authentication exceptions (production-ready)
 # ============================================================================
-class AuthError(Exception):
+class AuthError(FunctionsError):
     """Base exception for all authentication and authorisation errors."""
 
     def __init__(
@@ -14,21 +52,14 @@ class AuthError(Exception):
         details: Optional[Dict[str, Any]] = None,
         username: Optional[str] = None,
     ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.error_code = error_code
-        self.details = details or {}
+        super().__init__(message, error_code=error_code or "authentication_error", details=details)
         self.username = username
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, *, include_sensitive: bool = False) -> Dict[str, Any]:
         """Convert to dictionary for API error responses."""
-        result: Dict[str, Any] = {"error": self.message, "type": self.__class__.__name__}
-        if self.error_code:
-            result["code"] = self.error_code
-        if self.username:
+        result = super().to_dict()
+        if include_sensitive and self.username:
             result["username"] = self.username
-        if self.details:
-            result["details"] = self.details
         return result
 
 
@@ -119,7 +150,7 @@ class InvalidTokenError(AuthError):
 # ============================================================================
 # Base exception for shared memory / security helpers
 # ============================================================================
-class FunctionsMemoryError(Exception):
+class FunctionsMemoryError(FunctionsError):
     """Base exception for shared memory/security helpers."""
     pass
 
@@ -201,7 +232,7 @@ class StoreSaveError(StoreError):
 # ============================================================================
 # Base exception for rate limiting
 # ============================================================================
-class RateLimitError(Exception):
+class RateLimitError(FunctionsError):
     """Base exception for rate limiting errors."""
     pass
 
@@ -225,7 +256,7 @@ class RateLimitConfigurationError(RateLimitError):
 # ============================================================================
 # Base exception for email services
 # ============================================================================
-class EmailError(Exception):
+class EmailError(FunctionsError):
     """Base exception for email sending failures."""
     pass
 
@@ -259,7 +290,7 @@ class EmailConfigurationError(EmailError):
 # ============================================================================
 # Base exception for storage operations
 # ============================================================================
-class StorageError(Exception):
+class StorageError(FunctionsError):
     """Base exception for storage operations."""
     pass
 
@@ -317,81 +348,9 @@ class StorageBackendError(StorageError):
 
 
 # ============================================================================
-# Base exception for transport operations
-# ============================================================================
-class TransportError(Exception):
-    """Base exception for all transport layer communications."""
-
-    def __init__(
-        self,
-        message: str = "Transport error",
-        adapter_name: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.adapter_name = adapter_name
-        self.details = details or {}
-
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"error": self.message, "type": self.__class__.__name__}
-        if self.adapter_name:
-            result["adapter"] = self.adapter_name
-        if self.details:
-            result["details"] = self.details
-        return result
-
-
-class TransportChannelError(TransportError):
-    """Raised when an adapter/channel cannot connect or becomes unavailable."""
-
-    def __init__(
-        self,
-        adapter_name: str,
-        reason: str = "Channel unavailable",
-        channel_state: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        self.reason = reason
-        self.channel_state = channel_state
-        msg = f"Channel error on '{adapter_name}': {reason}"
-        if channel_state:
-            msg += f" (state={channel_state})"
-        extra_details = {"reason": reason, "state": channel_state}
-        if details:
-            extra_details.update(details)
-        super().__init__(msg, adapter_name=adapter_name, details=extra_details)
-
-
-class TransportRetryExhausted(TransportError):
-    """Raised when all retry attempts for a transmission have failed."""
-
-    def __init__(
-        self,
-        adapter_name: str,
-        attempts: int,
-        last_error: Optional[str] = None,
-        message: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        self.attempts = attempts
-        self.last_error = last_error
-        if not message:
-            msg = f"Adapter '{adapter_name}' exhausted {attempts} retries"
-            if last_error:
-                msg += f": {last_error}"
-        else:
-            msg = message
-        extra_details = {"attempts": attempts, "last_error": last_error}
-        if details:
-            extra_details.update(details)
-        super().__init__(msg, adapter_name=adapter_name, details=extra_details)
-
-
-# ============================================================================
 # Search engine exceptions
 # ============================================================================
-class SearchError(Exception):
+class SearchError(FunctionsError):
     """Base exception for search engine errors."""
     pass
 
@@ -437,3 +396,158 @@ class InconsistentFieldsError(SearchError):
         self.expected = expected
         self.got = got
         super().__init__(f"Field mismatch: expected {expected}, got {got}")
+
+
+# ============================================================================
+# Transport exceptions
+# ============================================================================
+class TransportError(FunctionsError):
+    """Base exception for transport-layer operations."""
+
+    default_code = "transport_error"
+
+    def __init__(
+        self,
+        message: str = "Transport operation failed",
+        *,
+        adapter_name: Optional[str] = None,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.adapter_name = adapter_name
+
+        error_details = dict(details or {})
+        if adapter_name is not None:
+            error_details.setdefault("adapter_name", adapter_name)
+
+        super().__init__(
+            message,
+            error_code=error_code or self.default_code,
+            details=error_details,
+        )
+
+
+class TransportChannelError(TransportError):
+    """Raised when a transport channel cannot connect or becomes unavailable."""
+
+    default_code = "transport_channel_error"
+
+    def __init__(
+        self,
+        adapter_name: str,
+        reason: str = "Channel unavailable",
+        *,
+        channel_state: Optional[str] = None,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not isinstance(adapter_name, str) or not adapter_name.strip():
+            raise ValueError("adapter_name must be a non-empty string")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be a non-empty string")
+
+        self.reason = reason
+        self.channel_state = channel_state
+
+        error_details = dict(details or {})
+        error_details.setdefault("reason", reason)
+        if channel_state is not None:
+            error_details.setdefault("channel_state", channel_state)
+
+        message = f"Channel error on '{adapter_name}': {reason}"
+        if channel_state is not None:
+            message += f" (state={channel_state})"
+
+        super().__init__(
+            message,
+            adapter_name=adapter_name,
+            error_code=error_code or self.default_code,
+            details=error_details,
+        )
+
+
+class TransportRetryExhausted(TransportError):
+    """Raised after every permitted transport attempt has failed."""
+
+    default_code = "transport_retry_exhausted"
+
+    def __init__(
+        self,
+        adapter_name: str,
+        attempts: int,
+        *,
+        last_error: Optional[str] = None,
+        message: Optional[str] = None,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not isinstance(adapter_name, str) or not adapter_name.strip():
+            raise ValueError("adapter_name must be a non-empty string")
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("attempts must be a positive integer")
+
+        self.attempts = attempts
+        self.last_error = last_error
+
+        error_details = dict(details or {})
+        error_details.setdefault("attempts", attempts)
+        if last_error is not None:
+            error_details.setdefault("last_error", last_error)
+
+        resolved_message = message or (
+            f"Adapter '{adapter_name}' exhausted {attempts} transport attempts"
+        )
+        if message is None and last_error:
+            resolved_message += f": {last_error}"
+
+        super().__init__(
+            resolved_message,
+            adapter_name=adapter_name,
+            error_code=error_code or self.default_code,
+            details=error_details,
+        )
+
+
+__all__ =[
+    "AccountLockedError",
+    "AuthError",
+    "CacheConfigurationError",
+    "CredentialPolicyError",
+    "EmailAuthError",
+    "EmailConfigurationError",
+    "EmailError",
+    "EmailSendError",
+    "EmailTemplateError",
+    "FunctionsMemoryError",
+    "FunctionsError",
+    "DocumentNotFoundError",
+    "InconsistentFieldsError",
+    "IndexBuildError",
+    "IndexLoadError",
+    "IndexSaveError",
+    "InvalidAnalyzerError",
+    "InvalidCredentialsError",
+    "InvalidTokenError",
+    "PasswordHashingError",
+    "RateLimitConfigurationError",
+    "RateLimitError",
+    "RateLimitExceeded",
+    "SearchError",
+    "StorageBackendError",
+    "StorageDeleteError",
+    "StorageDownloadError",
+    "StorageError",
+    "StorageNotFoundError",
+    "StoragePermissionError",
+    "StorageQuotaError",
+    "StorageUploadError",
+    "StoreError",
+    "StoreLoadError",
+    "StoreLockError",
+    "StoreSaveError",
+    "StoreSerializationError",
+    "TransportChannelError",
+    "TransportError",
+    "TransportRetryExhausted",
+    "UserAlreadyExistsError",
+]

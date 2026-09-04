@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional
 
 from .utils.config_loader import load_global_config, get_config_section
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Dropdown Menu")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 EASING_PRESETS: Dict[str, str] = {
@@ -70,15 +70,22 @@ class DropdownMenu:
         animation: Optional[AnimationConfig] = None,
     ) -> None:
         self.config = load_global_config()
-        self.auth_config = get_config_section('dropdown_animation')
+        animation_config = get_config_section("dropdown_animation", self.config)
 
         self.options: List[DropdownOption] = list(options)
         if not self.options:
             raise ValueError("Dropdown must contain at least one option")
 
-        self.animation = animation or AnimationConfig()
-        self.is_open = False
-        self.selected_value = default_value or self.options[0].value
+        self.animation = animation or AnimationConfig(
+            duration_ms=int(animation_config.get("duration_ms", 220)),
+            preset=str(animation_config.get("preset", "smooth")),
+        )
+        if self.animation.duration_ms < 0:
+            raise ValueError("animation duration_ms must be >= 0")
+        if self.animation.preset not in EASING_PRESETS:
+            raise ValueError(f"Unknown animation preset: {self.animation.preset}")
+        self.is_open = bool(animation_config.get("is_open", False))
+        self.selected_value = self.options[0].value if default_value is None else default_value
         self._validate_selected_value(self.selected_value)
 
         logger.info(f"Dropdown Menu successfully initialized")
@@ -117,3 +124,13 @@ class DropdownMenu:
         self.selected_value = value
         self.is_open = False
         return self.selected_value
+
+
+__all__ = [
+    # Dropdown
+    "AnimationConfig",
+    "DropdownMenu",
+    "DropdownOption",
+    "EASING_PRESETS",
+    "INTERPOLATION_STRATEGIES",
+]

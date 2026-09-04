@@ -8,9 +8,8 @@ import smtplib
 import socket
 import threading
 import time
-import socks # type: ignore
 
-from functools import lru_cache
+from pathlib import Path
 from email import encoders
 from email.mime.base import MIMEBase
 from abc import ABC, abstractmethod
@@ -38,6 +37,16 @@ class EmailRetryPolicy:
     max_delay: float = 30.0
     backoff_factor: float = 2.0
     jitter: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_retries < 0:
+            raise EmailConfigurationError("retry_max must be >= 0")
+        if self.base_delay < 0 or self.max_delay < 0:
+            raise EmailConfigurationError("retry delays must be >= 0")
+        if self.max_delay < self.base_delay:
+            raise EmailConfigurationError("retry_max_delay must be >= retry_base_delay")
+        if self.backoff_factor < 1:
+            raise EmailConfigurationError("retry_backoff_factor must be >= 1")
 
     def sleep_duration(self, attempt: int) -> float:
         cap = min(self.max_delay, self.base_delay * (self.backoff_factor ** attempt))
@@ -125,6 +134,14 @@ class SMTPBackend(EmailBackend):
         proxy: Optional[Dict[str, str]] = None,  # e.g. {"type": "socks5", "host": "...", "port": 1080}
         pool_size: int = 1,             # Simple per-thread pool
     ):
+        if not isinstance(host, str) or not host.strip():
+            raise EmailConfigurationError("SMTP host must be a non-empty string")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise EmailConfigurationError("SMTP port must be an integer within [1, 65535]")
+        if timeout <= 0:
+            raise EmailConfigurationError("SMTP timeout must be > 0")
+        if pool_size != 1:
+            raise EmailConfigurationError("SMTPBackend currently supports pool_size=1 only")
         self.host = host
         self.port = port
         self.username = username
@@ -138,14 +155,11 @@ class SMTPBackend(EmailBackend):
         self._lock = threading.Lock()
 
     def _create_connection(self):
-        """Create a new SMTP connection with proxy and timeout support."""
+        """Create a new SMTP connection without process-global socket mutation."""
         if self.proxy:
-            # Setup SOCKS proxy
-            proxy_type = self.proxy.get("type", "socks5").upper()
-            socks.set_default_proxy(
-                getattr(socks, proxy_type),
-                self.proxy["host"],
-                int(self.proxy["port"]),
+            raise EmailConfigurationError(
+                "SMTPBackend does not mutate process-global sockets; "
+                "provide a dedicated proxy-aware EmailBackend instead"
             )
             socket.socket = socks.socksocket
 
@@ -173,31 +187,39 @@ class SMTPBackend(EmailBackend):
         from_addr = message.from_addr or self.default_from
         if not from_addr:
             raise EmailConfigurationError("No sender address specified (missing from_addr and default_from)")
-    
-        msg = MIMEMultipart("alternative")
+
+        recipients = self._normalize_recipients(message.to, "to")
+        cc = self._normalize_recipients(message.cc, "cc") if message.cc else []
+        self._validate_header("Subject", message.subject)
+        self._validate_header("From", from_addr)
+
+        msg = MIMEMultipart("mixed")
         msg["Subject"] = message.subject
         msg["From"] = from_addr
-        msg["To"] = ", ".join([message.to] if isinstance(message.to, str) else message.to)
-    
-        if message.cc:
-            msg["Cc"] = ", ".join([message.cc] if isinstance(message.cc, str) else message.cc)
+        msg["To"] = ", ".join(recipients)
+
+        if cc:
+            msg["Cc"] = ", ".join(cc)
         if message.reply_to:
+            self._validate_header("Reply-To", message.reply_to)
             msg["Reply-To"] = message.reply_to
         if message.headers:
             for k, v in message.headers.items():
+                self._validate_header(str(k), str(v))
                 msg[k] = v
-    
-        # Plain text part
+
+        body = MIMEMultipart("alternative")
         if message.body_text:
-            msg.attach(MIMEText(message.body_text, "plain"))
-        msg.attach(MIMEText(message.body_html, "html"))
-    
+            body.attach(MIMEText(message.body_text, "plain", "utf-8"))
+        body.attach(MIMEText(message.body_html, "html", "utf-8"))
+        msg.attach(body)
+
         # Attachments
         for att in (message.attachments or []):
             mime_type = att.mime_type or "application/octet-stream"
             main, sub = mime_type.split("/", 1) if "/" in mime_type else ("application", "octet-stream")
             part = MIMEBase(main, sub)
-    
+
             # Normalize content to bytes (MIMEBase.set_payload accepts bytes or str)
             content = att.content
             if isinstance(content, memoryview):
@@ -209,23 +231,41 @@ class SMTPBackend(EmailBackend):
             encoders.encode_base64(part)
             part.add_header("Content-Disposition", f'attachment; filename="{att.filename}"')
             msg.attach(part)
-    
+
         return msg
+
+    @staticmethod
+    def _validate_header(name: str, value: str) -> None:
+        if not isinstance(value, str) or "\r" in value or "\n" in value:
+            raise EmailConfigurationError(f"Invalid {name} header value")
+
+    @classmethod
+    def _normalize_recipients(
+        cls,
+        value: Union[str, List[str]],
+        field_name: str,
+    ) -> List[str]:
+        values = [value] if isinstance(value, str) else list(value)
+        if not values:
+            raise EmailConfigurationError(f"{field_name} must contain at least one address")
+        for address in values:
+            cls._validate_header(field_name, address)
+            if not address.strip():
+                raise EmailConfigurationError(f"{field_name} contains an empty address")
+        return values
 
     def send(self, message: EmailMessage) -> None:
         recipients = []
         try:
             server = self._get_connection()
             msg = self._build_message(message)
-    
-            # Collect all recipients
-            for field in (message.to, message.cc, message.bcc):
-                if field:
-                    if isinstance(field, str):
-                        recipients.append(field)
-                    else:
-                        recipients.extend(field)
-    
+
+            recipients.extend(self._normalize_recipients(message.to, "to"))
+            if message.cc:
+                recipients.extend(self._normalize_recipients(message.cc, "cc"))
+            if message.bcc:
+                recipients.extend(self._normalize_recipients(message.bcc, "bcc"))
+
             server.send_message(msg, to_addrs=recipients)
         except smtplib.SMTPAuthenticationError as e:
             raise EmailAuthError(f"SMTP authentication failed: {e}")
@@ -234,7 +274,10 @@ class SMTPBackend(EmailBackend):
         except (smtplib.SMTPException, socket.error, OSError) as e:
             with self._lock:
                 if self._connection:
-                    self._connection.quit()
+                    try:
+                        self._connection.quit()
+                    except (smtplib.SMTPException, OSError):
+                        pass
                     self._connection = None
             raise EmailSendError(recipient=", ".join(recipients), reason=str(e))
 
@@ -301,7 +344,7 @@ class EmailService:
             try:
                 operation()
                 return
-            except EmailError as exc:
+            except EmailSendError as exc:
                 last_exc = exc
                 if attempt >= self.retry_policy.max_retries:
                     break
@@ -314,42 +357,48 @@ class EmailService:
                     exc,
                 )
                 time.sleep(delay)
-        raise EmailError(f"Email send failed after retry budget: {last_exc}")
+        assert last_exc is not None
+        raise last_exc
 
     def _start_worker(self) -> None:
         def worker() -> None:
             while True:
-                message = None
                 try:
                     message = self._queue.get(timeout=1)
+                except queue.Empty:
+                    continue
+
+                try:
                     if message is None:      # shutdown signal
                         return
                     self._execute_with_retry(lambda: self.backend.send(message)) # type: ignore
-                except queue.Empty:
-                    continue
                 except Exception as e:
                     logger.error(f"Worker error: {e}")
                 finally:
-                    if message is not None:
-                        self._queue.task_done()
-    
+                    self._queue.task_done()
+
         self._worker = threading.Thread(target=worker, daemon=True)
         self._worker.start()
 
     def _render_template(self, template_name: str, context: Dict[str, Any]) -> str:
         """Render a simple HTML template with string.Template."""
         if not self.template_dir:
-            raise EmailError("Template directory not configured")
-        import os
+            raise EmailConfigurationError("Template directory not configured")
 
-        path = os.path.join(self.template_dir, template_name)
+        base_path = Path(self.template_dir).expanduser().resolve()
+        path = (base_path / template_name).resolve()
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            path.relative_to(base_path)
+        except ValueError as exc:
+            raise EmailTemplateError(template_name, "template path escapes template_dir") from exc
+
+        try:
+            with path.open("r", encoding="utf-8") as f:
                 template = Template(f.read())
-            return template.safe_substitute(context)
-        except Exception as e:
-            logger.error(f"Template rendering error: {e}")
-            raise EmailError(f"Template rendering failed: {e}")
+            return template.substitute(context)
+        except (OSError, KeyError, ValueError) as exc:
+            logger.error("Template rendering error for %s: %s", template_name, exc)
+            raise EmailTemplateError(template_name, str(exc)) from exc
 
     def send(self,
              to: Union[str, List[str]],
@@ -374,7 +423,7 @@ class EmailService:
             if not context:
                 context = {}
             body_html = self._render_template(template, context)
-    
+
         # Build EmailMessage from parameters
         message = EmailMessage(
             to=to,
@@ -389,7 +438,7 @@ class EmailService:
             headers=headers,
             priority=priority,
         )
-    
+
         if self.async_send:
             # Put the message directly onto the queue
             try:
@@ -406,20 +455,22 @@ class EmailService:
     def shutdown(self) -> None:
         """Stop the worker thread gracefully."""
         if self._worker and self._worker.is_alive():
+            self._queue.join()
             self._queue.put(None)
             self._worker.join(timeout=5)
+        self.backend.close()
 
     @classmethod
     def from_config(cls, async_send: bool = True):
         config = get_config_section("email")
         backend_type = config.get("backend", "smtp")
-    
+
         if backend_type == "smtp":
             # Ensure default_from is either a string or None
             default_from = config.get("default_from")
             if default_from is not None and not isinstance(default_from, str):
                 default_from = str(default_from)   # defensive, though YAML should already be string
-    
+
             backend = SMTPBackend(
                 host=config["host"],
                 port=config["port"],
@@ -449,10 +500,22 @@ class EmailService:
             queue_reject_on_full=bool(config.get("queue_reject_on_full", True)),
             retry_policy=retry_policy,
         )
-    
+
     def health_check(self) -> Dict[str, Any]:
         return {
             "backend_healthy": self.backend.test_connection(),
             "queue_size": self._queue.qsize(),
             "retry_policy": {"max_retries": self.retry_policy.max_retries},
         }
+
+
+__all__ = [
+    "EmailRetryPolicy",
+    "EmailPriority",
+    "EmailMessage",
+    "Attachment",
+    "EmailBackend",
+    "ConsoleBackend",
+    "SMTPBackend",
+    "EmailService",
+]

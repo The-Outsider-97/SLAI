@@ -12,7 +12,7 @@ import time
 import zlib
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, TypedDict
 
 MAGIC = b"RLYF"
 PROTOCOL_VERSION = 1
@@ -22,6 +22,12 @@ _HEADER_SIZE = struct.calcsize(_HEADER_FORMAT)
 
 class RelayCodecError(ValueError):
     """Raised when a frame cannot be encoded, decoded, or reassembled."""
+
+
+class _RelayBufferState(TypedDict):
+    fragment_count: int
+    parts: Dict[int, bytes]
+    updated_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,7 +270,7 @@ class RelayReassembler:
 
     def __init__(self, *, expiration_seconds: float = 120.0):
         self.expiration_seconds = float(expiration_seconds)
-        self._buffers: Dict[int, Dict[str, object]] = {}
+        self._buffers: Dict[int, _RelayBufferState] = {}
 
     def _expire(self) -> None:
         now = time.time()
@@ -295,10 +301,10 @@ class RelayReassembler:
             },
         )
 
-        if int(state["fragment_count"]) != header.fragment_count:
+        if state["fragment_count"] != header.fragment_count:
             raise RelayCodecError("fragment count mismatch for message_id")
 
-        parts: Dict[int, bytes] = state["parts"]  # type: ignore[assignment]
+        parts = state["parts"]
         parts[header.fragment_index] = frame.payload
         state["updated_at"] = time.time()
 
@@ -317,3 +323,12 @@ class RelayReassembler:
             if payload is not None:
                 completed.append(payload)
         return completed
+
+
+__all__ = [
+    "RelayCodecError",
+    "RelayFrameCodec",
+    "RelayFrameHeader",
+    "DecodedRelayFrame",
+    "RelayReassembler",
+]

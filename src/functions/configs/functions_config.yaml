@@ -1,9 +1,11 @@
 authentication:
-    checkpoint_dir: "data/processed/functions_auth.json"
+    checkpoint_path: "data/processed/functions_auth.json"
     token_ttl_minutes:  15
     refresh_ttl_days: 14
     max_failed_attempts: 5
     lockout_minutes: 15
+    inactivity_hours: 24
+    require_verified: true
 
 dropdown_animation:
     duration_ms: 220
@@ -37,7 +39,7 @@ portable_store:
   create_if_missing: true
 
 language_aware:
-    stopwords: "src/agents/language/templates/stopwords.json"
+    stopwords: null
 
 search_engine:
     max_size: 2048
@@ -49,28 +51,19 @@ bm25:
     k1: 1.2
     b: 0.75
 
-transport:
-    adapters:
-      - name: "field-lora"
-        type: "lora"
-        reliability: 0.92
-        base_latency_ms: 420
-      - name: "local-serial"
-        type: "serial"
-        reliability: 0.995
-        base_latency_ms: 20
-      - name: "mesh-net"
-        type: "mesh"
-        reliability: 0.90
-        base_latency_ms: 260
-      - name: "ops-lte"
-        type: "lte"
-        reliability: 0.97
-        base_latency_ms: 120
-      - name: "backup-sat"
-        type: "satcom"
-        reliability: 0.88
-        base_latency_ms: 780
+rate_limiter:
+    backend: "memory"
+    capacity: 100
+    refill_rate: 10.0
+    redis_key_prefix: "slai:functions:ratelimit:"
+    max_in_memory_buckets: 10000
+
+storage:
+    backend: "local"
+    base_path: "data/storage"
+    base_url: null
+    generate_unique_filename: true
+    presigned_url_ttl_seconds: 3600
 
 email:
     backend: "smtp"

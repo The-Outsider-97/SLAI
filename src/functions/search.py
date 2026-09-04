@@ -4,24 +4,20 @@ from __future__ import annotations
 
 import math
 import json
-import pickle
-import time
 import threading
+import copy
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set, Tuple, Union
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
-from difflib import SequenceMatcher
+from typing import Any, Dict, List, Optional, Union
 
-from .utils.config_loader import load_global_config, get_config_section
-from .utils.inverted_index import InvertedIndex, SearchAnalyzer, BM25Scorer
-from .utils.functions_error import IndexLoadError, IndexSaveError, SearchError
+from .utils.config_loader import *
+from .utils.inverted_index import *
+from .utils.functions_error import *
 from .functions_memory import TTLCache
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Search Engine")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 # ----------------------------------------------------------------------
@@ -66,13 +62,16 @@ class StopwordAnalyzer(BasicAnalyzer):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self._stopwords = set(data.get("Stopword", []))
+                    words = data.get(self.language, data.get("Stopword", []))
+                    if not isinstance(words, list) or not all(isinstance(word, str) for word in words):
+                        raise ValueError("stopword file must contain a list of strings")
+                    self._stopwords = {word.casefold() for word in words}
                 logger.debug(f"Loaded {len(self._stopwords)} stopwords from {path}")
             except Exception as e:
                 logger.error(f"Failed to load stopwords: {e}")
                 self._stopwords = self._fallback_stopwords()
         else:
-            logger.warning(f"Stopwords file not found at {path}, using fallback")
+            logger.debug("No stopword resource configured; using built-in %s set", self.language)
             self._stopwords = self._fallback_stopwords()
 
     def _fallback_stopwords(self) -> set[str]:
@@ -117,9 +116,9 @@ class SearchEngine:
 
     def __init__(self, fields: List[str],
         analyzer: Optional[SearchAnalyzer] = None,
-        cache_ttl_seconds: int = 120,
+        cache_ttl_seconds: Optional[int] = None,
         index_persistence_path: Optional[Union[str, Path]] = None,
-        default_fuzzy_threshold: float = 0.8,
+        default_fuzzy_threshold: Optional[float] = None,
     ):
         """
         Args:
@@ -135,14 +134,26 @@ class SearchEngine:
         if not fields:
             raise ValueError("fields cannot be empty")
 
-        self.fields = fields
+        self.fields = list(fields)
         self.analyzer = analyzer or BasicAnalyzer()
         self.scorer = BM25Scorer(
             k1=bm25_config.get("k1", 1.2),
             b=bm25_config.get("b", 0.75),
         )
-        self.cache_ttl = cache_ttl_seconds or config.get("cache_ttl_seconds", 120)
-        self.default_fuzzy_threshold = default_fuzzy_threshold
+        self.cache_ttl = int(
+            cache_ttl_seconds
+            if cache_ttl_seconds is not None
+            else config.get("cache_ttl_seconds", 120)
+        )
+        self.default_fuzzy_threshold = float(
+            default_fuzzy_threshold
+            if default_fuzzy_threshold is not None
+            else config.get("fuzzy_threshold", 0.8)
+        )
+        if self.cache_ttl < 0:
+            raise ValueError("cache_ttl_seconds must be >= 0")
+        if not 0.0 <= self.default_fuzzy_threshold <= 1.0:
+            raise ValueError("default_fuzzy_threshold must be within [0, 1]")
 
         # Core index
         self.index = InvertedIndex(self.analyzer, self.scorer)
@@ -225,17 +236,26 @@ class SearchEngine:
         Returns:
             List of SearchResult objects sorted by descending score.
         """
-        if not query or not query.strip():
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        if not query.strip():
             return []
 
-        limit = max(1, limit)
-        threshold = fuzzy_threshold if fuzzy_threshold is not None else self.default_fuzzy_threshold
-        threshold = max(0.0, min(1.0, threshold))
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        try:
+            threshold = float(
+                fuzzy_threshold if fuzzy_threshold is not None else self.default_fuzzy_threshold
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("fuzzy_threshold must be within [0, 1]") from exc
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("fuzzy_threshold must be finite and within [0, 1]")
 
         cache_key = f"{query.strip()}|{limit}|{threshold}"
         cached = self._cache.get(cache_key)
         if cached is not None:
-            return cached
+            return copy.deepcopy(cached)
 
         with self._lock:
             results = self.index.search(query, limit, threshold)
@@ -248,7 +268,7 @@ class SearchEngine:
                 for doc_id, score in results
             ]
             self._cache.set(cache_key, search_results)
-            return search_results
+            return copy.deepcopy(search_results)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -279,10 +299,7 @@ class SearchEngine:
     def _auto_persist(self) -> None:
         """Save the index automatically if auto‑save is enabled and index is dirty."""
         if self._auto_save and self.index_path and self.index.is_dirty():
-            try:
-                self.index.save(self.index_path, include_checksum=True)
-            except IndexSaveError as e:
-                logger.error(f"Auto‑save failed: {e}")
+            self.index.save(self.index_path, include_checksum=True)
 
     # ------------------------------------------------------------------
     # Cache & utilities
@@ -298,14 +315,34 @@ class SearchEngine:
 
     def reload_config(self) -> None:
         """Reload configuration from YAML and update runtime parameters."""
-        config = get_config_section("search_engine")
-        bm25_config = get_config_section("bm25")
-        self.cache_ttl = config.get("cache_ttl_seconds", 120)
-        self.default_fuzzy_threshold = config.get("fuzzy_threshold", 0.8)
-        # Update BM25 parameters
-        self.scorer = BM25Scorer(
-            k1=bm25_config.get("k1", 1.2),
-            b=bm25_config.get("b", 0.75),
-        )
-        # Note: scorer is not automatically propagated to the index – recreate index if needed
-        logger.info("Search engine configuration reloaded (scorer update requires index rebuild)")
+        with self._lock:
+            config = get_config_section("search_engine")
+            bm25_config = get_config_section("bm25")
+            cache_ttl = int(config.get("cache_ttl_seconds", 120))
+            threshold = float(config.get("fuzzy_threshold", 0.8))
+            if cache_ttl < 0:
+                raise ValueError("search_engine.cache_ttl_seconds must be >= 0")
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError("search_engine.fuzzy_threshold must be within [0, 1]")
+
+            self.cache_ttl = cache_ttl
+            self.default_fuzzy_threshold = threshold
+            self.scorer = BM25Scorer(
+                k1=bm25_config.get("k1", 1.2),
+                b=bm25_config.get("b", 0.75),
+            )
+            self.index.scorer = self.scorer
+            self._cache = TTLCache(
+                max_size=int(config.get("max_size", 2048)),
+                ttl_seconds=self.cache_ttl,
+            )
+            logger.info("Search engine configuration reloaded")
+
+
+__all__ = [
+    "BasicAnalyzer",
+    "StemAnalyzer",
+    "StopwordAnalyzer",
+    "SearchResult",
+    "SearchEngine",
+]
