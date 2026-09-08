@@ -120,7 +120,11 @@ class CredentialPolicy:
             violations.append("Password must include a lowercase letter")
         if self.require_digit and not any(c.isdigit() for c in password):
             violations.append("Password must include a digit")
-        if self.require_symbol and not any(not c.isalnum() for c in password):
+        if self.require_symbol and not any(character.isprintable()
+                and not character.isalnum()
+                and not character.isspace()
+                for character in password
+                ):
             violations.append("Password must include a symbol")
 
         if violations:
