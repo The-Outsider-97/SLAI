@@ -12,9 +12,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import phonenumbers # type: ignore
 
+from phonenumbers import PhoneNumberFormat # type: ignore
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from string import Template
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
@@ -26,66 +28,207 @@ from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissi
 logger = get_logger("Phone Verification")
 printer = PrettyPrinter()
 
-# ----------------------------------------------------------------------
-# Optional dependency: `phonenumbers` gives libphonenumber-grade validation.
-# The module degrades gracefully to E.164 regex validation if it's absent.
-# ----------------------------------------------------------------------
-try:
-    import phonenumbers  # type: ignore
 
-    _HAS_PHONENUMBERS = True
-except ImportError:  # pragma: no cover - exercised only when dependency missing
-    phonenumbers = None  # type: ignore
-    _HAS_PHONENUMBERS = False
+OTP_CODE_LENGTH = 6
 
-_E164_PATTERN = re.compile(r"^\+[1-9]\d{7,14}$")
-_FORMATTING_CHARS = re.compile(r"[\s\-.()]")
+_OTP_PATTERN = re.compile(r"^\d{6}$")
 _DIGITS = string.digits
 
 
 # ----------------------------------------------------------------------
-# Phone number normalization
+# Phone number normalization and country validation
 # ----------------------------------------------------------------------
-def normalize_phone_number(raw: str, default_region: Optional[str] = None) -> str:
-    """
-    Normalize a phone number to E.164 (e.g. "+14155552671").
+def _normalize_region_code(region: Optional[str]) -> Optional[str]:
+    if region is None:
+        return None
 
-    Uses the `phonenumbers` library when available for full libphonenumber
-    validation (including region-aware parsing of numbers without a leading
-    '+'). Falls back to a conservative E.164 regex check otherwise, in which
-    case numbers without a leading '+' cannot be disambiguated and are
-    rejected.
+    if not isinstance(region, str):
+        raise InvalidCountryCodeError(
+            str(region),
+            "country region must be a two-letter ISO 3166-1 region code",
+        )
 
-    Raises:
-        InvalidPhoneNumberError: if the number cannot be normalized/validated.
-    """
+    normalized = region.strip().upper()
+
+    if normalized not in phonenumbers.SUPPORTED_REGIONS:
+        raise InvalidCountryCodeError(
+            normalized,
+            "unsupported ISO 3166-1 phone region",
+        )
+
+    return normalized
+
+
+def _normalize_country_calling_code(country_code: Any) -> int:
+    if isinstance(country_code, bool):
+        raise InvalidCountryCodeError(
+            str(country_code),
+            "country calling code must be numeric",
+        )
+
+    value = str(country_code).strip()
+
+    if value.startswith("+"):
+        value = value[1:]
+
+    if (
+        not value
+        or not value.isdigit()
+        or value.startswith("0")
+        or len(value) > 3
+    ):
+        raise InvalidCountryCodeError(
+            str(country_code),
+            "country calling code must be in the form '+31', '31', or 31",
+        )
+
+    normalized = int(value)
+
+    regions = phonenumbers.region_codes_for_country_code(normalized)
+
+    if not regions or all(region == "001" for region in regions):
+        raise InvalidCountryCodeError(
+            str(country_code),
+            "calling code does not identify a supported geographic region",
+        )
+
+    return normalized
+
+
+def _parse_valid_phone_number(raw: str, default_region: Optional[str] = None,):
     if not isinstance(raw, str) or not raw.strip():
-        raise InvalidPhoneNumberError(str(raw), "phone number must be a non-empty string")
+        raise InvalidPhoneNumberError(
+            str(raw),
+            "phone number must be a non-empty string",
+        )
 
+    region = _normalize_region_code(default_region)
     candidate = raw.strip()
 
-    if _HAS_PHONENUMBERS:
-        assert phonenumbers is not None
-        try:
-            assert phonenumbers is not None
-            parsed = phonenumbers.parse(candidate, default_region)
-        except phonenumbers.NumberParseException as exc:
-            raise InvalidPhoneNumberError(raw, f"could not parse number: {exc}") from exc
-        if not phonenumbers.is_valid_number(parsed):
-            raise InvalidPhoneNumberError(raw, "number failed validity check")
-        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-
-    cleaned = _FORMATTING_CHARS.sub("", candidate)
-    if not cleaned.startswith("+"):
+    if not candidate.startswith("+") and region is None:
         raise InvalidPhoneNumberError(
             raw,
-            "phone number must be in E.164 format (leading '+'); install the "
-            "'phonenumbers' package to enable region-aware parsing",
+            "national-format phone numbers require a country region",
         )
-    if not _E164_PATTERN.match(cleaned):
-        raise InvalidPhoneNumberError(raw, "phone number is not a valid E.164 number")
-    return cleaned
 
+    try:
+        parsed = phonenumbers.parse(candidate, region)
+    except phonenumbers.NumberParseException as exc:
+        raise InvalidPhoneNumberError(
+            raw,
+            f"could not parse number: {exc}",
+        ) from exc
+
+    if not phonenumbers.is_possible_number(parsed):
+        raise InvalidPhoneNumberError(
+            raw,
+            "phone number is not possible for its numbering plan",
+        )
+
+    if not phonenumbers.is_valid_number(parsed):
+        raise InvalidPhoneNumberError(
+            raw,
+            "phone number failed numbering-plan validation",
+        )
+
+    return parsed
+
+
+def normalize_phone_number(raw: str, default_region: Optional[str] = None,) -> str:
+    """
+    Normalize a valid phone number to E.164.
+
+    Example:
+        06 12345678 + region NL -> +31612345678
+    """
+    parsed = _parse_valid_phone_number(raw, default_region)
+
+    return phonenumbers.format_number(
+        parsed,
+        PhoneNumberFormat.E164,
+    )
+
+
+def validate_phone_country(raw: str, country_code: Any, country_region: Optional[str] = None,) -> str:
+    """
+    Validate and normalize a phone number against the selected country.
+
+    `country_code` is the international calling code:
+        +31, 31, or 31
+
+    `country_region` is the ISO 3166-1 alpha-2 region:
+        NL, US, CW, BQ, GB, etc.
+
+    When `country_region` is supplied, both the calling code and the
+    region-specific numbering plan must match.
+
+    Returns:
+        Canonical E.164 phone number.
+
+    Raises:
+        InvalidPhoneNumberError
+        InvalidCountryCodeError
+        PhoneCountryMismatchError
+    """
+    expected_calling_code = _normalize_country_calling_code(country_code)
+    expected_region = _normalize_region_code(country_region)
+
+    if expected_region is not None:
+        region_calling_code = phonenumbers.country_code_for_region(
+            expected_region
+        )
+
+        if region_calling_code != expected_calling_code:
+            raise InvalidCountryCodeError(
+                f"+{expected_calling_code}",
+                (
+                    f"calling code +{expected_calling_code} does not match "
+                    f"region {expected_region}, which uses "
+                    f"+{region_calling_code}"
+                ),
+            )
+
+    parsed = _parse_valid_phone_number(raw, expected_region,)
+
+    actual_calling_code = int(parsed.country_code)
+    actual_region = phonenumbers.region_code_for_number(parsed)
+
+    if actual_calling_code != expected_calling_code:
+        raise PhoneCountryMismatchError(
+            raw,
+            expected_country_code=f"+{expected_calling_code}",
+            actual_country_code=f"+{actual_calling_code}",
+            expected_region=expected_region,
+            actual_region=actual_region,
+        )
+
+    if (
+        expected_region is not None
+        and not phonenumbers.is_valid_number_for_region(
+            parsed,
+            expected_region,
+        )
+    ):
+        raise PhoneCountryMismatchError(
+            raw,
+            expected_country_code=f"+{expected_calling_code}",
+            actual_country_code=f"+{actual_calling_code}",
+            expected_region=expected_region,
+            actual_region=actual_region,
+        )
+
+    return phonenumbers.format_number(
+        parsed,
+        PhoneNumberFormat.E164,
+    )
+
+
+def _mask_phone_number(phone_number: str) -> str:
+    """Return a log-safe representation of an E.164 phone number."""
+    if len(phone_number) <= 6:
+        return "***"
+
+    return f"{phone_number[:3]}***{phone_number[-4:]}"
 
 # ----------------------------------------------------------------------
 # Retry policy (mirrors EmailRetryPolicy)
@@ -114,7 +257,6 @@ class SMSRetryPolicy:
         cap = min(self.max_delay, self.base_delay * (self.backoff_factor ** attempt))
         return random.uniform(0.0, cap) if self.jitter else cap
 
-
 # ----------------------------------------------------------------------
 # Message model
 # ----------------------------------------------------------------------
@@ -125,7 +267,6 @@ class SMSMessage:
     to: str
     body: str
     from_number: Optional[str] = None
-
 
 # ----------------------------------------------------------------------
 # Backend abstraction
@@ -269,7 +410,6 @@ class TwilioBackend(SMSBackend):
     def close(self) -> None:
         pass  # stateless HTTP client; nothing to release
 
-
 # ----------------------------------------------------------------------
 # Internal verification record
 # ----------------------------------------------------------------------
@@ -279,8 +419,6 @@ class _VerificationRecord:
     created_at: float
     expires_at: float
     attempts_remaining: int
-    send_timestamps: List[float] = field(default_factory=list)
-    last_sent_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -288,9 +426,10 @@ class VerificationRequest:
     """Result of successfully dispatching a verification code."""
 
     phone_number: str
+    country_code: str
+    country_region: Optional[str]
     expires_in_seconds: float
     resend_after_seconds: float
-
 
 # ----------------------------------------------------------------------
 # Service
@@ -341,8 +480,14 @@ class PhoneVerificationService:
         retry_policy: Optional[SMSRetryPolicy] = None,
         hmac_secret: Optional[bytes] = None,
     ) -> None:
-        if isinstance(code_length, bool) or not isinstance(code_length, int) or not 4 <= code_length <= 10:
-            raise PhoneConfigurationError("code_length must be an integer between 4 and 10")
+        if (
+            isinstance(code_length, bool)
+            or not isinstance(code_length, int)
+            or code_length != OTP_CODE_LENGTH
+        ):
+            raise PhoneConfigurationError(
+                f"code_length must be exactly {OTP_CODE_LENGTH}"
+            )
         if code_ttl_seconds <= 0:
             raise PhoneConfigurationError("code_ttl_seconds must be > 0")
         if isinstance(max_verify_attempts, bool) or not isinstance(max_verify_attempts, int) or max_verify_attempts < 1:
@@ -369,13 +514,15 @@ class PhoneVerificationService:
         self._hmac_secret = hmac_secret if hmac_secret is not None else secrets.token_bytes(32)
 
         self._records: Dict[str, _VerificationRecord] = {}
+        self._send_history: Dict[str, List[float]] = {}
+        self._pending_sends: set[str] = set()
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _generate_code(self) -> str:
-        return "".join(secrets.choice(_DIGITS) for _ in range(self.code_length))
+        return "".join(secrets.choice(_DIGITS) for _ in range(OTP_CODE_LENGTH))
 
     def _hash_code(self, phone_number: str, code: str) -> str:
         payload = f"{phone_number}:{code}".encode("utf-8")
@@ -403,15 +550,36 @@ class PhoneVerificationService:
         assert last_exc is not None
         raise last_exc
 
-    def _prune_send_timestamps_unlocked(self, record: _VerificationRecord, now: float) -> None:
+    def _prune_send_history_unlocked(self, phone_number: str, now: float,) -> List[float]:
         window_start = now - self.send_window_seconds
-        record.send_timestamps[:] = [ts for ts in record.send_timestamps if ts > window_start]
+
+        history = [
+            timestamp
+            for timestamp in self._send_history.get(phone_number, [])
+            if timestamp > window_start
+        ]
+
+        if history:
+            self._send_history[phone_number] = history
+        else:
+            self._send_history.pop(phone_number, None)
+
+        return history
 
     def _purge_expired_unlocked(self) -> None:
         now = time.monotonic()
-        expired = [phone for phone, rec in self._records.items() if rec.expires_at <= now]
+
+        expired = [
+            phone
+            for phone, record in self._records.items()
+            if record.expires_at <= now
+        ]
+
         for phone in expired:
             self._records.pop(phone, None)
+
+        for phone in tuple(self._send_history):
+            self._prune_send_history_unlocked(phone, now)
 
     def _resolve_region(self, default_region: Optional[str]) -> Optional[str]:
         return default_region if default_region is not None else self.default_region
@@ -423,77 +591,107 @@ class PhoneVerificationService:
     def normalize_phone_number(raw: str, default_region: Optional[str] = None) -> str:
         return normalize_phone_number(raw, default_region)
 
-    def send_verification_code(
-        self, phone_number: str, *, default_region: Optional[str] = None
-    ) -> VerificationRequest:
+    def send_verification_code(self, phone_number: str, *, country_code: Any, country_region: Optional[str] = None) -> VerificationRequest:
         """
-        Generate and dispatch a new verification code.
+        Validate the phone number against the selected country and,
+        only after successful validation, dispatch a six-digit OTP.
+
+        Args:
+            phone_number:
+                User-supplied phone number.
+
+            country_code:
+                Selected international calling code, e.g. "+31".
+
+            country_region:
+                Optional ISO 3166-1 alpha-2 region, e.g. "NL".
+                Strongly recommended because some countries share a
+                calling code.
 
         Raises:
-            InvalidPhoneNumberError: if the number cannot be normalized.
-            VerificationRateLimitError: if the resend cooldown or send-window
-                limit for this number has been reached.
-            SMSSendError / SMSAuthError: if dispatch fails after retries.
+            InvalidPhoneNumberError
+            InvalidCountryCodeError
+            PhoneCountryMismatchError
+            VerificationRateLimitError
+            SMSSendError
+            SMSAuthError
         """
-        phone = normalize_phone_number(phone_number, self._resolve_region(default_region))
+        region = (
+            country_region
+            if country_region is not None
+            else self.default_region
+        )
+
+        phone = validate_phone_country(phone_number, country_code, region,)
+        expected_country_code = (f"+{_normalize_country_calling_code(country_code)}")
+        normalized_region = _normalize_region_code(region)
+
         now = time.monotonic()
 
         with self._lock:
             self._purge_expired_unlocked()
-            record = self._records.get(phone)
-            send_timestamps: List[float] = []
 
-            if record is not None:
-                if record.last_sent_at and (now - record.last_sent_at) < self.resend_cooldown_seconds:
-                    retry_after = self.resend_cooldown_seconds - (now - record.last_sent_at)
+            if phone in self._pending_sends:
+                raise VerificationRateLimitError(phone, 1.0, reason="Verification SMS dispatch already in progress")
+            send_history = self._prune_send_history_unlocked(phone, now,)
+            if send_history:
+                elapsed = now - send_history[-1]
+
+                if elapsed < self.resend_cooldown_seconds:
+                    retry_after = (
+                        self.resend_cooldown_seconds - elapsed
+                    )
+
                     raise VerificationRateLimitError(phone, retry_after, reason="Resend cooldown active")
 
-                self._prune_send_timestamps_unlocked(record, now)
-                if len(record.send_timestamps) >= self.max_sends_per_window:
-                    oldest = min(record.send_timestamps)
-                    retry_after = max(self.send_window_seconds - (now - oldest), 0.0)
-                    raise VerificationRateLimitError(
-                        phone, retry_after, reason="Send window limit exceeded"
-                    )
-                send_timestamps = list(record.send_timestamps)
+            if len(send_history) >= self.max_sends_per_window:
+                oldest = send_history[0]
 
-            code = self._generate_code()
-            code_hash = self._hash_code(phone, code)
-            send_timestamps.append(now)
+                retry_after = max(self.send_window_seconds - (now - oldest), 0.0)
 
-            self._records[phone] = _VerificationRecord(
-                code_hash=code_hash,
-                created_at=now,
-                expires_at=now + self.code_ttl_seconds,
-                attempts_remaining=self.max_verify_attempts,
-                send_timestamps=send_timestamps,
-                last_sent_at=now,
-            )
+                raise VerificationRateLimitError(phone, retry_after, reason="Send window limit exceeded")
 
+            self._pending_sends.add(phone)
+
+        code = self._generate_code()
+        code_hash = self._hash_code(phone, code)
         body = Template(self.message_template).substitute(code=code)
         message = SMSMessage(to=phone, body=body)
 
         try:
-            self._execute_with_retry(lambda: self.backend.send(message))
-        except SMSSendError:
-            # Roll back so a failed dispatch doesn't consume the resend
-            # window or block the caller from retrying.
-            with self._lock:
-                current = self._records.get(phone)
-                if current is not None and current.code_hash == code_hash:
-                    self._records.pop(phone, None)
-            raise
+            self._execute_with_retry(
+                lambda: self.backend.send(message)
+            )
 
-        logger.info("Verification code dispatched to %s", phone)
+            sent_at = time.monotonic()
+
+            with self._lock:
+                history = self._prune_send_history_unlocked(phone, sent_at)
+                history.append(sent_at)
+                self._send_history[phone] = history
+
+                self._records[phone] = _VerificationRecord(
+                    code_hash=code_hash,
+                    created_at=sent_at,
+                    expires_at=sent_at + self.code_ttl_seconds,
+                    attempts_remaining=self.max_verify_attempts,
+                )
+
+        finally:
+            with self._lock:
+                self._pending_sends.discard(phone)
+
+        logger.info("Verification code dispatched to %s", _mask_phone_number(phone))
+
         return VerificationRequest(
             phone_number=phone,
+            country_code=expected_country_code,
+            country_region=normalized_region,
             expires_in_seconds=self.code_ttl_seconds,
             resend_after_seconds=self.resend_cooldown_seconds,
         )
 
-    def verify_code(
-        self, phone_number: str, code: str, *, default_region: Optional[str] = None
-    ) -> bool:
+    def verify_code(self, phone_number: str, code: str, *, default_region: Optional[str] = None) -> bool:
         """
         Verify a supplied code against the pending record for `phone_number`.
 
@@ -510,8 +708,13 @@ class PhoneVerificationService:
         phone = normalize_phone_number(phone_number, self._resolve_region(default_region))
         if not isinstance(code, str):
             return False
+        
+        if not isinstance(code, str):
+            return False
+
         code = code.strip()
-        if not code:
+
+        if not _OTP_PATTERN.fullmatch(code):
             return False
 
         now = time.monotonic()
@@ -533,7 +736,7 @@ class PhoneVerificationService:
 
             if is_match:
                 self._records.pop(phone, None)
-                logger.info("Verification succeeded for %s", phone)
+                logger.info("Verification succeeded for %s", _mask_phone_number(phone))
                 return True
 
             record.attempts_remaining -= 1
@@ -543,7 +746,7 @@ class PhoneVerificationService:
 
         logger.warning(
             "Verification code mismatch for %s (%s attempts remaining)",
-            phone,
+            _mask_phone_number(phone),
             max(attempts_left, 0),
         )
         return False
@@ -555,22 +758,48 @@ class PhoneVerificationService:
             self._records.pop(phone, None)
 
     def get_status(self, phone_number: str, *, default_region: Optional[str] = None) -> Dict[str, Any]:
-        """Return non-sensitive diagnostic status for a phone number's pending verification."""
+        """Return non-sensitive status for a pending verification."""
+
         phone = normalize_phone_number(phone_number, self._resolve_region(default_region))
         now = time.monotonic()
+
         with self._lock:
             self._purge_expired_unlocked()
+
             record = self._records.get(phone)
+            history = self._prune_send_history_unlocked(phone, now)
+            last_sent_at = history[-1] if history else 0.0
+
+            resend_available = 0.0
+            if last_sent_at:
+                resend_available = max(
+                    self.resend_cooldown_seconds
+                    - (now - last_sent_at),
+                    0.0,
+                )
+
             if record is None:
-                return {"phone_number": phone, "pending": False}
+                return {
+                    "phone_number": phone,
+                    "pending": False,
+                    "dispatch_in_progress": (
+                        phone in self._pending_sends
+                    ),
+                    "resend_available_in_seconds": resend_available,
+                }
+
             return {
                 "phone_number": phone,
                 "pending": True,
-                "expires_in_seconds": max(record.expires_at - now, 0.0),
-                "attempts_remaining": record.attempts_remaining,
-                "resend_available_in_seconds": max(
-                    self.resend_cooldown_seconds - (now - record.last_sent_at), 0.0
+                "dispatch_in_progress": (
+                    phone in self._pending_sends
                 ),
+                "expires_in_seconds": max(
+                    record.expires_at - now,
+                    0.0,
+                ),
+                "attempts_remaining": record.attempts_remaining,
+                "resend_available_in_seconds": resend_available,
             }
 
     def cleanup_expired(self) -> int:
@@ -582,11 +811,19 @@ class PhoneVerificationService:
 
     def health_check(self) -> Dict[str, Any]:
         with self._lock:
+            self._purge_expired_unlocked()
+
             pending = len(self._records)
+            dispatching = len(self._pending_sends)
+
         return {
             "backend_healthy": self.backend.test_connection(),
             "pending_verifications": pending,
-            "retry_policy": {"max_retries": self.retry_policy.max_retries},
+            "sms_dispatches_in_progress": dispatching,
+            "otp_code_length": OTP_CODE_LENGTH,
+            "retry_policy": {
+                "max_retries": self.retry_policy.max_retries,
+            },
         }
 
     def shutdown(self) -> None:
@@ -635,6 +872,7 @@ class PhoneVerificationService:
 
 
 __all__ = [
+    "OTP_CODE_LENGTH",
     "SMSRetryPolicy",
     "SMSMessage",
     "SMSBackend",
@@ -643,6 +881,7 @@ __all__ = [
     "VerificationRequest",
     "PhoneVerificationService",
     "normalize_phone_number",
+    "validate_phone_country",
 ]
 
 
@@ -650,47 +889,150 @@ if __name__ == "__main__":
     print("\n=== Running Phone Verification ===\n")
     printer.status("TEST", "Phone Verification initialized", "info")
 
+    class _CaptureSMSBackend(SMSBackend):
+        def __init__(self) -> None:
+            self.messages: List[SMSMessage] = []
+
+        def send(self, message: SMSMessage) -> None:
+            self.messages.append(message)
+
+        def test_connection(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            pass
+
     try:
+        backend = _CaptureSMSBackend()
+
         service = PhoneVerificationService(
-            ConsoleSMSBackend(),
+            backend,
             code_length=6,
-            code_ttl_seconds=5,
+            code_ttl_seconds=300,
             max_verify_attempts=3,
             resend_cooldown_seconds=0,
             max_sends_per_window=10,
             send_window_seconds=3600,
         )
 
-        phone = "+14155552671"
+        # --------------------------------------------------------------
+        # Obtain a metadata-defined Dutch example number instead of
+        # using a real user's phone number.
+        # --------------------------------------------------------------
+        example = phonenumbers.example_number_for_type("NL", phonenumbers.PhoneNumberType.MOBILE)
+        if example is None:
+            example = phonenumbers.example_number("NL")
 
-        # Successful path
-        service.send_verification_code(phone)
-        record = service._records[phone]  # test-only introspection
-        # Recover the plaintext code is impossible (only the hash is stored),
-        # so exercise verify against a deliberately wrong code first.
-        assert service.verify_code(phone, "000000") in (False,) or True
-        printer.status("SEND", "Verification code dispatched", "success")
+        assert example is not None
+        phone = phonenumbers.format_number(example, PhoneNumberFormat.E164)
 
-        # Wrong-code attempts decrement attempts_remaining without raising
-        for _ in range(2):
-            service.send_verification_code(phone)  # cooldown is 0 in this test config
-        printer.status("RESEND", "Resend without cooldown succeeded", "success")
+        # --------------------------------------------------------------
+        # Correct country/region
+        # --------------------------------------------------------------
+        request = service.send_verification_code(
+            phone,
+            country_code="+31",
+            country_region="NL",
+        )
+
+        assert request.phone_number == phone
+        assert request.country_code == "+31"
+        assert request.country_region == "NL"
+
+        assert len(backend.messages) == 1
+
+        match = re.search(
+            r"\b(\d{6})\b",
+            backend.messages[-1].body,
+        )
+
+        assert match is not None
+
+        otp = match.group(1)
+
+        assert len(otp) == 6
+        assert otp.isdigit()
+
+        printer.status("SEND", "Six-digit verification code dispatched", "success")
+
+        # --------------------------------------------------------------
+        # Successful OTP verification
+        # --------------------------------------------------------------
+        assert service.verify_code(
+            phone,
+            otp,
+        ) is True
+
+        printer.status("VERIFY", "Verification code accepted", "success")
+
+        # --------------------------------------------------------------
+        # Country mismatch must fail BEFORE SMS dispatch
+        # --------------------------------------------------------------
+        sent_before = len(backend.messages)
 
         try:
-            service.verify_code("not-a-number", "123456")
+            service.send_verification_code(
+                phone,
+                country_code="+44",
+                country_region="GB",
+            )
+            raise AssertionError(
+                "expected PhoneCountryMismatchError"
+            )
+        except PhoneCountryMismatchError:
+            pass
+
+        assert len(backend.messages) == sent_before
+
+        printer.status("COUNTRY", "Country mismatch rejected before SMS dispatch", "success")
+
+        # --------------------------------------------------------------
+        # Invalid calling-code/region combination
+        # --------------------------------------------------------------
+        try:
+            service.send_verification_code(
+                phone,
+                country_code="+1",
+                country_region="NL",
+            )
+            raise AssertionError(
+                "expected InvalidCountryCodeError"
+            )
+        except InvalidCountryCodeError:
+            pass
+
+        printer.status("COUNTRY_CODE", "Invalid country-code/region pair rejected", "success")
+
+        # --------------------------------------------------------------
+        # Invalid phone number
+        # --------------------------------------------------------------
+        try:
+            service.send_verification_code(
+                "not-a-number",
+                country_code="+31",
+                country_region="NL",
+            )
             raise AssertionError("expected InvalidPhoneNumberError")
         except InvalidPhoneNumberError:
-            printer.status("VALIDATE", "Invalid phone number rejected", "success")
+            pass
 
-        try:
-            service.verify_code("+15005550001", "123456")
-            raise AssertionError("expected VerificationNotFoundError")
-        except VerificationNotFoundError:
-            printer.status("NOT_FOUND", "Missing verification correctly raised", "success")
+        printer.status("VALIDATE",
+            "Invalid phone number rejected",
+            "success",
+        )
 
         health = service.health_check()
+
         assert health["backend_healthy"] is True
-        printer.status("HEALTH", f"Health check passed: {health}", "success")
+        assert health["otp_code_length"] == 6
+
+        printer.status(
+            "HEALTH",
+            f"Health check passed: {health}",
+            "success",
+        )
+
+        service.shutdown()
 
     except Exception as exc:
         printer.status("FAIL", f"Phone Verification test failed: {exc}", "error")

@@ -7,6 +7,7 @@ from .email import *
 from .functions_memory import *
 from .loader import *
 from .loading import *
+from .phone_verification import *
 from .ratelimiter import *
 from .search import *
 from .sidebar import *
@@ -21,6 +22,7 @@ from .email import __all__ as _email_exports
 from .functions_memory import __all__ as _functions_memory_exports
 from .loader import __all__ as _loader_exports
 from .loading import __all__ as _loading_exports
+from .phone_verification import __all__ as _phone_verification_exports
 from .ratelimiter import __all__ as _ratelimiter_exports
 from .search import __all__ as _search_exports
 from .sidebar import __all__ as _sidebar_exports
@@ -36,6 +38,7 @@ __all__ = [
     *_functions_memory_exports,
     *_loader_exports,
     *_loading_exports,
+    *_phone_verification_exports,
     *_ratelimiter_exports,
     *_search_exports,
     *_sidebar_exports,

@@ -317,6 +317,65 @@ class InvalidPhoneNumberError(PhoneVerificationError):
         )
 
 
+class InvalidCountryCodeError(PhoneVerificationError):
+    """Raised when a supplied country calling code or ISO region is invalid."""
+
+    default_code = "invalid_country_code"
+
+    def __init__(self, country_code: str, reason: str = "Invalid country code"):
+        self.country_code = country_code
+        self.reason = reason
+        super().__init__(
+            f"{reason}: {country_code!r}",
+            error_code=self.default_code,
+            details={
+                "country_code": country_code,
+                "reason": reason,
+            },
+        )
+
+
+class PhoneCountryMismatchError(PhoneVerificationError):
+    """Raised when a phone number does not belong to the expected country/region."""
+
+    default_code = "phone_country_mismatch"
+
+    def __init__(
+        self,
+        phone_number: str,
+        *,
+        expected_country_code: str,
+        actual_country_code: str,
+        expected_region: Optional[str] = None,
+        actual_region: Optional[str] = None,
+    ):
+        self.phone_number = phone_number
+        self.expected_country_code = expected_country_code
+        self.actual_country_code = actual_country_code
+        self.expected_region = expected_region
+        self.actual_region = actual_region
+
+        expected = expected_country_code
+        if expected_region:
+            expected = f"{expected_country_code} ({expected_region})"
+
+        actual = actual_country_code
+        if actual_region:
+            actual = f"{actual_country_code} ({actual_region})"
+
+        super().__init__(
+            f"Phone number country mismatch: expected {expected}, got {actual}",
+            error_code=self.default_code,
+            details={
+                "phone_number": phone_number,
+                "expected_country_code": expected_country_code,
+                "actual_country_code": actual_country_code,
+                "expected_region": expected_region,
+                "actual_region": actual_region,
+            },
+        )
+
+
 class SMSError(PhoneVerificationError):
     """Base exception for SMS transport failures."""
 
@@ -646,11 +705,13 @@ __all__ =[
     "IndexLoadError",
     "IndexSaveError",
     "InvalidAnalyzerError",
+    "InvalidCountryCodeError",
     "InvalidCredentialsError",
     "InvalidPhoneNumberError",
     "InvalidTokenError",
     "PasswordHashingError",
     "PhoneConfigurationError",
+    "PhoneCountryMismatchError",
     "PhoneVerificationError",
     "RateLimitConfigurationError",
     "RateLimitError",

@@ -89,9 +89,13 @@ phone_verification:
     auth_token: ""
     from_number: ""
     messaging_service_sid: ""
-    api_base_url: null          # override for Twilio-compatible gateways; null = default Twilio API
+    api_base_url: null
     timeout_seconds: 10.0
-    default_region: null        # e.g. "US" — used to parse numbers without a leading '+'
+    # Fallback ISO 3166-1 alpha-2 region when the caller does not
+    # explicitly supply country_region.
+    default_region: null
+    # SLAI phone-verification OTPs are always exactly six digits.
+    # Any other value is rejected during service initialization.
     code_length: 6
     code_ttl_seconds: 300
     max_verify_attempts: 5
@@ -104,4 +108,3 @@ phone_verification:
     retry_max_delay: 30.0
     retry_backoff_factor: 2.0
     retry_jitter: true
- 
