@@ -82,3 +82,26 @@ email:
     retry_max_delay: 30.0
     retry_backoff_factor: 2.0
     retry_jitter: true
+
+phone_verification:
+    backend: "console"          # "console" | "twilio"
+    account_sid: ""
+    auth_token: ""
+    from_number: ""
+    messaging_service_sid: ""
+    api_base_url: null          # override for Twilio-compatible gateways; null = default Twilio API
+    timeout_seconds: 10.0
+    default_region: null        # e.g. "US" — used to parse numbers without a leading '+'
+    code_length: 6
+    code_ttl_seconds: 300
+    max_verify_attempts: 5
+    resend_cooldown_seconds: 60
+    max_sends_per_window: 5
+    send_window_seconds: 3600
+    message_template: "Your verification code is: $code"
+    retry_max: 3
+    retry_base_delay: 0.5
+    retry_max_delay: 30.0
+    retry_backoff_factor: 2.0
+    retry_jitter: true
+ 

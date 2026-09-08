@@ -288,6 +288,126 @@ class EmailConfigurationError(EmailError):
 
 
 # ============================================================================
+# Base exception for phone verification services
+# ============================================================================
+class PhoneVerificationError(FunctionsError):
+    """Base exception for phone number verification failures."""
+
+    default_code = "phone_verification_error"
+
+
+class PhoneConfigurationError(PhoneVerificationError):
+    """Raised when phone verification service configuration is invalid."""
+
+    default_code = "phone_configuration_error"
+
+
+class InvalidPhoneNumberError(PhoneVerificationError):
+    """Raised when a phone number fails validation or normalization."""
+
+    default_code = "invalid_phone_number"
+
+    def __init__(self, phone_number: str, reason: str = "Invalid phone number"):
+        self.phone_number = phone_number
+        self.reason = reason
+        super().__init__(
+            f"{reason}: {phone_number!r}",
+            error_code=self.default_code,
+            details={"phone_number": phone_number, "reason": reason},
+        )
+
+
+class SMSError(PhoneVerificationError):
+    """Base exception for SMS transport failures."""
+
+    default_code = "sms_error"
+
+
+class SMSSendError(SMSError):
+    """Raised when sending an SMS fails (network, provider, etc.)."""
+
+    default_code = "sms_send_error"
+
+    def __init__(self, recipient: str, reason: str):
+        self.recipient = recipient
+        self.reason = reason
+        super().__init__(
+            f"Failed to send SMS to {recipient}: {reason}",
+            error_code=self.default_code,
+            details={"recipient": recipient, "reason": reason},
+        )
+
+
+class SMSAuthError(SMSError):
+    """Raised when authentication with the SMS provider fails."""
+
+    default_code = "sms_auth_error"
+
+
+class VerificationNotFoundError(PhoneVerificationError):
+    """Raised when verifying a phone number with no pending verification record."""
+
+    default_code = "verification_not_found"
+
+    def __init__(self, phone_number: str):
+        self.phone_number = phone_number
+        super().__init__(
+            f"No pending verification found for {phone_number}",
+            error_code=self.default_code,
+            details={"phone_number": phone_number},
+        )
+
+
+class VerificationCodeExpiredError(PhoneVerificationError):
+    """Raised when the stored verification code has passed its TTL."""
+
+    default_code = "verification_code_expired"
+
+    def __init__(self, phone_number: str):
+        self.phone_number = phone_number
+        super().__init__(
+            f"Verification code for {phone_number} has expired",
+            error_code=self.default_code,
+            details={"phone_number": phone_number},
+        )
+
+
+class VerificationAttemptsExceededError(PhoneVerificationError):
+    """Raised when the maximum number of verification attempts has been used."""
+
+    default_code = "verification_attempts_exceeded"
+
+    def __init__(self, phone_number: str, max_attempts: int):
+        self.phone_number = phone_number
+        self.max_attempts = max_attempts
+        super().__init__(
+            f"Maximum verification attempts ({max_attempts}) exceeded for {phone_number}",
+            error_code=self.default_code,
+            details={"phone_number": phone_number, "max_attempts": max_attempts},
+        )
+
+
+class VerificationRateLimitError(PhoneVerificationError):
+    """Raised when a resend cooldown or send-window limit blocks a new code."""
+
+    default_code = "verification_rate_limited"
+
+    def __init__(self, phone_number: str, retry_after_seconds: float, reason: str = "Rate limit exceeded"):
+        self.phone_number = phone_number
+        self.retry_after_seconds = retry_after_seconds
+        self.reason = reason
+        super().__init__(
+            f"{reason} for {phone_number}; retry after {retry_after_seconds:.1f}s",
+            error_code=self.default_code,
+            details={
+                "phone_number": phone_number,
+                "retry_after_seconds": retry_after_seconds,
+                "reason": reason,
+            },
+        )
+
+
+# ============================================================================
 # Base exception for storage operations
 # ============================================================================
 class StorageError(FunctionsError):
@@ -527,12 +647,18 @@ __all__ =[
     "IndexSaveError",
     "InvalidAnalyzerError",
     "InvalidCredentialsError",
+    "InvalidPhoneNumberError",
     "InvalidTokenError",
     "PasswordHashingError",
+    "PhoneConfigurationError",
+    "PhoneVerificationError",
     "RateLimitConfigurationError",
     "RateLimitError",
     "RateLimitExceeded",
     "SearchError",
+    "SMSAuthError",
+    "SMSError",
+    "SMSSendError",
     "StorageBackendError",
     "StorageDeleteError",
     "StorageDownloadError",
@@ -550,4 +676,8 @@ __all__ =[
     "TransportError",
     "TransportRetryExhausted",
     "UserAlreadyExistsError",
+    "VerificationAttemptsExceededError",
+    "VerificationCodeExpiredError",
+    "VerificationNotFoundError",
+    "VerificationRateLimitError",
 ]
