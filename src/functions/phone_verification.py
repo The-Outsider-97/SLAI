@@ -23,6 +23,7 @@ from urllib.parse import urlencode
 
 from .utils.config_loader import get_config_section
 from .utils.functions_error import *
+from .utils.functions_helpers import *
 from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Phone Verification")
@@ -30,7 +31,6 @@ printer = PrettyPrinter()
 
 
 OTP_CODE_LENGTH = 6
-
 _OTP_PATTERN = re.compile(r"^\d{6}$")
 _DIGITS = string.digits
 

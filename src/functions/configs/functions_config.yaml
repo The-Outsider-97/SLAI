@@ -108,3 +108,48 @@ phone_verification:
     retry_max_delay: 30.0
     retry_backoff_factor: 2.0
     retry_jitter: true
+
+webhook:
+    # One configured destination per WebhookService instance.
+    endpoint: ""
+
+    # Never place the actual signing secret in this YAML file.
+    # WebhookService.from_config() resolves it from this environment variable.
+    secret_env: "SLAI_WEBHOOK_SECRET"
+
+    timeout_seconds: 10.0
+
+    # Maximum serialized request body.
+    max_payload_bytes: 262144
+
+    # Maximum webhook response body retained by SLAI.
+    # 0 disables response-body retention while still retaining status/headers.
+    max_response_bytes: 4096
+
+    # Production default: HTTPS only.
+    allow_http: false
+
+    # Production default: block loopback, private, link-local,
+    # reserved, multicast, and other non-global destinations.
+    allow_private_hosts: false
+
+    user_agent: "SLAI-Webhook/2.3"
+
+    # Optional application-defined headers.
+    # Security/signature headers are reserved by WebhookService.
+    headers: {}
+
+    retry_max: 3
+    retry_base_delay: 0.5
+    retry_max_delay: 30.0
+    retry_backoff_factor: 2.0
+    retry_jitter: true
+
+    retry_status_codes:
+        - 408
+        - 425
+        - 429
+        - 500
+        - 502
+        - 503
+        - 504

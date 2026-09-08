@@ -687,6 +687,208 @@ class TransportRetryExhausted(TransportError):
         )
 
 
+# ============================================================================
+# Webhook exceptions
+# ============================================================================
+
+class WebhookError(FunctionsError):
+    """Base exception for webhook operations."""
+
+    default_code = "webhook_error"
+
+    def __init__(
+        self,
+        message: str = "Webhook operation failed",
+        *,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            error_code=error_code or self.default_code,
+            details=details,
+        )
+
+
+class WebhookConfigurationError(WebhookError):
+    """Raised when webhook configuration is invalid."""
+
+    default_code = "webhook_configuration_error"
+
+
+class WebhookSerializationError(WebhookError):
+    """Raised when a webhook event cannot be serialized to canonical JSON."""
+
+    default_code = "webhook_serialization_error"
+
+    def __init__(
+        self,
+        reason: str,
+    ) -> None:
+        self.reason = reason
+
+        super().__init__(
+            f"Webhook serialization failed: {reason}",
+            error_code=self.default_code,
+            details={
+                "reason": reason,
+            },
+        )
+
+
+class WebhookSecurityError(WebhookError):
+    """Raised when a webhook destination violates security policy."""
+
+    default_code = "webhook_security_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        endpoint: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.endpoint = endpoint
+
+        error_details = dict(
+            details or {}
+        )
+
+        if endpoint is not None:
+            error_details.setdefault(
+                "endpoint",
+                endpoint,
+            )
+
+        super().__init__(
+            message,
+            error_code=self.default_code,
+            details=error_details,
+        )
+
+
+class WebhookSignatureError(WebhookError):
+    """Raised when webhook signature validation fails."""
+
+    default_code = "webhook_signature_error"
+
+
+class WebhookPayloadTooLargeError(WebhookError):
+    """Raised when a webhook payload exceeds its configured size limit."""
+
+    default_code = "webhook_payload_too_large"
+
+    def __init__(
+        self,
+        actual_bytes: int,
+        max_bytes: int,
+    ) -> None:
+        self.actual_bytes = actual_bytes
+        self.max_bytes = max_bytes
+
+        super().__init__(
+            (
+                f"Webhook payload is {actual_bytes} bytes; "
+                f"maximum is {max_bytes} bytes"
+            ),
+            error_code=self.default_code,
+            details={
+                "actual_bytes": actual_bytes,
+                "max_bytes": max_bytes,
+            },
+        )
+
+
+class WebhookDeliveryError(WebhookError):
+    """Raised when delivery to a webhook endpoint fails."""
+
+    default_code = "webhook_delivery_error"
+
+    def __init__(
+        self,
+        endpoint: str,
+        reason: str,
+        *,
+        status_code: Optional[int] = None,
+        retryable: bool = False,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.endpoint = endpoint
+        self.reason = reason
+        self.status_code = status_code
+        self.retryable = retryable
+
+        error_details = dict(
+            details or {}
+        )
+
+        error_details.setdefault(
+            "endpoint",
+            endpoint,
+        )
+
+        error_details.setdefault(
+            "reason",
+            reason,
+        )
+
+        error_details.setdefault(
+            "retryable",
+            retryable,
+        )
+
+        if status_code is not None:
+            error_details.setdefault(
+                "status_code",
+                status_code,
+            )
+
+        super().__init__(
+            f"Webhook delivery to {endpoint} failed: {reason}",
+            error_code=self.default_code,
+            details=error_details,
+        )
+
+
+class WebhookRetryExhausted(WebhookDeliveryError):
+    """Raised after all permitted webhook delivery attempts fail."""
+
+    default_code = "webhook_retry_exhausted"
+
+    def __init__(
+        self,
+        endpoint: str,
+        event_id: str,
+        attempts: int,
+        *,
+        last_error: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ) -> None:
+        self.event_id = event_id
+        self.attempts = attempts
+        self.last_error = last_error
+
+        reason = (
+            f"delivery exhausted after {attempts} attempt(s)"
+        )
+
+        if last_error:
+            reason += f": {last_error}"
+
+        super().__init__(
+            endpoint=endpoint,
+            reason=reason,
+            status_code=status_code,
+            retryable=False,
+            details={
+                "event_id": event_id,
+                "attempts": attempts,
+                "last_error": last_error,
+            },
+        )
+
+        self.error_code = self.default_code
+
 __all__ =[
     "AccountLockedError",
     "AuthError",
@@ -741,4 +943,12 @@ __all__ =[
     "VerificationCodeExpiredError",
     "VerificationNotFoundError",
     "VerificationRateLimitError",
+    "WebhookConfigurationError",
+    "WebhookDeliveryError",
+    "WebhookError",
+    "WebhookPayloadTooLargeError",
+    "WebhookRetryExhausted",
+    "WebhookSecurityError",
+    "WebhookSerializationError",
+    "WebhookSignatureError",
 ]
