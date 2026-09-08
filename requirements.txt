@@ -23,6 +23,7 @@ opencv-python  # provides cv2
 packaging
 pandas
 pgmpy
+phonenumbers
 Pillow  # provides PIL
 portalocker
 prometheus-client  # provides prometheus_client
