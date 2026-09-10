@@ -263,9 +263,36 @@ class AuthService:
 
     def _get_user(self, username: str) -> UserRecord:
         user = self._users.get(username)
+
         if not user:
-            raise InvalidCredentialsError()
+            raise InvalidCredentialsError("Invalid username or password")
+
         return user
+
+
+    def _get_user_by_id(self, user_id: str) -> UserRecord:
+        if (
+            not isinstance(user_id, str)
+            or not user_id.strip()
+        ):
+            raise InvalidCredentialsError("Invalid authentication identity")
+
+        normalized_user_id = user_id.strip()
+
+        for user in self._users.values():
+            if user.user_id == normalized_user_id:
+                return user
+
+        raise InvalidCredentialsError("Invalid authentication identity")
+
+
+    def _complete_login_for_user(self, user: UserRecord) -> AuthToken:
+        now = datetime.now(timezone.utc)
+
+        user.last_activity_at = now
+        self._persist_state()
+
+        return self._mint_session(user.user_id).access
 
     # --- Public Methods ---
 
@@ -383,11 +410,20 @@ class AuthService:
             self._persist_state()
             return False
 
-    def complete_login(self, username: str, password: Optional[str] = None) -> AuthToken:
-        """Compatibility entry point that now requires credential proof."""
-        if password is None:
-            raise InvalidCredentialsError(message="Credential proof is required")
-        return self.log_in(username, password)
+    def complete_login(self, username: str) -> AuthToken:
+        with self._lock:
+            user = self._get_user(username)
+
+            return self._complete_login_for_user(user)
+
+    def complete_login_by_user_id(self, user_id: str) -> AuthToken:
+        with self._lock:
+            user = self._get_user_by_id(user_id)
+
+            if not user.is_verified:
+                raise InvalidCredentialsError("Account verification is required")
+
+            return self._complete_login_for_user(user)
 
     def requires_reverification(self, username: str) -> bool:
         with self._lock:
