@@ -58,9 +58,13 @@ class FallbackEvaluatorAgent(BaseAgent):
         - Core evaluations still run (e.g. safety checks)
         - System doesn't crash entirely under failure
         """
-        self.evaluators = None
-        return hasattr(self, 'evaluators') and all(
-            callable(getattr(ev, "execute_test_suite", None)) for ev in self.evaluators.values()
+        evaluators = getattr(self, "evaluators", None)
+        if not isinstance(evaluators, dict):
+            return False
+
+        return all(
+            callable(getattr(ev, "execute_test_suite", None))
+            for ev in evaluators.values()
         )
 
     def has_redundant_safety_channels(self):
@@ -558,110 +562,160 @@ class EvaluationAgent(BaseAgent):
             logger.warning("No autonomous tasks defined in config.")
             return []
 
-    def execute_validation_cycle(self, params: Dict) -> Dict:
-        """Comprehensive evaluation across all dimensions"""
+    def execute_validation_cycle(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute a domain-neutral SLAI validation cycle.
+
+        The cycle aggregates evaluator-native evidence across static,
+        behavioral, performance, efficiency, autonomous, resource,
+        statistical, safety, and performance-budget dimensions.
+
+        Domain-specific business state must not influence core SLAI health
+        unless it is supplied through a dedicated evaluator.
+        """
+        if params is None:
+            params = {}
+
+        if not isinstance(params, dict):
+            raise TypeError(
+                "EvaluationAgent.execute_validation_cycle() expects params "
+                "to be a dictionary."
+            )
+
         try:
-            results = {}
-            
-            # Static Analysis
-            if self.protocol.static_analysis.get('enable', False):
-                analyzer = StaticAnalyzer('src/agents/evaluation_agent.py')
+            results: Dict[str, Any] = {}
+
+            # --------------------------------------------------------------
+            # Static analysis
+            # --------------------------------------------------------------
+            if self.protocol.static_analysis.get("enable", False):
+                analyzer = StaticAnalyzer("src/agents/evaluation_agent.py")
                 static_results = analyzer.full_analysis()
-                results.update({
-                    'static_analysis': static_results,
-                    'static_analysis_explanation': self._explain_static_results(static_results)
-                })
 
-            # Create agent and run behavioral tests
+                results.update(
+                    {
+                        "static_analysis": static_results,
+                        "static_analysis_explanation":
+                            self._explain_static_results(static_results),
+                    }
+                )
+
+            # --------------------------------------------------------------
+            # Behavioral validation
+            # --------------------------------------------------------------
             agent = self.create_agent()
-            test_suite = {
-                'predictions': [],
-                'expected_outputs': []
+
+            test_suite: Dict[str, Any] = {
+                "predictions": [],
+                "expected_outputs": [],
             }
-            if self.protocol.behavioral_testing.get('test_types'):
-                test_suite = self.evaluators['behavioral'].execute_test_suite(agent)
-                results['behavioral'] = test_suite
-                results['test_explanation'] = self._explain_test_results(test_suite)
 
-            outputs = test_suite.get('predictions', [])
-            truths = test_suite.get('expected_outputs', [])
+            if self.protocol.behavioral_testing.get("test_types"):
+                test_suite = self.evaluators["behavioral"].execute_test_suite(agent)
 
-            # Performance Evaluation
+                results["behavioral"] = test_suite
+                results["test_explanation"] = self._explain_test_results(test_suite)
+
+            outputs = test_suite.get("predictions", [])
+            truths = test_suite.get("expected_outputs", [])
+
+            # --------------------------------------------------------------
+            # Performance and efficiency
+            # --------------------------------------------------------------
             if outputs and truths:
-                results['performance'] = self.evaluators['performance'].evaluate(
-                    outputs=outputs,
-                    ground_truths=truths
-                )
-        
-                # Efficiency Evaluation
-                results['efficiency'] = self.evaluators['efficiency'].evaluate(
-                    outputs=outputs,
-                    ground_truths=truths
-                )
-        
-            # Autonomous Task Evaluation
+                results["performance"] = self.evaluators[
+                    "performance"
+                ].evaluate(outputs=outputs, ground_truths=truths)
+
+                results["efficiency"] = self.evaluators[
+                    "efficiency"
+                ].evaluate(outputs=outputs, ground_truths=truths)
+
+            # --------------------------------------------------------------
+            # Autonomous-task evaluation
+            # --------------------------------------------------------------
             if self.autonomous_tasks:
                 try:
-                    results['autonomous'] = self.evaluators['autonomous'].evaluate_task_set(
-                        self.autonomous_tasks
-                    )
-                except Exception as e:
-                    logger.error(f"Autonomous evaluation failed: {str(e)}")
-                    results['autonomous'] = {'error': str(e)}
-            
-            # Resource Utilization (always runs)
-            results['resource'] = self.evaluators['resource'].evaluate()
+                    results["autonomous"] = self.evaluators[
+                        "autonomous"
+                    ].evaluate_task_set(self.autonomous_tasks)
+                except Exception as exc:
+                    logger.error("Autonomous evaluation failed: %s", exc)
+                    results["autonomous"] = {"error": str(exc)}
 
+            # Runtime resource utilization
+            results["resource"] = self.evaluators["resource"].evaluate()
+
+            # --------------------------------------------------------------
+            # Statistical evaluation
+            # --------------------------------------------------------------
             statistical_data = self._prepare_statistical_dataset()
-            current_run = statistical_data.get('current_run', [])
-            if len(current_run) >= self.evaluators['statistical'].min_sample_size:
-                results['statistical'] = self.evaluators['statistical'].evaluate(
-                    datasets=statistical_data
-                )
+            current_run = statistical_data.get("current_run", [])
+
+            if (
+                len(current_run)
+                >= self.evaluators["statistical"].min_sample_size
+            ):
+                results["statistical"] = self.evaluators["statistical"].evaluate(datasets=statistical_data)
             else:
                 logger.info("Skipping statistical evaluation - insufficient data")
-                results['statistical'] = {'status': 'skipped', 'reason': 'Insufficient data'}
-
-            # Safety Incident Evaluation (use persistent safety evaluator instance)
-            safety_incidents = params.get('safety_incidents') or self.evaluators['safety'].raw_incidents
-            if safety_incidents:
-                try:
-                    results['safety'] = self.evaluators['safety'].evaluate_operation(safety_incidents)
-
-                except Exception as e:
-                    logger.error(f"Safety evaluation failed: {str(e)}")
-                    results['safety'] = {'error': str(e)}
-
-
-            # Cross-agent performance budget contracts
-            observed_budget_metrics = params.get('agent_performance_metrics', {})
-            if observed_budget_metrics:
-                results['performance_budget'] = self.evaluators['performance_budget'].evaluate(observed_budget_metrics)
-            else:
-                results['performance_budget'] = {
-                    'status': 'skipped',
-                    'reason': 'No agent_performance_metrics provided for contract validation.'
+                results["statistical"] = {
+                    "status": "skipped",
+                    "reason": "Insufficient data",
                 }
 
-            # Add aggregated metrics
+            # --------------------------------------------------------------
+            # Safety evaluation
+            # --------------------------------------------------------------
+            safety_incidents = (
+                params.get("safety_incidents")
+                or self.evaluators["safety"].raw_incidents
+            )
+
+            if safety_incidents:
+                try:
+                    results["safety"] = self.evaluators["safety"].evaluate_operation(safety_incidents)
+                except Exception as exc:
+                    logger.error("Safety evaluation failed: %s", exc)
+                    results["safety"] = {"error": str(exc)}
+
+            # --------------------------------------------------------------
+            # Cross-agent performance-budget contracts
+            # --------------------------------------------------------------
+            observed_budget_metrics = params.get("agent_performance_metrics", {})
+
+            if observed_budget_metrics:
+                results["performance_budget"] = self.evaluators["performance_budget"].evaluate(observed_budget_metrics)
+            else:
+                results["performance_budget"] = {
+                    "status": "skipped",
+                    "reason": (
+                        "No agent_performance_metrics provided "
+                        "for contract validation."
+                    ),
+                }
+
+            # Domain-neutral aggregate metrics
             results.update(self._gather_core_metrics(results))
 
-            # Financial health assessment
-            financial_health = self._evaluate_financial_health(
-                params.get('portfolio_state', {}),
-                params.get('dashboard_data', {})
+            # Domain-neutral validation health
+            results.update(self._evaluate_validation_health(results=results, params=params))
+
+            # --------------------------------------------------------------
+            # Overall validation state
+            # --------------------------------------------------------------
+            results["status"] = self._determine_system_status(
+                results
             )
-            results.update(financial_health)
-            
-            # Determine overall status
-            results['status'] = self._determine_system_status(results)
 
             return results
-        except Exception as e:
-            logger.error(f"Validation cycle failed: {str(e)}")
+
+        except Exception as exc:
+            logger.error("Validation cycle failed: %s", exc, exc_info=True)
             return {
-                'error': str(e),
-                'cycle_failed': True
+                "status": "critical",
+                "error": str(exc),
+                "cycle_failed": True,
             }
 
     def _prepare_statistical_dataset(self) -> Dict[str, List[float]]:
@@ -669,59 +723,510 @@ class EvaluationAgent(BaseAgent):
         metrics = self.shared_memory.get("latest_metrics") or {}
         perf_metrics = metrics.get('performance', {})
 
-        current_data = perf_metrics.get('accuracy_history', [])
-        if not isinstance(current_data, list):
-            current_data = []
-        current_data = [x for x in current_data if isinstance(x, (int, float))]
+        current_data_raw = perf_metrics.get('accuracy_history', [])
+        if not isinstance(current_data_raw, list):
+            current_data_raw = []
+        current_data: List[float] = [
+            float(x) for x in current_data_raw if isinstance(x, (int, float))
+        ]
 
-        previous_runs = []
+        previous_runs: List[float] = []
         for entry in self.shared_memory.get("metric_history") or []:
             perf = entry.get('performance', {}) if isinstance(entry, dict) else {}
             val = perf.get('accuracy')
             if isinstance(val, (int, float)):
-                previous_runs.append(val)
+                previous_runs.append(float(val))
 
         return {
             'current_run': current_data,
             'previous_runs': previous_runs
         }
     
-    def _evaluate_financial_health(self, portfolio: Dict, dashboard: Dict) -> Dict:
-        """Financial-specific risk assessment"""
-        metrics = {
-            'value_at_risk': portfolio.get('value_at_risk', 0),
-            'drawdown': portfolio.get('current_drawdown', 0),
-            'liquidity_ratio': portfolio.get('cash', 0) / portfolio.get('portfolio_value', 1)
+    def _evaluate_validation_health(self, results: Dict[str, Any], params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Aggregate evaluator-native health evidence without introducing
+        application- or domain-specific semantics.
+
+        This method does not independently re-score evaluator metrics.
+        Instead, it consumes the threshold assessments, statuses, violations,
+        and errors already produced by SLAI evaluators.
+
+        Returns:
+            {
+                "critical_issues": [...],
+                "warnings": [...],
+                "component_status": {...},
+            }
+        """
+        if not isinstance(results, dict):
+            raise TypeError("results must be a dictionary")
+
+        context = params if isinstance(params, dict) else {}
+
+        critical_issues: List[str] = []
+        warnings: List[str] = []
+        component_status: Dict[str, str] = {}
+
+        severity_rank = {
+            "skipped": 0,
+            "normal": 1,
+            "warning": 2,
+            "critical": 3,
         }
-        
-        # Check against thresholds
-        critical_issues = []
-        if metrics['value_at_risk'] > 0.15:
-            critical_issues.append('VaR exceeds 15% threshold')
-        if metrics['drawdown'] > 0.1:
-            critical_issues.append('Drawdown exceeds 10% limit')
-        if metrics['liquidity_ratio'] < 0.2:
-            critical_issues.append('Liquidity ratio below 20%')
-            
+
+        def as_dict(value: Any) -> Dict[str, Any]:
+            return value if isinstance(value, dict) else {}
+
+        def numeric(value: Any, default: float = 0.0) -> float:
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ):
+                return float(value)
+            return float(default)
+
+        def append_unique(collection: List[str], message: str) -> None:
+            normalized = str(message).strip()
+            if normalized and normalized not in collection:
+                collection.append(normalized)
+
+        def mark(component: str, status: str) -> None:
+            normalized = str(status).strip().lower()
+
+            if normalized not in severity_rank:
+                return
+
+            current = component_status.get(component)
+
+            if current is None:
+                component_status[component] = normalized
+                return
+
+            if (
+                severity_rank[normalized]
+                > severity_rank.get(current, 0)
+            ):
+                component_status[component] = normalized
+
+        def add_critical(component: str, message: str) -> None:
+            append_unique(critical_issues, f"{component}: {message}")
+            mark(component, "critical")
+
+        def add_warning(component: str, message: str) -> None:
+            append_unique(warnings, f"{component}: {message}")
+            mark(component, "warning")
+
+        # --------------------------------------------------------------
+        # Generic evaluator failures/statuses
+        # --------------------------------------------------------------
+        failing_statuses = {
+            "block",
+            "blocked",
+            "critical",
+            "error",
+            "fail",
+            "failed",
+            "failure",
+        }
+
+        warning_statuses = {
+            "degraded",
+            "incomplete",
+            "partial",
+            "warn",
+            "warning",
+        }
+
+        successful_statuses = {
+            "allow",
+            "complete",
+            "completed",
+            "normal",
+            "ok",
+            "pass",
+            "passed",
+            "success",
+            "succeeded",
+        }
+
+        for component, payload in results.items():
+            if not isinstance(payload, dict):
+                continue
+
+            error = payload.get("error")
+            if error:
+                add_critical(component, f"evaluation error: {error}")
+                continue
+
+            raw_status = payload.get("status")
+            if raw_status is None:
+                continue
+
+            status = str(raw_status).strip().lower()
+
+            if status in failing_statuses:
+                add_critical(component, f"reported status {status!r}")
+            elif status in warning_statuses:
+                add_warning(component, f"reported status {status!r}")
+            elif status == "skipped":
+                mark(component, "skipped")
+            elif status in successful_statuses:
+                mark(component, "normal")
+
+        # --------------------------------------------------------------
+        # Static-analysis evidence
+        # --------------------------------------------------------------
+        static_result = as_dict(results.get("static_analysis"))
+
+        if static_result:
+            security_metrics = as_dict(static_result.get("security_metrics"))
+            critical_count = numeric(security_metrics.get("critical_count"), 0.0)
+            static_config = as_dict(getattr(self.protocol, "static_analysis", {}))
+            security_config = as_dict(static_config.get("security"))
+            max_critical = numeric(security_config.get("max_critical"), 0.0)
+
+            if critical_count > max_critical:
+                add_critical(
+                    "static_analysis",
+                    (
+                        f"{int(critical_count)} critical security "
+                        f"issue(s) exceed allowed maximum "
+                        f"{int(max_critical)}"
+                    ),
+                )
+            else:
+                mark("static_analysis", "normal")
+
+        # --------------------------------------------------------------
+        # Behavioral validation
+        # --------------------------------------------------------------
+        behavioral = as_dict(
+            results.get("behavioral")
+        )
+
+        if behavioral:
+            summary = as_dict(
+                behavioral.get("summary")
+            )
+
+            failed = numeric(
+                summary.get("failed"),
+                0.0,
+            )
+            errored = numeric(
+                summary.get("errored"),
+                0.0,
+            )
+
+            if failed > 0 or errored > 0:
+                add_critical(
+                    "behavioral",
+                    (
+                        f"{int(failed)} failed and "
+                        f"{int(errored)} errored test(s)"
+                    ),
+                )
+            elif summary:
+                mark("behavioral", "normal")
+
+        # --------------------------------------------------------------
+        # Performance threshold evidence
+        # --------------------------------------------------------------
+        performance = as_dict(
+            results.get("performance")
+        )
+
+        if performance:
+            assessment = as_dict(
+                performance.get("threshold_assessment")
+            )
+
+            if assessment.get(
+                "composite_below_threshold"
+            ) is True:
+                add_warning(
+                    "performance",
+                    "composite score is below configured threshold",
+                )
+
+            assessment_warnings = assessment.get(
+                "warnings",
+                [],
+            )
+
+            if isinstance(
+                assessment_warnings,
+                (list, tuple),
+            ):
+                for warning in assessment_warnings:
+                    add_warning(
+                        "performance",
+                        str(warning),
+                    )
+
+            if (
+                not assessment.get(
+                    "composite_below_threshold"
+                )
+                and not assessment_warnings
+            ):
+                mark("performance", "normal")
+
+        # --------------------------------------------------------------
+        # Resource-health evidence
+        # --------------------------------------------------------------
+        resource = as_dict(
+            results.get("resource")
+        )
+
+        if resource:
+            health_status = as_dict(
+                resource.get("health_status")
+            )
+
+            critical_resources = [
+                str(metric)
+                for metric, status in health_status.items()
+                if str(status).strip().upper()
+                == "CRITICAL"
+            ]
+
+            warning_resources = [
+                str(metric)
+                for metric, status in health_status.items()
+                if str(status).strip().upper()
+                == "WARNING"
+            ]
+
+            if critical_resources:
+                add_critical(
+                    "resource",
+                    (
+                        "critical utilization detected for: "
+                        + ", ".join(sorted(critical_resources))
+                    ),
+                )
+            elif warning_resources:
+                add_warning(
+                    "resource",
+                    (
+                        "elevated utilization detected for: "
+                        + ", ".join(sorted(warning_resources))
+                    ),
+                )
+            elif health_status:
+                mark("resource", "normal")
+
+            threshold_violations = as_dict(
+                resource.get("threshold_violations")
+            )
+
+            if threshold_violations:
+                add_critical(
+                    "resource",
+                    (
+                        "configured resource threshold(s) "
+                        "were exceeded: "
+                        + ", ".join(
+                            sorted(
+                                str(key)
+                                for key
+                                in threshold_violations
+                            )
+                        )
+                    ),
+                )
+
+        # --------------------------------------------------------------
+        # Safety evidence
+        # --------------------------------------------------------------
+        safety = as_dict(
+            results.get("safety")
+        )
+
+        if safety:
+            aggregates = as_dict(
+                safety.get("aggregates")
+            )
+            threshold_assessment = as_dict(
+                safety.get("threshold_assessment")
+            )
+
+            critical_incidents = numeric(
+                aggregates.get("critical_incidents"),
+                0.0,
+            )
+
+            if critical_incidents > 0:
+                add_critical(
+                    "safety",
+                    (
+                        f"{int(critical_incidents)} "
+                        "critical safety incident(s)"
+                    ),
+                )
+
+            violations = threshold_assessment.get(
+                "violations",
+                [],
+            )
+
+            if isinstance(violations, (list, tuple)):
+                for violation in violations:
+                    add_critical(
+                        "safety",
+                        str(violation),
+                    )
+
+            if (
+                critical_incidents <= 0
+                and not violations
+            ):
+                mark("safety", "normal")
+
+        # --------------------------------------------------------------
+        # Cross-agent performance budget
+        # --------------------------------------------------------------
+        performance_budget = as_dict(
+            results.get("performance_budget")
+        )
+
+        if performance_budget:
+            budget_status = str(
+                performance_budget.get(
+                    "status",
+                    "",
+                )
+            ).strip().lower()
+
+            summary = as_dict(
+                performance_budget.get("summary")
+            )
+
+            violations = numeric(
+                summary.get("violations"),
+                0.0,
+            )
+
+            warning_count = numeric(
+                summary.get("warnings"),
+                0.0,
+            )
+
+            if (
+                budget_status == "fail"
+                or violations > 0
+            ):
+                add_critical(
+                    "performance_budget",
+                    (
+                        f"{int(violations)} "
+                        "performance-budget violation(s)"
+                    ),
+                )
+            elif (
+                budget_status in {"warn", "warning"}
+                or warning_count > 0
+            ):
+                add_warning(
+                    "performance_budget",
+                    (
+                        f"{int(warning_count)} "
+                        "performance-budget warning(s)"
+                    ),
+                )
+            elif budget_status == "skipped":
+                mark(
+                    "performance_budget",
+                    "skipped",
+                )
+            elif budget_status:
+                mark(
+                    "performance_budget",
+                    "normal",
+                )
+
+        # --------------------------------------------------------------
+        # Autonomous-control-loop execution evidence
+        # --------------------------------------------------------------
+        execution = as_dict(
+            context.get("control_loop_execution")
+        )
+
+        if execution:
+            execution_status = str(
+                execution.get("status", "")
+            ).strip().lower()
+
+            if (
+                execution.get("success") is False
+                or execution_status
+                in failing_statuses
+            ):
+                add_critical(
+                    "execution",
+                    (
+                        "control-loop execution "
+                        "reported failure"
+                    ),
+                )
+
+            elif (
+                execution.get("completed") is False
+                or execution_status
+                in warning_statuses
+            ):
+                add_warning(
+                    "execution",
+                    (
+                        "control-loop execution "
+                        "is incomplete or degraded"
+                    ),
+                )
+
+            else:
+                mark("execution", "normal")
+
         return {
-            'financial_metrics': metrics,
-            'critical_issues': critical_issues
+            "critical_issues": critical_issues,
+            "warnings": warnings,
+            "component_status": component_status,
         }
 
-    def _determine_system_status(self, results: Dict) -> str:
-        """Determine overall system health status"""
-        min_success = self.risk_thresholds.get('min_success_rate', 0.8)  # Default value
+    def _determine_system_status(self, results: Dict[str, Any]) -> str:
+        """
+        Determine the overall validation state from normalized evaluator
+        findings.
 
-        safety_aggregates = results.get('safety', {}).get('aggregates', {}) if isinstance(results, dict) else {}
-        performance_metrics = results.get('performance', {}).get('metrics', {}) if isinstance(results, dict) else {}
+        Individual evaluator thresholds remain owned by their respective
+        evaluators. EvaluationAgent only aggregates their outcomes.
+        """
+        if not isinstance(results, dict):
+            return "critical"
 
-        if safety_aggregates.get('compliance_rate', 0) < min_success:
-            return 'critical'
-        if results.get('critical_issues'):
-            return 'critical'
-        if performance_metrics.get('accuracy', 0) < 0.7:
-            return 'warning'
-        return 'normal'
+        if results.get("cycle_failed"):
+            return "critical"
+
+        if results.get("error"):
+            return "critical"
+
+        critical_issues = results.get("critical_issues", [])
+
+        if (
+            isinstance(critical_issues, list)
+            and critical_issues
+        ):
+            return "critical"
+
+        warnings = results.get("warnings", [])
+
+        if (
+            isinstance(warnings, list)
+            and warnings
+        ):
+            return "warning"
+
+        return "normal"
 
     def _connect_issue_database(self):
         """Robust database connection with fallback handling"""
@@ -958,25 +1463,80 @@ class EvaluationAgent(BaseAgent):
 
             if state is not None:
                 has_light_eval = True
-                lightweight_params: Dict[str, Any] = {"lightweight": True, "input_state": state}
-                if isinstance(state, dict):
-                    if "portfolio_state" in state:
-                        lightweight_params["portfolio_state"] = state.get("portfolio_state", {})
-                    if "dashboard_data" in state:
-                        lightweight_params["dashboard_data"] = state.get("dashboard_data", {})
 
-                light_results = self.execute_validation_cycle(lightweight_params)
+                lightweight_params: Dict[str, Any] = {
+                    "lightweight": True,
+                    "input_state": state,
+                }
+
+                if isinstance(state, dict):
+                    # Forward only inputs that belong to the generic
+                    # EvaluationAgent contract.
+                    for key in (
+                        "safety_incidents",
+                        "agent_performance_metrics",
+                        "control_loop_execution",
+                    ):
+                        if key in state:
+                            lightweight_params[key] = state[key]
+
+                light_results = self.execute_validation_cycle(
+                    lightweight_params
+                )
+
                 if isinstance(light_results, dict):
+                    critical_issues = light_results.get(
+                        "critical_issues",
+                        [],
+                    )
+                    warnings_found = light_results.get(
+                        "warnings",
+                        [],
+                    )
+
                     light_eval_summary = {
-                        "status": light_results.get("status", "unknown"),
-                        "has_errors": bool(light_results.get("error")),
-                        "system_status": light_results.get("system_status"),
+                        "status": light_results.get(
+                            "status",
+                            "unknown",
+                        ),
+                        "has_errors": bool(
+                            light_results.get("error")
+                        ),
+                        "critical_issue_count": (
+                            len(critical_issues)
+                            if isinstance(
+                                critical_issues,
+                                list,
+                            )
+                            else 0
+                        ),
+                        "warning_count": (
+                            len(warnings_found)
+                            if isinstance(
+                                warnings_found,
+                                list,
+                            )
+                            else 0
+                        ),
                     }
+
                     if light_results.get("error"):
-                        warnings.append(f"lightweight_validation_error: {light_results.get('error')}")
-                    health["predicted_metrics"] = self._gather_core_metrics(light_results)
+                        warnings.append(
+                            "lightweight_validation_error: "
+                            f"{light_results.get('error')}"
+                        )
+
+                    health["predicted_metrics"] = (
+                        self._gather_core_metrics(
+                            light_results
+                        )
+                    )
+
                 else:
-                    warnings.append("lightweight_validation_returned_non_dict_payload")
+                    warnings.append(
+                        "lightweight_validation_returned_"
+                        "non_dict_payload"
+                    )
 
             confidence = _compute_confidence(
                 health_payload=health if isinstance(health, dict) else {},

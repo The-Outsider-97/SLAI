@@ -145,7 +145,6 @@ class ReasoningAgent(BaseAgent):
     KNOWLEDGE_MEMORY_KEY_DEFAULT = "reasoning_agent:knowledge_base"
     CHECKPOINTING_SUPPORTED = True
     CHECKPOINT_SCHEMA = "slai.reasoning-agent.state.v1"
-
     _ALLOWED_CONFIG_KEYS = {
         "learning_rate", "decay", "exploration_rate", "max_iterations",
         "contradiction_threshold", "redundancy_margin", "knowledge_db",
@@ -1034,22 +1033,99 @@ class ReasoningAgent(BaseAgent):
         return {"success": False, "error": f"Unknown action: {action}"}
 
     def perform_task(self, task_data: Mapping[str, Any]) -> Dict[str, Any]:
-        payload = dict(task_data or {})
-        task_type = str(payload.get("task_type", "forward_chaining")).strip().lower()
+        """
+        Route a public ReasoningAgent task to an explicitly supported operation.
+        """
+        if not isinstance(task_data, Mapping):
+            raise ReasoningValidationError(
+                message="ReasoningAgent task_data must be a mapping.",
+                context={"received_type": type(task_data).__name__},
+            )
+
+        payload = dict(task_data)
+        raw_task_type = payload.get("task_type", "forward_chaining")
+        task_type = str(raw_task_type).strip().lower()
+
+        supported_task_types = {
+            "add_fact",
+            "validate_fact",
+            "probabilistic_query",
+            "multi_hop_reasoning",
+            "reason",
+            "execute_action",
+            "forward_chaining",
+        }
+
+        if task_type not in supported_task_types:
+            raise ReasoningValidationError(
+                message=f"Unsupported reasoning task type: {task_type!r}.",
+                context={
+                    "task_type": task_type,
+                    "supported_task_types": sorted(supported_task_types),
+                },
+            )
+
+        def require(field_name: str) -> Any:
+            if field_name not in payload or payload[field_name] is None:
+                raise ReasoningValidationError(
+                    message=(
+                        f"Reasoning task {task_type!r} requires "
+                        f"field {field_name!r}."
+                    ),
+                    context={
+                        "task_type": task_type,
+                        "missing_field": field_name,
+                    },
+                )
+            return payload[field_name]
+
         if task_type == "add_fact":
-            return {"status": "success", "added": self.add_fact(payload["fact"], payload.get("confidence", 1.0))}
+            added = self.add_fact(require("fact"), payload.get("confidence", 1.0))
+            return {
+                "status": "success",
+                "task_type": task_type,
+                "added": added,
+            }
+
         if task_type == "validate_fact":
-            return self.validate_fact(payload["fact"], payload.get("threshold", 0.75))
+            return self.validate_fact(require("fact"), payload.get("threshold", 0.75))
+
         if task_type == "probabilistic_query":
-            return {"status": "success", "probability": self.probabilistic_query(payload["fact"], payload.get("evidence"))}
+            probability = self.probabilistic_query(require("fact"), payload.get("evidence"))
+            return {
+                "status": "success",
+                "task_type": task_type,
+                "probability": probability,
+            }
+
         if task_type == "multi_hop_reasoning":
-            return {"status": "success", "score": self.multi_hop_reasoning(payload["query"], payload.get("max_depth", 3))}
+            score = self.multi_hop_reasoning(require("query"), payload.get("max_depth", 3))
+            return {
+                "status": "success",
+                "task_type": task_type,
+                "score": score,
+            }
+
         if task_type == "reason":
-            return self.reason(payload.get("problem"), payload.get("reasoning_type"), payload.get("context"))
+            return self.reason(
+                require("problem"),
+                payload.get("reasoning_type"),
+                payload.get("context"),
+            )
+
         if task_type == "execute_action":
-            return self.execute_action(payload.get("action", "query_knowledge_base"), payload.get("payload"))
+            return self.execute_action(
+                payload.get("action", "query_knowledge_base"),
+                payload.get("payload"),
+            )
+
+        # Explicit forward-chaining route only.
         report = self.forward_chaining_report(payload.get("max_iterations"))
-        return {"status": "success", "task_type": "forward_chaining", "report": report.to_dict()}
+        return {
+            "status": "success",
+            "task_type": "forward_chaining",
+            "report": report.to_dict(),
+        }
 
     def stream_update(self, new_facts: Iterable[Union[str, Sequence[Any]]], confidence: float = 1.0) -> Dict[str, Any]:
         added = 0
