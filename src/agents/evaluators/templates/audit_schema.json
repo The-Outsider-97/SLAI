@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Audit Entry",
+  "description": "Schema for versioned audit blocks used in documentation trail.",
+  "type": "object",
+  "properties": {
+    "report_hash": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$",
+      "description": "SHA256 hash of the report data"
+    },
+    "metrics_snapshot": {
+      "type": "object",
+      "description": "Snapshot of key performance metrics at report time",
+      "properties": {
+        "success_rate": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "current_risk": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "operational_time": {
+          "type": "number",
+          "minimum": 0.0
+        }
+      },
+      "required": ["success_rate", "current_risk", "operational_time"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO timestamp of when the audit block was created"
+    },
+    "previous_hash": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$",
+      "description": "Hash of the previous audit block"
+    },
+    "nonce": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$"
+    }
+  },
+  "required": ["report_hash", "metrics_snapshot", "timestamp", "previous_hash", "nonce", "hash"]
+}

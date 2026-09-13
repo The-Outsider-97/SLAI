@@ -1,0 +1,80 @@
+{
+  "recommendation_sections": [
+    {
+      "section_title": "Performance Optimization",
+      "recommendations": [
+        {
+          "condition": {
+            "metric": "temporal",
+            "operator": "<",
+            "threshold": 0.5
+          },
+          "message": "Optimize response pipelines for faster execution."
+        },
+        {
+          "condition": {
+            "metric": "temporal",
+            "operator": "<",
+            "threshold": 0.3
+          },
+          "message": "Implement parallel processing or distributed computing to drastically reduce latency."
+        }
+      ]
+    },
+    {
+      "section_title": "Memory & Resources",
+      "recommendations": [
+        {
+          "condition": {
+            "metric": "spatial",
+            "operator": "<",
+            "threshold": 0.4
+          },
+          "message": "Review data structures for memory footprint reduction opportunities."
+        },
+        {
+          "condition": {
+            "metric": "memory_usage_mb",
+            "operator": ">",
+            "threshold": 100.0
+          },
+          "message": "Profile memory usage to identify and fix leaks."
+        }
+      ]
+    },
+    {
+      "section_title": "Linguistic Quality",
+      "recommendations": [
+        {
+          "condition": {
+            "metric": "syntactic_complexity",
+            "operator": ">",
+            "threshold": 0.8
+          },
+          "message": "Simplify sentence structures to improve readability."
+        },
+        {
+          "condition": {
+            "metric": "semantic_density",
+            "operator": "<",
+            "threshold": 0.1
+          },
+          "message": "Enrich content with domain-specific entities for better context."
+        }
+      ]
+    },
+    {
+      "section_title": "Computational Efficiency",
+      "recommendations": [
+        {
+          "condition": {
+            "metric": "computational",
+            "operator": "<",
+            "threshold": 0.6
+          },
+          "message": "Upgrade hardware accelerators or optimize model FLOPs utilization."
+        }
+      ]
+    }
+  ]
+}
