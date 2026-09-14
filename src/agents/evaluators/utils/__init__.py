@@ -1,6 +1,7 @@
 from .config_loader import *
 from .evaluation_errors import *
 from .evaluation_helpers import *
+from .plugin_loader import *
 
 
 from .config_loader import __all__ as _config_loader_exports
