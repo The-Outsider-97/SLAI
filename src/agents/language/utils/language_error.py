@@ -929,3 +929,655 @@ class NLGGenerationError(NLGError):
             },
         )
         super().__init__(issue, recoverable=fallback_attempted, cause=original_exception)
+
+
+# ---------------------------------------------------------------------------
+# Language-agent error base classes
+# ---------------------------------------------------------------------------
+#
+# The LanguageAgent is an orchestrator, not a linguistic processor. Its error
+# taxonomy therefore keys on coordination contracts — input validation,
+# session lifecycle, stage policy, configuration validity and component
+# wiring — rather than on the linguistic pipeline stages owned by the
+# individual processors. To preserve both backward compatibility with the
+# legacy `RuntimeError` / `ValueError` inheritance and the structured
+# `LanguageIssue` surface used throughout this module, the two base classes
+# below use cooperative multiple inheritance from `DomainLanguageError`.
+#
+# MRO note (checked for both classes):
+#
+#     LanguageAgentRuntimeError
+#       -> DomainLanguageError -> LanguageError -> RuntimeError
+#       -> Exception -> BaseException -> object
+#
+#     LanguageAgentConfigurationError
+#       -> DomainLanguageError -> LanguageError -> ValueError
+#       -> Exception -> BaseException -> object
+#
+# This keeps `str(exc)` informative (code-prefixed, matching every other
+# error in the module), keeps `except RuntimeError` / `except ValueError`
+# working for legacy callers, and still exposes `.issue`, `.to_dict()`,
+# `.to_json()` and `.log()` from `LanguageError`.
+# ---------------------------------------------------------------------------
+
+
+class LanguageAgentRuntimeError(DomainLanguageError, RuntimeError):
+    """
+    Structured runtime failure raised by the ``LanguageAgent`` coordinator.
+
+    Semantics
+    ---------
+    A ``LanguageAgentRuntimeError`` represents a failure that originates in
+    the agent's *coordination* logic — input validation, session lifecycle,
+    policy enforcement, stage orchestration, shared-memory persistence, or
+    component wiring — and is *not* a processor-internal linguistic failure.
+    A processor-level failure that has not been converted by an agent stage
+    policy keeps its own taxonomy (``NLPError``, ``NLUError``,
+    ``GrammarError``, ...). Once the agent converts such a failure, it does
+    so through a dedicated subclass (see
+    :class:`LanguageAgentStageExecutionError` and
+    :class:`LanguageAgentComponentError`).
+
+    Recoverability
+    --------------
+    By default the agent treats runtime errors as **recoverable**: the agent
+    can normally continue by returning a fallback response, downgrading to a
+    partial result, or reprompting the user. Subclasses that represent
+    unrecoverable conditions (for example
+    :class:`LanguageAgentDisabledError`) override
+    :attr:`default_recoverable` to ``False``.
+
+    Compatibility
+    -------------
+    Inherits from both :class:`DomainLanguageError` (structured diagnostics,
+    ``LanguageIssue`` payloads, JSON serialization, logging helpers) and
+    :class:`RuntimeError` (legacy catch semantics). Callers that already
+    ``except RuntimeError`` continue to work unchanged; callers that want
+    structured diagnostics call :meth:`to_dict` or inspect the
+    ``self.issue`` attribute.
+
+    Correlation context
+    -------------------
+    In addition to the standard ``LanguageIssue`` fields, instances carry
+    the agent's correlation context:
+
+    * ``trace_id``   — the pipeline trace identifier, when available;
+    * ``session_id`` — the dialogue/session identifier, when available;
+    * ``stage_name`` — the originating agent stage, when the failure is
+      stage-scoped.
+
+    These values are stored inside ``self.issue.details`` so that they
+    survive ``to_dict()`` / ``to_json()`` round-trips without requiring any
+    agent-specific (de)serialization logic. They are also exposed through
+    convenience properties.
+
+    Defaults
+    --------
+    * ``code``        : ``LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH``
+    * ``stage``       : ``LanguageStage.PIPELINE``
+    * ``category``    : ``ErrorCategory.PIPELINE_CONTRACT``
+    * ``severity``    : ``Severity.ERROR``
+    * ``module``      : ``"LanguageAgent"``
+    * ``recoverable`` : ``True``
+    """
+
+    domain_name = "language_agent.runtime"
+    default_code: LanguageErrorCode = LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH
+    default_stage: LanguageStage = LanguageStage.PIPELINE
+    default_category: ErrorCategory = ErrorCategory.PIPELINE_CONTRACT
+    default_severity: Severity = Severity.ERROR
+    default_module: Optional[str] = "LanguageAgent"
+    default_recoverable: bool = True
+
+    def __init__(
+        self,
+        issue: Union[LanguageIssue, str],
+        *,
+        code: Optional[Union[str, LanguageErrorCode]] = None,
+        stage: Optional[Union[str, LanguageStage]] = None,
+        category: Optional[Union[str, ErrorCategory]] = None,
+        severity: Optional[Union[str, Severity]] = None,
+        module: Optional[str] = None,
+        recoverable: Optional[bool] = None,
+        cause: Optional[BaseException] = None,
+        frame: Optional[LinguisticFrame] = None,
+        details: Optional[Dict[str, Any]] = None,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        stage_name: Optional[str] = None,
+        **issue_fields: Any,
+    ) -> None:
+        enriched_details: Dict[str, Any] = dict(details or {})
+        if trace_id is not None:
+            enriched_details.setdefault("trace_id", trace_id)
+        if session_id is not None:
+            enriched_details.setdefault("session_id", session_id)
+        if stage_name is not None:
+            enriched_details.setdefault("stage_name", stage_name)
+        super().__init__(
+            issue,
+            code=code,
+            stage=stage,
+            category=category,
+            severity=severity,
+            module=module,
+            recoverable=recoverable,
+            cause=cause,
+            frame=frame,
+            details=enriched_details,
+            **issue_fields,
+        )
+
+    # -- convenience accessors for the correlation context -----------------
+
+    @property
+    def trace_id(self) -> Optional[str]:
+        """Pipeline trace identifier, when supplied at construction time."""
+        return self.issue.details.get("trace_id")
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Dialogue/session identifier, when supplied at construction time."""
+        return self.issue.details.get("session_id")
+
+    @property
+    def stage_name(self) -> Optional[str]:
+        """Originating agent stage name, when the failure is stage-scoped."""
+        return self.issue.details.get("stage_name")
+
+    # -- structured construction -------------------------------------------
+
+    @classmethod
+    def from_exception(
+        cls,
+        cause: BaseException,
+        *,
+        message: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        stage_name: Optional[str] = None,
+        **overrides: Any,
+    ) -> "LanguageAgentRuntimeError":
+        """
+        Build a structured runtime error from an arbitrary exception.
+
+        The original exception is preserved as ``self.cause``. Subclasses
+        whose ``__init__`` requires additional keyword-only arguments should
+        override this classmethod to keep the same ergonomics.
+        """
+        return cls(
+            message or str(cause) or type(cause).__name__,
+            trace_id=trace_id,
+            session_id=session_id,
+            stage_name=stage_name,
+            cause=cause,
+            **overrides,
+        )
+
+
+class LanguageAgentConfigurationError(DomainLanguageError, ValueError):
+    """
+    Structured configuration-time failure raised by the ``LanguageAgent``.
+
+    Semantics
+    ---------
+    A ``LanguageAgentConfigurationError`` indicates that the agent's own
+    runtime configuration — loaded from ``agents_config.yaml`` under the
+    ``language_agent`` section — is missing, malformed, internally
+    inconsistent, or violates a declared constraint (numeric bounds, enum
+    membership, required keys).
+
+    By convention, configuration failures are **not recoverable**: the
+    agent cannot begin or continue work until the operator corrects the
+    configuration. This mirrors the semantics of
+    :class:`ConfigurationLanguageError`.
+
+    Compatibility
+    -------------
+    Inherits from both :class:`DomainLanguageError` and :class:`ValueError`,
+    so legacy ``except ValueError`` handlers continue to function.
+
+    Defaults
+    --------
+    * ``code``        : ``LanguageErrorCode.CONFIG_SCHEMA_INVALID``
+    * ``stage``       : ``LanguageStage.CONFIG``
+    * ``category``    : ``ErrorCategory.CONFIGURATION``
+    * ``severity``    : ``Severity.ERROR``
+    * ``module``      : ``"LanguageAgent"``
+    * ``recoverable`` : ``False``
+    """
+
+    domain_name = "language_agent.configuration"
+    default_code: LanguageErrorCode = LanguageErrorCode.CONFIG_SCHEMA_INVALID
+    default_stage: LanguageStage = LanguageStage.CONFIG
+    default_category: ErrorCategory = ErrorCategory.CONFIGURATION
+    default_severity: Severity = Severity.ERROR
+    default_module: Optional[str] = "LanguageAgent"
+    default_recoverable: bool = False
+
+    def __init__(
+        self,
+        issue: Union[LanguageIssue, str],
+        *,
+        code: Optional[Union[str, LanguageErrorCode]] = None,
+        stage: Optional[Union[str, LanguageStage]] = None,
+        category: Optional[Union[str, ErrorCategory]] = None,
+        severity: Optional[Union[str, Severity]] = None,
+        module: Optional[str] = None,
+        recoverable: Optional[bool] = None,
+        cause: Optional[BaseException] = None,
+        frame: Optional[LinguisticFrame] = None,
+        details: Optional[Dict[str, Any]] = None,
+        config_section: Optional[str] = None,
+        config_key: Optional[str] = None,
+        observed_value: Any = None,
+        expected_value: Any = None,
+        **issue_fields: Any,
+    ) -> None:
+        enriched_details: Dict[str, Any] = dict(details or {})
+        if config_section is not None:
+            enriched_details.setdefault("config_section", config_section)
+        if config_key is not None:
+            enriched_details.setdefault("config_key", config_key)
+        if observed_value is not None:
+            enriched_details.setdefault("observed_value", observed_value)
+        if expected_value is not None:
+            enriched_details.setdefault("expected_value", expected_value)
+        super().__init__(
+            issue,
+            code=code,
+            stage=stage,
+            category=category,
+            severity=severity,
+            module=module,
+            recoverable=recoverable,
+            cause=cause,
+            frame=frame,
+            details=enriched_details,
+            **issue_fields,
+        )
+
+    # -- convenience accessors ---------------------------------------------
+
+    @property
+    def config_section(self) -> Optional[str]:
+        """Configuration section the failure pertains to, when supplied."""
+        return self.issue.details.get("config_section")
+
+    @property
+    def config_key(self) -> Optional[str]:
+        """Configuration key the failure pertains to, when supplied."""
+        return self.issue.details.get("config_key")
+
+    @property
+    def observed_value(self) -> Any:
+        """The value as configured, when supplied."""
+        return self.issue.details.get("observed_value")
+
+    @property
+    def expected_value(self) -> Any:
+        """The value the constraint requires, when supplied."""
+        return self.issue.details.get("expected_value")
+
+
+# ---------------------------------------------------------------------------
+# Runtime specializations
+# ---------------------------------------------------------------------------
+
+
+class LanguageAgentDisabledError(LanguageAgentRuntimeError):
+    """
+    Raised when ``LanguageAgent.process`` is invoked while the agent is
+    disabled via ``language_agent.enabled = False``.
+
+    This is a lifecycle condition rather than an input or processing
+    failure; callers are expected to route around the agent (or enable it)
+    rather than retry the same request.
+    """
+
+    default_code: LanguageErrorCode = LanguageErrorCode.CONFIG_VALUE_INVALID
+    default_category: ErrorCategory = ErrorCategory.CONFIGURATION
+    default_severity: Severity = Severity.WARNING
+    default_recoverable: bool = False
+
+    def __init__(self, message: Optional[str] = None, **kwargs: Any) -> None:
+        super().__init__(
+            message or "LanguageAgent is disabled by configuration.",
+            **kwargs,
+        )
+
+
+class LanguageAgentInputTooLargeError(LanguageAgentRuntimeError):
+    """
+    Raised when user input exceeds ``language_agent.max_input_chars``.
+
+    The failure is user-recoverable: the caller may shorten the input and
+    resubmit. Both the observed and maximum lengths are preserved in
+    ``self.issue.details`` for telemetry and audit purposes.
+    """
+
+    default_code: LanguageErrorCode = LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH
+    default_category: ErrorCategory = ErrorCategory.USER_INPUT
+    default_severity: Severity = Severity.WARNING
+    default_recoverable: bool = True
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        *,
+        observed_length: Optional[int] = None,
+        max_length: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        details: Dict[str, Any] = dict(kwargs.pop("details", {}) or {})
+        if observed_length is not None:
+            details.setdefault("observed_length", int(observed_length))
+        if max_length is not None:
+            details.setdefault("max_length", int(max_length))
+        if message is None:
+            if observed_length is not None and max_length is not None:
+                message = (
+                    f"Input exceeds max_input_chars "
+                    f"({observed_length} > {max_length})."
+                )
+            else:
+                message = "Input exceeds configured max_input_chars."
+        super().__init__(message, details=details, **kwargs)
+
+
+class LanguageAgentStageExecutionError(LanguageAgentRuntimeError):
+    """
+    Raised when an agent pipeline stage fails under policy ``FAIL`` or
+    ``BLOCK``.
+
+    This class wraps the original processor exception (stored in
+    ``self.cause``) and preserves the stage name and policy that triggered
+    escalation. Under policy ``CONTINUE`` the original exception is logged
+    and the pipeline proceeds; this class is not raised in that case.
+    """
+
+    default_code: LanguageErrorCode = LanguageErrorCode.PIPELINE_STAGE_FAILED
+    default_severity: Severity = Severity.ERROR
+    default_recoverable: bool = False
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        *,
+        stage_name: Optional[str] = None,
+        policy: Optional[str] = None,
+        cause: Optional[BaseException] = None,
+        **kwargs: Any,
+    ) -> None:
+        details: Dict[str, Any] = dict(kwargs.pop("details", {}) or {})
+        if policy is not None:
+            details.setdefault("policy", str(policy))
+        if cause is not None:
+            details.setdefault("cause_type", type(cause).__name__)
+            details.setdefault("cause_message", str(cause))
+        if message is None:
+            if stage_name and policy:
+                message = (
+                    f"Pipeline stage '{stage_name}' failed "
+                    f"under policy '{policy}'."
+                )
+            elif stage_name:
+                message = f"Pipeline stage '{stage_name}' failed."
+            else:
+                message = "LanguageAgent pipeline stage execution failed."
+        super().__init__(
+            message,
+            stage_name=stage_name,
+            cause=cause,
+            details=details,
+            **kwargs,
+        )
+
+
+class LanguageAgentComponentError(LanguageAgentRuntimeError):
+    """
+    Raised when a required language component fails to initialize or is
+    discovered to be unusable at runtime.
+
+    Component errors are surfaced separately from stage execution errors so
+    that operators can distinguish between an initialisation-time contract
+    violation (bad factory, missing model file) and a runtime stage failure
+    on an otherwise healthy component.
+    """
+
+    default_code: LanguageErrorCode = LanguageErrorCode.MODEL_UNAVAILABLE
+    default_category: ErrorCategory = ErrorCategory.MODEL
+    default_severity: Severity = Severity.ERROR
+    default_recoverable: bool = False
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        *,
+        component_name: Optional[str] = None,
+        cause: Optional[BaseException] = None,
+        **kwargs: Any,
+    ) -> None:
+        details: Dict[str, Any] = dict(kwargs.pop("details", {}) or {})
+        if component_name is not None:
+            details.setdefault("component_name", component_name)
+        if cause is not None:
+            details.setdefault("cause_type", type(cause).__name__)
+            details.setdefault("cause_message", str(cause))
+        if message is None:
+            message = (
+                f"Language component '{component_name}' is unavailable."
+                if component_name
+                else "A required language component is unavailable."
+            )
+        super().__init__(message, cause=cause, details=details, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Configuration specializations
+# ---------------------------------------------------------------------------
+
+
+class LanguageAgentUnsupportedStageError(LanguageAgentConfigurationError):
+    """
+    Raised when ``language_agent.pipeline_order`` contains stage names that
+    are not members of :class:`StageName`.
+    """
+
+    default_code: LanguageErrorCode = LanguageErrorCode.CONFIG_VALUE_INVALID
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        *,
+        unknown_stages: Optional[Iterable[str]] = None,
+        supported_stages: Optional[Iterable[str]] = None,
+        **kwargs: Any,
+    ) -> None:
+        details: Dict[str, Any] = dict(kwargs.pop("details", {}) or {})
+        if unknown_stages is not None:
+            details.setdefault("unknown_stages", list(unknown_stages))
+        if supported_stages is not None:
+            details.setdefault("supported_stages", list(supported_stages))
+        if message is None:
+            if unknown_stages:
+                message = f"Unsupported pipeline stage(s): {list(unknown_stages)}"
+            else:
+                message = "One or more configured pipeline stages are unsupported."
+        super().__init__(
+            message,
+            config_section="language_agent",
+            config_key="pipeline_order",
+            details=details,
+            **kwargs,
+        )
+
+
+class LanguageAgentUnsupportedPolicyError(LanguageAgentConfigurationError):
+    """
+    Raised when ``language_agent.stage_failure_policy`` contains stage keys
+    that are not members of :class:`StageName`.
+    """
+
+    default_code: LanguageErrorCode = LanguageErrorCode.CONFIG_VALUE_INVALID
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        *,
+        policy_key: Optional[str] = None,
+        supported_keys: Optional[Iterable[str]] = None,
+        **kwargs: Any,
+    ) -> None:
+        details: Dict[str, Any] = dict(kwargs.pop("details", {}) or {})
+        if policy_key is not None:
+            details.setdefault("policy_key", policy_key)
+        if supported_keys is not None:
+            details.setdefault("supported_keys", list(supported_keys))
+        if message is None:
+            message = (
+                f"Unsupported stage_failure_policy key: {policy_key}"
+                if policy_key
+                else "Unsupported stage_failure_policy key."
+            )
+        super().__init__(
+            message,
+            config_section="language_agent",
+            config_key="stage_failure_policy",
+            details=details,
+            **kwargs,
+        )
+
+
+class LanguageAgentInvalidValueError(LanguageAgentConfigurationError):
+    """
+    Raised when a numeric or boolean ``language_agent`` configuration value
+    violates its declared constraint (sign, range, or positivity).
+    """
+
+    default_code: LanguageErrorCode = LanguageErrorCode.CONFIG_VALUE_INVALID
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        *,
+        config_key: Optional[str] = None,
+        observed_value: Any = None,
+        constraint: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        details: Dict[str, Any] = dict(kwargs.pop("details", {}) or {})
+        if constraint is not None:
+            details.setdefault("constraint", constraint)
+        if message is None:
+            if config_key and constraint:
+                message = (
+                    f"Invalid value for {config_key}: "
+                    f"constraint '{constraint}' is violated."
+                )
+            elif config_key:
+                message = f"Invalid configuration value for {config_key}."
+            else:
+                message = "Invalid LanguageAgent configuration value."
+        super().__init__(
+            message,
+            config_section="language_agent",
+            config_key=config_key,
+            observed_value=observed_value,
+            expected_value=constraint,
+            details=details,
+            **kwargs,
+        )
+
+
+class LanguageAgentUnknownComponentError(LanguageAgentConfigurationError):
+    """
+    Raised when ``language_agent.component_init_order`` references an
+    initializer that the agent does not recognise.
+    """
+
+    default_code: LanguageErrorCode = LanguageErrorCode.CONFIG_VALUE_INVALID
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        *,
+        component_name: Optional[str] = None,
+        known_components: Optional[Iterable[str]] = None,
+        **kwargs: Any,
+    ) -> None:
+        details: Dict[str, Any] = dict(kwargs.pop("details", {}) or {})
+        if component_name is not None:
+            details.setdefault("component_name", component_name)
+        if known_components is not None:
+            details.setdefault("known_components", list(known_components))
+        if message is None:
+            message = (
+                f"Unknown language component initializer: {component_name}"
+                if component_name
+                else "Unknown language component initializer."
+            )
+        super().__init__(
+            message,
+            config_section="language_agent",
+            config_key="component_init_order",
+            details=details,
+            **kwargs,
+        )
+
+__all__ = [
+    # Re-exported frame types (previously pulled in via `import *`)
+    "LinguisticFrame",
+    "SpeechActType",
+    # Enums
+    "Severity",
+    "LanguageStage",
+    "ErrorCategory",
+    "LanguageErrorCode",
+    # Type aliases
+    "Span",
+    # Diagnostics dataclasses
+    "LanguageIssue",
+    "LanguageDiagnostics",
+    "LanguageResult",
+    # Exception base classes
+    "LanguageError",
+    "DomainLanguageError",
+    # Issue subclasses
+    "OrthographyIssue",
+    "TokenizationIssue",
+    "NLPIssue",
+    "DependencyIssue",
+    "GrammarIssue",
+    "NLUIssue",
+    "ContextIssue",
+    "NLGIssue",
+    "ConfigurationIssue",
+    "ResourceIssue",
+    "ModelIssue",
+    "CacheIssue",
+    # Domain errors
+    "OrthographyError",
+    "TokenizationError",
+    "NLPError",
+    "DependencyError",
+    "GrammarError",
+    "NLUError",
+    "ContextError",
+    "NLGError",
+    "ConfigurationLanguageError",
+    "ResourceLanguageError",
+    "ModelLanguageError",
+    "CacheLanguageError",
+    "PipelineContractError",
+    # Specialized NLG errors
+    "NLGFillingError",
+    "NLGValidationError",
+    "TemplateNotFoundError",
+    "NLGGenerationError",
+    # Runtime errors
+    "LanguageAgentRuntimeError",
+    "LanguageAgentConfigurationError",
+    # Factory
+    "make_issue",
+]
