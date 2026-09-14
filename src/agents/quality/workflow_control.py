@@ -17,13 +17,13 @@ from threading import RLock
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.quality_error import (DataQualityError, QualityErrorType, QualitySeverity,
-                                  QualityMemoryError, normalize_quality_exception)
+from .utils.quality_error import *
+from .utils.quality_helpers import *
 from .quality_memory import QualityMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Workflow Control")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 ERR_CONFIG_INVALID = getattr(QualityErrorType, "CONFIGURATION_INVALID", QualityErrorType.POLICY_THRESHOLD_INVALID)
 ERR_ROUTING_FAILED = getattr(QualityErrorType, "ROUTING_FAILED", QualityErrorType.REMEDIATION_FAILED)
@@ -1027,12 +1027,18 @@ class WorkflowControl:
             source_reliability = 0.5
             if hasattr(self.memory, "latest_source_reliability"):
                 latest_reliability = self.memory.latest_source_reliability(decision["source_id"])
-                if isinstance(latest_reliability, Mapping) and latest_reliability.get("reliability") is not None:
-                    source_reliability = float(latest_reliability.get("reliability"))
+                if isinstance(latest_reliability, Mapping):
+                    reliability_value = latest_reliability.get("reliability")
+                    if reliability_value is not None:
+                        source_reliability = float(reliability_value)
                 elif hasattr(self.memory, "default_source_reliability"):
-                    source_reliability = float(getattr(self.memory, "default_source_reliability"))
+                    default_reliability = getattr(self.memory, "default_source_reliability")
+                    if default_reliability is not None:
+                        source_reliability = float(default_reliability)
             elif hasattr(self.memory, "default_source_reliability"):
-                source_reliability = float(getattr(self.memory, "default_source_reliability"))
+                default_reliability = getattr(self.memory, "default_source_reliability")
+                if default_reliability is not None:
+                    source_reliability = float(default_reliability)
 
             self.memory.record_quality_snapshot(
                 source_id=decision["source_id"],
@@ -1267,6 +1273,15 @@ class WorkflowControl:
         if isinstance(value, (list, tuple, set)):
             return [self._safe_value(item) for item in value]
         return str(value)
+
+
+__all__ = [
+    "WorkflowControl",
+    "WorkflowDecision",
+    "RemediationPlan",
+    "RouteRecord",
+    "QuarantineEntry",
+]
 
 
 if __name__ == "__main__":
