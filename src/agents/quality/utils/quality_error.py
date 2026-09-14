@@ -12,7 +12,9 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from threading import RLock
-from typing import Any, Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, TypeVar
+
+TEnum = TypeVar("TEnum", bound=Enum)
 
 
 class QualitySeverity(str, Enum):
@@ -312,7 +314,7 @@ _SINKS_LOCK = RLock()
 _MAX_TEXT_LENGTH = 4096
 
 
-def _coerce_enum(value: Any, enum_cls: type[Enum], default: Enum) -> Enum:
+def _coerce_enum(value: Any, enum_cls: type[TEnum], default: TEnum) -> TEnum:
     if isinstance(value, enum_cls):
         return value
     if isinstance(value, str):
@@ -1032,3 +1034,27 @@ def normalize_quality_exception(
         remediation=remediation or "Retry with backoff, preserve the failed payload, and escalate to Handler if the failure persists.",
         cause=exc,
     )
+
+
+__all__ = [
+    "QualitySeverity",
+    "QualityDomain",
+    "QualityStage",
+    "QualityDisposition",
+    "QualityErrorType",
+    "DataQualityError",
+    "DataQualityErrorGroup",
+    "SchemaValidationError",
+    "RequiredFieldError",
+    "ThresholdConfigurationError",
+    "QualityMemoryError",
+    "DriftThresholdError",
+    "ProvenanceTrustError",
+    "QuarantineOperationError",
+    "RemediationExecutionError",
+    "_infer_error_type",
+    "quality_error_boundary",
+    "normalize_quality_exception",
+    "set_quality_audit_sink",
+    "set_quality_metrics_sink",
+]
