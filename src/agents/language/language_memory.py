@@ -41,7 +41,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Type, TypeVar, Set, Tuple, Union
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.linguistic_frame import LinguisticFrame, SpeechActType
