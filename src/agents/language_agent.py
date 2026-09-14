@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.3.0"
 
 """
 Production-ready Language Agent.
@@ -229,14 +229,6 @@ class LanguageAgentResponse:
             "grammar_ok": self.grammar_ok,
             "metadata": json_safe(self.metadata),
         }
-
-
-class LanguageAgentRuntimeError(RuntimeError):
-    """Recoverable language-agent runtime failure."""
-
-
-class LanguageAgentConfigurationError(ValueError):
-    """Language-agent configuration failure."""
 
 
 class LanguageAgent(BaseAgent):
@@ -761,11 +753,11 @@ class LanguageAgent(BaseAgent):
                 )
             elif callable(getattr(self.dialogue_context, "record_pipeline_turn", None)):
                 self.dialogue_context.record_pipeline_turn(
-                    user_text=user_text,
-                    agent_text=response_text,
+                    user_input=user_text,
+                    agent_response=response_text,
                     frame=frame,
                     grammar_result=grammar_result,
-                    trace_id=trace.trace_id,
+                    metadata={"trace_id": trace.trace_id},
                 )
             else:
                 self._context_message("agent", response_text)
@@ -870,8 +862,15 @@ class LanguageAgent(BaseAgent):
             "nlg_engine": hasattr(self, "nlg_engine"),
             "safety_guard": hasattr(self, "safety_guard"),
         }
+
+        healthy = bool(self.enabled and all(components.values()))
+
         return {
-            "ok": all(components.values()),
+            # Backward-compatible legacy signal.
+            "ok": healthy,
+
+            # Canonical SLAI/BIMAP operational-health signal.
+            "health": "healthy" if healthy else "degraded",
             "version": __version__,
             "enabled": self.enabled,
             "uptime_seconds": round(time_module.time() - self.started_at, 3),
@@ -959,7 +958,10 @@ class LanguageAgent(BaseAgent):
         getter = getattr(self.dialogue_context, "get_time_since_last_interaction", None)
         if callable(getter):
             try:
-                if getter() > self.session_timeout_seconds and callable(getattr(self.dialogue_context, "clear", None)):
+                elapsed_seconds = getter()
+                if isinstance(elapsed_seconds, (int, float)) and elapsed_seconds > self.session_timeout_seconds and callable(
+                    getattr(self.dialogue_context, "clear", None)
+                ):
                     self.dialogue_context.clear()
                     trace.warn("Dialogue context was cleared after session timeout.")
             except Exception as exc:
