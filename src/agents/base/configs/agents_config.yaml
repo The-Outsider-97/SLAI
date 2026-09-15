@@ -634,7 +634,42 @@ perception_agent:
 planning_agent: {}
 
 
-privacy_agent: {}
+privacy_agent:
+  enabled: true
+  fail_closed_on_subsystem_error: true
+  include_evidence_bundle: true
+  include_sanitized_payload_on_block: false
+
+  default_policy_id: "privacy-runtime-policy"
+  default_policy_version: "v1"
+  default_source_context: "runtime"
+  default_destination_context: "runtime"
+  default_action: "process"
+  default_purpose: "general_processing"
+  default_retention_days: 30
+
+  # Agent-owned orchestration labels. Subsystem stage labels stay in
+  # privacy_config.yaml and are not duplicated here.
+  post_minimization_stage: "privacy_agent.post_minimization_identification"
+  runtime_gate_stage: "privacy_agent.runtime_gate"
+  evidence_bundle_name: "privacy_runtime_bundle"
+
+  # SLAI SharedMemory publication. This is NOT privacy_memory.py.
+  shared_memory:
+    enabled: true
+    publish_notifications: true
+    ttl_seconds: 86400
+
+    # Detailed stage evidence can contain detector previews/path metadata and is
+    # therefore excluded from SharedMemory by default.
+    include_stage_evidence: false
+    include_sanitized_payload: false
+    include_evidence_bundle: false
+
+    result_key_prefix: "privacy_agent.result"
+    summary_key_prefix: "privacy_agent.summary"
+    error_key_prefix: "privacy_agent.error"
+    event_channel: "privacy.events"
 
 
 qnn_agent:
