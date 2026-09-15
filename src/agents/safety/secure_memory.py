@@ -28,7 +28,7 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 logger = get_logger("Secure Memory")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 CHECKPOINT_SCHEMA_VERSION = "secure_memory.checkpoint.v3"
 ENTRY_SCHEMA_VERSION = "secure_memory.entry.v3"
 AUDIT_SCHEMA_VERSION = "secure_memory.audit.v2"

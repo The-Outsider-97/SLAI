@@ -31,7 +31,7 @@ from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissi
 logger = get_logger("Security Attention Monitor")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 ANALYSIS_SCHEMA_VERSION = "attention_monitor.analysis.v3"
 ASSESSMENT_SCHEMA_VERSION = "attention_monitor.security_assessment.v2"
 EPSILON = 1e-12
@@ -802,6 +802,15 @@ class AttentionAdapter:
             )
         return self.monitor.analyze_attention(prepared.to(self.monitor.device), context=context or {"source": "attention_adapter"})
 
+__all__ = [
+    "ANALYSIS_SCHEMA_VERSION",
+    "EPSILON",
+    "AttentionTensorSummary",
+    "AttentionSecurityAssessment",
+    "AttentionAnalysisResult",
+    "AttentionMonitor",
+    "AttentionAdapter",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Attention Monitor ===\n")

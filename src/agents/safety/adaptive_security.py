@@ -33,7 +33,7 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 logger = get_logger("Adaptive Security System")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 ANALYSIS_SCHEMA_VERSION = "adaptive_security.analysis.v3"
 SUPPLY_CHAIN_SCHEMA_VERSION = "adaptive_security.supply_chain.v2"
 
@@ -1108,6 +1108,14 @@ class AdaptiveSecurity:
                 raise AuditLogFailureError(logging_target="secure_memory.adaptive_analysis", failure_mode=type(exc).__name__, component="adaptive_security", cause=exc) from exc
             logger.warning("Adaptive analysis memory store failed: %s", safe_log_payload("adaptive_memory_store_failed", {"error_type": type(exc).__name__}))
 
+__all__ = [
+    "ANALYSIS_SCHEMA_VERSION",
+    "SUPPLY_CHAIN_SCHEMA_VERSION",
+    "AdaptiveAnalysisResult",
+    "RateLimitDecision",
+    "SupplyChainCheckResult",
+    "AdaptiveSecurity",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Adaptive Security ===\n")

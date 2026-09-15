@@ -38,7 +38,7 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 logger = get_logger("Security Compliance Checker")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 EVALUATION_SCHEMA_VERSION = "compliance_checker.evaluation.v3"
 REPORT_SCHEMA_VERSION = "compliance_checker.report.v2"
 
@@ -953,6 +953,12 @@ class ComplianceChecker:
                     configured_paths[Path(model_name).name] = str(model_dir / Path(model_name).name)
         return {str(name): self._resolve_path(path) or Path(str(path)) for name, path in configured_paths.items()}
 
+__all__ = [
+    "EvidenceItem",
+    "ControlEvaluation",
+    "SectionEvaluation",
+    "ComplianceChecker",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Compliance Checker ===\n")

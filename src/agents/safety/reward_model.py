@@ -43,7 +43,7 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 logger = get_logger("Security Reward Model")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 EVALUATION_SCHEMA_VERSION = "reward_model.evaluation.v3"
 FEEDBACK_SCHEMA_VERSION = "reward_model.feedback.v2"
 REPORT_SCHEMA_VERSION = "reward_model.report.v3"
@@ -1043,6 +1043,15 @@ class RewardModel:
             logger.warning("Reward memory recall failed: %s", safe_log_payload("reward_memory_recall_failed", {"tag": tag, "error": str(exc)}))
             return []
 
+__all__ = [
+    "EVALUATION_SCHEMA_VERSION",
+    "FEEDBACK_SCHEMA_VERSION",
+    "REPORT_SCHEMA_VERSION",
+    "RewardComponent",
+    "RewardEvaluation",
+    "FeedbackTrainingSummary",
+    "RewardModel",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Reward Model ===\n")

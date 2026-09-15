@@ -26,7 +26,7 @@ import re
 
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
-from typing import Any, DefaultDict, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
+from typing import Any, DefaultDict, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union, cast
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.security_error import *
@@ -37,7 +37,7 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 logger = get_logger("SLAI System-Theoretic Process Analysis")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 SCOPE_SCHEMA_VERSION = "secure_stpa.scope.v2"
 UCA_SCHEMA_VERSION = "secure_stpa.uca.v2"
 CONTEXT_SCHEMA_VERSION = "secure_stpa.context.v2"
@@ -369,8 +369,8 @@ class SecureSTPA:
 
     def model_control_structure(
         self,
-        structure: Dict[str, Dict[str, List[str]]],
-        process_models: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        structure: Mapping[str, Mapping[str, Any]],
+        process_models: Optional[Mapping[str, Mapping[str, Any]]] = None,
     ) -> None:
         """
         Model the control structure.
@@ -429,7 +429,9 @@ class SecureSTPA:
                 "authority_level": normalize_text(raw_data.get("authority_level", "nominal"), max_length=128, lowercase=True),
                 "safe_states": self._normalize_optional_list(raw_data.get("safe_states", self._cfg("sos.default_safe_states", ["SAFE", "NORMAL"])), max_items_key="max_states", max_length=128),
                 "unsafe_states": self._normalize_optional_list(raw_data.get("unsafe_states", []), max_items_key="max_states", max_length=128),
-                "metadata": redact_value(dict(raw_data.get("metadata", {}))) if isinstance(raw_data.get("metadata", {}), Mapping) else {},
+                "metadata": redact_value(
+                    dict(cast(Mapping[Any, Any], raw_data.get("metadata", {})))
+                ) if isinstance(raw_data.get("metadata", {}), Mapping) else {},
             }
 
         normalized_process_models: DefaultDict[str, Dict[str, Any]] = defaultdict(dict)
@@ -493,7 +495,11 @@ class SecureSTPA:
                         risk_level=categorize_risk(risk),
                         decision=self._risk_decision(risk),
                         rationale=rationale,
-                        indicators=indicators,
+                        indicators=self._normalize_optional_list(
+                            indicators,
+                            max_items_key="max_indicators",
+                            max_length=512,
+                        ),
                     )
                     uca_dict = uca.to_dict()
                     self.uca_table.append(uca_dict)
@@ -644,7 +650,6 @@ class SecureSTPA:
                 "Transition references unknown component.",
                 expected_state="known component in control structure",
                 actual_state=normalized_component,
-                component="secure_stpa",
             )
         current = normalize_text(self.component_states[normalized_component].get("current", "INIT"), max_length=128)
         source_state = normalize_text(from_state or current, max_length=128)
@@ -734,7 +739,6 @@ class SecureSTPA:
                 "Secure STPA analysis contains consistency issues.",
                 expected_state="no orphaned or missing analysis artifacts",
                 actual_state=stable_json(result),
-                component="secure_stpa",
             )
         return result
 
@@ -797,7 +801,6 @@ class SecureSTPA:
                 "STPA scope must be defined before identifying unsafe control actions.",
                 expected_state="scope defined",
                 actual_state="scope missing",
-                component="secure_stpa",
             )
         self._require_control_structure()
 
@@ -808,7 +811,6 @@ class SecureSTPA:
                 "Control structure must be modeled before this STPA operation.",
                 expected_state="control structure modeled",
                 actual_state="control structure missing",
-                component="secure_stpa",
             )
 
     def _determine_hazard_link(self, controller: str, action: str, guideword: str, *, include_details: bool = False) -> Union[str, Tuple[str, str, List[str]]]:
@@ -819,7 +821,6 @@ class SecureSTPA:
                 "No hazards are available for hazard linking.",
                 expected_state="non-empty hazards list",
                 actual_state="empty hazards list",
-                component="secure_stpa",
             )
 
         query = f"{controller} {action} {guideword}"
@@ -1300,6 +1301,17 @@ class SecureSTPA:
             factors.append("Trust boundary validation failure")
         return dedupe_preserve_order(factors)[: self._max_items("max_causal_factors", 50)]
 
+__all__ = [
+    "SCOPE_SCHEMA_VERSION",
+    "UCA_SCHEMA_VERSION",
+    "CONTEXT_SCHEMA_VERSION",
+    "SCENARIO_SCHEMA_VERSION",
+    "STPAScope",
+    "UnsafeControlAction",
+    "ContextTableEntry",
+    "LossScenario",
+    "SecureSTPA",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Secure STPA ===\n")

@@ -39,7 +39,7 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 logger = get_logger("Safety Guard")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 ANALYSIS_SCHEMA_VERSION = "safety_guard.analysis.v3"
 REPORT_SCHEMA_VERSION = "safety_guard.report.v2"
 
@@ -235,6 +235,9 @@ class SafetyGuard:
                 },
             ),
         )
+
+    def scrub(self, value = None):
+        pass
 
     # ------------------------------------------------------------------
     # Configuration and resource loading
@@ -1085,6 +1088,14 @@ class SafetyGuard:
             "```",
         ])
 
+__all__ = [
+    "ANALYSIS_SCHEMA_VERSION",
+    "REPORT_SCHEMA_VERSION",
+    "GuardPattern",
+    "GuardFinding",
+    "SafetyAnalysis",
+    "SafetyGuard",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Safety Guard ===\n")

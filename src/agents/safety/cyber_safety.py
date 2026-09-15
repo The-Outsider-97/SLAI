@@ -44,7 +44,7 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 logger = get_logger("SLAI Cyber Safety Module")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 ANALYSIS_SCHEMA_VERSION = "cyber_safety.analysis.v3"
 EVENT_SCHEMA_VERSION = "cyber_safety.event.v2"
 THREAT_SCHEMA_VERSION = "cyber_safety.threat.v2"
@@ -1086,6 +1086,14 @@ class CyberSafetyModule:
             if coerce_bool(get_nested(self.cyber_config, "memory.fail_closed_on_store_error", False), False):
                 raise AuditLogFailureError(logging_target="secure_memory.cyber_safety", failure_mode=f"Failed to store {analysis_type}: {type(exc).__name__}", component="cyber_safety", cause=exc) from exc
 
+__all__ = [
+    "CyberFinding",
+    "CyberAnalysisResult",
+    "EventAnalysisResult",
+    "RunningStatistic",
+    "ThreatAssessmentResult",
+    "CyberSafetyModule",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Cyber Safety ===\n")
