@@ -4,6 +4,7 @@ from .data_minimization import *
 from .data_retention import *
 from .privacy_auditability import *
 from .privacy_memory import *
+from .modules import *
 
 
 from .data_consent import __all__ as _data_consent_exports
@@ -12,6 +13,7 @@ from .data_minimization import __all__ as data_minimization__exports
 from .data_retention import __all__ as _data_retention_exports
 from .privacy_auditability import __all__ as _privacy_auditability_exports
 from .privacy_memory import __all__ as _privacy_memory_exports
+from .modules import __all__ as _privacy_modules_exports
 
 
 __all__ = [
@@ -21,4 +23,5 @@ __all__ = [
    *_data_retention_exports,
    *_privacy_auditability_exports,
    *_privacy_memory_exports,
+   *_privacy_modules_exports,
 ] # type: ignore
