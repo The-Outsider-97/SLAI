@@ -650,48 +650,323 @@ qnn_agent:
 
 
 quality_agent:
+  enabled: true
+  default_window: latest
+
+  # Core orchestration
+  stop_on_blocking_structural: true
+  fail_closed_on_subsystem_error: true
+  auto_route_via_workflow: true
+  prefer_workflow_verdict: true
+  allow_workflow_verdict_relaxation: false
+  include_workflow_findings_in_summary: true
+  include_record_previews_in_shared_memory: false
+  max_shared_record_preview: 5
+
+  # Fallback agent-level policy. When intelligence.use_fitness_policy=true,
+  # the active fitness profile supplies thresholds/weights per evaluation.
+  pass_threshold: 0.90
+  warn_threshold: 0.75
+
+  # Aggregation/reporting order. Structural still executes first. With quality
+  # intelligence enabled, SemanticQuality runs before StatisticalQuality because
+  # trusted-baseline promotion needs provenance/source-reliability evidence.
+  subsystem_order:
+    - structural
+    - statistical
+    - semantic
+
+  subsystem_weights:
+    structural: 0.34
+    statistical: 0.33
+    semantic: 0.33
+
+  bridge_resolution:
+    resolve_handler_from_factory: false
+    resolve_safety_from_factory: false
+    handler_factory_names:
+      - handler_agent
+      - handler
+      - HandlerAgent
+    safety_factory_names:
+      - safety_agent
+      - safety
+      - SafetyAgent
+
+  shared_memory:
     enabled: true
-    default_window: latest
-    stop_on_blocking_structural: true
-    fail_closed_on_subsystem_error: true
-    auto_route_via_workflow: true
-    prefer_workflow_verdict: true
-    include_workflow_findings_in_summary: true
-    include_record_previews_in_shared_memory: false
-    max_shared_record_preview: 5
-    pass_threshold: 0.90
-    warn_threshold: 0.75
+    ttl_seconds: 86400
+    publish_notifications: true
+    result_key_prefix: quality_agent.result
+    summary_key_prefix: quality_agent.summary
+    error_key_prefix: quality_agent.error
+    event_channel: quality.events
 
-    subsystem_order:
-        - structural
-        - statistical
-        - semantic
+  # -----------------------------------------------------------------------
+  # Agent-owned intelligence configuration.
+  # These sections are injected into src/agents/quality/modules/*.py.
+  # The intelligence modules MUST NOT read quality_config.yaml themselves.
+  # -----------------------------------------------------------------------
+  intelligence:
+    enabled: true
+    use_fitness_policy: true
 
-    subsystem_weights:
-        structural: 0.34
-        statistical: 0.33
-        semantic: 0.33
+    relationship_integration:
+      enabled: true
+      weight: 0.15
+      apply_score_when_baseline_unavailable: false
+      fail_closed_on_error: false
 
-    bridge_resolution:
-        resolve_handler_from_factory: false
-        resolve_safety_from_factory: false
-        handler_factory_names:
-            - handler_agent
-            - handler
-            - HandlerAgent
-        safety_factory_names:
-            - safety_agent
-            - safety
-            - SafetyAgent
+    # Monotonic dispositions: these can only make the final QualityAgent
+    # posture more conservative, never less conservative.
+    policy_enforcement:
+      source_reliability_failure: warn
+      trusted_baseline_missing: warn
+      required_check_missing: warn
+      insufficient_evidence: warn
 
-    shared_memory:
-        enabled: true
-        ttl_seconds: 86400
-        publish_notifications: true
-        result_key_prefix: quality_agent.result
-        summary_key_prefix: quality_agent.summary
-        error_key_prefix: quality_agent.error
-        event_channel: quality.events
+    fitness_policy:
+      enabled: true
+      default_profile: general
+      allow_runtime_overrides: false
+      allow_runtime_relaxation: false
+      allow_weight_overrides: false
+
+      use_case_profiles:
+        general: general
+        knowledge_ingestion: knowledge_ingestion
+        training: training
+        replay: replay
+        inference_context: inference_context
+        memory_write: memory_write
+
+      profiles:
+        general:
+          use_case: general
+          pass_threshold: 0.90
+          warn_threshold: 0.75
+          subsystem_weights:
+            structural: 0.34
+            statistical: 0.33
+            semantic: 0.33
+          required_checks:
+            - schema
+            - provenance
+          hard_block_error_types:
+            - privacy_policy_conflict
+          min_source_reliability: 0.50
+          require_trusted_baseline: false
+          baseline_bootstrap_allowed: true
+          minimum_evidence_strength: moderate
+
+        knowledge_ingestion:
+          use_case: knowledge_ingestion
+          pass_threshold: 0.91
+          warn_threshold: 0.78
+          subsystem_weights:
+            structural: 0.34
+            statistical: 0.26
+            semantic: 0.40
+          required_checks:
+            - schema
+            - provenance
+            - consistency
+          hard_block_error_types:
+            - provenance_untrusted
+            - privacy_policy_conflict
+          min_source_reliability: 0.65
+          require_trusted_baseline: false
+          baseline_bootstrap_allowed: true
+          minimum_evidence_strength: moderate
+
+        training:
+          use_case: training
+          pass_threshold: 0.94
+          warn_threshold: 0.82
+          subsystem_weights:
+            structural: 0.30
+            statistical: 0.30
+            semantic: 0.40
+          required_checks:
+            - schema
+            - leakage
+            - provenance
+            - drift
+            - relationship_drift
+          hard_block_error_types:
+            - leakage_detected
+            - provenance_untrusted
+            - privacy_policy_conflict
+          min_source_reliability: 0.75
+          require_trusted_baseline: true
+          baseline_bootstrap_allowed: false
+          minimum_evidence_strength: strong
+
+        replay:
+          use_case: replay
+          pass_threshold: 0.92
+          warn_threshold: 0.80
+          subsystem_weights:
+            structural: 0.32
+            statistical: 0.34
+            semantic: 0.34
+          required_checks:
+            - schema
+            - duplicates
+            - drift
+            - provenance
+          hard_block_error_types:
+            - leakage_detected
+            - privacy_policy_conflict
+          min_source_reliability: 0.70
+          require_trusted_baseline: true
+          baseline_bootstrap_allowed: false
+          minimum_evidence_strength: strong
+
+        inference_context:
+          use_case: inference_context
+          pass_threshold: 0.92
+          warn_threshold: 0.80
+          subsystem_weights:
+            structural: 0.32
+            statistical: 0.25
+            semantic: 0.43
+          required_checks:
+            - schema
+            - provenance
+            - consistency
+          hard_block_error_types:
+            - provenance_untrusted
+            - privacy_policy_conflict
+          min_source_reliability: 0.70
+          require_trusted_baseline: false
+          baseline_bootstrap_allowed: false
+          minimum_evidence_strength: strong
+
+        memory_write:
+          use_case: memory_write
+          pass_threshold: 0.93
+          warn_threshold: 0.82
+          subsystem_weights:
+            structural: 0.35
+            statistical: 0.25
+            semantic: 0.40
+          required_checks:
+            - schema
+            - provenance
+            - consistency
+          hard_block_error_types:
+            - provenance_untrusted
+            - privacy_policy_conflict
+          min_source_reliability: 0.75
+          require_trusted_baseline: false
+          baseline_bootstrap_allowed: false
+          minimum_evidence_strength: strong
+
+    baseline_governance:
+      enabled: true
+      metric_name: dataset_profile
+      min_stable_batches: 3
+      min_source_reliability: 0.70
+      allowed_structural_verdicts:
+        - pass
+      allowed_semantic_verdicts:
+        - pass
+        - warn
+      max_quality_score_delta: 0.08
+      max_baseline_age_seconds: 2592000
+      trust_explicit_baseline: false
+      require_schema_match: true
+      persist_trusted_baselines: true
+
+      # Compatibility with the current QualityMemory public API.
+      allow_export_state_fallback: true
+
+      # Do not silently trust baselines created by the old auto-register path.
+      accept_legacy_baselines: false
+
+      # Required if min_stable_batches > 1 and QualityMemory is expected to
+      # supply historical evidence for candidate promotion.
+      use_memory_snapshot_history: true
+      history_limit: 12
+
+    relationship_quality:
+      enabled: true
+      profile_metric_name: relationship_profile
+
+      # Bounds O(p^2) relationship evaluation.
+      max_numeric_fields: 30
+      min_pair_observations: 20
+
+      # Effect-size thresholds.
+      min_absolute_baseline_correlation: 0.20
+      warn_correlation_delta: 0.20
+      block_correlation_delta: 0.40
+      warn_missingness_delta: 0.20
+      block_missingness_delta: 0.40
+
+      # Significance supports an effect-size decision; significance alone
+      # never creates a block.
+      significance_alpha: 0.05
+      require_statistical_support_for_block: true
+
+      pass_threshold: 0.90
+      warn_threshold: 0.75
+
+      exclude_fields:
+        - record_id
+        - id
+        - row_id
+        - sample_id
+        - uuid
+        - created_at
+        - updated_at
+        - timestamp
+        - batch_id
+        - source_id
+
+      remediation_actions:
+        warn:
+          - review_feature_relationships
+          - compare_recent_batches
+          - review_upstream_transformations
+        block:
+          - quarantine_relationship_shifted_batch
+          - revalidate_upstream_transformations
+          - rebuild_trusted_baseline
+          - review_feature_engineering
+
+    evidence_calibration:
+      enabled: true
+      confidence_level: 0.95
+      sample_support_scale: 50.0
+
+      component_weights:
+        sample_support: 0.30
+        coverage: 0.20
+        baseline_trust: 0.20
+        source_reliability: 0.15
+        detector_agreement: 0.15
+
+      strength_thresholds:
+        weak: 0.35
+        moderate: 0.55
+        strong: 0.75
+        very_strong: 0.90
+
+      baseline_trust_scores:
+        not_applicable: 1.00
+        unestablished: 0.00
+        rejected: 0.00
+        candidate: 0.35
+        stale: 0.30
+        superseded: 0.20
+        trusted: 0.90
+        active: 1.00
+
+      batch_aggregation:
+        mean_weight: 0.70
+        minimum_weight: 0.30
 
 
 reader_agent:
