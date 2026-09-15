@@ -285,3 +285,172 @@ privacy_memory:
   max_redaction_history: 100
   max_lineage_parents: 20
   deletion_grace_period_seconds: 0
+
+residual_exposure:
+  enabled: true
+  strict_mode: true
+  default_decision_stage: "residual_exposure.runtime_gate"
+
+  # Compatibility switch. Keep false until DataID explicitly returns
+  # scan_complete on every classification result.
+  require_explicit_scan_completeness: false
+
+  block_on_critical_residual: true
+  block_on_incomplete_post_scan: true
+  escalate_on_high_residual: true
+  escalate_on_under_redaction: true
+  modify_on_over_redaction: true
+
+  max_findings: 100
+  max_required_fields: 200
+  high_residual_saturation_count: 3
+
+  critical_severities:
+    - critical
+
+  high_severities:
+    - high
+    - critical
+
+  coverage_severities:
+    - high
+    - critical
+
+  direct_identifier_categories:
+    - direct_identifier
+    - government_identifier
+    - financial_identifier
+    - credential
+
+  thresholds:
+    max_post_sensitivity_allow: 0.20
+    min_exposure_reduction: 0.50
+    min_transformation_coverage: 0.90
+    min_required_field_preservation: 1.00
+    max_removal_ratio: 0.90
+
+  risk_weights:
+    post_sensitivity: 0.35
+    critical_residual: 0.25
+    high_residual: 0.15
+    coverage_gap: 0.15
+    scan_uncertainty: 0.10
+
+
+privacy_flow_analyzer:
+  enabled: true
+  strict_mode: true
+  default_decision_stage: "flow.runtime_gate"
+
+  block_on_post_deletion_processing: true
+  block_on_unauthorized_destination: false
+  escalate_on_unauthorized_destination: true
+  escalate_on_purpose_drift: true
+  escalate_on_context_cycle: false
+
+  max_events: 500
+  max_findings: 100
+  max_authorized_contexts: 100
+
+  # These are privacy-policy context identifiers, not network hosts.
+  high_risk_contexts: []
+  ignored_contexts: []
+  allowed_cycle_contexts: []
+
+  thresholds:
+    max_unique_destinations: 3
+    max_cross_context_transitions: 5
+    max_unique_purposes: 2
+    max_context_fanout: 3
+    modify_score: 0.30
+    escalate_score: 0.60
+
+  risk_weights:
+    destination_expansion: 0.15
+    cross_context: 0.15
+    purpose_drift: 0.15
+    unauthorized_destination: 0.25
+    post_deletion_processing: 0.25
+    cycle: 0.05
+
+
+privacy_risk_engine:
+  enabled: true
+  strict_mode: true
+  default_decision_stage: "risk.runtime_gate"
+
+  # Weighted risk may escalate, but authoritative subsystem decisions
+  # remain the primary source of hard blocks.
+  risk_can_block: false
+  escalate_on_incomplete_evidence: true
+
+  max_factors: 20
+  max_evidence_sources: 10
+  max_recommended_controls: 20
+
+  required_evidence_sources:
+    - identification
+    - consent
+    - minimization
+    - residual_exposure
+    - retention
+    - flow
+
+  authoritative_decision_sources:
+    - identification
+    - consent
+    - minimization
+    - residual_exposure
+    - retention
+    - flow
+
+  component_weights:
+    inherent_sensitivity: 0.15
+    residual_exposure: 0.25
+    authorization: 0.15
+    retention: 0.10
+    flow: 0.15
+    uncertainty: 0.10
+    evidence_gap: 0.10
+
+  decision_scores:
+    allow: 0.00
+    modify: 0.35
+    escalate: 0.75
+    block: 1.00
+
+  decision_thresholds:
+    modify: 0.25
+    escalate: 0.55
+    block: 0.85
+
+  confidence_penalties:
+    uncertainty: 0.60
+    evidence_gap: 0.40
+
+  recommended_controls:
+    allow: []
+
+    modify:
+      - "Apply the configured privacy transformation before downstream use."
+
+    escalate:
+      - "Require explicit privacy review before broader processing or transfer."
+
+    block:
+      - "Stop ordinary downstream processing until the blocking privacy condition is resolved."
+
+    under_redaction:
+      - "Re-run minimization with stronger controls and verify the sanitized payload again."
+
+    over_redaction:
+      - "Review declared required fields and reduce unnecessary suppression."
+
+    unauthorized_destination:
+      - "Revalidate destination authorization and purpose binding before further propagation."
+
+    post_deletion_processing:
+      - "Stop processing the deleted record and investigate lineage after deletion completion."
+
+    incomplete_evidence:
+      - "Complete the missing privacy evidence before allowing sensitive downstream processing."
