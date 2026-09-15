@@ -11,16 +11,14 @@ import json
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .utils import (get_config_section, load_global_config,
-                    # error
-                    ToolPayloadSanitizationError, PrivacyConfigurationError, PrivacyError,
-                    PolicyEvaluationError, PrivacyDecision, RedactionError,
-                    normalize_privacy_exception, sanitize_privacy_context)
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.privacy_error import *
+from .utils.privacy_helpers import *
 from .privacy_memory import PrivacyMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Data Minimization and Redaction")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class DataMinimization:
@@ -999,6 +997,7 @@ class DataMinimization:
             context={"storage_target": normalized_storage_target, **self._normalize_context(context)},
         )
 
+__all__ = ["DataMinimization"]
 
 if __name__ == "__main__":
     print("\n=== Running data Minimization===\n")
