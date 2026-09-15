@@ -1058,6 +1058,89 @@ class StatisticalQuality:
     # ------------------------------------------------------------------
     # Profiling helpers
     # ------------------------------------------------------------------
+
+    def build_profile(self, records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        """Build a compact statistical profile for a batch of records.
+
+        The profile includes per-field missingness, summary statistics for numeric
+        columns, and frequency distributions for categorical columns. The method is
+        intentionally defensive so it can safely handle empty inputs, non-standard
+        record mappings, and sparse schemas without raising unexpectedly.
+        """
+        if records is None:
+            return {
+                "record_count": 0,
+                "field_count": 0,
+                "numeric_fields": {},
+                "categorical_fields": {},
+                "missing_rate_by_field": {},
+                "generated_at": time.time(),
+            }
+
+        prepared_records = self._normalize_records(records)
+        if not prepared_records:
+            return {
+                "record_count": 0,
+                "field_count": 0,
+                "numeric_fields": {},
+                "categorical_fields": {},
+                "missing_rate_by_field": {},
+                "generated_at": time.time(),
+            }
+
+        min_observations = max(1, int(self.drift_config.get("min_observations", 20)))
+        field_names = self._field_union(prepared_records)
+        numeric_fields: Dict[str, Any] = {}
+        categorical_fields: Dict[str, Any] = {}
+        missing_rate_by_field: Dict[str, float] = {}
+
+        for field_name in field_names:
+            column = [record.get(field_name) for record in prepared_records]
+            missing_count = sum(1 for value in column if self._is_missing(value))
+            missing_rate = missing_count / max(len(prepared_records), 1)
+            missing_rate_by_field[field_name] = float(missing_rate)
+
+            numeric_values = [float(value) for value in column if self._is_numeric(value)] # type: ignore
+            if len(numeric_values) >= min_observations:
+                numeric_fields[field_name] = {
+                    "count": len(numeric_values),
+                    "mean": mean(numeric_values),
+                    "std": pstdev(numeric_values) if len(numeric_values) > 1 else 0.0,
+                    "median": median(numeric_values),
+                    "min": min(numeric_values),
+                    "max": max(numeric_values),
+                    "p25": self._percentile(numeric_values, 0.25),
+                    "p75": self._percentile(numeric_values, 0.75),
+                }
+                continue
+
+            categorical_values = [
+                self._normalize_categorical(value)
+                for value in column
+                if not self._is_missing(value)
+            ]
+            if categorical_values:
+                distribution = self._distribution(categorical_values)
+                categorical_fields[field_name] = {
+                    "count": len(categorical_values),
+                    "unique_count": len(distribution),
+                    "distribution": distribution,
+                    "top_values": sorted(
+                        distribution.items(),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )[:10],
+                }
+
+        return {
+            "record_count": len(prepared_records),
+            "field_count": len(field_names),
+            "numeric_fields": numeric_fields,
+            "categorical_fields": categorical_fields,
+            "missing_rate_by_field": missing_rate_by_field,
+            "generated_at": time.time(),
+        }
+
     def _build_profile(self, records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         field_names = self._field_union(records)
         numeric_fields: Dict[str, Any] = {}
