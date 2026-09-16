@@ -889,6 +889,112 @@ class WebhookRetryExhausted(WebhookDeliveryError):
 
         self.error_code = self.default_code
 
+
+# -------------------------------------------------------------------------
+# Payment Exceptions
+# -------------------------------------------------------------------------
+class PaymentError(Exception):
+    """Base exception for payment operations."""
+
+
+class PaymentValidationError(PaymentError):
+    """Raised when a payment request is invalid."""
+
+
+class PaymentProviderError(PaymentError):
+    """Raised when the configured payment provider fails."""
+
+    def __init__(self, operation: str, reason: str) -> None:
+        self.operation = operation
+        self.reason = reason
+        super().__init__(f"Payment provider failed during {operation}: {reason}")
+
+
+class PaymentStateError(PaymentError):
+    """Raised when an operation is incompatible with payment state."""
+
+
+class PaymentNotFoundError(PaymentError):
+    """Raised when a local payment record cannot be found."""
+
+    def __init__(self, payment_id: str) -> None:
+        self.payment_id = payment_id
+        super().__init__(f"Payment not found: {payment_id}")
+
+
+class IdempotencyConflictError(PaymentError):
+    """Raised when an idempotency key is reused for different input."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(
+            f"Idempotency key '{key}' was already used for a different request"
+        )
+
+
+# -------------------------------------------------------------------------
+# File transfer Exceptions
+# -------------------------------------------------------------------------
+
+class FileTransferError(Exception):
+    """Base exception for transfer-layer failures."""
+
+
+class TransferValidationError(FileTransferError):
+    """Raised when transfer input or policy validation fails."""
+
+
+class TransferSizeError(FileTransferError):
+    """Raised when a transfer exceeds its configured size limit."""
+
+    def __init__(self, size: int, maximum: int) -> None:
+        self.size = size
+        self.maximum = maximum
+        super().__init__(
+            f"Transfer size {size} bytes exceeds maximum {maximum} bytes"
+        )
+
+
+class TransferIntegrityError(FileTransferError):
+    """Raised when an expected digest does not match actual content."""
+
+    def __init__(self, expected: str, actual: str) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"SHA-256 mismatch: expected {expected}, actual {actual}"
+        )
+
+
+class TransferDestinationError(FileTransferError):
+    """Raised when a local download destination is unsafe or unavailable."""
+
+
+# -------------------------------------------------------------------------
+# Query Exceptions
+# -------------------------------------------------------------------------
+
+
+class QueryError(Exception):
+    """Base exception for structured query operations."""
+
+
+class QueryValidationError(QueryError):
+    """Raised when a query specification is invalid."""
+
+
+class QueryExecutionError(QueryError):
+    """Raised when SQLite cannot execute a validated query."""
+
+    def __init__(self, reason: str, *, fingerprint: Optional[str] = None) -> None:
+        self.reason = reason
+        self.fingerprint = fingerprint
+        message = f"Query execution failed: {reason}"
+        if fingerprint:
+            message += f" (fingerprint={fingerprint})"
+        super().__init__(message)
+
+
 __all__ =[
     "AccountLockedError",
     "AuthError",
@@ -935,9 +1041,23 @@ __all__ =[
     "StoreLockError",
     "StoreSaveError",
     "StoreSerializationError",
+    "PaymentError",
+    "PaymentValidationError",
+    "PaymentProviderError",
+    "PaymentStateError",
+    "PaymentNotFoundError",
+    "IdempotencyConflictError",
+    "QueryError",
+    "QueryValidationError",
+    "QueryExecutionError",
     "TransportChannelError",
     "TransportError",
     "TransportRetryExhausted",
+    "FileTransferError",
+    "TransferValidationError",
+    "TransferSizeError",
+    "TransferIntegrityError",
+    "TransferDestinationError",
     "UserAlreadyExistsError",
     "VerificationAttemptsExceededError",
     "VerificationCodeExpiredError",
