@@ -1093,6 +1093,7 @@ class SafetyFeatures:
 __all__ = [
     # Module metadata
     "MODULE_VERSION",
+    "FEATURE_SCHEMA_VERSION",
     # Dataclasses
     "FeatureExtractionResult",
     "DomainReputationRecord",
