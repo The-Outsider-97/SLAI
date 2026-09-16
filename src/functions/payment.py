@@ -31,6 +31,7 @@ from enum import Enum
 from typing import Any, Dict, Mapping, Optional, Protocol, Union, runtime_checkable
 
 from .utils.functions_error import *
+from .utils.functions_helpers import *
 from logs.logger import get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Payment")
@@ -766,24 +767,6 @@ def _validate_idempotency_key(key: str) -> str:
             "letters, digits, '.', '_', ':', or '-'"
         )
     return normalized
-
-
-def _derived_idempotency_key(base: str, suffix: str) -> str:
-    candidate = f"{base}:{suffix}"
-    if len(candidate) <= 200:
-        return candidate
-    digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
-    return f"derived:{digest}"
-
-
-def _fingerprint(payload: Mapping[str, Any]) -> str:
-    raw = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
 
 
 def _clone_record(record: PaymentRecord) -> PaymentRecord:

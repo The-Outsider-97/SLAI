@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .utils.functions_error import *
+from .utils.functions_helpers import *
 from logs.logger import get_logger # type: ignore
 
 logger = get_logger("Queries")
@@ -533,11 +534,6 @@ def _validate_identifier(value: Any, field_name: str) -> str:
     return normalized
 
 
-def _quote_identifier(identifier: str) -> str:
-    # Identifier has already passed the strict regex above.
-    return f'"{identifier}"'
-
-
 def _normalize_allowed_schema(
     schema: Optional[Mapping[str, Iterable[str]]],
 ) -> Optional[Dict[str, frozenset[str]]]:
@@ -564,20 +560,6 @@ def _normalize_allowed_schema(
         normalized[table_name] = column_set
 
     return normalized
-
-
-def _query_fingerprint(sql: str, params: Sequence[Any]) -> str:
-    # Values are included in the local fingerprint but neither SQL nor values
-    # are logged. This supports correlation without leaking query content.
-    payload = json.dumps(
-        {
-            "sql": sql,
-            "params": [repr(value) for value in params],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:16]
 
 
 __all__ = [
