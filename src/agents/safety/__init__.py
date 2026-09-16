@@ -5,6 +5,7 @@ from .compliance_checker import *
 from .cyber_safety import *
 from .reward_model import *
 from .safety_guard import *
+from .secure_hacker import *
 from .secure_stpa import *
 from .modules import *
 
@@ -16,6 +17,7 @@ from .compliance_checker import __all__ as _compliance_checker_exports
 from .cyber_safety import __all__ as _cyber_safety_exports
 from .reward_model import __all__ as _reward_model_exports
 from .safety_guard import __all__ as _safety_guard_exports
+from .secure_hacker import __all__ as _secure_hacker_exports
 from .secure_stpa import __all__ as _secure_stpa_exports
 from .modules import __all__ as _safety_modules_exports
 
@@ -28,6 +30,7 @@ __all__ = [
     *_cyber_safety_exports,
     *_reward_model_exports,
     *_safety_guard_exports,
+    *_secure_hacker_exports,
     *_secure_stpa_exports,
     *_safety_modules_exports,
 ] # type: ignore
