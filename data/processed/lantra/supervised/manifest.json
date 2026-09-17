@@ -1,0 +1,57 @@
+{
+  "schema": "slai.lantra.supervised-seed.v2",
+  "records_per_task": 120,
+  "total_records": 840,
+  "split_policy": {
+    "train": 96,
+    "validation": 12,
+    "test": 12
+  },
+  "deduplication_audit": {
+    "exact_content_duplicates": 0,
+    "cross_split_conflicts": 0,
+    "unique_ids": 840,
+    "unique_normalized_content_records": 840
+  },
+  "task_split_counts": {
+    "generation": {
+      "train": 96,
+      "validation": 12,
+      "test": 12
+    },
+    "classification": {
+      "train": 96,
+      "validation": 12,
+      "test": 12
+    },
+    "translation": {
+      "train": 96,
+      "validation": 12,
+      "test": 12
+    },
+    "summarization": {
+      "train": 96,
+      "validation": 12,
+      "test": 12
+    },
+    "dialogue": {
+      "train": 96,
+      "validation": 12,
+      "test": 12
+    },
+    "embedding": {
+      "train": 96,
+      "validation": 12,
+      "test": 12
+    },
+    "reranking": {
+      "train": 96,
+      "validation": 12,
+      "test": 12
+    }
+  },
+  "limitations": [
+    "Synthetic seed corpus for LANTRA supervised pipeline completion and initial fine-tuning.",
+    "Expand with licensed, independently curated real-world task data before serious evaluation or deployment."
+  ]
+}
