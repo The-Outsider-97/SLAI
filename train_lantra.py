@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """SLAI Language Transformer (LANTRA) multi-task trainer.
 
 This is a real staged training entry point for SLAI's existing LanguageTransformer
@@ -34,7 +33,9 @@ Default invocation
 ------------------
     py -m train_lantra
 
-No subcommand is required.  By default the trainer discovers supervised data from:
+No subcommand is required. Interval recovery checkpoints are saved every 1000
+optimizer steps by default (configurable with ``--checkpoint-every-steps``).
+By default the trainer discovers supervised data from:
     data/processed/lantra/
     data/raw/lantra/
     data/lantra_training.jsonl
@@ -105,7 +106,7 @@ from html.parser import HTMLParser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from logs.logger import PrettyPrinter, configure_logging, get_logger
 from src.agents.language.modules.language_tokenizer import LanguageTokenizer
@@ -159,6 +160,21 @@ RAW_TEXT_EXTENSIONS = frozenset({
     ".html", ".htm", ".xhtml",
     ".docx", ".epub", ".pdf",
     ".json", ".jsonl",
+})
+
+# JSON files that describe a corpus rather than contain supervised examples.
+# These are deliberately excluded during supervised dataset discovery, while
+# iter_json_records() also performs structural validation as a second line of
+# defence for previously unseen metadata filenames.
+SUPERVISED_METADATA_JSON_NAMES = frozenset({
+    "manifest.json",
+    "dataset_manifest.json",
+    "metadata.json",
+    "provenance.json",
+    "stats.json",
+    "statistics.json",
+    "report.json",
+    "summary.json",
 })
 
 OBJECTIVE_CONTRACT: Dict[str, Any] = {
@@ -266,6 +282,7 @@ class TrainerConfig:
     max_eval_records: int
     generation_eval_records: int
     log_every: int
+    checkpoint_every_steps: int
     min_task_samples: int
     balance_tasks: bool
     retrain_tokenizer: bool
@@ -558,9 +575,29 @@ def iter_json_records(path: Path) -> Iterator[Tuple[Mapping[str, Any], int]]:
         except json.JSONDecodeError as exc:
             raise LantraTrainingError(f"Invalid JSON in {path}: {exc.msg}.") from exc
         if isinstance(payload, Mapping):
-            records = payload.get("records", payload.get("examples", payload.get("data")))
-            if records is None:
+            wrapped_records: Any = None
+            wrapper_name: Optional[str] = None
+            for candidate in ("records", "examples", "data"):
+                if candidate in payload:
+                    wrapped_records = payload[candidate]
+                    wrapper_name = candidate
+                    break
+
+            if wrapper_name is not None:
+                records = wrapped_records
+            elif "task" in payload:
+                # A single supervised training example stored as a JSON object.
                 records = [payload]
+            else:
+                # Metadata/provenance manifests are allowed to live beside the
+                # JSONL task files.  They are not training examples and must not
+                # be normalized as one merely because they are JSON objects.
+                LOGGER.info(
+                    "Skipping non-training JSON metadata file %s: top-level object has "
+                    "no 'task' and no records/examples/data collection.",
+                    path,
+                )
+                return
         else:
             records = payload
         if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
@@ -592,11 +629,18 @@ def discover_data_files(configured_paths: Sequence[str]) -> List[Path]:
         if not candidate.exists():
             continue
         if candidate.is_file():
-            discovered = [candidate] if candidate.suffix.lower() in {".json", ".jsonl"} else []
+            discovered = (
+                [candidate]
+                if candidate.suffix.lower() in {".json", ".jsonl"}
+                and candidate.name.lower() not in SUPERVISED_METADATA_JSON_NAMES
+                else []
+            )
         else:
             discovered = sorted(
                 item for item in candidate.rglob("*")
-                if item.is_file() and item.suffix.lower() in {".json", ".jsonl"}
+                if item.is_file()
+                and item.suffix.lower() in {".json", ".jsonl"}
+                and item.name.lower() not in SUPERVISED_METADATA_JSON_NAMES
             )
         for item in discovered:
             resolved = str(item.resolve())
@@ -1363,55 +1407,13 @@ def _extract_epub(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
     return _normalize_document_text("\n\n".join(chapters)), title, {"chapters": len(chapters)}
 
 
-_READER_PARSER_ENGINE: Optional[Any] = None
-_READER_PARSER_UNAVAILABLE: Optional[str] = None
-
-
-def _reader_parser_engine() -> Optional[Any]:
-    """Return SLAI Reader's ParserEngine when the current runtime provides it.
-
-    LANTRA deliberately consumes the Reader subsystem rather than constructing a
-    full ReaderAgent. ReaderAgent itself requires shared-memory and agent-factory
-    runtime ownership, while ParserEngine is its public document parsing component
-    and is the correct dependency for an offline trainer that only needs text.
-    """
-    global _READER_PARSER_ENGINE, _READER_PARSER_UNAVAILABLE
-    if _READER_PARSER_ENGINE is not None:
-        return _READER_PARSER_ENGINE
-    if _READER_PARSER_UNAVAILABLE is not None:
-        return None
-    try:
-        module = importlib.import_module("src.agents.reader.parser_engine")
-        parser_cls = getattr(module, "ParserEngine")
-        _READER_PARSER_ENGINE = parser_cls()
-        LOGGER.info("LANTRA document ingestion connected to SLAI Reader ParserEngine.")
-        return _READER_PARSER_ENGINE
-    except Exception as exc:
-        _READER_PARSER_UNAVAILABLE = f"{type(exc).__name__}: {exc}"
-        LOGGER.warning(
-            "SLAI Reader ParserEngine is unavailable for LANTRA document ingestion; "
-            "PDFs will use the text-only pypdf fallback. reason=%s",
-            _READER_PARSER_UNAVAILABLE,
-        )
-        return None
-
-
-def _extract_pdf_pypdf_text(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
-    """Text-only PDF fallback used when SLAI Reader cannot parse a PDF.
-
-    This intentionally uses plain ``page.extract_text()``. The earlier LANTRA
-    implementation requested pypdf's layout extraction mode, which emits large
-    volumes of rotated-text/fixed-width warnings on legitimate PDFs and may omit
-    rotated text. LANTRA does not need page geometry or images, so layout mode is
-    neither necessary nor desirable here.
-    """
+def _extract_pdf(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
     try:
         pypdf = importlib.import_module("pypdf")
     except ImportError as exc:
         raise LantraTrainingError(
-            "PDF corpus ingestion requires SLAI Reader or pypdf. SLAI's root "
-            "requirements.txt declares pypdf; install the project requirements "
-            "in the active virtual environment."
+            "PDF corpus ingestion requires pypdf. SLAI's root requirements.txt already declares pypdf; "
+            "install the project requirements in the active virtual environment."
         ) from exc
 
     try:
@@ -1429,20 +1431,20 @@ def _extract_pdf_pypdf_text(path: Path) -> Tuple[str, Optional[str], Dict[str, A
 
     pages: List[str] = []
     failed_pages = 0
-    empty_pages = 0
-    page_count = len(getattr(reader, "pages", []))
     for page_number, page in enumerate(reader.pages, 1):
         try:
-            text = page.extract_text() or ""
+            try:
+                text = page.extract_text(extraction_mode="layout") or ""
+            except TypeError:
+                text = page.extract_text() or ""
         except Exception as exc:
             failed_pages += 1
             LOGGER.warning("PDF text extraction failed for %s page %d: %s", path, page_number, exc)
             continue
-        if not text.strip():
-            empty_pages += 1
-            continue
-        text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
-        pages.append(text)
+        if text.strip():
+            # Repair common line-end hyphenation before paragraph normalization.
+            text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
+            pages.append(text)
 
     title: Optional[str] = None
     metadata = getattr(reader, "metadata", None)
@@ -1454,58 +1456,11 @@ def _extract_pdf_pypdf_text(path: Path) -> Tuple[str, Optional[str], Dict[str, A
             title = str(candidate).strip() or None
 
     return _normalize_document_text("\n\n".join(pages)), title, {
-        "backend": "pypdf",
-        "page_count": page_count,
-        "pages_extracted": len(pages),
-        "empty_pages": empty_pages,
+        "pages": len(getattr(reader, "pages", [])),
+        "pages_with_text": len(pages),
         "failed_pages": failed_pages,
-        "reader_fallback": True,
-        "_extractor": "pypdf-text-fallback",
     }
 
-
-def _extract_pdf(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
-    """Extract PDF text through SLAI Reader first, with pypdf as fallback.
-
-    No OCR or image extraction is attempted. Image-only PDFs therefore remain
-    deliberately unusable training sources and are reported by corpus provenance.
-    """
-    engine = _reader_parser_engine()
-    if engine is not None:
-        try:
-            result = engine.parse(path)
-            content = _normalize_document_text(str(result.get("content", "") or ""))
-            result_metadata = result.get("metadata")
-            metadata_map = dict(result_metadata) if isinstance(result_metadata, Mapping) else {}
-            parser_metadata = metadata_map.get("parser_metadata")
-            quality = metadata_map.get("quality")
-            warnings = result.get("warnings")
-            metadata: Dict[str, Any] = {
-                "backend": "slai-reader",
-                "reader_parser": str(result.get("parser", "ParserEngine")),
-                "reader_warnings": list(warnings) if isinstance(warnings, Sequence) and not isinstance(warnings, (str, bytes, bytearray)) else [],
-                "reader_quality": dict(quality) if isinstance(quality, Mapping) else None,
-                "reader_parser_metadata": dict(parser_metadata) if isinstance(parser_metadata, Mapping) else None,
-                "reader_content_sha256": metadata_map.get("content_sha256"),
-                "_extractor": "slai-reader-parser",
-            }
-            # Keep the manifest compact and JSON-safe.
-            metadata = {key: value for key, value in metadata.items() if value is not None}
-            if content:
-                return content, None, metadata
-            LOGGER.info(
-                "SLAI Reader returned no text for %s; trying LANTRA's text-only pypdf fallback.",
-                path,
-            )
-        except Exception as exc:
-            LOGGER.warning(
-                "SLAI Reader PDF parse failed for %s; using text-only pypdf fallback: %s: %s",
-                path,
-                type(exc).__name__,
-                exc,
-            )
-
-    return _extract_pdf_pypdf_text(path)
 
 def _json_text_candidates(value: Any) -> Iterator[Tuple[str, Optional[str], Dict[str, Any]]]:
     """Yield logical text documents from JSON without mistaking task labels for prose."""
@@ -1567,9 +1522,8 @@ def extract_raw_documents(path: Path, *, source_sha256: Optional[str] = None) ->
 
     if suffix == ".pdf":
         text, title, metadata = _extract_pdf(path)
-        extractor = str(metadata.pop("_extractor", "slai-reader-parser"))
         if text:
-            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, extractor, 0, metadata)
+            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "pypdf", 0, metadata)
         return
 
     if suffix == ".jsonl":
@@ -1905,81 +1859,45 @@ def discover_glove_path(config: TrainerConfig, model_dimension: int) -> Optional
     return unknown[0] if unknown else None
 
 
-def _normalize_glove_lexeme(value: Any) -> str:
-    text = unicodedata.normalize("NFKC", str(value or "")).strip()
-    return text.casefold()
-
-
-def _glove_keys_for_token(token: str, tokenizer: LanguageTokenizer) -> Tuple[str, ...]:
-    """Return safe lexical GloVe keys for one SLAI BPE token.
-
-    SLAI's configured BPE vocabulary uses an explicit end-of-word suffix. Static
-    word embeddings must therefore only be copied into tokens that can represent
-    complete lexical words; continuation fragments are intentionally excluded.
-    """
-    raw = unicodedata.normalize("NFKC", str(token or "")).strip()
-    special_tokens = {str(item) for item in getattr(tokenizer, "special_tokens", [])}
-    if not raw or raw in special_tokens:
-        return ()
-
+def _glove_key_for_token(token: str, tokenizer: LanguageTokenizer) -> Optional[str]:
+    value = str(token).strip()
+    if not value or value in set(getattr(tokenizer, "special_tokens", [])):
+        return None
     suffix = str(getattr(tokenizer, "end_of_word_suffix", "") or "")
     prefix = str(getattr(tokenizer, "continuation_prefix", "") or "")
-    add_eow = bool(getattr(tokenizer, "add_end_of_word", True))
 
-    # Continuation markers denote fragments, not standalone lexical words.
-    if prefix and raw.startswith(prefix):
-        return ()
-    if raw.startswith("##"):
-        return ()
+    # GloVe is word-level. When SLAI's BPE marks end-of-word explicitly, only
+    # align complete-word BPE symbols. Mapping continuation fragments such as
+    # ``in`` from inside another word to the standalone GloVe word "in" would
+    # inject incorrect lexical semantics.
+    if suffix and bool(getattr(tokenizer, "add_end_of_word", True)):
+        if not value.endswith(suffix):
+            return None
+        value = value[:-len(suffix)]
+    elif suffix and value.endswith(suffix):
+        value = value[:-len(suffix)]
+    if prefix and value.startswith(prefix):
+        return None
+    if value.startswith("##"):
+        return None
 
-    candidates: List[str] = []
-    if suffix and add_eow:
-        if not raw.endswith(suffix):
-            return ()
-        lexical = raw[:-len(suffix)]
-        # Some SLAI embedding exports may serialize BPE keys literally, while
-        # standard GloVe assets use the unsuffixed surface word. Support both.
-        candidates.extend((raw, lexical))
-    else:
-        lexical = raw[:-len(suffix)] if suffix and raw.endswith(suffix) else raw
-        candidates.extend((raw, lexical))
-
-    # Also understand common word-boundary conventions without turning internal
-    # continuation pieces into whole words.
-    for value in tuple(candidates):
-        if value.startswith("Ġ") or value.startswith("▁"):
-            candidates.append(value[1:])
-
-    normalized: List[str] = []
-    seen: set[str] = set()
-    for value in candidates:
-        key = _normalize_glove_lexeme(value)
-        if not key or any(ch.isspace() for ch in key):
-            continue
-        if key not in seen:
-            seen.add(key)
-            normalized.append(key)
-    return tuple(normalized)
-
-
-def _glove_key_for_token(token: str, tokenizer: LanguageTokenizer) -> Optional[str]:
-    """Backward-compatible primary key helper."""
-    keys = _glove_keys_for_token(token, tokenizer)
-    return keys[0] if keys else None
+    value = value.strip().lower()
+    if not value or any(ch.isspace() for ch in value):
+        return None
+    return value
 
 
 def _coerce_vector(value: Any) -> Optional[Tuple[float, ...]]:
     if isinstance(value, Mapping):
-        for key in ("vector", "embedding", "values", "weights", "vector_values", "embedding_vector"):
+        for key in ("vector", "embedding", "values"):
             if key in value:
                 return _coerce_vector(value[key])
         return None
     if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
+        parts = value.strip().split()
+        if not parts:
             return None
-        parts = re.split(r"[\s,]+", stripped)
-        value = [part for part in parts if part]
+        value = parts
     if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
         return None
     out: List[float] = []
@@ -1994,139 +1912,6 @@ def _coerce_vector(value: Any) -> Optional[Tuple[float, ...]]:
     return tuple(out) if out else None
 
 
-def _vector_at(vectors: Any, index: int) -> Any:
-    if isinstance(vectors, Mapping):
-        for key in (index, str(index)):
-            if key in vectors:
-                return vectors[key]
-        return None
-    if isinstance(vectors, Sequence) and not isinstance(vectors, (str, bytes, bytearray)):
-        return vectors[index] if 0 <= index < len(vectors) else None
-    return None
-
-
-def _iter_indexed_glove_entries(vocabulary: Any, vectors: Any) -> Iterator[Tuple[str, Any]]:
-    """Yield entries from vocabulary/index + vector-matrix serializations."""
-    if isinstance(vocabulary, Sequence) and not isinstance(vocabulary, (str, bytes, bytearray)):
-        for index, word in enumerate(vocabulary):
-            if isinstance(word, Mapping):
-                word = word.get("word", word.get("token", word.get("text", word.get("term"))))
-            if not isinstance(word, str):
-                continue
-            raw_vector = _vector_at(vectors, index)
-            if raw_vector is not None:
-                yield word, raw_vector
-        return
-
-    if not isinstance(vocabulary, Mapping):
-        return
-
-    # Common form: {"word": 123, ...}
-    emitted = False
-    for word, raw_index in vocabulary.items():
-        index: Optional[int] = None
-        if isinstance(raw_index, Mapping):
-            raw_index = raw_index.get("id", raw_index.get("index", raw_index.get("token_id")))
-        try:
-            if not isinstance(raw_index, bool):
-                index = int(raw_index)
-        except (TypeError, ValueError):
-            index = None
-        if index is None:
-            continue
-        raw_vector = _vector_at(vectors, index)
-        if raw_vector is not None:
-            emitted = True
-            yield str(word), raw_vector
-    if emitted:
-        return
-
-    # Inverse form: {"123": "word", ...}
-    for raw_index, word in vocabulary.items():
-        if not isinstance(word, str):
-            continue
-        try:
-            index = int(raw_index)
-        except (TypeError, ValueError):
-            continue
-        raw_vector = _vector_at(vectors, index)
-        if raw_vector is not None:
-            yield word, raw_vector
-
-
-def _iter_glove_entries(payload: Any) -> Iterator[Tuple[str, Any]]:
-    """Accept the practical JSON serializations used for static embeddings.
-
-    Supported forms include word->vector mappings, record arrays, nested
-    ``embeddings``/``vectors`` containers, parallel word/vector arrays, and
-    vocabulary-index + matrix representations. This is intentionally a parser of
-    serialization shape only; lexical matching remains strict and separate.
-    """
-    if isinstance(payload, Mapping):
-        vocab_keys = ("vocab", "vocabulary", "words", "tokens", "terms", "index_to_word", "itos")
-        vector_keys = ("vectors", "embeddings", "matrix", "weights", "word_vectors")
-
-        # Pair a vocabulary/index with a vector matrix when both are present.
-        for vocab_key in vocab_keys:
-            vocabulary = payload.get(vocab_key)
-            if vocabulary is None:
-                continue
-            for vector_key in vector_keys:
-                vectors = payload.get(vector_key)
-                if vectors is None or vectors is vocabulary:
-                    continue
-                yield from _iter_indexed_glove_entries(vocabulary, vectors)
-
-        # Direct word -> vector entries can coexist with metadata.
-        for word, raw_vector in payload.items():
-            vector = _coerce_vector(raw_vector)
-            if vector is not None:
-                yield str(word), raw_vector
-
-        # Known nested containers. Avoid recursively descending arbitrary metadata
-        # so a malformed file cannot explode traversal cost.
-        for key in ("data", "items", "records", "entries", "word_vectors", "embeddings", "vectors"):
-            nested = payload.get(key)
-            if isinstance(nested, Mapping):
-                # Mapping containers are often directly word->vector.
-                for word, raw_vector in nested.items():
-                    vector = _coerce_vector(raw_vector)
-                    if vector is not None:
-                        yield str(word), raw_vector
-                    elif isinstance(raw_vector, Mapping):
-                        record_word = raw_vector.get("word", raw_vector.get("token", raw_vector.get("text", raw_vector.get("term"))))
-                        if isinstance(record_word, str):
-                            yield record_word, raw_vector
-            elif isinstance(nested, Sequence) and not isinstance(nested, (str, bytes, bytearray)):
-                for item in nested:
-                    if isinstance(item, Mapping):
-                        word = item.get("word", item.get("token", item.get("text", item.get("term", item.get("key")))))
-                        if isinstance(word, str):
-                            yield word, item
-                    elif (
-                        isinstance(item, Sequence)
-                        and not isinstance(item, (str, bytes, bytearray))
-                        and len(item) >= 2
-                        and isinstance(item[0], str)
-                    ):
-                        yield item[0], item[1] if len(item) == 2 else item[1:]
-        return
-
-    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
-        for item in payload:
-            if isinstance(item, Mapping):
-                word = item.get("word", item.get("token", item.get("text", item.get("term", item.get("key")))))
-                if isinstance(word, str):
-                    yield word, item
-            elif (
-                isinstance(item, Sequence)
-                and not isinstance(item, (str, bytes, bytearray))
-                and len(item) >= 2
-                and isinstance(item[0], str)
-            ):
-                yield item[0], item[1] if len(item) == 2 else item[1:]
-
-
 def load_glove_asset(
     path: Path,
     tokenizer: LanguageTokenizer,
@@ -2136,7 +1921,8 @@ def load_glove_asset(
 ) -> GloveAsset:
     desired: Dict[str, List[Tuple[int, str]]] = collections.defaultdict(list)
     for token, token_id in tokenizer.vocab.items():
-        for key in _glove_keys_for_token(str(token), tokenizer):
+        key = _glove_key_for_token(token, tokenizer)
+        if key:
             desired[key].append((int(token_id), str(token)))
 
     LOGGER.info("Loading GloVe resource %s for %d candidate lexical keys", path, len(desired))
@@ -2146,47 +1932,90 @@ def load_glove_asset(
     except (OSError, json.JSONDecodeError) as exc:
         raise LantraTrainingError(f"Failed to load GloVe JSON {path}: {exc}") from exc
 
+    container: Any = payload
+    if isinstance(payload, Mapping):
+        for key in ("vectors", "embeddings", "data"):
+            nested = payload.get(key)
+            if isinstance(nested, (Mapping, list, tuple)):
+                container = nested
+                break
+
     found: Dict[str, Tuple[float, ...]] = {}
-    dimensions: collections.Counter[int] = collections.Counter()
-    parsed_vectors = 0
-    sample_keys: List[str] = []
-    seen_entry_keys: set[Tuple[str, int]] = set()
+    dimension: Optional[int] = None
 
-    for raw_word, raw_vector in _iter_glove_entries(payload):
-        key = _normalize_glove_lexeme(raw_word)
-        vector = _coerce_vector(raw_vector)
-        if not key or vector is None:
-            continue
-        identity = (key, len(vector))
-        if identity in seen_entry_keys:
-            continue
-        seen_entry_keys.add(identity)
-        parsed_vectors += 1
-        dimensions[len(vector)] += 1
-        if len(sample_keys) < 8:
-            sample_keys.append(str(raw_word))
-        if key in desired and key not in found:
+    # Also support the common {"words": [...], "vectors": [[...], ...]}
+    # representation in addition to word->vector mappings.
+    paired_words = payload.get("words") if isinstance(payload, Mapping) else None
+    paired_vectors = payload.get("vectors") if isinstance(payload, Mapping) else None
+    if (
+        isinstance(paired_words, Sequence)
+        and not isinstance(paired_words, (str, bytes, bytearray))
+        and isinstance(paired_vectors, Sequence)
+        and not isinstance(paired_vectors, (str, bytes, bytearray))
+        and len(paired_words) == len(paired_vectors)
+    ):
+        for word, raw_vector in zip(paired_words, paired_vectors):
+            key = str(word).strip().lower()
+            if key not in desired:
+                continue
+            vector = _coerce_vector(raw_vector)
+            if vector is None:
+                continue
+            if dimension is None:
+                dimension = len(vector)
+            if len(vector) == dimension:
+                found[key] = vector
+    elif isinstance(container, Mapping):
+        for word, raw_vector in container.items():
+            key = str(word).strip().lower()
+            if key not in desired:
+                continue
+            vector = _coerce_vector(raw_vector)
+            if vector is None:
+                continue
+            if dimension is None:
+                dimension = len(vector)
+            if len(vector) != dimension:
+                continue
             found[key] = vector
-
-    root_type = type(payload).__name__
-    top_level_keys = list(payload.keys())[:20] if isinstance(payload, Mapping) else []
-    del payload
-
-    if not found:
-        desired_samples = list(sorted(desired))[:8]
+    elif isinstance(container, Sequence) and not isinstance(container, (str, bytes, bytearray)):
+        for item in container:
+            if isinstance(item, Mapping):
+                word = item.get("word", item.get("token", item.get("text")))
+                if not isinstance(word, str):
+                    continue
+                key = word.strip().lower()
+                raw_vector = item
+            elif (
+                isinstance(item, Sequence)
+                and not isinstance(item, (str, bytes, bytearray))
+                and len(item) >= 2
+                and isinstance(item[0], str)
+            ):
+                key = item[0].strip().lower()
+                raw_vector = item[1:]
+            else:
+                continue
+            if key not in desired:
+                continue
+            vector = _coerce_vector(raw_vector)
+            if vector is None:
+                continue
+            if dimension is None:
+                dimension = len(vector)
+            if len(vector) != dimension:
+                continue
+            found[key] = vector
+    else:
         raise LantraTrainingError(
-            f"GloVe file {path} loaded but no vectors matched SLAI BPE lexical tokens. "
-            f"Diagnostics: root_type={root_type}, top_level_keys={top_level_keys}, "
-            f"parsed_vectors={parsed_vectors}, dimensions={dict(dimensions)}, "
-            f"glove_key_samples={sample_keys}, bpe_key_samples={desired_samples}. "
-            "The GloVe JSON serialization or vocabulary provenance does not align with the active SLAI tokenizer."
+            f"Unsupported GloVe JSON structure in {path}; expected word->vector mapping or record list."
         )
 
-    # Select the dominant matched dimensionality rather than assuming every
-    # serialized entry has identical shape. Mixed dimensions are rejected from
-    # the actual bootstrap set below.
-    matched_dimensions = collections.Counter(len(vector) for vector in found.values())
-    dimension = matched_dimensions.most_common(1)[0][0]
+    del payload
+    if not found or dimension is None:
+        raise LantraTrainingError(
+            f"GloVe file {path} loaded, but none of its vectors matched SLAI BPE vocabulary tokens."
+        )
     if dimension > model_dimension:
         raise LantraTrainingError(
             f"GloVe dimension {dimension} exceeds LanguageTransformer d_model={model_dimension}. "
@@ -2194,40 +2023,21 @@ def load_glove_asset(
         )
 
     matches: List[GloveMatch] = []
-    used_token_ids: set[int] = set()
     for key in sorted(found):
         vector = found[key]
-        if len(vector) != dimension:
-            continue
         for token_id, token in desired[key]:
-            if token_id in used_token_ids:
-                continue
             matches.append(GloveMatch(token_id, token, key, vector))
-            used_token_ids.add(token_id)
             if max_tokens > 0 and len(matches) >= max_tokens:
                 break
         if max_tokens > 0 and len(matches) >= max_tokens:
             break
-
-    if not matches:
-        raise LantraTrainingError(
-            f"GloVe {path} produced lexical matches, but none remained after dimension/token validation. "
-            f"matched_dimensions={dict(matched_dimensions)}, model_dimension={model_dimension}."
-        )
-
-    LOGGER.info(
-        "Matched %d SLAI BPE token rows to GloVe (%dd); parsed_vectors=%d root_type=%s",
-        len(matches),
-        dimension,
-        parsed_vectors,
-        root_type,
-    )
     return GloveAsset(
         path=str(path),
         dimension=dimension,
         matches=tuple(matches),
         file_sha256=sha256_file(path),
     )
+
 
 def _expand_glove_vector(vector: Sequence[float], model_dimension: int) -> List[float]:
     if len(vector) > model_dimension:
@@ -2534,6 +2344,7 @@ def raw_text_pretrain(
     latest_path = Path(config.output_dir) / "lantra_raw_pretrain_latest.pt"
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     history: List[Dict[str, Any]] = []
+    interval_checkpoints: List[str] = []
     rng = random.Random(config.seed + 202)
 
     for epoch in range(1, config.raw_pretrain_epochs + 1):
@@ -2580,6 +2391,39 @@ def raw_text_pretrain(
             grad_norm = model.clip_gradients(optimizer)
             optimizer.step()
             epoch_steps += 1
+
+            if (
+                config.checkpoint_every_steps > 0
+                and global_step % config.checkpoint_every_steps == 0
+            ):
+                interval_path = Path(config.output_dir) / (
+                    f"lantra_raw_pretrain_{run_id}_step_{global_step:08d}.pt"
+                )
+                interval_saved = save_phase_checkpoint(
+                    model,
+                    optimizer,
+                    interval_path,
+                    run_id=run_id,
+                    phase="raw_text_denoising_pretraining_interval",
+                    metadata={
+                        "epoch": epoch,
+                        "global_optimizer_step": global_step,
+                        "total_optimizer_steps": total_steps,
+                        "examples_in_epoch": example_count,
+                        "mean_train_loss_to_step": epoch_loss / max(1, example_count),
+                        "learning_rate": lr,
+                        "corpus_fingerprint": corpus.fingerprint,
+                        "checkpoint_every_steps": config.checkpoint_every_steps,
+                    },
+                )
+                interval_checkpoints.append(interval_saved)
+                LOGGER.info(
+                    "Raw pretrain interval checkpoint saved at optimizer step %d/%d: %s",
+                    global_step,
+                    total_steps,
+                    interval_saved,
+                )
+
             if config.log_every > 0 and global_step % config.log_every == 0:
                 LOGGER.info(
                     "Raw pretrain epoch=%d step=%d/%d examples=%d mean_loss=%.6f lr=%.8f grad_norm=%.4f",
@@ -2645,6 +2489,8 @@ def raw_text_pretrain(
         "validation_segments": len(validation_segments),
         "test_segments": len(test_segments),
         "history": history,
+        "interval_checkpoints": interval_checkpoints,
+        "checkpoint_every_steps": config.checkpoint_every_steps,
         "best_objective": best_validation,
         "heldout_test_loss": test_loss,
         "checkpoint": str(best_path if best_path.is_file() else latest_path),
@@ -2961,6 +2807,7 @@ def train_epoch(
     total_optimizer_steps: int,
     effective_warmup_steps: int,
     global_optimizer_step: int,
+    checkpoint_callback: Optional[Callable[[int, int, EpochStats, float], None]] = None,
 ) -> Tuple[EpochStats, int]:
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -3011,6 +2858,13 @@ def train_epoch(
             stats.optimizer_steps += 1
             stats.grad_norm_sum += grad_norm
             pending = 0
+
+            if (
+                checkpoint_callback is not None
+                and config.checkpoint_every_steps > 0
+                and global_optimizer_step % config.checkpoint_every_steps == 0
+            ):
+                checkpoint_callback(epoch, global_optimizer_step, stats, lr)
 
         if config.log_every > 0 and index % config.log_every == 0:
             LOGGER.info(
@@ -3277,6 +3131,7 @@ def save_checkpoint(
     global_optimizer_step: int,
     validation_metrics: Optional[Mapping[str, Any]] = None,
     status: str,
+    extra_metadata: Optional[Mapping[str, Any]] = None,
 ) -> str:
     metadata = {
         "trainer": "train_lantra",
@@ -3291,6 +3146,8 @@ def save_checkpoint(
         "validation_metrics": dict(validation_metrics or {}),
         "saved_at": utc_now(),
     }
+    if extra_metadata:
+        metadata["training_progress"] = dict(extra_metadata)
     return model.save_language_model(
         path,
         lang_metadata=metadata,
@@ -3326,6 +3183,42 @@ def train(
     best_global_optimizer_step = 0
     epochs_without_improvement = 0
     history: List[Dict[str, Any]] = []
+    interval_checkpoints: List[str] = []
+
+    def save_interval_checkpoint(
+        epoch: int,
+        optimizer_step: int,
+        stats: EpochStats,
+        learning_rate: float,
+    ) -> None:
+        interval_path = output_dir / (
+            f"lantra_supervised_{run_id}_step_{optimizer_step:08d}.pt"
+        )
+        saved = save_checkpoint(
+            model,
+            optimizer,
+            interval_path,
+            run_id=run_id,
+            dataset=dataset,
+            config=config,
+            epoch=epoch,
+            global_optimizer_step=optimizer_step,
+            validation_metrics=None,
+            status="interval",
+            extra_metadata={
+                "checkpoint_kind": "optimizer_step_interval",
+                "checkpoint_every_steps": config.checkpoint_every_steps,
+                "learning_rate": learning_rate,
+                "epoch_progress": stats.to_dict(),
+            },
+        )
+        interval_checkpoints.append(saved)
+        LOGGER.info(
+            "Supervised interval checkpoint saved at optimizer step %d/%d: %s",
+            optimizer_step,
+            total_optimizer_steps,
+            saved,
+        )
 
     LOGGER.info(
         "Training LANTRA: train=%d validation=%d test=%d epochs=%d device=%s total_optimizer_steps=%d warmup_steps=%d",
@@ -3352,6 +3245,7 @@ def train(
                 total_optimizer_steps=total_optimizer_steps,
                 effective_warmup_steps=effective_warmup_steps,
                 global_optimizer_step=global_optimizer_step,
+                checkpoint_callback=save_interval_checkpoint,
             )
             validation_metrics = evaluate(
                 model,
@@ -3491,6 +3385,8 @@ def train(
         "global_optimizer_steps": global_optimizer_step,
         "history": history,
         "test": test_metrics,
+        "checkpoint_every_steps": config.checkpoint_every_steps,
+        "interval_checkpoints": interval_checkpoints,
         "checkpoints": {
             "best": str(best_path),
             "latest": str(latest_path),
@@ -3551,6 +3447,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--max-eval-records", type=int, default=2000)
     parser.add_argument("--generation-eval-records", type=int, default=8)
     parser.add_argument("--log-every", type=int, default=100)
+    parser.add_argument(
+        "--checkpoint-every-steps",
+        type=int,
+        default=int(os.getenv("SLAI_LANTRA_CHECKPOINT_EVERY_STEPS", "1000")),
+        help=(
+            "Save a recoverable checkpoint every N optimizer steps in raw and supervised training. "
+            "Default: 1000. Use 0 to disable interval checkpoints. Best/latest epoch checkpoints remain enabled."
+        ),
+    )
     parser.add_argument("--min-task-samples", type=int, default=8)
     parser.add_argument("--no-balance-tasks", action="store_true")
     parser.add_argument(
@@ -3623,6 +3528,7 @@ def config_from_args(args: argparse.Namespace) -> TrainerConfig:
         max_eval_records=int(args.max_eval_records),
         generation_eval_records=int(args.generation_eval_records),
         log_every=int(args.log_every),
+        checkpoint_every_steps=int(args.checkpoint_every_steps),
         min_task_samples=int(args.min_task_samples),
         balance_tasks=not bool(args.no_balance_tasks),
         retrain_tokenizer=bool(args.retrain_tokenizer),
@@ -3677,6 +3583,7 @@ def validate_config(config: TrainerConfig) -> None:
         "max_eval_records": config.max_eval_records,
         "generation_eval_records": config.generation_eval_records,
         "log_every": config.log_every,
+        "checkpoint_every_steps": config.checkpoint_every_steps,
     }
     for name, value in nonnegative.items():
         if value < 0:
@@ -3790,14 +3697,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         # Discover optional raw corpus and optional supervised corpus.
         # --------------------------------------------------------------
-        raw_files = discover_raw_text_files(config.raw_text_paths)
-        raw_corpus = load_raw_corpus(raw_files, config) if raw_files else empty_raw_corpus()
-        raw_corpus = write_raw_corpus_manifest(raw_corpus, Path(config.report_dir), run_id)
-        LOGGER.info("LANTRA raw/document corpus files: %s", list(raw_corpus.files))
-        if raw_corpus.segments:
-            PRINTER.pretty("LANTRA RAW CORPUS", raw_corpus.to_dict(), "success")
+        # Loading a large document library can take minutes.  It is only needed
+        # when raw pretraining is enabled or when the tokenizer is explicitly
+        # being retrained from raw text.  Supervised-only continuation runs must
+        # not pay the document-extraction cost.
+        needs_raw_corpus = config.raw_pretrain_epochs > 0 or config.retrain_tokenizer
+        if needs_raw_corpus:
+            raw_files = discover_raw_text_files(config.raw_text_paths)
+            raw_corpus = load_raw_corpus(raw_files, config) if raw_files else empty_raw_corpus()
+            raw_corpus = write_raw_corpus_manifest(raw_corpus, Path(config.report_dir), run_id)
+            LOGGER.info("LANTRA raw/document corpus files: %s", list(raw_corpus.files))
+            if raw_corpus.segments:
+                PRINTER.pretty("LANTRA RAW CORPUS", raw_corpus.to_dict(), "success")
+            else:
+                PRINTER.status(
+                    "LANTRA RAW",
+                    "No raw-text corpus found; raw-text pretraining will be skipped.",
+                    "info",
+                )
         else:
-            PRINTER.status("LANTRA RAW", "No raw-text corpus found; raw-text pretraining will be skipped.", "info")
+            raw_files = []
+            raw_corpus = empty_raw_corpus()
+            PRINTER.status(
+                "LANTRA RAW",
+                "Raw corpus ingestion skipped because --raw-pretrain-epochs=0 and tokenizer retraining is disabled.",
+                "info",
+            )
 
         supervised_files = discover_data_files(config.data_paths)
         dataset: Optional[DatasetSplit] = None
