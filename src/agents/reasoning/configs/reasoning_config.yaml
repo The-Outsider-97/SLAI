@@ -80,7 +80,7 @@ inference:
   exploration_rate: 0.1           # Probability to trigger rule discovery
   max_learning_cycles: 100
   knowledge_base_weight: 0.3
-  structural_weights: "src/agents/reasoning/templates/structural_weights.json"
+  structural_weights: "src/agents/reasoning/templates/structure_weights.json"
   llm_fallback:
     enable: true
     temperature: 0.3
@@ -246,7 +246,7 @@ reasoning_cache:
 
 reasoning_types:
   max_combined_types: 3
-  enable_instance_cache: true
+  enable_instance_cache: false
   instance_cache_max_size: 32
   instance_cache_ttl_seconds: 300.0
   default_strategy: "abduction+deduction"
