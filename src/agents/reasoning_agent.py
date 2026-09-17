@@ -26,14 +26,15 @@ import json
 import os
 import tempfile
 import time
+import uuid
 
 from opentelemetry import trace # type: ignore
 from opentelemetry.trace import SpanKind, Status, StatusCode # type: ignore
-from prometheus_client import Counter as _Counter, Histogram, Gauge # type: ignore
+# from prometheus_client import Counter as _Counter, Histogram, Gauge # type: ignore
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Event, Thread
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
 
 from .base_agent import BaseAgent
@@ -48,7 +49,7 @@ logger = get_logger("Reasoning Agent")
 printer = PrettyPrinter()
 
 OTEL_AVAILABLE = True
-PROM_AVAILABLE = True
+# PROM_AVAILABLE = True
 
 @dataclass(frozen=True)
 class AgentReasoningTrace:
@@ -96,42 +97,288 @@ class ForwardChainReport:
 
 
 class DistributedLock:
-    def __init__(self, shared_memory, lock_key: str, timeout_seconds: float = 30.0):
+    """CAS-backed renewable lease over SLAI SharedMemory.
+
+    ``timeout_seconds`` is retained for backward compatibility and represents
+    the lease duration. Acquisition is bounded separately so a caller cannot
+    block forever waiting on another owner.
+
+    The lock value is a small structured record:
+
+        {
+            "owner": "<unique-token>",
+            "expires_at": <unix timestamp>,
+        }
+
+    Numeric values from the previous lock format are still recognized as
+    legacy expiry timestamps, allowing rolling upgrades without requiring
+    explicit lock-state migration.
+    """
+
+    def __init__(
+        self,
+        shared_memory: Any,
+        lock_key: str,
+        timeout_seconds: float = 30.0,
+        *,
+        acquire_timeout_seconds: Optional[float] = None,
+        poll_interval_seconds: float = 0.05,
+    ) -> None:
+        if shared_memory is None:
+            raise AgentLifecycleError("DistributedLock requires shared memory.", context={"lock_key": lock_key})
+        getter = getattr(shared_memory, "get", None)
+        cas = getattr(shared_memory, "compare_and_swap", None)
+
+        if not callable(getter) or not callable(cas):
+            raise AgentLifecycleError(
+                "Shared memory does not satisfy the DistributedLock contract.",
+                context={
+                    "lock_key": lock_key,
+                    "has_get": callable(getter),
+                    "has_compare_and_swap": callable(cas),
+                },
+            )
+
         self.sm = shared_memory
-        self.lock_key = lock_key
-        self.timeout = timeout_seconds
+        self.lock_key = str(lock_key)
+
+        self.lease_seconds = max(0.5, float(timeout_seconds))
+
+        if acquire_timeout_seconds is None:
+            acquire_timeout_seconds = self.lease_seconds
+
+        self.acquire_timeout_seconds = max(0.0, float(acquire_timeout_seconds))
+        self.poll_interval_seconds = max(0.01, float(poll_interval_seconds))
+
+        self._owner_token = uuid.uuid4().hex
         self._held = False
-        self._expiry = None          # store the expiry timestamp when locked
+        self._lost = False
+        self._lease_record: Optional[Dict[str, Any]] = None
+
+        self._state_lock = RLock()
+        self._heartbeat_stop = Event()
+        self._heartbeat_thread: Optional[Thread] = None
+
+    @staticmethod
+    def _expiry_of(value: Any) -> float:
+        """Extract the lease expiry from current or legacy lock records."""
+        if value is None:
+            return 0.0
+
+        if isinstance(value, Mapping):
+            try:
+                return float(value.get("expires_at", 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        # Backward compatibility with the previous float-only lock format.
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _is_owned_by_me(self, value: Any) -> bool:
+        return (
+            isinstance(value, Mapping)
+            and value.get("owner") == self._owner_token
+        )
+
+    def _new_lease_record(self) -> Dict[str, Any]:
+        # Calculate expiry at the time of the actual lease operation,
+        # never before waiting for acquisition.
+        return {
+            "owner": self._owner_token,
+            "expires_at": time.time() + self.lease_seconds,
+        }
 
     def acquire(self, blocking: bool = True) -> bool:
-        expiry = time.time() + self.timeout
+        """Acquire the lease.
+
+        Returns ``False`` when non-blocking acquisition fails or when the
+        bounded acquisition timeout expires.
+        """
+        deadline = (
+            time.monotonic() + self.acquire_timeout_seconds
+            if blocking
+            else time.monotonic()
+        )
+
         while True:
             current = self.sm.get(self.lock_key)
-            if current is None or current < time.time():
-                # Attempt to claim the lock
-                if self.sm.compare_and_swap(self.lock_key, current, expiry):
-                    self._held = True
-                    self._expiry = expiry
+            now = time.time()
+
+            if current is None or self._expiry_of(current) <= now:
+                candidate = self._new_lease_record()
+
+                if self.sm.compare_and_swap(
+                    self.lock_key,
+                    current,
+                    candidate,
+                ):
+                    with self._state_lock:
+                        self._held = True
+                        self._lost = False
+                        self._lease_record = candidate
+
+                    self._start_heartbeat()
                     return True
+
             if not blocking:
                 return False
-            time.sleep(0.1)
 
-    def release(self):
-        if self._held:
-            # Only release if we still hold it (the stored expiry matches)
-            current = self.sm.get(self.lock_key)
-            if current == self._expiry:
-                self.sm.compare_and_swap(self.lock_key, current, None)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return False
+
+            time.sleep(
+                min(self.poll_interval_seconds, remaining)
+            )
+
+    def renew(self) -> bool:
+        """Renew the current lease if this instance still owns it."""
+        with self._state_lock:
+            if not self._held or self._lost:
+                return False
+
+        current = self.sm.get(self.lock_key)
+
+        if not self._is_owned_by_me(current):
+            with self._state_lock:
+                self._held = False
+                self._lost = True
+            return False
+
+        updated = self._new_lease_record()
+
+        if not self.sm.compare_and_swap(
+            self.lock_key,
+            current,
+            updated,
+        ):
+            with self._state_lock:
+                self._held = False
+                self._lost = True
+            return False
+
+        with self._state_lock:
+            self._lease_record = updated
+
+        return True
+
+    def assert_held(self) -> None:
+        """Fail explicitly when the lease has been lost."""
+        with self._state_lock:
+            if not self._held or self._lost:
+                raise InferenceExecutionError(
+                    "Distributed reasoning lock was lost.",
+                    context={
+                        "lock_key": self.lock_key,
+                        "owner": self._owner_token,
+                    },
+                )
+
+        current = self.sm.get(self.lock_key)
+
+        if (
+            not self._is_owned_by_me(current)
+            or self._expiry_of(current) <= time.time()
+        ):
+            with self._state_lock:
+                self._held = False
+                self._lost = True
+
+            raise InferenceExecutionError(
+                "Distributed reasoning lock expired or changed ownership.",
+                context={
+                    "lock_key": self.lock_key,
+                    "owner": self._owner_token,
+                },
+            )
+
+    def _start_heartbeat(self) -> None:
+        self._heartbeat_stop.clear()
+
+        interval = max(
+            0.1,
+            min(
+                self.lease_seconds / 3.0,
+                self.lease_seconds * 0.5,
+            ),
+        )
+
+        self._heartbeat_thread = Thread(
+            target=self._heartbeat_loop,
+            args=(interval,),
+            name=f"reasoning-lock:{self.lock_key}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self, interval: float) -> None:
+        while not self._heartbeat_stop.wait(interval):
+            try:
+                if not self.renew():
+                    logger.error(
+                        "Reasoning distributed lock lease lost | key=%s",
+                        self.lock_key,
+                    )
+                    return
+            except Exception as exc:
+                with self._state_lock:
+                    self._held = False
+                    self._lost = True
+
+                logger.error(
+                    "Reasoning distributed lock renewal failed | key=%s | error=%s",
+                    self.lock_key,
+                    exc,
+                )
+                return
+
+    def release(self) -> None:
+        """Release the lease only when this instance still owns it."""
+        self._heartbeat_stop.set()
+
+        heartbeat = self._heartbeat_thread
+        if heartbeat is not None and heartbeat.is_alive():
+            heartbeat.join(
+                timeout=max(
+                    0.2,
+                    min(self.lease_seconds, 1.0),
+                )
+            )
+
+        current = self.sm.get(self.lock_key)
+
+        if self._is_owned_by_me(current):
+            self.sm.compare_and_swap(
+                self.lock_key,
+                current,
+                None,
+            )
+
+        with self._state_lock:
             self._held = False
-            self._expiry = None
+            self._lost = False
+            self._lease_record = None
+            self._heartbeat_thread = None
 
-    def __enter__(self):
-        self.acquire()
+    def __enter__(self) -> "DistributedLock":
+        if not self.acquire(blocking=True):
+            raise ReasoningTimeoutError(
+                "Timed out acquiring distributed reasoning lock.",
+                context={
+                    "lock_key": self.lock_key,
+                    "acquire_timeout_seconds": self.acquire_timeout_seconds,
+                },
+            )
+
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
         self.release()
+        return False
+
 
 class ReasoningAgent(BaseAgent):
     """Production facade for symbolic, probabilistic, and typed reasoning.
@@ -173,9 +420,9 @@ class ReasoningAgent(BaseAgent):
         config=config,
         checkpoint_manager=checkpoint_manager,
         )
-        self.shared_memory = shared_memory
         self.agent_factory = agent_factory
         self._reasoning_lock = RLock()
+
         self.config: Dict[str, Any] = load_global_config()
         self.agent_config: Dict[str, Any] = dict(get_config_section(self.AGENT_KEY) or {})
         if config:
@@ -211,26 +458,6 @@ class ReasoningAgent(BaseAgent):
         self.operation_counts: Counter[str] = Counter()
         self.reasoning_history: Deque[Dict[str, Any]] = deque(maxlen=self.max_trace_items)
 
-        self.prom_conflicts = _Counter(
-            'reasoning_conflicts_total',
-            'Total number of fact conflicts detected',
-            ['agent_name']
-        )
-        self.prom_forward_duration = Histogram(
-            'forward_chaining_duration_seconds',
-            'Duration of forward chaining',
-            ['agent_name']
-        )
-        self.prom_kb_size = Gauge(
-            'reasoning_kb_size',
-            'Current knowledge base size',
-            ['agent_name']
-        )
-        self.prom_rule_weights = Gauge(
-            'reasoning_rule_weight',
-            'Weight of a symbolic rule',
-            ['agent_name', 'rule_name']
-        )
         if self.auto_register_builtin_rules:
             weights = self.builtin_rule_weights
             self.add_rule(self.identity_rule, "identity_rule", weights.get("identity_rule", 1.0))
@@ -358,6 +585,108 @@ class ReasoningAgent(BaseAgent):
         self.reasoning_history.append(payload)
         self._shared_publish(self.reasoning_trace_topic, {"agent": self.name, "trace": payload})
         self._remember(payload, tag=self.memory_event_tag, priority=self.memory_event_priority)
+
+    def _metric_value(
+        self,
+        metric_name: str,
+        value: float,
+        *,
+        unit: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Record a reasoning metric without allowing telemetry to break reasoning."""
+        store = getattr(self, "metric_store", None)
+        recorder = getattr(store, "record_value", None)
+
+        if not callable(recorder):
+            return
+
+        try:
+            recorder(
+                metric_name,
+                float(value),
+                category="reasoning",
+                unit=unit,
+                metadata=dict(metadata or {}),
+            )
+        except Exception as exc:
+            logger.debug(
+                "Reasoning metric recording failed | metric=%s | error=%s",
+                metric_name,
+                exc,
+            )
+
+
+    def _metric_increment(
+        self,
+        metric_name: str,
+        amount: float = 1.0,
+        *,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        store = getattr(self, "metric_store", None)
+        incrementer = getattr(store, "increment_counter", None)
+
+        if callable(incrementer):
+            try:
+                incrementer(
+                    metric_name,
+                    float(amount),
+                    category="reasoning",
+                    unit="count",
+                    metadata=dict(metadata or {}),
+                )
+                return
+            except Exception as exc:
+                logger.debug(
+                    "Reasoning counter increment failed | metric=%s | error=%s",
+                    metric_name,
+                    exc,
+                )
+
+        # BaseAgent may be using its degraded metric-store implementation.
+        self._metric_value(
+            metric_name,
+            amount,
+            unit="count",
+            metadata=metadata,
+        )
+
+
+    def _metric_gauge(
+        self,
+        metric_name: str,
+        value: float,
+        *,
+        unit: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        store = getattr(self, "metric_store", None)
+        setter = getattr(store, "set_gauge", None)
+
+        if callable(setter):
+            try:
+                setter(
+                    metric_name,
+                    float(value),
+                    category="reasoning",
+                    unit=unit,
+                    metadata=dict(metadata or {}),
+                )
+                return
+            except Exception as exc:
+                logger.debug(
+                    "Reasoning gauge update failed | metric=%s | error=%s",
+                    metric_name,
+                    exc,
+                )
+
+        self._metric_value(
+            metric_name,
+            value,
+            unit=unit,
+            metadata=metadata,
+        )
 
     # ------------------------------------------------------------------
     # Knowledge loading and persistence
@@ -690,11 +1019,11 @@ class ReasoningAgent(BaseAgent):
     # ------------------------------------------------------------------
     def validate_fact(self, fact: Union[str, Sequence[Any]], threshold: float = 0.75) -> Dict[str, Any]:
         start = time.time()
+
         normalized = normalize_fact(fact)
         safe_threshold = clamp_confidence(threshold)
         confidence = self.knowledge_base.get(normalized, 0.0)
-    
-        # ---- OpenTelemetry span ----
+
         if OTEL_AVAILABLE and trace:
             tracer = trace.get_tracer(__name__)
             span = tracer.start_span("validate_fact")
@@ -703,47 +1032,199 @@ class ReasoningAgent(BaseAgent):
             span.set_attribute("kb_confidence", confidence)
         else:
             span = None
-    
+
         try:
-            validation_details: Any = {}
-            try:
-                validator = getattr(self.validation_engine, "validate_all", None)
-                if callable(validator):
-                    validation_details = validator(rules=self.rules, new_facts={normalized: confidence or safe_threshold})
-            except Exception as exc:
-                validation_details = {"validation_error": f"{type(exc).__name__}: {exc}"}
-                logger.warning("ValidationEngine failed for %s: %s", normalized, exc)
-    
-            conflicts = validation_details.get("conflicts", []) if isinstance(validation_details, Mapping) else []
-            has_conflict = any(normalized in pair for pair in conflicts if isinstance(pair, (tuple, list, set)))
-            probability = self.probabilistic_query(normalized) if self.enable_probabilistic_fallback else confidence
-            is_valid = confidence >= safe_threshold and not has_conflict
-            payload = json_safe_reasoning_state({
-                "fact": normalized,
-                "kb_confidence": confidence,
-                "probabilistic_confidence": probability,
-                "has_conflict": has_conflict,
-                "is_valid": is_valid,
-                "combined_valid": is_valid and probability >= safe_threshold,
-                "validation_details": validation_details,
-            })
-            if payload["combined_valid"]:
-                self._shared_set(self.last_validation_key, payload)
-    
-            # ---- Prometheus: increment conflict counter ----
-            if has_conflict and PROM_AVAILABLE and self.prom_conflicts:
-                self.prom_conflicts.labels(agent_name=self.name).inc()
-    
-            # ---- Set span status to OK ----
+            validation_details: Dict[str, Any]
+
+            validator = getattr(
+                self.validation_engine,
+                "validate_all",
+                None,
+            )
+
+            if not callable(validator):
+                validation_details = {
+                    "validation_status": "unavailable",
+                    "validation_error": (
+                        "ValidationEngine does not expose validate_all"
+                    ),
+                }
+
+            else:
+                try:
+                    raw_validation = validator(
+                        rules=self.rules,
+                        new_facts={
+                            normalized:
+                            confidence or safe_threshold
+                        },
+                    )
+
+                    if isinstance(raw_validation, Mapping):
+                        validation_details = dict(
+                            raw_validation
+                        )
+                    else:
+                        validation_details = {
+                            "validation_status": "failed",
+                            "validation_error": (
+                                "ValidationEngine returned an "
+                                f"unsupported result type: "
+                                f"{type(raw_validation).__name__}"
+                            ),
+                        }
+
+                except Exception as exc:
+                    validation_details = {
+                        "validation_status": "failed",
+                        "validation_error": (
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                    }
+
+                    logger.warning(
+                        "ValidationEngine failed for %s: %s",
+                        normalized,
+                        exc,
+                    )
+
+            raw_status = validation_details.get(
+                "validation_status",
+                "unknown",
+            )
+
+            validation_status = str(
+                raw_status
+            ).strip().lower()
+
+            if (
+                "validation_error" in validation_details
+                and validation_status
+                not in {"failed", "partial"}
+            ):
+                validation_status = "failed"
+
+            validation_complete = (
+                validation_status == "success"
+            )
+
+            conflicts = validation_details.get(
+                "conflicts",
+                [],
+            )
+
+            has_conflict = (
+                isinstance(conflicts, list)
+                and any(
+                    normalized in pair
+                    for pair in conflicts
+                    if isinstance(
+                        pair,
+                        (tuple, list, set),
+                    )
+                )
+            )
+
+            probability = (
+                self.probabilistic_query(normalized)
+                if self.enable_probabilistic_fallback
+                else confidence
+            )
+
+            base_valid = (
+                confidence >= safe_threshold
+                and not has_conflict
+            )
+
+            probability_valid = (
+                probability >= safe_threshold
+            )
+
+            if (
+                not base_valid
+                or not probability_valid
+            ):
+                decision = "invalid"
+
+            elif (
+                self.strict_fact_validation
+                and not validation_complete
+            ):
+                decision = "indeterminate"
+
+            else:
+                decision = "valid"
+
+            combined_valid = (
+                decision == "valid"
+            )
+
+            payload = json_safe_reasoning_state(
+                {
+                    "fact": normalized,
+                    "kb_confidence": confidence,
+                    "probabilistic_confidence": probability,
+                    "has_conflict": has_conflict,
+
+                    # Backward-compatible field:
+                    "is_valid": base_valid,
+
+                    # Canonical top-level decision:
+                    "combined_valid": combined_valid,
+                    "decision": decision,
+
+                    # Explicit validation state:
+                    "validation_status": validation_status,
+                    "validation_complete": validation_complete,
+                    "strict_validation": self.strict_fact_validation,
+
+                    "validation_details": validation_details,
+                }
+            )
+
+            if combined_valid:
+                self._shared_set(
+                    self.last_validation_key,
+                    payload,
+                )
+
+            if has_conflict:
+                self._metric_increment(
+                    "conflicts_total",
+                    1.0,
+                )
+
+            self._metric_value(
+                "validation_complete",
+                1.0 if validation_complete else 0.0,
+            )
+
             if span:
-                span.set_status(Status(StatusCode.OK))
+                span.set_attribute(
+                    "validation_status",
+                    validation_status,
+                )
+                span.set_attribute(
+                    "validation_decision",
+                    decision,
+                )
+                span.set_status(
+                    Status(StatusCode.OK)
+                )
+
             return payload
-    
-        except Exception as e:
+
+        except Exception as exc:
             if span:
-                span.set_status(Status(StatusCode.ERROR, str(e)))
-                span.record_exception(e)
+                span.set_status(
+                    Status(
+                        StatusCode.ERROR,
+                        str(exc),
+                    )
+                )
+                span.record_exception(exc)
             raise
+
         finally:
             if span:
                 span.end()
@@ -798,115 +1279,206 @@ class ReasoningAgent(BaseAgent):
         return clamp_confidence(best)
 
     def forward_chaining(self, max_iterations: Optional[int] = None) -> Dict[Fact, float]:
-        with DistributedLock(self.shared_memory, f"locks:forward_chaining:{self.name}"):
-            report = self.forward_chaining_report(max_iterations=max_iterations)
-        return report.added
+        return self.forward_chaining_report(max_iterations=max_iterations).added
 
-    def forward_chaining_report(self, max_iterations: Optional[int] = None) -> ForwardChainReport:
+    def forward_chaining_report(self, max_iterations: Optional[int] = None) -> ForwardChainReport: # type: ignore
+        lock_key = f"locks:forward_chaining:{self.name}"
+
+        with DistributedLock(
+            self.shared_memory,
+            lock_key,
+            timeout_seconds=30.0,
+            acquire_timeout_seconds=30.0,
+        ) as distributed_lock:
+            return self._forward_chaining_report_locked(
+                max_iterations=max_iterations,
+                distributed_lock=distributed_lock,
+            )
+
+    def _forward_chaining_report_locked(self, max_iterations: Optional[int], distributed_lock: DistributedLock) -> ForwardChainReport:
         start = time.time()
-    
-        # ---- OpenTelemetry span ----
+
         if OTEL_AVAILABLE and trace:
             tracer = trace.get_tracer(__name__)
             span = tracer.start_span("forward_chaining")
             span.set_attribute("max_iterations", max_iterations or self.max_iterations)
         else:
             span = None
-    
+
         try:
-            limit = bounded_iterations(max_iterations or self.max_iterations, minimum=1, maximum=max(1, self.max_iterations))
+            limit = bounded_iterations(
+                max_iterations or self.max_iterations,
+                minimum=1,
+                maximum=max(1, self.max_iterations),
+            )
+
             added: Dict[Fact, float] = {}
             iterations = 0
+
             with self._reasoning_lock:
                 for _ in range(limit):
+                    distributed_lock.assert_held()
+
                     iterations += 1
                     current_new: Dict[Fact, float] = {}
+
                     ranked_rules = rank_rules_by_weight(self.rules, self.rule_weights)
-                    if self.exploration_rate > 0.0 and len(ranked_rules) > 1:
+
+                    if (
+                        self.exploration_rate > 0.0
+                        and len(ranked_rules) > 1
+                    ):
                         sampled = sample_rules(ranked_rules, self.rule_weights, k=max(1, min(len(ranked_rules), 3)))
-                        ranked_rules = sampled + [rule for rule in ranked_rules if rule[0] not in {r[0] for r in sampled}]
-    
+
+                        sampled_names = {
+                            rule[0]
+                            for rule in sampled
+                        }
+
+                        ranked_rules = sampled + [
+                            rule
+                            for rule in ranked_rules
+                            if rule[0] not in sampled_names
+                        ]
+
                     for name, rule_fn, default_weight in ranked_rules:
+                        distributed_lock.assert_held()
+
                         try:
-                            inferred = rule_fn(dict(self.knowledge_base)) or {}
+                            inferred = (rule_fn(dict(self.knowledge_base)) or {})
+
                             if not isinstance(inferred, Mapping):
                                 raise RuleExecutionError("Rule must return a mapping", context={"rule": name})
+
                         except ReasoningError:
                             self._update_rule_weights(name, success=False)
                             raise
+
                         except Exception as exc:
                             self._update_rule_weights(name, success=False)
-                            raise RuleExecutionError("Symbolic rule execution failed", cause=exc, context={"rule": name}) from exc
-    
-                        effective_weight = clamp_confidence(self.rule_weights.get(name, default_weight))
+                            raise RuleExecutionError(
+                                "Symbolic rule execution failed",
+                                cause=exc,
+                                context={"rule": name},
+                            ) from exc
+
+                        # A rule may itself take longer than expected. Check
+                        # ownership again before applying any of its results.
+                        distributed_lock.assert_held()
+
+                        effective_weight = clamp_confidence(
+                            self.rule_weights.get(name, default_weight))
+
                         rule_added = False
+
                         for inferred_fact, inferred_conf in inferred.items():
                             normalized = normalize_fact(inferred_fact)
+
                             try:
-                                ensure_non_contradictory(normalized, self.knowledge_base, threshold=self.contradiction_threshold, source=name)
+                                ensure_non_contradictory(
+                                    normalized,
+                                    self.knowledge_base,
+                                    threshold=self.contradiction_threshold,
+                                    source=name,
+                                )
                             except ContradictionError:
                                 continue
-                            weighted = clamp_confidence(inferred_conf) * effective_weight
+
+                            weighted = (clamp_confidence(inferred_conf)* effective_weight)
                             previous = self.knowledge_base.get(normalized, 0.0)
+
                             if weighted > previous:
-                                current_new[normalized] = max(current_new.get(normalized, 0.0), weighted)
+                                current_new[normalized] = max(
+                                    current_new.get(normalized, 0.0), weighted)
                                 rule_added = True
+
                         self._update_rule_weights(name, success=rule_added)
-    
+
                     if not current_new:
                         break
+
+                    distributed_lock.assert_held()
+
                     self.knowledge_base.update(current_new)
                     added.update(current_new)
-    
+
+                distributed_lock.assert_held()
+
                 self._sync_component_state()
                 self._persist_state(reason="forward_chaining")
-    
+
             conflicts = self._detect_conflicts()
             redundancies = self._detect_redundancies()
+
             elapsed = time.time() - start
+
             self.conflict_count = len(conflicts)
             self.forward_chaining_speed = elapsed
-    
-            # ---- Prometheus histogram observation ----
-            if PROM_AVAILABLE and hasattr(self, 'prom_forward_duration') and self.prom_forward_duration:
-                self.prom_forward_duration.labels(agent_name=self.name).observe(elapsed)
-    
-            # ---- Update KB size gauge (optional, can be called elsewhere too) ----
-            if PROM_AVAILABLE and hasattr(self, 'prom_kb_size') and self.prom_kb_size:
-                self.prom_kb_size.labels(agent_name=self.name).set(len(self.knowledge_base))
-    
-            # ---- Update rule weights gauge (optional) ----
-            if PROM_AVAILABLE and hasattr(self, 'prom_rule_weights') and self.prom_rule_weights:
-                for name, weight in self.rule_weights.items():
-                    self.prom_rule_weights.labels(agent_name=self.name, rule_name=name).set(weight)
-    
+
+            self._metric_value(
+                "forward_chaining_duration_seconds",
+                elapsed,
+                unit="seconds",
+            )
+
+            self._metric_gauge(
+                "knowledge_base_size",
+                len(self.knowledge_base),
+                unit="facts",
+            )
+
+            for name, weight in self.rule_weights.items():
+                self._metric_gauge(
+                    "rule_weight",
+                    weight,
+                    metadata={"rule_name": name},
+                )
+
             report = ForwardChainReport(
                 added=added,
                 iterations=iterations,
                 conflicts=conflicts,
                 redundancies=redundancies,
-                duration_seconds=elapsed
+                duration_seconds=elapsed,
             )
-            self._record_trace(AgentReasoningTrace(
-                "forward_chaining", start, time.time(), "success",
-                {"added": len(added), "iterations": iterations}
-            ))
-    
+
+            self._record_trace(
+                AgentReasoningTrace(
+                    "forward_chaining",
+                    start,
+                    time.time(),
+                    "success",
+                    {
+                        "added": len(added),
+                        "iterations": iterations,
+                    },
+                )
+            )
+
             if span:
                 span.set_attribute("iterations", iterations)
                 span.set_attribute("added_facts", len(added))
                 span.set_attribute("duration_seconds", elapsed)
                 span.set_status(Status(StatusCode.OK))
+
             return report
-    
-        except Exception as e:
+
+        except Exception as exc:
             if span:
-                span.set_status(Status(StatusCode.ERROR, str(e)))
-                span.record_exception(e)
+                span.set_status(
+                    Status(
+                        StatusCode.ERROR,
+                        str(exc),
+                    )
+                )
+                span.record_exception(exc)
             raise
+
         finally:
             if span:
                 span.end()
+
+        raise RuntimeError("Forward chaining completed without producing a report")
 
     def _update_rule_weights(self, rule_name: str, success: bool) -> None:
         if rule_name not in self.rule_weights:
@@ -939,46 +1511,24 @@ class ReasoningAgent(BaseAgent):
         return requested
 
     def _invoke_reasoning_engine(self, reasoning_engine: Any, problem: Any, context: Optional[Mapping[str, Any]] = None) -> Any:
-        context_dict = dict(context or {})
-        performer = getattr(reasoning_engine, "perform_reasoning", None)
-        if not callable(performer):
-            raise ReasoningTypeError("Reasoning engine does not expose perform_reasoning", context={"engine": type(reasoning_engine).__name__})
-        sig = inspect.signature(performer)
-        params = [p for p in sig.parameters.values() if p.name != "self"]
-        names = [p.name for p in params]
-        kwargs: Dict[str, Any] = {}
-        if "context" in names:
-            kwargs["context"] = context_dict
-        if "premises" in names and "hypothesis" in names:
-            return performer(
-                premises=context_dict.get("premises", [str(problem)]),
-                hypothesis=context_dict.get("hypothesis", str(problem)),
-                **kwargs,
-            )
-        if "events" in names:
-            if "conditions" in names:
-                kwargs["conditions"] = context_dict.get("conditions", {})
-            return performer(events=context_dict.get("events", problem if isinstance(problem, list) else [problem]), **kwargs)
-        if "observations" in names:
-            return performer(observations=context_dict.get("observations", problem), **kwargs)
-        if "target" in names and "source_domain" in names:
-            return performer(target=context_dict.get("target", problem), source_domain=context_dict.get("source_domain", []), **kwargs)
-        if "system" in names:
-            return performer(system=context_dict.get("system", problem), **kwargs)
-        if "input_data" in names:
-            return performer(input_data=problem, **kwargs)
-        if params and params[0].name != "context":
-            kwargs[params[0].name] = problem
-        return performer(**kwargs)
+        """
+        Backward-compatible strategy invocation wrapper.
+        ReasoningTypes owns strategy-specific argument adaptation.
+        """
+        return self.types.invoke_instance(reasoning_engine, problem, context)
 
     def reason(self, problem: Any, reasoning_type: Optional[str] = None, context: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         start = time.time()
         resolved_type = self._resolve_reasoning_type(reasoning_type, problem)
-        engine = self.types.create(resolved_type)
-        result = self._invoke_reasoning_engine(engine, problem, context)
-        payload = {"reasoning_type": resolved_type, "result": result, "status": "success"}
+        result = self.types.execute(resolved_type, problem, context)
+        payload = {
+            "reasoning_type": resolved_type,
+            "result": result,
+            "status": "success",
+        }
         self.operation_counts["reason"] += 1
-        self._record_trace(AgentReasoningTrace("reason", start, time.time(), "success", {"type": resolved_type}))
+        self._record_trace(AgentReasoningTrace("reason", start, time.time(),"success", {"type": resolved_type}))
+
         return payload
 
     def react_loop(self, problem: str, max_steps: Optional[int] = None) -> Dict[str, Any]:
