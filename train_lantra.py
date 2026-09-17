@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """SLAI Language Transformer (LANTRA) multi-task trainer.
 
 This is a real staged training entry point for SLAI's existing LanguageTransformer
@@ -86,18 +87,19 @@ import random
 import sys
 import time
 import traceback
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
-from logs.logger import PrettyPrinter, configure_logging, get_logger
+from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
 from src.agents.language.modules.language_tokenizer import LanguageTokenizer
 from src.agents.language.modules.language_transformer import LanguageTransformer
 
 
 LOGGER = get_logger("LANTRA Trainer")
-PRINTER = PrettyPrinter
+PRINTER = PrettyPrinter()
 
 SUPPORTED_TASKS: Tuple[str, ...] = (
     "generation",
@@ -1237,21 +1239,45 @@ def load_glove_asset(
     except (OSError, json.JSONDecodeError) as exc:
         raise LantraTrainingError(f"Failed to load GloVe JSON {path}: {exc}") from exc
 
-    container: Any = payload
-    if isinstance(payload, Mapping):
-        for key in ("vectors", "embeddings", "data"):
-            nested = payload.get(key)
-            if isinstance(nested, (Mapping, list, tuple)):
-                container = nested
-                break
-
     found: Dict[str, Tuple[float, ...]] = {}
     dimension: Optional[int] = None
 
-    # Also support the common {"words": [...], "vectors": [[...], ...]}
-    # representation in addition to word->vector mappings.
+    # IMPORTANT: a plain GloVe dictionary is itself a word->vector mapping and
+    # words such as "data", "vectors", or "embeddings" may legitimately occur
+    # as vocabulary keys.  Do not mistake the numeric vector for one of those
+    # words for a wrapper container.  Wrapper detection therefore happens only
+    # after paired words/vectors detection and only when the candidate value is
+    # structurally a collection of records/mappings rather than one flat vector.
     paired_words = payload.get("words") if isinstance(payload, Mapping) else None
     paired_vectors = payload.get("vectors") if isinstance(payload, Mapping) else None
+
+    container: Any = payload
+    if isinstance(payload, Mapping) and not (
+        isinstance(paired_words, Sequence)
+        and not isinstance(paired_words, (str, bytes, bytearray))
+        and isinstance(paired_vectors, Sequence)
+        and not isinstance(paired_vectors, (str, bytes, bytearray))
+        and len(paired_words) == len(paired_vectors)
+    ):
+        for wrapper_key in ("vectors", "embeddings", "data"):
+            nested = payload.get(wrapper_key)
+            if isinstance(nested, Mapping):
+                container = nested
+                break
+            if (
+                isinstance(nested, Sequence)
+                and not isinstance(nested, (str, bytes, bytearray))
+                and nested
+                and _coerce_vector(nested) is None
+            ):
+                # A list of records or list-of-vectors may be a wrapper. A flat
+                # numeric list is a normal GloVe vector for the word itself and
+                # must leave ``container`` pointing at the top-level mapping.
+                container = nested
+                break
+
+    # Also support the common {"words": [...], "vectors": [[...], ...]}
+    # representation in addition to word->vector mappings.
     if (
         isinstance(paired_words, Sequence)
         and not isinstance(paired_words, (str, bytes, bytearray))
@@ -1799,8 +1825,10 @@ def encode_text(
         return_tokens=False,
         return_tensors="pt",
     )
-    ids = payload.get("input_ids")
-    mask = payload.get("attention_mask")
+    # The tokenizer payload also contains list-valued optional metadata fields;
+    # narrow the two required entries before using tensor-specific operations.
+    ids: Any = payload.get("input_ids")
+    mask: Any = payload.get("attention_mask")
     if ids is None or mask is None:
         raise LantraTrainingError("LanguageTokenizer.encode did not return input_ids and attention_mask.")
     if ids.dim() != 1 or mask.dim() != 1:
@@ -2222,12 +2250,19 @@ def generate_prediction(
     # LanguageTransformer greedy/sample wrapper does not forward a source padding
     # mask into BaseTransformer.inference, so deliberately keep this source
     # unpadded rather than pretending that an ignored mask is honored.
-    generated = model.generate(
+    # The generation API can return a tensor or a structured output depending
+    # on the decoding implementation.  ``return_dict=False`` requests a tensor,
+    # but normalize defensively for wrappers that still return an output object.
+    generated: Any = model.generate(
         src,
         strategy="greedy",
         max_len=config.target_max_length,
         return_dict=False,
     )
+    if not hasattr(generated, "dim"):
+        generated = getattr(generated, "sequences", None)
+    if generated is None or not hasattr(generated, "dim"):
+        raise LantraTrainingError("Unexpected generated result: expected a token tensor.")
     if generated.dim() != 2 or generated.size(0) < 1:
         raise LantraTrainingError(f"Unexpected generated tensor shape: {list(generated.shape)}")
     return tokenizer.decode(generated[0], skip_special_tokens=True)
