@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import inspect
 import threading
-from typing import Any, Dict, List, Optional, Type, Union
+
+from typing import Any, Dict, List, Mapping, Optional, Type, Union
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.reasoning_errors import *
@@ -53,16 +54,20 @@ class ReasoningTypes:
         self.types_cfg: Dict[str, Any] = get_config_section("reasoning_types", self.config) or {}
 
         # ---- Configuration -------------------------------------------------
-        self.max_combined_types: int = bounded_iterations(
-            self.types_cfg.get("max_combined_types", 3), minimum=1, maximum=10
-        )
-        self.enable_instance_cache: bool = bool(self.types_cfg.get("enable_instance_cache", False))
-        self.instance_cache_max_size: int = bounded_iterations(
-            self.types_cfg.get("instance_cache_max_size", 32), minimum=1, maximum=10000
-        )
-        self.instance_cache_ttl_seconds: Optional[float] = self._optional_float(
-            self.types_cfg.get("instance_cache_ttl_seconds", 300.0)
-        )
+        self.max_combined_types: int = bounded_iterations(self.types_cfg.get("max_combined_types", 3), minimum=1, maximum=10)
+        requested_instance_cache = bool(self.types_cfg.get("enable_instance_cache", False))
+        if requested_instance_cache:
+            logger.warning("reasoning_types.enable_instance_cache=true was requested, but mutable strategy-instance caching is disabled for safety.")
+
+        # Strategy implementations contain mutable per-run state inherited from
+        # BaseReasoning. They must therefore be instantiated per reasoning session.
+        self.enable_instance_cache = False
+
+        # Retain these values temporarily for configuration/backward compatibility.
+        self.instance_cache_max_size = bounded_iterations(self.types_cfg.get("instance_cache_max_size", 32), minimum=1, maximum=10_000)
+        self.instance_cache_ttl_seconds = self._optional_float(self.types_cfg.get("instance_cache_ttl_seconds", 300.0))
+        self.instance_cache_max_size: int = bounded_iterations(self.types_cfg.get("instance_cache_max_size", 32), minimum=1, maximum=10000)
+        self.instance_cache_ttl_seconds: Optional[float] = self._optional_float(self.types_cfg.get("instance_cache_ttl_seconds", 300.0))
         self.default_strategy: str = str(self.types_cfg.get("default_strategy", "abduction+deduction")).strip()
         self.strategy_keywords: Dict[str, List[str]] = self.types_cfg.get("strategy_keywords", {
             "abduction": ["explain", "why", "hypothesis", "plausible", "most likely"],
@@ -74,7 +79,9 @@ class ReasoningTypes:
         })
 
         # ---- Shared resources ----------------------------------------------
-        self.reasoning_memory: ReasoningMemory = ReasoningMemory()
+        self.reasoning_memory = ReasoningMemory()
+
+        # Kept only so get_cache()/diagnostics do not break existing callers.
         self._instance_cache: Optional[ReasoningCache] = None
         if self.enable_instance_cache:
             self._instance_cache = ReasoningCache(
@@ -95,41 +102,112 @@ class ReasoningTypes:
     # Public API
     # ------------------------------------------------------------------
     def create(self, task_type: str) -> BaseReasoning:
-        """
-        Create a reasoning strategy instance (single or combined).
+        """Create a fresh reasoning strategy instance."""
+        normalized = str(task_type or "").strip().lower()
 
-        Args:
-            task_type: One of the registered strategy names, or a combination
-                       joined by '+' (e.g., "abduction+induction+deduction").
-
-        Returns:
-            An instance of BaseReasoning (single or combined).
-
-        Raises:
-            ReasoningTypeError: If the task_type is unknown or invalid.
-        """
-        normalized = (task_type or "").strip().lower()
         if not normalized:
-            raise ReasoningTypeError("reasoning type is required", context={"task_type": task_type})
+            raise ReasoningTypeError("reasoning type is required", context={"task_type": task_type},)
 
-        # Check cache first (if enabled)
-        if self.enable_instance_cache and self._instance_cache is not None:
-            cached = self._instance_cache.get(normalized)
-            if cached is not None:
-                logger.debug(f"Returning cached reasoning instance: {normalized}")
-                return cached
-
-        # Combined reasoning
         if "+" in normalized:
             instance = self._create_combined_reasoning(normalized)
-        else:
-            instance = self._create_single_reasoning(normalized)
 
-        # Store in cache (if enabled) – note: combined instances are also cached
-        if self.enable_instance_cache and self._instance_cache is not None:
-            self._instance_cache.set(normalized, instance, metadata={"type": "combined" if "+" in normalized else "single"})
+            with self._lock:
+                self._stats["combined"] += 1
+
+            return instance
+
+        instance = self._create_single_reasoning(normalized)
+
+        with self._lock:
+            self._stats["single"] += 1
 
         return instance
+
+    def execute(self, task_type: str, problem: Any, context: Optional[Mapping[str, Any]] = None) -> Any:
+        """Execute one or more reasoning strategies through one stable contract.
+
+        ``problem`` is the top-level Agent input. ``context`` may provide the
+        strategy-specific structured fields required by a concrete reasoner.
+        """
+        normalized = str(task_type or "").strip().lower()
+
+        if not normalized:
+            raise ReasoningTypeError(
+                "reasoning type is required",
+                context={
+                    "task_type": task_type,
+                },
+            )
+
+        context_dict = dict(context or {})
+
+        if "+" in normalized:
+            names = self._parse_combined_types(normalized)
+            return self._execute_combined(names, problem, context_dict)
+
+        component = self._create_single_reasoning(normalized)
+        return self._invoke_component(normalized, component, problem, context_dict)
+
+
+    def invoke_instance(
+        self,
+        reasoning_engine: BaseReasoning,
+        problem: Any,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        """Invoke an already-created strategy without signature reflection.
+
+        Kept primarily for compatibility with existing ReasoningAgent internals
+        and external callers that still create strategies explicitly.
+        """
+        context_dict = dict(context or {})
+
+        component_names = getattr(
+            reasoning_engine,
+            "component_names",
+            None,
+        )
+
+        if component_names:
+            return self._execute_combined(
+                list(component_names),
+                problem,
+                context_dict,
+            )
+
+        for strategy_name, strategy_cls in self._TASK_TYPES.items():
+            if isinstance(
+                reasoning_engine,
+                strategy_cls,
+            ):
+                return self._invoke_component(
+                    strategy_name,
+                    reasoning_engine,
+                    problem,
+                    context_dict,
+                )
+
+        # Registered extension strategies are required to respect BaseReasoning's
+        # declared input_data/context contract.
+        performer = getattr(
+            reasoning_engine,
+            "perform_reasoning",
+            None,
+        )
+
+        if not callable(performer):
+            raise ReasoningTypeError(
+                "Reasoning engine does not expose perform_reasoning",
+                context={
+                    "engine":
+                        type(reasoning_engine).__name__,
+                },
+            )
+
+        return performer(
+            problem,
+            context_dict,
+        )
 
     def determine_reasoning_strategy(self, problem: str) -> str:
         """
@@ -207,73 +285,70 @@ class ReasoningTypes:
         return reasoning_cls()
 
     def _create_combined_reasoning(self, combined_type: str) -> BaseReasoning:
-        """
-        Create a combined reasoning instance that runs multiple strategies
-        sequentially, passing context and results forward.
-        """
-        names = [n.strip() for n in combined_type.split("+") if n.strip()]
-        if not (1 <= len(names) <= self.max_combined_types):
-            raise ReasoningTypeError(
-                f"Combined reasoning must include between 1 and {self.max_combined_types} strategies",
-                context={"requested": len(names), "max": self.max_combined_types}
-            )
+        """Create a compatibility wrapper for combined strategies."""
+        names = self._parse_combined_types(
+            combined_type
+        )
 
-        # Resolve each component class
-        components: List[BaseReasoning] = []
-        component_names: List[str] = []
-        for name in names:
-            cls = self._TASK_TYPES.get(name)
-            if cls is None:
-                self.discover_task_types()
-                cls = self._TASK_TYPES.get(name)
-            if cls is None:
-                raise ReasoningTypeError(f"Unknown reasoning type in combined expression: {name}")
-            components.append(cls())
-            component_names.append(name)
+        factory = self
 
-        # Create combined class dynamically
         class CombinedReasoning(BaseReasoning):
-            def __init__(self, comps: List[BaseReasoning], comp_names: List[str]):
+            def __init__(
+                self,
+                component_names: List[str],
+            ) -> None:
                 super().__init__()
-                self.components = comps
-                self.component_names = comp_names
-                self.name = "+".join(comp_names)
 
-            def perform_reasoning(self, *args, **kwargs) -> Dict[str, Any]:
-                # Extract initial context (default to empty dict)
-                context = dict(kwargs.pop("context", {}) or {})
-                # Keep original input for reference
-                context["original_input"] = args if len(args) > 1 else (args[0] if args else None)
+                self.component_names = list(
+                    component_names
+                )
 
-                step_results: Dict[str, Any] = {}
-                for idx, (component, cname) in enumerate(zip(self.components, self.component_names), start=1):
-                    # Pass context enriched with previous outputs
-                    step_context = context.copy()
-                    if idx > 1:
-                        prev_key = f"step_{idx-1}_{self.component_names[idx-2]}"
-                        step_context["prev_step_result"] = step_results.get(prev_key)
-                        step_context[f"prev_{self.component_names[idx-2]}_result"] = step_results.get(prev_key)
+                self.name = "+".join(
+                    self.component_names
+                )
 
-                    step_result = component.perform_reasoning(*args, context=step_context, **kwargs)
-                    step_results[f"step_{idx}_{cname}"] = step_result
-                    step_results["prev_step_result"] = step_result
+            def perform_reasoning(
+                self,
+                input_data: Any = None,
+                context: Optional[Dict[str, Any]] = None,
+                **legacy_kwargs: Any,
+            ) -> Dict[str, Any]:
+                merged_context = dict(
+                    context or {}
+                )
 
-                    if isinstance(step_result, dict):
-                        for key in ("best_explanation", "final_output", "result"):
-                            if key in step_result:
-                                step_results[key] = step_result[key]
+                # Preserve compatibility with previous callers such as:
+                #
+                #   combined.perform_reasoning(observations=[...])
+                #
+                for key, value in legacy_kwargs.items():
+                    merged_context.setdefault(
+                        key,
+                        value,
+                    )
 
-                    context[f"step_{idx}_result"] = step_result
-                    context["prev_step_result"] = step_result
+                problem = input_data
 
-                last_result = step_results.get("prev_step_result", {})
-                return {
-                    "combined_result": step_results,
-                    "reasoning_types": self.name,
-                    "final_output": last_result,
-                }
+                if problem is None:
+                    for key in (
+                        "problem",
+                        "observations",
+                        "events",
+                        "system",
+                        "target",
+                        "hypothesis",
+                    ):
+                        if key in merged_context:
+                            problem = merged_context[key]
+                            break
 
-        return CombinedReasoning(components, component_names)
+                return factory._execute_combined(
+                    self.component_names,
+                    problem,
+                    merged_context,
+                )
+
+        return CombinedReasoning(names)
     
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:
@@ -319,6 +394,327 @@ class ReasoningTypes:
     # Backward‑compatible private method (used by legacy code)
     def _determine_reasoning_strategy(self, problem: str) -> str:
         return self.determine_reasoning_strategy(problem)
+
+    def _parse_combined_types(
+        self,
+        combined_type: str,
+    ) -> List[str]:
+        names = [
+            name.strip().lower()
+            for name in combined_type.split("+")
+            if name.strip()
+        ]
+
+        if not (
+            1
+            <= len(names)
+            <= self.max_combined_types
+        ):
+            raise ReasoningTypeError(
+                (
+                    "Combined reasoning must include between "
+                    f"1 and {self.max_combined_types} strategies"
+                ),
+                context={
+                    "requested": len(names),
+                    "max": self.max_combined_types,
+                },
+            )
+
+        unknown = [
+            name
+            for name in names
+            if name not in self._TASK_TYPES
+        ]
+
+        if unknown:
+            self.discover_task_types()
+
+            unknown = [
+                name
+                for name in names
+                if name not in self._TASK_TYPES
+            ]
+
+        if unknown:
+            raise ReasoningTypeError(
+                "Unknown reasoning type(s) in combined expression",
+                context={
+                    "unknown": unknown,
+                    "available": sorted(
+                        self._TASK_TYPES.keys()
+                    ),
+                },
+            )
+
+        return names
+
+
+    @staticmethod
+    def _as_list(value: Any) -> List[Any]:
+        if value is None:
+            return []
+
+        if isinstance(value, list):
+            return list(value)
+
+        if isinstance(value, tuple):
+            return list(value)
+
+        if isinstance(value, set):
+            return list(value)
+
+        return [value]
+
+
+    def _invoke_component(
+        self,
+        strategy_name: str,
+        component: BaseReasoning,
+        problem: Any,
+        context: Mapping[str, Any],
+    ) -> Any:
+        """Adapt the canonical Reasoning request to one concrete strategy."""
+        strategy = str(
+            strategy_name
+        ).strip().lower()
+
+        context_dict = dict(context or {})
+
+        problem_payload: Dict[str, Any] = (
+            dict(problem)
+            if isinstance(problem, Mapping)
+            else {}
+        )
+
+        if strategy == "abduction":
+            observations = context_dict.get(
+                "observations",
+                problem_payload.get(
+                    "observations",
+                    problem,
+                ),
+            )
+
+            return getattr(component, "perform_reasoning")(  # type: ignore[call-arg]
+                observations=observations,
+                context=context_dict,
+            )
+
+        if strategy == "induction":
+            observations = context_dict.get(
+                "observations",
+                problem_payload.get(
+                    "observations",
+                    problem,
+                ),
+            )
+
+            return getattr(component, "perform_reasoning")(  # type: ignore[call-arg]
+                observations=self._as_list(
+                    observations
+                ),
+                context=context_dict,
+            )
+
+        if strategy == "deduction":
+            premises = context_dict.get(
+                "premises",
+                problem_payload.get(
+                    "premises",
+                ),
+            )
+
+            hypothesis = context_dict.get(
+                "hypothesis",
+                problem_payload.get(
+                    "hypothesis",
+                ),
+            )
+
+            if premises is None:
+                if isinstance(
+                    problem,
+                    (list, tuple, set),
+                ):
+                    premises = list(problem)
+                else:
+                    premises = [str(problem)]
+
+            premises = [
+                str(item)
+                for item in self._as_list(
+                    premises
+                )
+            ]
+
+            if hypothesis is None:
+                hypothesis = (
+                    problem_payload.get("goal")
+                    or problem_payload.get("query")
+                    or str(problem)
+                )
+
+            hypothesis = str(hypothesis).strip()
+
+            if not hypothesis:
+                raise ReasoningValidationError(
+                    "Deductive reasoning requires a hypothesis.",
+                    context={
+                        "strategy": strategy,
+                    },
+                )
+
+            return getattr(component, "perform_reasoning")(  # type: ignore[call-arg]
+                premises=premises,
+                hypothesis=hypothesis,
+                context=context_dict,
+            )
+
+        if strategy == "analogical":
+            target = context_dict.get(
+                "target",
+                problem_payload.get(
+                    "target",
+                    problem,
+                ),
+            )
+
+            source_domain = context_dict.get(
+                "source_domain",
+                problem_payload.get(
+                    "source_domain",
+                    [],
+                ),
+            )
+
+            return getattr(component, "perform_reasoning")(  # type: ignore[call-arg]
+                target=target,
+                source_domain=self._as_list(
+                    source_domain
+                ),
+                context=context_dict,
+            )
+
+        if strategy == "cause_effect":
+            events = context_dict.get(
+                "events",
+                problem_payload.get(
+                    "events",
+                    problem,
+                ),
+            )
+
+            conditions = context_dict.get(
+                "conditions",
+                problem_payload.get(
+                    "conditions",
+                    {},
+                ),
+            )
+
+            return getattr(component, "perform_reasoning")(  # type: ignore[call-arg]
+                events=self._as_list(events),
+                conditions=dict(
+                    conditions or {}
+                ),
+                context=context_dict,
+            )
+
+        if strategy == "decompositional":
+            system = context_dict.get(
+                "system",
+                problem_payload.get(
+                    "system",
+                    problem,
+                ),
+            )
+
+            return getattr(component, "perform_reasoning")(  # type: ignore[call-arg]
+                system=system,
+                context=context_dict,
+            )
+
+        # Extensions registered outside the built-in strategy set must implement
+        # BaseReasoning's canonical input_data/context interface.
+        return component.perform_reasoning(
+            problem,
+            context_dict,
+        )
+
+
+    def _execute_combined(
+        self,
+        names: List[str],
+        problem: Any,
+        context: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute combined strategies with fresh per-step instances."""
+        working_context = dict(context or {})
+
+        working_context.setdefault(
+            "original_input",
+            problem,
+        )
+
+        step_results: Dict[str, Any] = {}
+        previous_result: Any = None
+
+        for index, strategy_name in enumerate(
+            names,
+            start=1,
+        ):
+            component = self._create_single_reasoning(
+                strategy_name
+            )
+
+            step_context = dict(
+                working_context
+            )
+
+            if previous_result is not None:
+                step_context[
+                    "prev_step_result"
+                ] = previous_result
+
+                previous_name = names[
+                    index - 2
+                ]
+
+                step_context[
+                    f"prev_{previous_name}_result"
+                ] = previous_result
+
+            result = self._invoke_component(
+                strategy_name,
+                component,
+                problem,
+                step_context,
+            )
+
+            step_key = (
+                f"step_{index}_{strategy_name}"
+            )
+
+            step_results[
+                step_key
+            ] = result
+
+            working_context[
+                f"step_{index}_result"
+            ] = result
+
+            working_context[
+                "prev_step_result"
+            ] = result
+
+            previous_result = result
+
+        return {
+            "combined_result": step_results,
+            "reasoning_types": "+".join(names),
+            "final_output": previous_result,
+        }
 
 
 # ----------------------------------------------------------------------

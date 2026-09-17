@@ -404,23 +404,71 @@ class ProbabilisticModels(nn.Module):
             "hierarchical": 0.67,
             "spouse": 0.55,
         }
+
         if isinstance(raw, Mapping):
-            return {**defaults, **{str(k): clamp_confidence(v) for k, v in raw.items()}}
+            return {
+                **defaults,
+                **{
+                    str(key): clamp_confidence(value)
+                    for key, value in raw.items()
+                },
+            }
+
         if isinstance(raw, str) and raw.strip():
             path = Path(raw).expanduser()
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    if isinstance(data, Mapping):
-                        return {**defaults, **{str(k): clamp_confidence(v) for k, v in data.items()}}
-                except Exception as exc:
-                    if self.strict_resource_loading:
-                        raise ResourceLoadError(
-                            "Failed to load structural weights",
-                            cause=exc,
-                            context={"path": str(path)},
-                        ) from exc
-                    logger.warning("Failed to load structural weights from %s: %s", path, exc)
+
+            if not path.exists():
+                error = FileNotFoundError(f"Structural weights file not found: {path}")
+
+                if self.strict_resource_loading:
+                    raise ResourceLoadError(
+                        "Structural weights resource does not exist",
+                        cause=error,
+                        context={
+                            "path": str(path),
+                        },
+                    ) from error
+
+                logger.warning("Structural weights resource not found at %s; using built-in defaults", path)
+                return defaults
+
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+
+                if not isinstance(data, Mapping):
+                    raise ResourceLoadError(
+                        "Structural weights resource must contain a mapping",
+                        context={
+                            "path": str(path),
+                            "actual_type":
+                                type(data).__name__,
+                        },
+                    )
+
+                return {
+                    **defaults,
+                    **{
+                        str(key):
+                            clamp_confidence(value)
+                        for key, value
+                        in data.items()
+                    },
+                }
+
+            except ReasoningError:
+                raise
+
+            except Exception as exc:
+                if self.strict_resource_loading:
+                    raise ResourceLoadError(
+                        "Failed to load structural weights",
+                        cause=exc,
+                        context={
+                            "path": str(path),
+                        },
+                    ) from exc
+
+                logger.warning("Failed to load structural weights from %s: %s; using built-in defaults", path, exc)
         return defaults
 
     # ------------------------------------------------------------------
