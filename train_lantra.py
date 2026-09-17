@@ -34,11 +34,19 @@ Default invocation
 ------------------
     py -m train_lantra
 
-No subcommand is required.  By default the trainer discovers data from:
+No subcommand is required.  By default the trainer discovers supervised data from:
     data/processed/lantra/
     data/raw/lantra/
     data/lantra_training.jsonl
     data/language_training.jsonl
+
+and raw/document pretraining corpora from:
+    data/library/                 (TXT/MD/HTML/DOCX/EPUB/PDF/JSON/JSONL)
+    data/raw/lantra_corpus/
+    data/raw/language_corpus/
+    data/raw/language/
+    data/lantra_corpus/
+    data/language_corpus/
 
 or from ``SLAI_LANTRA_DATA``. Supervised data is optional: when it is absent,
 the trainer can still perform genuine GloVe semantic bootstrap training and, when
@@ -79,27 +87,33 @@ import argparse
 import collections
 import dataclasses
 import hashlib
+import importlib
 import json
 import math
 import os
 import platform
+import posixpath
 import random
+import re
 import sys
 import time
 import traceback
-
+import unicodedata
+import zipfile
+import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
-from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
+from logs.logger import PrettyPrinter, configure_logging, get_logger
 from src.agents.language.modules.language_tokenizer import LanguageTokenizer
 from src.agents.language.modules.language_transformer import LanguageTransformer
 
 
 LOGGER = get_logger("LANTRA Trainer")
-PRINTER = PrettyPrinter()
+PRINTER = PrettyPrinter
 
 SUPPORTED_TASKS: Tuple[str, ...] = (
     "generation",
@@ -128,6 +142,7 @@ DEFAULT_DATA_CANDIDATES: Tuple[str, ...] = (
 DEFAULT_OUTPUT_DIR = "src/agents/language/checkpoints/lantra"
 DEFAULT_REPORT_DIR = "src/agents/language/artifacts/training/lantra"
 DEFAULT_RAW_TEXT_CANDIDATES: Tuple[str, ...] = (
+    "data/library",
     "data/raw/lantra_corpus",
     "data/raw/language_corpus",
     "data/raw/language",
@@ -139,7 +154,12 @@ DEFAULT_GLOVE_CANDIDATES: Tuple[str, ...] = (
     "data/embeddings/glove.6B.100d.json",
     "data/embeddings/glove.6B.300d.json",
 )
-RAW_TEXT_EXTENSIONS = frozenset({".txt", ".text", ".md", ".json", ".jsonl"})
+RAW_TEXT_EXTENSIONS = frozenset({
+    ".txt", ".text", ".md", ".markdown",
+    ".html", ".htm", ".xhtml",
+    ".docx", ".epub", ".pdf",
+    ".json", ".jsonl",
+})
 
 OBJECTIVE_CONTRACT: Dict[str, Any] = {
     "generation": {"mode": "seq2seq", "source_prefix": "task: generation\nprompt:", "target": "completion"},
@@ -262,6 +282,7 @@ class TrainerConfig:
     raw_segments_per_epoch: int
     raw_max_segments: int
     raw_validation_fraction: float
+    raw_test_fraction: float
     raw_corruption_probability: float
     raw_min_chars: int
     raw_chunk_chars: int
@@ -947,17 +968,128 @@ def initialize_model(config: TrainerConfig, tokenizer: LanguageTokenizer, device
 
 
 @dataclass(frozen=True)
-class RawCorpus:
-    segments: Tuple[str, ...]
-    files: Tuple[str, ...]
-    fingerprint: str
+class RawDocumentProvenance:
+    document_id: str
+    source_path: str
+    source_type: str
+    source_sha256: str
+    content_sha256: str
+    normalized_text_sha256: str
+    title: Optional[str]
+    extractor: str
+    character_count: int
+    split: str
+    segment_count: int
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "segments": len(self.segments),
+            "document_id": self.document_id,
+            "source_path": self.source_path,
+            "source_type": self.source_type,
+            "source_sha256": self.source_sha256,
+            "content_sha256": self.content_sha256,
+            "normalized_text_sha256": self.normalized_text_sha256,
+            "title": self.title,
+            "extractor": self.extractor,
+            "character_count": self.character_count,
+            "split": self.split,
+            "segment_count": self.segment_count,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class RawExtractionFailure:
+    source_path: str
+    source_type: str
+    error_type: str
+    message: str
+
+    def to_dict(self) -> Dict[str, str]:
+        return dataclasses.asdict(self)
+
+
+@dataclass(frozen=True)
+class RawCorpus:
+    train_segments: Tuple[str, ...]
+    validation_segments: Tuple[str, ...]
+    test_segments: Tuple[str, ...]
+    files: Tuple[str, ...]
+    fingerprint: str
+    documents: Tuple[RawDocumentProvenance, ...] = ()
+    duplicate_files_exact: int = 0
+    duplicate_documents_exact: int = 0
+    duplicate_documents_normalized: int = 0
+    duplicate_segments: int = 0
+    extraction_failures: Tuple[RawExtractionFailure, ...] = ()
+    manifest_path: Optional[str] = None
+
+    @property
+    def segments(self) -> Tuple[str, ...]:
+        return self.train_segments + self.validation_segments + self.test_segments
+
+    def to_dict(self) -> Dict[str, Any]:
+        by_type = collections.Counter(document.source_type for document in self.documents)
+        by_split = collections.Counter(document.split for document in self.documents)
+        return {
+            "documents": len(self.documents),
+            "documents_by_type": dict(sorted(by_type.items())),
+            "documents_by_split": {
+                split: int(by_split.get(split, 0)) for split in ("train", "validation", "test")
+            },
+            "segments": {
+                "total": len(self.segments),
+                "train": len(self.train_segments),
+                "validation": len(self.validation_segments),
+                "test": len(self.test_segments),
+            },
             "files": list(self.files),
             "fingerprint_sha256": self.fingerprint,
+            "deduplication": {
+                "duplicate_files_exact": self.duplicate_files_exact,
+                "duplicate_documents_exact": self.duplicate_documents_exact,
+                "duplicate_documents_normalized": self.duplicate_documents_normalized,
+                "duplicate_segments": self.duplicate_segments,
+            },
+            "extraction_failures": [failure.to_dict() for failure in self.extraction_failures],
+            "provenance_manifest": self.manifest_path,
         }
+
+
+@dataclass(frozen=True)
+class _ExtractedRawDocument:
+    source_path: str
+    source_type: str
+    source_sha256: str
+    text: str
+    title: Optional[str]
+    extractor: str
+    logical_index: int = 0
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _PreparedRawDocument:
+    document_id: str
+    source_path: str
+    source_type: str
+    source_sha256: str
+    text: str
+    title: Optional[str]
+    extractor: str
+    content_sha256: str
+    normalized_text_sha256: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _SegmentCandidate:
+    text: str
+    normalized_sha256: str
+    document_id: str
+    split: str
+    segment_index: int
 
 
 @dataclass(frozen=True)
@@ -984,12 +1116,28 @@ class GloveAsset:
         }
 
 
+def empty_raw_corpus() -> RawCorpus:
+    return RawCorpus(
+        train_segments=(),
+        validation_segments=(),
+        test_segments=(),
+        files=(),
+        fingerprint=sha256_payload({"files": [], "documents": [], "segments": []}),
+    )
+
+
 def discover_raw_text_files(configured_paths: Sequence[str]) -> List[Path]:
+    # data/library is always a first-class local corpus source. Explicit --raw-text
+    # paths and SLAI_LANTRA_RAW_TEXT add sources; they do not suppress the library.
+    candidates: List[Path] = [Path("data/library")]
     if configured_paths:
-        candidates = [Path(value) for value in configured_paths]
+        candidates.extend(Path(value) for value in configured_paths)
     else:
         env_path = os.getenv("SLAI_LANTRA_RAW_TEXT", "").strip()
-        candidates = [Path(env_path)] if env_path else [Path(value) for value in DEFAULT_RAW_TEXT_CANDIDATES]
+        if env_path:
+            candidates.append(Path(env_path))
+        else:
+            candidates.extend(Path(value) for value in DEFAULT_RAW_TEXT_CANDIDATES if value != "data/library")
 
     files: List[Path] = []
     seen: set[str] = set()
@@ -1007,16 +1155,280 @@ def discover_raw_text_files(configured_paths: Sequence[str]) -> List[Path]:
     return sorted(files, key=lambda item: str(item))
 
 
-def _json_text_candidates(value: Any) -> Iterator[str]:
-    """Yield plausible raw-text fields without interpreting labels as text corpora."""
+def _decode_document_bytes(payload: bytes) -> str:
+    """Decode ordinary text files without introducing a charset dependency."""
+    if not payload:
+        return ""
+    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252"):
+        try:
+            return payload.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
+def _normalize_document_text(text: str) -> str:
+    text = unicodedata.normalize("NFKC", str(text)).replace("\x00", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    compact: List[str] = []
+    blank = False
+    for line in lines:
+        if line:
+            compact.append(line)
+            blank = False
+        elif compact and not blank:
+            compact.append("")
+            blank = True
+    return "\n".join(compact).strip()
+
+
+def _normalized_text_hash(text: str) -> str:
+    canonical = " ".join(_normalize_document_text(text).split())
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _clean_markdown_text(text: str) -> str:
+    # Preserve the actual prose/code while removing high-frequency presentation
+    # syntax that otherwise becomes corpus noise.
+    text = re.sub(r"(?ms)^---\s*$.*?^---\s*$", " ", text, count=1)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
+    text = re.sub(r"(?m)^\s*>\s?", "", text)
+    text = re.sub(r"(?m)^\s*[-*_]{3,}\s*$", "", text)
+    text = text.replace("```", "").replace("~~~", "")
+    return _normalize_document_text(text)
+
+
+class _VisibleHTMLTextExtractor(HTMLParser):
+    _SKIP_TAGS = frozenset({"script", "style", "noscript", "svg", "canvas", "template"})
+    _BLOCK_TAGS = frozenset({
+        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+        "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+        "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table",
+        "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: List[str] = []
+        self.title_parts: List[str] = []
+        self._skip_depth = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        if tag == "title":
+            self._in_title = True
+        if tag in self._BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        if not self._skip_depth and tag.lower() in self._BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            if self._skip_depth:
+                self._skip_depth -= 1
+            return
+        if self._skip_depth:
+            return
+        if tag == "title":
+            self._in_title = False
+        if tag in self._BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        value = data.strip()
+        if not value:
+            return
+        if self._in_title:
+            self.title_parts.append(value)
+        self.parts.append(value)
+        self.parts.append(" ")
+
+    def result(self) -> Tuple[str, Optional[str]]:
+        text = _normalize_document_text("".join(self.parts))
+        title = " ".join(self.title_parts).strip() or None
+        return text, title
+
+
+def _extract_html_text(payload: str) -> Tuple[str, Optional[str]]:
+    parser = _VisibleHTMLTextExtractor()
+    parser.feed(payload)
+    parser.close()
+    return parser.result()
+
+
+def _extract_docx(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
+    with zipfile.ZipFile(path) as archive:
+        try:
+            root = ET.fromstring(archive.read("word/document.xml"))
+        except KeyError as exc:
+            raise LantraTrainingError(f"DOCX is missing word/document.xml: {path}") from exc
+        paragraphs: List[str] = []
+        for paragraph in root.iter():
+            if not paragraph.tag.endswith("}p"):
+                continue
+            text_nodes = [node.text or "" for node in paragraph.iter() if node.tag.endswith("}t")]
+            paragraph_text = "".join(text_nodes).strip()
+            if paragraph_text:
+                paragraphs.append(paragraph_text)
+
+        title: Optional[str] = None
+        try:
+            core_root = ET.fromstring(archive.read("docProps/core.xml"))
+            for node in core_root.iter():
+                if node.tag.endswith("}title") and (node.text or "").strip():
+                    title = (node.text or "").strip()
+                    break
+        except (KeyError, ET.ParseError):
+            pass
+
+    return _normalize_document_text("\n\n".join(paragraphs)), title, {"paragraphs": len(paragraphs)}
+
+
+def _safe_epub_member(base_dir: str, href: str) -> str:
+    member = posixpath.normpath(posixpath.join(base_dir, href.split("#", 1)[0]))
+    if member.startswith("../") or member.startswith("/"):
+        raise LantraTrainingError(f"Unsafe EPUB member path: {href!r}")
+    return member
+
+
+def _extract_epub(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+        opf_path: Optional[str] = None
+        if "META-INF/container.xml" in names:
+            container_root = ET.fromstring(archive.read("META-INF/container.xml"))
+            rootfile = container_root.find(".//{*}rootfile")
+            if rootfile is not None:
+                opf_path = rootfile.attrib.get("full-path")
+
+        ordered_members: List[str] = []
+        title: Optional[str] = None
+        if opf_path and opf_path in names:
+            package_root = ET.fromstring(archive.read(opf_path))
+            base_dir = posixpath.dirname(opf_path)
+            manifest: Dict[str, Tuple[str, str, str]] = {}
+            for item in package_root.findall(".//{*}manifest/{*}item"):
+                item_id = item.attrib.get("id", "")
+                href = item.attrib.get("href", "")
+                media_type = item.attrib.get("media-type", "")
+                properties = item.attrib.get("properties", "")
+                if item_id and href:
+                    manifest[item_id] = (href, media_type, properties)
+            for itemref in package_root.findall(".//{*}spine/{*}itemref"):
+                item_id = itemref.attrib.get("idref", "")
+                if item_id not in manifest:
+                    continue
+                href, media_type, properties = manifest[item_id]
+                if "nav" in properties.split():
+                    continue
+                if media_type in {"application/xhtml+xml", "text/html"} or href.lower().endswith((".xhtml", ".html", ".htm")):
+                    member = _safe_epub_member(base_dir, href)
+                    if member in names:
+                        ordered_members.append(member)
+            title_node = package_root.find(".//{http://purl.org/dc/elements/1.1/}title")
+            if title_node is not None and (title_node.text or "").strip():
+                title = (title_node.text or "").strip()
+
+        if not ordered_members:
+            ordered_members = sorted(
+                name for name in names if name.lower().endswith((".xhtml", ".html", ".htm"))
+            )
+
+        chapters: List[str] = []
+        seen_members: set[str] = set()
+        for member in ordered_members:
+            if member in seen_members:
+                continue
+            seen_members.add(member)
+            text, chapter_title = _extract_html_text(_decode_document_bytes(archive.read(member)))
+            if text:
+                if chapter_title and not title:
+                    title = chapter_title
+                chapters.append(text)
+
+    return _normalize_document_text("\n\n".join(chapters)), title, {"chapters": len(chapters)}
+
+
+def _extract_pdf(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
+    try:
+        pypdf = importlib.import_module("pypdf")
+    except ImportError as exc:
+        raise LantraTrainingError(
+            "PDF corpus ingestion requires pypdf. SLAI's root requirements.txt already declares pypdf; "
+            "install the project requirements in the active virtual environment."
+        ) from exc
+
+    try:
+        reader = pypdf.PdfReader(str(path), strict=False)
+    except Exception as exc:
+        raise LantraTrainingError(f"Unable to open PDF {path}: {exc}") from exc
+
+    if getattr(reader, "is_encrypted", False):
+        try:
+            decrypted = reader.decrypt("")
+        except Exception as exc:
+            raise LantraTrainingError(f"Encrypted PDF cannot be decrypted without a password: {path}") from exc
+        if not decrypted:
+            raise LantraTrainingError(f"Encrypted PDF requires a password and cannot be used for training: {path}")
+
+    pages: List[str] = []
+    failed_pages = 0
+    for page_number, page in enumerate(reader.pages, 1):
+        try:
+            try:
+                text = page.extract_text(extraction_mode="layout") or ""
+            except TypeError:
+                text = page.extract_text() or ""
+        except Exception as exc:
+            failed_pages += 1
+            LOGGER.warning("PDF text extraction failed for %s page %d: %s", path, page_number, exc)
+            continue
+        if text.strip():
+            # Repair common line-end hyphenation before paragraph normalization.
+            text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
+            pages.append(text)
+
+    title: Optional[str] = None
+    metadata = getattr(reader, "metadata", None)
+    if metadata is not None:
+        candidate = getattr(metadata, "title", None)
+        if candidate is None and isinstance(metadata, Mapping):
+            candidate = metadata.get("/Title")
+        if candidate:
+            title = str(candidate).strip() or None
+
+    return _normalize_document_text("\n\n".join(pages)), title, {
+        "pages": len(getattr(reader, "pages", [])),
+        "pages_with_text": len(pages),
+        "failed_pages": failed_pages,
+    }
+
+
+def _json_text_candidates(value: Any) -> Iterator[Tuple[str, Optional[str], Dict[str, Any]]]:
+    """Yield logical text documents from JSON without mistaking task labels for prose."""
     preferred = ("text", "content", "document", "body", "passage", "article", "paragraph")
     if isinstance(value, Mapping):
         emitted = False
+        title = value.get("title") if isinstance(value.get("title"), str) else None
         for key in preferred:
             item = value.get(key)
             if isinstance(item, str) and item.strip():
                 emitted = True
-                yield item
+                yield item, title, {"json_field": key}
         if not emitted:
             for key in ("records", "examples", "data", "documents", "items"):
                 nested = value.get(key)
@@ -1026,27 +1438,53 @@ def _json_text_candidates(value: Any) -> Iterator[str]:
         for item in value:
             yield from _json_text_candidates(item)
     elif isinstance(value, str) and value.strip():
-        yield value
+        yield value, None, {"json_field": None}
 
 
-def iter_raw_documents(path: Path) -> Iterator[str]:
+def extract_raw_documents(path: Path, *, source_sha256: Optional[str] = None) -> Iterator[_ExtractedRawDocument]:
     suffix = path.suffix.lower()
-    if suffix in {".txt", ".text", ".md"}:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            buffer: List[str] = []
-            for line in handle:
-                stripped = line.strip()
-                if stripped:
-                    buffer.append(stripped)
-                elif buffer:
-                    yield " ".join(buffer)
-                    buffer.clear()
-            if buffer:
-                yield " ".join(buffer)
+    source_hash = source_sha256 or sha256_file(path)
+    source_type = suffix.lstrip(".") or "unknown"
+
+    if suffix in {".txt", ".text"}:
+        text = _normalize_document_text(_decode_document_bytes(path.read_bytes()))
+        if text:
+            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, None, "stdlib-text", 0)
+        return
+
+    if suffix in {".md", ".markdown"}:
+        text = _clean_markdown_text(_decode_document_bytes(path.read_bytes()))
+        if text:
+            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, None, "stdlib-markdown", 0)
+        return
+
+    if suffix in {".html", ".htm", ".xhtml"}:
+        text, title = _extract_html_text(_decode_document_bytes(path.read_bytes()))
+        if text:
+            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "stdlib-html.parser", 0)
+        return
+
+    if suffix == ".docx":
+        text, title, metadata = _extract_docx(path)
+        if text:
+            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "stdlib-zipfile+xml", 0, metadata)
+        return
+
+    if suffix == ".epub":
+        text, title, metadata = _extract_epub(path)
+        if text:
+            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "stdlib-epub-zip+xml+html", 0, metadata)
+        return
+
+    if suffix == ".pdf":
+        text, title, metadata = _extract_pdf(path)
+        if text:
+            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "pypdf", 0, metadata)
         return
 
     if suffix == ".jsonl":
         with path.open("r", encoding="utf-8") as handle:
+            logical_index = 0
             for line_number, line in enumerate(handle, 1):
                 if not line.strip():
                     continue
@@ -1056,7 +1494,13 @@ def iter_raw_documents(path: Path) -> Iterator[str]:
                     raise LantraTrainingError(
                         f"Invalid raw-text JSONL in {path}:{line_number}: {exc.msg}."
                     ) from exc
-                yield from _json_text_candidates(payload)
+                for text, title, metadata in _json_text_candidates(payload):
+                    metadata = {**metadata, "jsonl_line": line_number}
+                    yield _ExtractedRawDocument(
+                        str(path), source_type, source_hash, _normalize_document_text(text), title,
+                        "stdlib-json", logical_index, metadata,
+                    )
+                    logical_index += 1
         return
 
     if suffix == ".json":
@@ -1065,12 +1509,18 @@ def iter_raw_documents(path: Path) -> Iterator[str]:
                 payload = json.load(handle)
         except json.JSONDecodeError as exc:
             raise LantraTrainingError(f"Invalid raw-text JSON in {path}: {exc.msg}.") from exc
-        yield from _json_text_candidates(payload)
+        for logical_index, (text, title, metadata) in enumerate(_json_text_candidates(payload)):
+            yield _ExtractedRawDocument(
+                str(path), source_type, source_hash, _normalize_document_text(text), title,
+                "stdlib-json", logical_index, metadata,
+            )
         return
+
+    raise LantraTrainingError(f"Unsupported raw corpus document type: {path}")
 
 
 def segment_raw_document(text: str, *, min_chars: int, chunk_chars: int) -> Iterator[str]:
-    normalized = " ".join(str(text).split())
+    normalized = " ".join(_normalize_document_text(text).split())
     if len(normalized) < min_chars:
         return
     if len(normalized) <= chunk_chars:
@@ -1097,36 +1547,235 @@ def segment_raw_document(text: str, *, min_chars: int, chunk_chars: int) -> Iter
             yield chunk
 
 
-def load_raw_corpus(files: Sequence[Path], config: TrainerConfig) -> RawCorpus:
-    segments: List[str] = []
-    seen: set[str] = set()
-    fingerprints: List[Dict[str, str]] = []
-    for path in files:
-        fingerprints.append({"path": str(path), "sha256": sha256_file(path)})
-        for document in iter_raw_documents(path):
-            for segment in segment_raw_document(
-                document,
-                min_chars=config.raw_min_chars,
-                chunk_chars=config.raw_chunk_chars,
-            ):
-                digest = hashlib.sha256(segment.encode("utf-8")).hexdigest()
-                if digest in seen:
-                    continue
-                seen.add(digest)
-                segments.append(segment)
-                if config.raw_max_segments > 0 and len(segments) >= config.raw_max_segments:
-                    break
-            if config.raw_max_segments > 0 and len(segments) >= config.raw_max_segments:
-                break
-        if config.raw_max_segments > 0 and len(segments) >= config.raw_max_segments:
+def _assign_document_splits(
+    documents: Sequence[_PreparedRawDocument],
+    *,
+    validation_fraction: float,
+    test_fraction: float,
+    seed: int,
+) -> Dict[str, str]:
+    """Assign complete documents before chunking to prevent cross-split leakage."""
+    if not documents:
+        return {}
+    ordered = sorted(
+        documents,
+        key=lambda item: (
+            stable_unit_interval(item.normalized_text_sha256, seed),
+            item.normalized_text_sha256,
+            item.document_id,
+        ),
+    )
+    count = len(ordered)
+    n_validation = 0 if validation_fraction <= 0.0 else max(1, int(round(count * validation_fraction)))
+    n_test = 0 if test_fraction <= 0.0 else max(1, int(round(count * test_fraction)))
+
+    # Always retain at least one training document. Tiny corpora cannot support
+    # three statistically meaningful partitions; the manifest makes this explicit.
+    while n_validation + n_test >= count:
+        if n_test >= n_validation and n_test > 0:
+            n_test -= 1
+        elif n_validation > 0:
+            n_validation -= 1
+        else:
             break
 
-    fingerprint = sha256_payload({
-        "files": fingerprints,
-        "segments": [hashlib.sha256(item.encode("utf-8")).hexdigest() for item in segments],
-    })
-    return RawCorpus(tuple(segments), tuple(str(path) for path in files), fingerprint)
+    assignments: Dict[str, str] = {}
+    for index, document in enumerate(ordered):
+        if index < n_test:
+            split = "test"
+        elif index < n_test + n_validation:
+            split = "validation"
+        else:
+            split = "train"
+        assignments[document.document_id] = split
+    return assignments
 
+
+def load_raw_corpus(files: Sequence[Path], config: TrainerConfig) -> RawCorpus:
+    prepared: List[_PreparedRawDocument] = []
+    failures: List[RawExtractionFailure] = []
+    accepted_files: List[str] = []
+    seen_file_hashes: set[str] = set()
+    seen_content_hashes: set[str] = set()
+    seen_normalized_hashes: set[str] = set()
+    duplicate_files_exact = 0
+    duplicate_documents_exact = 0
+    duplicate_documents_normalized = 0
+
+    for path in files:
+        try:
+            source_hash = sha256_file(path)
+        except OSError as exc:
+            failures.append(RawExtractionFailure(str(path), path.suffix.lower().lstrip("."), type(exc).__name__, str(exc)))
+            LOGGER.warning("LANTRA corpus could not hash %s: %s", path, exc)
+            continue
+
+        if source_hash in seen_file_hashes:
+            duplicate_files_exact += 1
+            LOGGER.info("LANTRA corpus exact duplicate file skipped: %s", path)
+            continue
+        seen_file_hashes.add(source_hash)
+
+        try:
+            extracted = list(extract_raw_documents(path, source_sha256=source_hash))
+        except Exception as exc:
+            failures.append(RawExtractionFailure(str(path), path.suffix.lower().lstrip("."), type(exc).__name__, str(exc)))
+            LOGGER.warning("LANTRA corpus extraction skipped %s: %s", path, exc)
+            continue
+
+        if not extracted:
+            failures.append(RawExtractionFailure(
+                str(path), path.suffix.lower().lstrip("."), "NoTextExtracted",
+                "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+            ))
+            continue
+
+        accepted_files.append(str(path))
+        for document in extracted:
+            normalized = _normalize_document_text(document.text)
+            if len(normalized) < config.raw_min_chars:
+                continue
+            content_hash = hashlib.sha256(document.text.encode("utf-8")).hexdigest()
+            normalized_hash = _normalized_text_hash(normalized)
+            if content_hash in seen_content_hashes:
+                duplicate_documents_exact += 1
+                continue
+            if normalized_hash in seen_normalized_hashes:
+                duplicate_documents_normalized += 1
+                continue
+            seen_content_hashes.add(content_hash)
+            seen_normalized_hashes.add(normalized_hash)
+            document_id = sha256_payload({
+                "source_sha256": document.source_sha256,
+                "logical_index": document.logical_index,
+                "normalized_text_sha256": normalized_hash,
+            })[:24]
+            prepared.append(_PreparedRawDocument(
+                document_id=document_id,
+                source_path=document.source_path,
+                source_type=document.source_type,
+                source_sha256=document.source_sha256,
+                text=normalized,
+                title=document.title,
+                extractor=document.extractor,
+                content_sha256=content_hash,
+                normalized_text_sha256=normalized_hash,
+                metadata=dict(document.metadata),
+            ))
+
+    assignments = _assign_document_splits(
+        prepared,
+        validation_fraction=config.raw_validation_fraction,
+        test_fraction=config.raw_test_fraction,
+        seed=config.seed,
+    )
+
+    # Chunk only after document assignment. Segment-level deduplication is global
+    # across partitions, so repeated boilerplate cannot leak from train into held-out data.
+    segment_by_hash: Dict[str, _SegmentCandidate] = {}
+    duplicate_segments = 0
+    for document in prepared:
+        split = assignments[document.document_id]
+        for segment_index, segment in enumerate(segment_raw_document(
+            document.text,
+            min_chars=config.raw_min_chars,
+            chunk_chars=config.raw_chunk_chars,
+        )):
+            segment_hash = _normalized_text_hash(segment)
+            candidate = _SegmentCandidate(segment, segment_hash, document.document_id, split, segment_index)
+            existing = segment_by_hash.get(segment_hash)
+            if existing is not None:
+                duplicate_segments += 1
+                # Select a deterministic owner independent of filesystem traversal order.
+                current_key = stable_unit_interval(existing.document_id + segment_hash, config.seed)
+                candidate_key = stable_unit_interval(candidate.document_id + segment_hash, config.seed)
+                if candidate_key < current_key:
+                    segment_by_hash[segment_hash] = candidate
+            else:
+                segment_by_hash[segment_hash] = candidate
+
+    retained = sorted(
+        segment_by_hash.values(),
+        key=lambda item: (
+            stable_unit_interval(item.normalized_sha256, config.seed + 71),
+            item.normalized_sha256,
+        ),
+    )
+    if config.raw_max_segments > 0:
+        retained = retained[: config.raw_max_segments]
+
+    split_segments: Dict[str, List[str]] = {"train": [], "validation": [], "test": []}
+    segment_counts = collections.Counter()
+    for item in retained:
+        split_segments[item.split].append(item.text)
+        segment_counts[item.document_id] += 1
+
+    provenance: List[RawDocumentProvenance] = []
+    for document in prepared:
+        provenance.append(RawDocumentProvenance(
+            document_id=document.document_id,
+            source_path=document.source_path,
+            source_type=document.source_type,
+            source_sha256=document.source_sha256,
+            content_sha256=document.content_sha256,
+            normalized_text_sha256=document.normalized_text_sha256,
+            title=document.title,
+            extractor=document.extractor,
+            character_count=len(document.text),
+            split=assignments[document.document_id],
+            segment_count=int(segment_counts.get(document.document_id, 0)),
+            metadata=dict(document.metadata),
+        ))
+
+    fingerprint = sha256_payload({
+        "files": [
+            {"path": document.source_path, "source_sha256": document.source_sha256}
+            for document in provenance
+        ],
+        "documents": [
+            {
+                "document_id": document.document_id,
+                "normalized_text_sha256": document.normalized_text_sha256,
+                "split": document.split,
+                "segment_count": document.segment_count,
+            }
+            for document in provenance
+        ],
+        "segments": {
+            split: [hashlib.sha256(item.encode("utf-8")).hexdigest() for item in values]
+            for split, values in split_segments.items()
+        },
+    })
+
+    return RawCorpus(
+        train_segments=tuple(split_segments["train"]),
+        validation_segments=tuple(split_segments["validation"]),
+        test_segments=tuple(split_segments["test"]),
+        files=tuple(accepted_files),
+        fingerprint=fingerprint,
+        documents=tuple(sorted(provenance, key=lambda item: item.document_id)),
+        duplicate_files_exact=duplicate_files_exact,
+        duplicate_documents_exact=duplicate_documents_exact,
+        duplicate_documents_normalized=duplicate_documents_normalized,
+        duplicate_segments=duplicate_segments,
+        extraction_failures=tuple(failures),
+    )
+
+
+def write_raw_corpus_manifest(corpus: RawCorpus, report_dir: Path, run_id: str) -> RawCorpus:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / f"lantra_corpus_manifest_{run_id}.json"
+    enriched = dataclasses.replace(corpus, manifest_path=str(path))
+    payload = {
+        "schema": "slai.lantra.raw-corpus-manifest.v1",
+        "created_at": utc_now(),
+        "run_id": run_id,
+        "fingerprint_sha256": enriched.fingerprint,
+        "summary": enriched.to_dict(),
+        "documents": [document.to_dict() for document in enriched.documents],
+    }
+    atomic_json_write(path, payload)
+    return enriched
 
 def _glove_dimension_from_filename(path: Path) -> Optional[int]:
     name = path.name.lower()
@@ -1239,45 +1888,21 @@ def load_glove_asset(
     except (OSError, json.JSONDecodeError) as exc:
         raise LantraTrainingError(f"Failed to load GloVe JSON {path}: {exc}") from exc
 
+    container: Any = payload
+    if isinstance(payload, Mapping):
+        for key in ("vectors", "embeddings", "data"):
+            nested = payload.get(key)
+            if isinstance(nested, (Mapping, list, tuple)):
+                container = nested
+                break
+
     found: Dict[str, Tuple[float, ...]] = {}
     dimension: Optional[int] = None
 
-    # IMPORTANT: a plain GloVe dictionary is itself a word->vector mapping and
-    # words such as "data", "vectors", or "embeddings" may legitimately occur
-    # as vocabulary keys.  Do not mistake the numeric vector for one of those
-    # words for a wrapper container.  Wrapper detection therefore happens only
-    # after paired words/vectors detection and only when the candidate value is
-    # structurally a collection of records/mappings rather than one flat vector.
-    paired_words = payload.get("words") if isinstance(payload, Mapping) else None
-    paired_vectors = payload.get("vectors") if isinstance(payload, Mapping) else None
-
-    container: Any = payload
-    if isinstance(payload, Mapping) and not (
-        isinstance(paired_words, Sequence)
-        and not isinstance(paired_words, (str, bytes, bytearray))
-        and isinstance(paired_vectors, Sequence)
-        and not isinstance(paired_vectors, (str, bytes, bytearray))
-        and len(paired_words) == len(paired_vectors)
-    ):
-        for wrapper_key in ("vectors", "embeddings", "data"):
-            nested = payload.get(wrapper_key)
-            if isinstance(nested, Mapping):
-                container = nested
-                break
-            if (
-                isinstance(nested, Sequence)
-                and not isinstance(nested, (str, bytes, bytearray))
-                and nested
-                and _coerce_vector(nested) is None
-            ):
-                # A list of records or list-of-vectors may be a wrapper. A flat
-                # numeric list is a normal GloVe vector for the word itself and
-                # must leave ``container`` pointing at the top-level mapping.
-                container = nested
-                break
-
     # Also support the common {"words": [...], "vectors": [[...], ...]}
     # representation in addition to word->vector mappings.
+    paired_words = payload.get("words") if isinstance(payload, Mapping) else None
+    paired_vectors = payload.get("vectors") if isinstance(payload, Mapping) else None
     if (
         isinstance(paired_words, Sequence)
         and not isinstance(paired_words, (str, bytes, bytearray))
@@ -1527,25 +2152,6 @@ def semantic_bootstrap_train(
     }
 
 
-def split_raw_segments(
-    segments: Sequence[str],
-    *,
-    validation_fraction: float,
-    seed: int,
-) -> Tuple[List[str], List[str]]:
-    if not segments:
-        return [], []
-    ordered = sorted(
-        segments,
-        key=lambda item: stable_unit_interval(hashlib.sha256(item.encode("utf-8")).hexdigest(), seed),
-    )
-    if len(ordered) < 20 or validation_fraction <= 0.0:
-        return ordered, []
-    n_val = max(1, int(round(len(ordered) * validation_fraction)))
-    n_val = min(n_val, max(1, len(ordered) // 5))
-    return ordered[n_val:], ordered[:n_val]
-
-
 def _encode_raw_ids(tokenizer: LanguageTokenizer, text: str, max_length: int) -> List[int]:
     payload = tokenizer.encode(
         text,
@@ -1669,15 +2275,13 @@ def raw_text_pretrain(
     device: str,
     run_id: str,
 ) -> Tuple[LanguageTransformer, Dict[str, Any]]:
-    if config.raw_pretrain_epochs <= 0 or not corpus.segments:
-        return model, {"status": "skipped", "reason": "no raw segments or raw_pretrain_epochs=0"}
+    if config.raw_pretrain_epochs <= 0 or not corpus.train_segments:
+        return model, {"status": "skipped", "reason": "no raw training segments or raw_pretrain_epochs=0"}
 
     runtime = torch_runtime()
-    train_segments, validation_segments = split_raw_segments(
-        corpus.segments,
-        validation_fraction=config.raw_validation_fraction,
-        seed=config.seed,
-    )
+    train_segments = list(corpus.train_segments)
+    validation_segments = list(corpus.validation_segments)
+    test_segments = list(corpus.test_segments)
     if not train_segments:
         return model, {"status": "skipped", "reason": "raw corpus produced no train segments"}
 
@@ -1793,13 +2397,22 @@ def raw_text_pretrain(
 
     if best_path.is_file():
         model = LanguageTransformer.load_language_model(best_path, device=device, strict=True)
+    test_loss = evaluate_raw_pretraining(
+        model,
+        tokenizer,
+        test_segments,
+        config,
+        device,
+    )
     return model, {
         "status": "completed",
         "corpus": corpus.to_dict(),
         "train_segments": len(train_segments),
         "validation_segments": len(validation_segments),
+        "test_segments": len(test_segments),
         "history": history,
         "best_objective": best_validation,
+        "heldout_test_loss": test_loss,
         "checkpoint": str(best_path if best_path.is_file() else latest_path),
     }
 
@@ -1825,10 +2438,8 @@ def encode_text(
         return_tokens=False,
         return_tensors="pt",
     )
-    # The tokenizer payload also contains list-valued optional metadata fields;
-    # narrow the two required entries before using tensor-specific operations.
-    ids: Any = payload.get("input_ids")
-    mask: Any = payload.get("attention_mask")
+    ids = payload.get("input_ids")
+    mask = payload.get("attention_mask")
     if ids is None or mask is None:
         raise LantraTrainingError("LanguageTokenizer.encode did not return input_ids and attention_mask.")
     if ids.dim() != 1 or mask.dim() != 1:
@@ -2250,19 +2861,12 @@ def generate_prediction(
     # LanguageTransformer greedy/sample wrapper does not forward a source padding
     # mask into BaseTransformer.inference, so deliberately keep this source
     # unpadded rather than pretending that an ignored mask is honored.
-    # The generation API can return a tensor or a structured output depending
-    # on the decoding implementation.  ``return_dict=False`` requests a tensor,
-    # but normalize defensively for wrappers that still return an output object.
-    generated: Any = model.generate(
+    generated = model.generate(
         src,
         strategy="greedy",
         max_len=config.target_max_length,
         return_dict=False,
     )
-    if not hasattr(generated, "dim"):
-        generated = getattr(generated, "sequences", None)
-    if generated is None or not hasattr(generated, "dim"):
-        raise LantraTrainingError("Unexpected generated result: expected a token tensor.")
     if generated.dim() != 2 or generated.size(0) < 1:
         raise LantraTrainingError(f"Unexpected generated tensor shape: {list(generated.shape)}")
     return tokenizer.decode(generated[0], skip_special_tokens=True)
@@ -2680,7 +3284,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--raw-text",
         action="append",
         default=[],
-        help="Optional raw text/JSON/JSONL file or directory for self-supervised denoising pretraining. Repeatable.",
+        help="Additional raw/document corpus file or directory. Supports TXT/MD/HTML/DOCX/EPUB/PDF/JSON/JSONL; data/library is always included automatically.",
     )
     parser.add_argument(
         "--glove",
@@ -2738,6 +3342,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--raw-segments-per-epoch", type=int, default=20_000, help="0 means all discovered segments.")
     parser.add_argument("--raw-max-segments", type=int, default=100_000, help="0 means no corpus loading cap.")
     parser.add_argument("--raw-validation-fraction", type=float, default=0.02)
+    parser.add_argument("--raw-test-fraction", type=float, default=0.02)
     parser.add_argument("--raw-corruption-probability", type=float, default=0.15)
     parser.add_argument("--raw-min-chars", type=int, default=40)
     parser.add_argument("--raw-chunk-chars", type=int, default=2000)
@@ -2800,6 +3405,7 @@ def config_from_args(args: argparse.Namespace) -> TrainerConfig:
         raw_segments_per_epoch=int(args.raw_segments_per_epoch),
         raw_max_segments=int(args.raw_max_segments),
         raw_validation_fraction=float(args.raw_validation_fraction),
+        raw_test_fraction=float(args.raw_test_fraction),
         raw_corruption_probability=float(args.raw_corruption_probability),
         raw_min_chars=int(args.raw_min_chars),
         raw_chunk_chars=int(args.raw_chunk_chars),
@@ -2857,6 +3463,10 @@ def validate_config(config: TrainerConfig) -> None:
         raise LantraTrainingError("Pairwise margins must be > 0.")
     if not (0.0 <= config.raw_validation_fraction < 0.5):
         raise LantraTrainingError("raw_validation_fraction must be >= 0 and < 0.5.")
+    if not (0.0 <= config.raw_test_fraction < 0.5):
+        raise LantraTrainingError("raw_test_fraction must be >= 0 and < 0.5.")
+    if config.raw_validation_fraction + config.raw_test_fraction >= 1.0:
+        raise LantraTrainingError("raw_validation_fraction + raw_test_fraction must be < 1.0.")
     if not (0.0 < config.raw_corruption_probability < 1.0):
         raise LantraTrainingError("raw_corruption_probability must be > 0 and < 1.")
     if config.raw_chunk_chars < config.raw_min_chars:
@@ -2892,7 +3502,7 @@ def build_report(
             "coverage": dict(supervised_coverage or {}),
         }
     return {
-        "schema": "slai.lantra.training-report.v2",
+        "schema": "slai.lantra.training-report.v3",
         "run_id": run_id,
         "started_at": started_at,
         "completed_at": utc_now(),
@@ -2947,8 +3557,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Discover optional raw corpus and optional supervised corpus.
         # --------------------------------------------------------------
         raw_files = discover_raw_text_files(config.raw_text_paths)
-        raw_corpus = load_raw_corpus(raw_files, config) if raw_files else RawCorpus((), (), sha256_payload({"files": [], "segments": []}))
-        LOGGER.info("LANTRA raw-text files: %s", list(raw_corpus.files))
+        raw_corpus = load_raw_corpus(raw_files, config) if raw_files else empty_raw_corpus()
+        raw_corpus = write_raw_corpus_manifest(raw_corpus, Path(config.report_dir), run_id)
+        LOGGER.info("LANTRA raw/document corpus files: %s", list(raw_corpus.files))
         if raw_corpus.segments:
             PRINTER.pretty("LANTRA RAW CORPUS", raw_corpus.to_dict(), "success")
         else:
@@ -2994,7 +3605,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         # Phase 0: SLAI BPE tokenizer bootstrap.
         # --------------------------------------------------------------
-        tokenizer = initialize_tokenizer(config, dataset, raw_corpus.segments)
+        tokenizer = initialize_tokenizer(config, dataset, raw_corpus.train_segments)
         device = resolve_device(config.device)
         LOGGER.info("Resolved LANTRA device: %s", device)
         model = initialize_model(config, tokenizer, device)
