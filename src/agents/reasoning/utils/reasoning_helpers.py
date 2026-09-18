@@ -625,3 +625,73 @@ def transitive_rule(kb: Dict[Fact, float]) -> Dict[Fact, float]:
             if p2 == "is" and b1 == b2:
                 inferred[(a, "is", c)] = max(inferred.get((a, "is", c), 0.0), min(c1, c2))
     return inferred
+
+__all__ = [
+    # Type aliases
+    "Fact",
+    "RuleWeightMap",
+    "RuleEntry",
+    # Fact normalization / text
+    "normalize_token",
+    "normalize_fact",
+    "fact_to_string",
+    "canonicalize_fact_case",
+    "invert_fact_object",
+    # Confidence / probabilistic math
+    "clamp_confidence",
+    "assert_confidence",
+    "merge_confidence",
+    "weighted_confidence",
+    "logistic_confidence",
+    # Contradiction / consistency
+    "detect_inverse_contradiction",
+    "ensure_non_contradictory",
+    "conflict_pairs",
+    "redundancy_groups",
+    # Rule registration / execution
+    "validate_rule_registration",
+    "rank_rules_by_weight",
+    "update_rule_weight",
+    "bounded_iterations",
+    "select_top_rules",
+    "sample_rules",
+    # Knowledge-base transformation
+    "normalize_knowledge",
+    "merge_knowledge_bases",
+    "knowledge_delta",
+    "filter_knowledge_by_confidence",
+    # Serialization / persistence
+    "json_safe_reasoning_state",
+    "dump_knowledge_json",
+    "load_knowledge_json",
+    # Deterministic utilities
+    "monotonic_timestamp_ms",
+    "safe_dict_update",
+    "freeze_kb_signature",
+    "elapsed_seconds",
+    # Graph / topology
+    "build_subject_index",
+    "build_predicate_index",
+    "build_object_index",
+    "adjacency_from_knowledge",
+    "has_path",
+    # Inference bookkeeping
+    "init_inference_stats",
+    "finalize_inference_stats",
+    "bump_stat",
+    "track_fact_mutation",
+    # Evidence / query helpers
+    "normalize_evidence",
+    "merge_evidence",
+    "normalize_query_variables",
+    "top_k_facts",
+    "kb_size_metrics",
+    # Configuration helpers
+    "get_base_config_value",
+    # Logging / display
+    "log_step",
+    "print_reasoning",
+    # Built-in example rules
+    "identity_rule",
+    "transitive_rule",
+]
