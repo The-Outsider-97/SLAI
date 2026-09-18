@@ -1,13 +1,16 @@
 semantic_frames_path: "src/agents/reasoning/templates/semantic_frames.json"
 embedding_dim: 64
+symbolic_runtime:
+  learning_rate: 0.05
+  decay: 0.95
+  exploration_rate: 0.10
+  max_iterations: 20
 contradiction_threshold: 0.25   # Confidence conflict threshold between contradictory facts
 markov_logic_weight: 0.7
 
+
 reasoning_memory:
   max_size: 10000
-  checkpoint_dir: "src/agents/reasoning/checkpoints"
-  checkpoint_freq: 1000
-  auto_save: true
   alpha: 0.6
   beta: 0.4
   epsilon: 0.00005
@@ -17,8 +20,6 @@ reasoning_memory:
   sample_with_replacement: true
   normalize_importance_weights: true
   strict_priorities: true
-  checkpoint_keep_last: 5
-  checkpoint_prefix: "memory"
   context_recent_window: 50
   context_high_priority_threshold: 0.85
   context_high_priority_ratio: 0.3
@@ -168,6 +169,9 @@ rules:
   politeness_strategies_path: "src/agents/language/resources/en/nlg_pack.yaml"
   manner_filler_words: ["uh", "um", "like", "sort of", "kind of"]  # Gricean manner-maxim disfluency markers
   quality_hedge_words: ["probably", "perhaps", "maybe", "might", "possibly"]  # Gricean quality-maxim hedge terms
+  builtin_rule_weights:
+    identity_rule: 1.0
+    transitive_rule: 0.8
 
 validation:
   enable: true
@@ -190,8 +194,6 @@ nlp:
 
 storage:
   bayesian_network: "src/agents/reasoning/networks/bayesian_network.json"
-  knowledge_db: "src/agents/knowledge/templates/knowledge_db.json"
-  rule_backup: "src/agents/knowledge/discovered_rules.json"
   lexicon_path: "src/agents/language/resources/en/sentiment_pack.yaml"
   dependency_rules_path: "src/agents/language/resources/en/syntax_pack.yaml"
 
@@ -246,18 +248,41 @@ reasoning_cache:
 
 reasoning_types:
   max_combined_types: 3
-  enable_instance_cache: false
-  instance_cache_max_size: 32
-  instance_cache_ttl_seconds: 300.0
-  default_strategy: "abduction+deduction"
-  record_memory_events: false
   strategy_keywords:
-    abduction: ["explain", "why", "hypothesis", "plausible", "most likely"]
-    deduction: ["prove", "derive", "therefore", "premise", "must be"]
-    induction: ["pattern", "trend", "generalize", "predict", "extrapolate"]
-    analogical: ["analogy", "similar", "compare", "resembles"]
-    decompositional: ["break down", "component", "decompose", "subsystem"]
-    cause_effect: ["effect", "impact", "results in", "causal", "cause"]
+    abduction:
+      - explain
+      - why
+      - hypothesis
+      - plausible
+      - most likely
+    deduction:
+      - prove
+      - derive
+      - therefore
+      - premise
+      - must be
+    induction:
+      - pattern
+      - trend
+      - generalize
+      - predict
+      - extrapolate
+    analogical:
+      - analogy
+      - similar
+      - compare
+      - resembles
+    decompositional:
+      - break down
+      - component
+      - decompose
+      - subsystem
+    cause_effect:
+      - effect
+      - impact
+      - results in
+      - causal
+      - cause
 
 base_reasoning:
   confidence: 0.75 # default confidence
