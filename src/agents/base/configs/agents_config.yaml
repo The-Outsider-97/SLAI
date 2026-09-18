@@ -1054,55 +1054,47 @@ reader_agent:
 
 
 reasoning_agent:
-  learning_rate: 0.05
-  exploration_rate: 0.1
-  tuple_key:
-  - subject
-  - predicate
-  - object
-  hypothesis_graph:
-    nodes: {}
-    edges: {}
-    confidence: 0.0
-  decay: 0.95
-  knowledge_db: src/agents/knowledge/templates/knowledge_db.json
-  glove_path: data/embeddings/glove.6B.200d.json
-  ner_tag: None
-  embedding: None
-  max_iterations: 20
-  contradiction_threshold: 0.25
-  redundancy_margin: 0.05
+  # -------------------------------------------------------------------------
+  # Request / orchestration bounds
+  # -------------------------------------------------------------------------
   large_kb_threshold: 500
   low_confidence_threshold: 0.4
   max_action_results: 20
   max_chain_depth: 4
   max_react_steps: 5
   max_trace_items: 250
+
+  # -------------------------------------------------------------------------
+  # Runtime behaviour
+  # -------------------------------------------------------------------------
   enable_shared_memory_publish: true
-  enable_knowledge_persistence: true
   enable_memory_logging: true
   enable_probabilistic_fallback: true
-  auto_register_builtin_rules: true
   strict_fact_validation: true
-  human_intervention_key: human_intervention_requests
-  knowledge_memory_key: reasoning_agent:knowledge_base
-  last_validation_key: reasoning_agent:last_validated_fact
-  reasoning_trace_topic: reasoning_trace
-  memory_event_tag: reasoning_agent
+
+  # -------------------------------------------------------------------------
+  # Shared runtime contracts
+  # -------------------------------------------------------------------------
+  working_knowledge_key: "reasoning_agent:working_knowledge"
+  knowledge_candidate_topic: "reasoning_agent:knowledge_candidates"
+  human_intervention_key: "human_intervention_requests"
+  last_validation_key: "reasoning_agent:last_validated_fact"
+  reasoning_trace_topic: "reasoning_trace"
+  memory_event_tag: "reasoning_agent"
   memory_event_priority: 0.75
-  strategy_default: deduction
+
+  # -------------------------------------------------------------------------
+  # Agent-level strategy policy
+  # -------------------------------------------------------------------------
+  strategy_default: "deduction"
   reasoning_type_aliases:
-    deductive: deduction
-    inductive: induction
-    abductive: abduction
-    causal: cause_effect
-    cause-and-effect: cause_effect
-    decomposition: decompositional
-    analytical: analogical
-    analitical: analogical
-  builtin_rule_weights:
-    identity_rule: 1.0
-    transitive_rule: 0.8
+    abductive: "abduction"
+    deductive: "deduction"
+    inductive: "induction"
+    analogy: "analogical"
+    decomposition: "decompositional"
+    causal: "cause_effect"
+    cause-and-effect: "cause_effect"
 
 
 safety_agent:
