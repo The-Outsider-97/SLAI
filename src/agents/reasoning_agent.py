@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 """
 Production Reasoning Agent for SLAI.
@@ -30,7 +30,6 @@ import uuid
 
 from opentelemetry import trace # type: ignore
 from opentelemetry.trace import SpanKind, Status, StatusCode # type: ignore
-# from prometheus_client import Counter as _Counter, Histogram, Gauge # type: ignore
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,7 +39,13 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, MutableM
 from .base_agent import BaseAgent
 from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import get_config_section, load_global_config
-from .reasoning import *
+from .reasoning.reasoning_types import ReasoningTypes
+from .reasoning.rule_engine import RuleEngine
+from .reasoning.validation import ValidationEngine
+from .reasoning.probabilistic_models import ProbabilisticModels
+from .reasoning.hybrid_probabilistic_models import HybridProbabilisticModels
+from .reasoning.utils.reasoning_errors import *
+from .reasoning.utils.reasoning_helpers import *
 from .reasoning.utils.reasoning_errors import *
 from .reasoning.utils.reasoning_helpers import *
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -389,21 +394,35 @@ class ReasoningAgent(BaseAgent):
     """
 
     AGENT_KEY = "reasoning_agent"
-    KNOWLEDGE_MEMORY_KEY_DEFAULT = "reasoning_agent:knowledge_base"
+    WORKING_KNOWLEDGE_KEY_DEFAULT = "reasoning_agent:working_knowledge"
+    KNOWLEDGE_CANDIDATE_TOPIC_DEFAULT = "reasoning_agent:knowledge_candidates"
     CHECKPOINTING_SUPPORTED = True
-    CHECKPOINT_SCHEMA = "slai.reasoning-agent.state.v1"
+    CHECKPOINT_SCHEMA = "slai.reasoning-agent.state.v2"
     _ALLOWED_CONFIG_KEYS = {
-        "learning_rate", "decay", "exploration_rate", "max_iterations",
-        "contradiction_threshold", "redundancy_margin", "knowledge_db",
-        "large_kb_threshold", "low_confidence_threshold", "max_action_results",
-        "max_chain_depth", "max_react_steps", "max_trace_items",
-        "enable_shared_memory_publish", "enable_knowledge_persistence",
-        "enable_memory_logging", "enable_probabilistic_fallback",
-        "auto_register_builtin_rules", "strict_fact_validation",
-        "human_intervention_key", "knowledge_memory_key", "last_validation_key",
-        "reasoning_trace_topic", "memory_event_tag", "memory_event_priority",
-        "strategy_default", "reasoning_type_aliases", "builtin_rule_weights",
-        "tuple_key", "hypothesis_graph", "glove_path", "ner_tag", "embedding",
+        "large_kb_threshold",
+        "low_confidence_threshold",
+
+        "max_action_results",
+        "max_chain_depth",
+        "max_react_steps",
+        "max_trace_items",
+
+        "enable_shared_memory_publish",
+        "enable_memory_logging",
+        "enable_probabilistic_fallback",
+        "strict_fact_validation",
+
+        "human_intervention_key",
+        "working_knowledge_key",
+        "knowledge_candidate_topic",
+        "last_validation_key",
+        "reasoning_trace_topic",
+
+        "memory_event_tag",
+        "memory_event_priority",
+
+        "strategy_default",
+        "reasoning_type_aliases",
     }
 
     def __init__(
@@ -477,13 +496,15 @@ class ReasoningAgent(BaseAgent):
     # ------------------------------------------------------------------
     def _load_runtime_config(self) -> None:
         cfg = self.agent_config
-        self.learning_rate = clamp_confidence(cfg.get("learning_rate", 0.05))
-        self.decay = clamp_confidence(cfg.get("decay", 0.95))
-        self.exploration_rate = clamp_confidence(cfg.get("exploration_rate", 0.1))
-        self.max_iterations = bounded_iterations(cfg.get("max_iterations", 20), minimum=1, maximum=100_000)
-        self.contradiction_threshold = clamp_confidence(cfg.get("contradiction_threshold", 0.25))
-        self.redundancy_margin = clamp_confidence(cfg.get("redundancy_margin", 0.05))
-        self.knowledge_db = str(cfg.get("knowledge_db", "src/agents/knowledge/templates/knowledge_db.json"))
+        # self.knowledge_db = str(cfg.get("knowledge_db", "src/agents/knowledge/templates/knowledge_db.json"))
+        # self.max_iterations = bounded_iterations(cfg.get("max_iterations", 20), minimum=1, maximum=100_000)
+        # self.contradiction_threshold = clamp_confidence(cfg.get("contradiction_threshold", 0.25))
+        # self.enable_knowledge_persistence = bool(cfg.get("enable_knowledge_persistence", True))
+        # self.auto_register_builtin_rules = bool(cfg.get("auto_register_builtin_rules", True))
+        # self.redundancy_margin = clamp_confidence(cfg.get("redundancy_margin", 0.05))
+        # self.exploration_rate = clamp_confidence(cfg.get("exploration_rate", 0.1))
+        # self.learning_rate = clamp_confidence(cfg.get("learning_rate", 0.05))
+        # self.decay = clamp_confidence(cfg.get("decay", 0.95))
         self.large_kb_threshold = bounded_iterations(cfg.get("large_kb_threshold", 500), minimum=1, maximum=50_000_000)
         self.max_action_results = bounded_iterations(cfg.get("max_action_results", 20), minimum=1, maximum=100_000)
         self.max_chain_depth = bounded_iterations(cfg.get("max_chain_depth", 4), minimum=1, maximum=256)
@@ -491,10 +512,8 @@ class ReasoningAgent(BaseAgent):
         self.max_trace_items = bounded_iterations(cfg.get("max_trace_items", 250), minimum=1, maximum=100_000)
         self.low_confidence_threshold = clamp_confidence(cfg.get("low_confidence_threshold", 0.4))
         self.enable_shared_memory_publish = bool(cfg.get("enable_shared_memory_publish", True))
-        self.enable_knowledge_persistence = bool(cfg.get("enable_knowledge_persistence", True))
         self.enable_memory_logging = bool(cfg.get("enable_memory_logging", True))
         self.enable_probabilistic_fallback = bool(cfg.get("enable_probabilistic_fallback", True))
-        self.auto_register_builtin_rules = bool(cfg.get("auto_register_builtin_rules", True))
         self.strict_fact_validation = bool(cfg.get("strict_fact_validation", True))
         self.knowledge_memory_key = str(cfg.get("knowledge_memory_key", self.KNOWLEDGE_MEMORY_KEY_DEFAULT))
         self.last_validation_key = str(cfg.get("last_validation_key", "reasoning_agent:last_validated_fact"))
@@ -504,10 +523,10 @@ class ReasoningAgent(BaseAgent):
         self.memory_event_priority = clamp_confidence(cfg.get("memory_event_priority", 0.75))
         self.strategy_default = str(cfg.get("strategy_default", "deduction")).strip() or "deduction"
         self.reasoning_type_aliases = {str(k).strip(): str(v).strip() for k, v in dict(cfg.get("reasoning_type_aliases", {})).items()}
-        self.builtin_rule_weights = {
-            str(k).strip(): clamp_confidence(v)
-            for k, v in dict(cfg.get("builtin_rule_weights", {"identity_rule": 1.0, "transitive_rule": 0.8})).items()
-        }
+        # self.builtin_rule_weights = {
+        #     str(k).strip(): clamp_confidence(v)
+        #     for k, v in dict(cfg.get("builtin_rule_weights", {"identity_rule": 1.0, "transitive_rule": 0.8})).items()
+        # }
 
     def _validate_runtime_config(self) -> None:
         if self.learning_rate <= 0.0:
