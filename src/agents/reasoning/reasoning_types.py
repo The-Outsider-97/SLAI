@@ -20,7 +20,6 @@ from .utils.reasoning_errors import *
 from .utils.reasoning_helpers import *
 from .types import *
 from .reasoning_memory import ReasoningMemory
-from .reasoning_cache import ReasoningCache
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Reasoning Types")
@@ -49,53 +48,46 @@ class ReasoningTypes:
         "cause_effect": ReasoningCauseAndEffect,
     }
 
-    def __init__(self) -> None:
-        self.config: Dict[str, Any] = load_global_config()
-        self.types_cfg: Dict[str, Any] = get_config_section("reasoning_types", self.config) or {}
-
-        # ---- Configuration -------------------------------------------------
-        self.max_combined_types: int = bounded_iterations(self.types_cfg.get("max_combined_types", 3), minimum=1, maximum=10)
-        requested_instance_cache = bool(self.types_cfg.get("enable_instance_cache", False))
-        if requested_instance_cache:
-            logger.warning("reasoning_types.enable_instance_cache=true was requested, but mutable strategy-instance caching is disabled for safety.")
-
-        # Strategy implementations contain mutable per-run state inherited from
-        # BaseReasoning. They must therefore be instantiated per reasoning session.
+    def __init__(
+        self,
+        *,
+        config: Optional[Mapping[str, Any]] = None,
+        default_strategy: str = "deduction",
+        memory: Optional[ReasoningMemory] = None,
+    ) -> None:
+        self.config: Dict[str, Any] = dict(config or load_global_config())
+        self.types_cfg: Dict[str, Any] = dict(get_config_section("reasoning_types", self.config, default={}) or {})
+        self.max_combined_types = bounded_iterations(self.types_cfg.get("max_combined_types", 3), minimum=1, maximum=10)
+        # Phase 0 established that strategies contain mutable run state.
+        # Therefore strategy instances remain request/session scoped.
         self.enable_instance_cache = False
-
-        # Retain these values temporarily for configuration/backward compatibility.
-        self.instance_cache_max_size = bounded_iterations(self.types_cfg.get("instance_cache_max_size", 32), minimum=1, maximum=10_000)
-        self.instance_cache_ttl_seconds = self._optional_float(self.types_cfg.get("instance_cache_ttl_seconds", 300.0))
-        self.instance_cache_max_size: int = bounded_iterations(self.types_cfg.get("instance_cache_max_size", 32), minimum=1, maximum=10000)
-        self.instance_cache_ttl_seconds: Optional[float] = self._optional_float(self.types_cfg.get("instance_cache_ttl_seconds", 300.0))
-        self.default_strategy: str = str(self.types_cfg.get("default_strategy", "abduction+deduction")).strip()
-        self.strategy_keywords: Dict[str, List[str]] = self.types_cfg.get("strategy_keywords", {
-            "abduction": ["explain", "why", "hypothesis", "plausible", "most likely"],
-            "deduction": ["prove", "derive", "therefore", "premise", "must be"],
-            "induction": ["pattern", "trend", "generalize", "predict", "extrapolate"],
-            "analogical": ["analogy", "similar", "compare", "resembles"],
-            "decompositional": ["break down", "component", "decompose", "subsystem"],
-            "cause_effect": ["effect", "impact", "results in", "causal", "cause"],
-        })
-
-        # ---- Shared resources ----------------------------------------------
-        self.reasoning_memory = ReasoningMemory()
-
-        # Kept only so get_cache()/diagnostics do not break existing callers.
-        self._instance_cache: Optional[ReasoningCache] = None
-        if self.enable_instance_cache:
-            self._instance_cache = ReasoningCache(
-                namespace="reasoning_types_instances",
-                max_size=self.instance_cache_max_size,
-                default_ttl_seconds=self.instance_cache_ttl_seconds,
-                memory=self.reasoning_memory if self.types_cfg.get("record_memory_events", False) else None,
+        self._instance_cache = None
+        self.default_strategy = (str(default_strategy).strip() or "deduction")
+        self.strategy_keywords = dict(
+            self.types_cfg.get(
+                "strategy_keywords",
+                {
+                    "abduction": ["explain", "why", "hypothesis", "plausible", "most likely"],
+                    "deduction": ["prove", "derive", "therefore", "premise", "must be"],
+                    "induction": ["pattern", "trend", "generalize", "predict", "extrapolate"],
+                    "analogical": ["analogy", "similar", "compare", "resembles"],
+                    "decompositional": ["break down", "component", "decompose", "subsystem"],
+                    "cause_effect": ["effect", "impact", "results in", "causal", "cause"],
+                },
             )
+        )
 
+        # Borrowed dependency; ReasoningTypes does not own its lifetime.
+        self.reasoning_memory = memory
         self._lock = threading.RLock()
         self._stats: Dict[str, int] = {"single": 0, "combined": 0}
+
         logger.info(
-            "ReasoningTypes initialized | cache_enabled=%s | max_combined=%s",
-            self.enable_instance_cache, self.max_combined_types
+            "ReasoningTypes initialized | "
+            "mutable_instance_cache=False | "
+            "max_combined=%s | default=%s",
+            self.max_combined_types,
+            self.default_strategy,
         )
 
     # ------------------------------------------------------------------
@@ -235,7 +227,7 @@ class ReasoningTypes:
             sorted_matches = sorted_matches[:self.max_combined_types]
         return "+".join(sorted_matches)
 
-    def get_memory(self) -> ReasoningMemory:
+    def get_memory(self) -> Optional[ReasoningMemory]:
         """Return the shared reasoning memory instance."""
         return self.reasoning_memory
 
@@ -293,19 +285,11 @@ class ReasoningTypes:
         factory = self
 
         class CombinedReasoning(BaseReasoning):
-            def __init__(
-                self,
-                component_names: List[str],
-            ) -> None:
+            def __init__(self, component_names: List[str]) -> None:
                 super().__init__()
 
-                self.component_names = list(
-                    component_names
-                )
-
-                self.name = "+".join(
-                    self.component_names
-                )
+                self.component_names = list(component_names)
+                self.name = "+".join(self.component_names)
 
             def perform_reasoning(
                 self,
@@ -313,19 +297,10 @@ class ReasoningTypes:
                 context: Optional[Dict[str, Any]] = None,
                 **legacy_kwargs: Any,
             ) -> Dict[str, Any]:
-                merged_context = dict(
-                    context or {}
-                )
+                merged_context = dict(context or {})
 
-                # Preserve compatibility with previous callers such as:
-                #
-                #   combined.perform_reasoning(observations=[...])
-                #
                 for key, value in legacy_kwargs.items():
-                    merged_context.setdefault(
-                        key,
-                        value,
-                    )
+                    merged_context.setdefault(key, value)
 
                 problem = input_data
 
@@ -342,12 +317,7 @@ class ReasoningTypes:
                             problem = merged_context[key]
                             break
 
-                return factory._execute_combined(
-                    self.component_names,
-                    problem,
-                    merged_context,
-                )
-
+                return factory._execute_combined(self.component_names, problem, merged_context)
         return CombinedReasoning(names)
     
     def get_stats(self) -> Dict[str, Any]:
@@ -367,10 +337,15 @@ class ReasoningTypes:
             }
     
     def shutdown(self, checkpoint_memory: bool = True) -> None:
+        """
+        Release ReasoningTypes-owned resources.
+
+        ``checkpoint_memory`` remains in the signature for v2.3 caller
+        compatibility but ReasoningTypes no longer owns memory persistence.
+        """
         if checkpoint_memory:
-            self.reasoning_memory.save_checkpoint()
-        if self._instance_cache:
-            self._instance_cache.clear()
+            logger.debug("Ignoring checkpoint_memory=True: Reasoning memory durability is owned by BaseAgent/checkpointing.")
+
         logger.info("ReasoningTypes shut down")
 
     # ------------------------------------------------------------------

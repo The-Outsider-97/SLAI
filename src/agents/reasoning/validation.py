@@ -37,18 +37,16 @@ Design constraints
  
 from __future__ import annotations
  
-import json
 import time
 
 from collections import defaultdict
-from pathlib import Path
 from threading import RLock
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union,  Mapping, MutableMapping
  
-from .utils.config_loader import load_global_config, get_config_section
+from .utils.config_loader import *
 from .utils.reasoning_errors import *
-from .utils.reasoning_helpers import * # type: ignore
-from .modules.mln_rules import * # type: ignore
+from .utils.reasoning_helpers import *
+from .modules.mln_rules import *
 from .reasoning_memory import ReasoningMemory
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
@@ -103,69 +101,50 @@ class ValidationEngine:
     # Construction
     # ------------------------------------------------------------------
  
-    def __init__(self) -> None:
-        self._lock: RLock = RLock()
- 
-        # ---- Configuration --------------------------------------------------
-        self.config: Dict[str, Any]            = load_global_config()
-        self.validation_config: Dict[str, Any] = get_config_section("validation", self.config)
-        self.storage_config: Dict[str, Any]    = get_config_section("storage",    self.config)
- 
-        # Top-level scalars
-        self.contradiction_threshold: float = clamp_confidence(
-            self.config.get("contradiction_threshold", 0.25)
+    def __init__(
+        self,
+        *,
+        config: Optional[Mapping[str, Any]] = None,
+        knowledge_base: Optional[MutableMapping[_Fact, float]] = None,
+        memory: Optional[ReasoningMemory] = None,
+    ) -> None:
+        self._lock = RLock()
+
+        self.config: Dict[str, Any] = dict(config or load_global_config())
+        self.validation_config: Dict[str, Any] = dict(get_config_section("validation", self.config, default={}) or {})
+        self.contradiction_threshold = clamp_confidence(self.config.get("contradiction_threshold", 0.25))
+        self.markov_logic_weight = clamp_confidence(self.config.get("markov_logic_weight", 0.7))
+        self.enable = bool(self.validation_config.get("enable", True))
+        self.redundancy_margin = clamp_confidence(self.validation_config.get("redundancy_margin", 0.05))
+        self._max_circular_depth = bounded_iterations(self.validation_config.get("max_circular_depth", 3),
+            minimum=1,
+            maximum=64,
         )
-        self.markov_logic_weight: float = clamp_confidence(
-            self.config.get("markov_logic_weight", 0.7)
+        self._validation_timeout = max(0.0, float(self.validation_config.get("validation_timeout", 1)))
+        self.min_soundness_score = clamp_confidence(self.validation_config.get("min_soundness_score", 0.7))
+        self._max_validation_attempts = bounded_iterations(self.validation_config.get("max_validation_attempts", 5),
+            minimum=1,
+            maximum=32,
         )
- 
-        # validation section scalars
-        self.enable: bool = bool(self.validation_config.get("enable", True))
-        self.redundancy_margin: float = clamp_confidence(
-            self.validation_config.get("redundancy_margin", 0.05)
+        self.mln_rule_confidence_threshold = clamp_confidence(self.validation_config.get("mln_rule_confidence_threshold", 0.7))
+        self._enable_semantic_redundancy = bool(self.validation_config.get("enable_semantic_redundancy", False))
+        self._semantic_conflict_similarity = clamp_confidence(self.validation_config.get("semantic_conflict_similarity", 0.80))
+        self._semantic_redundancy_similarity = clamp_confidence(self.validation_config.get("semantic_redundancy_similarity", 0.95))
+        self._semantic_conflict_confidence_gap = clamp_confidence(self.validation_config.get("semantic_conflict_confidence_gap", 0.30))
+
+        # SAME object as RuleEngine.
+        self.knowledge_base = (
+            knowledge_base
+            if knowledge_base is not None
+            else {}
         )
-        self._max_circular_depth: int = bounded_iterations(
-            self.validation_config.get("max_circular_depth", 3), minimum=1, maximum=64
-        )
-        self._validation_timeout: float = max(
-            0.0, float(self.validation_config.get("validation_timeout", 1))
-        )
-        self.min_soundness_score: float = clamp_confidence(
-            self.validation_config.get("min_soundness_score", 0.7)
-        )
-        self._max_validation_attempts: int = bounded_iterations(
-            self.validation_config.get("max_validation_attempts", 5), minimum=1, maximum=32
-        )
-        self.mln_rule_confidence_threshold: float = clamp_confidence(
-            self.validation_config.get("mln_rule_confidence_threshold", 0.7)
-        )
-        self._enable_semantic_redundancy: bool = bool(
-            self.validation_config.get("enable_semantic_redundancy", False)
-        )
-        self._semantic_conflict_similarity: float = clamp_confidence(
-            self.validation_config.get("semantic_conflict_similarity", 0.80)
-        )
-        self._semantic_redundancy_similarity: float = clamp_confidence(
-            self.validation_config.get("semantic_redundancy_similarity", 0.95)
-        )
-        self._semantic_conflict_confidence_gap: float = clamp_confidence(
-            self.validation_config.get("semantic_conflict_confidence_gap", 0.30)
-        )
- 
-        # ---- Storage --------------------------------------------------------
-        self._kb_path: Path = Path(self.storage_config.get("knowledge_db", ""))
- 
-        # ---- Core data structures -------------------------------------------
-        self.knowledge_base: _KB = self._load_knowledge_base(self._kb_path)
- 
-        # ---- Optional semantic model ----------------------------------------
+
+        self.reasoning_memory = memory
         self.semantic_model: Optional[Any] = None
+
         if self._enable_semantic_redundancy:
             self._initialize_semantic_model()
- 
-        # ---- Shared memory --------------------------------------------------
-        self.reasoning_memory: ReasoningMemory = ReasoningMemory()
- 
+
         logger.info(
             "ValidationEngine initialized | kb_facts=%d | enable=%s "
             "| semantic=%s | mln_rules=%d",
@@ -204,85 +183,8 @@ class ValidationEngine:
         self._semantic_conflict_confidence_gap = clamp_confidence(self.validation_config.get("semantic_conflict_confidence_gap", 0.30))
  
         logger.info("ValidationEngine configuration reloaded")
- 
-    # ------------------------------------------------------------------
-    # Resource loading
-    # ------------------------------------------------------------------
- 
-    def _load_knowledge_base(self, kb_path: Path) -> _KB:
-        """Load and normalise the KB from ``knowledge_db.json``.
- 
-        Handles three shapes inside the ``"knowledge"`` key:
-        - ``[{"subject": s, "predicate": p, "object": o, "confidence": c}, ...]``
-        - ``[[s, p, o, confidence], ...]``
-        - ``{"s||p||o": confidence, ...}``
- 
-        Falls back to a root-level pipe-delimited dict when ``"knowledge"`` is
-        absent.  Unknown / malformed entries are skipped with a warning.
-        """
-        if not kb_path.exists():
-            logger.warning("KB not found at %s — starting with empty knowledge base", kb_path)
-            return {}
- 
-        try:
-            with open(kb_path, "r", encoding="utf-8") as fh:
-                raw = json.load(fh)
-        except json.JSONDecodeError as exc:
-            raise KnowledgePersistenceError(
-                f"Invalid JSON in knowledge base: {kb_path}",
-                cause=exc,
-                context={"path": str(kb_path)},
-            ) from exc
- 
-        facts_source = raw.get("knowledge") if isinstance(raw, dict) else None
-        if facts_source is None:
-            # Fallback: root-level dict with pipe-delimited keys
-            facts_source = raw if isinstance(raw, dict) else {}
-            if facts_source:
-                logger.warning(
-                    "'knowledge' key absent in %s — using root-level dict fallback", kb_path
-                )
- 
-        parsed: _KB = {}
- 
-        if isinstance(facts_source, dict):
-            for key, conf in facts_source.items():
-                parts = str(key).split("||")
-                if len(parts) != 3:
-                    logger.warning("Skipping malformed KB key (expected s||p||o): %r", key)
-                    continue
-                try:
-                    fact = normalize_fact(tuple(parts))  # type: ignore[arg-type]
-                    parsed[fact] = clamp_confidence(conf)
-                except Exception as exc:
-                    logger.warning("Skipping invalid KB entry %r: %s", key, exc)
- 
-        elif isinstance(facts_source, list):
-            for item in facts_source:
-                try:
-                    if isinstance(item, dict):
-                        s = item.get("subject")
-                        p = item.get("predicate")
-                        o = item.get("object")
-                        if s is None or p is None or o is None:
-                            logger.warning("Skipping incomplete KB record: %s", item)
-                            continue
-                        conf = item.get("confidence") or item.get("weight") or 0.5
-                        fact = normalize_fact((str(s), str(p), str(o)))
-                        parsed[fact] = clamp_confidence(conf)
-                    elif isinstance(item, (list, tuple)) and len(item) >= 3:
-                        s, p, o = item[:3]
-                        conf = item[3] if len(item) >= 4 else 0.5
-                        fact = normalize_fact((str(s), str(p), str(o)))
-                        parsed[fact] = clamp_confidence(conf)
-                    else:
-                        logger.warning("Unsupported KB item type %s: %r", type(item).__name__, item)
-                except Exception as exc:
-                    logger.warning("Skipping KB item %r: %s", item, exc)
- 
-        logger.info("Loaded %d facts from %s", len(parsed), kb_path)
-        return parsed
- 
+
+
     def _initialize_semantic_model(self) -> None:
         """Initialise the sentence-transformer model for embedding-based checks.
  
@@ -912,11 +814,7 @@ class ValidationEngine:
     # Private helpers — scoring, contradiction, semantic layers
     # ------------------------------------------------------------------
  
-    def _score_rule_match(
-        self,
-        inferred: Any,
-        kb: _KB,
-    ) -> float:
+    def _score_rule_match(self, inferred: Any, kb: _KB) -> float:
         """Compute how well a rule's output matches the KB (0.0 – 1.0).
  
         Score = mean(1 - |inferred_conf - kb_conf|) across inferred facts.
@@ -950,12 +848,7 @@ class ValidationEngine:
             return True
         return False
  
-    def _detect_single_valued_conflicts(
-        self,
-        new_facts: _KB,
-        kb: _KB,
-        threshold: float,
-    ) -> List[_ConflictPair]:
+    def _detect_single_valued_conflicts(self, new_facts: _KB, kb: _KB, threshold: float) -> List[_ConflictPair]:
         """Flag (subject, predicate) pairs that map to two different high-confidence objects.
  
         A predicate is treated as *single-valued* when the stored KB shows
@@ -985,11 +878,7 @@ class ValidationEngine:
                     conflicts.append(((ns, np, no), (ns, np, ko)))
         return conflicts
  
-    def _detect_semantic_conflicts(
-        self,
-        new_facts: _KB,
-        kb: _KB,
-    ) -> List[_ConflictPair]:
+    def _detect_semantic_conflicts(self, new_facts: _KB, kb: _KB) -> List[_ConflictPair]:
         """Embedding-based semantic conflict detection.
  
         Two facts conflict semantically when their cosine similarity exceeds
@@ -1029,11 +918,7 @@ class ValidationEngine:
  
         return conflicts
  
-    def _detect_semantic_redundancies(
-        self,
-        new_facts: _KB,
-        kb: _KB,
-    ) -> List[_Fact]:
+    def _detect_semantic_redundancies(self, new_facts: _KB, kb: _KB) -> List[_Fact]:
         """Embedding-based semantic redundancy detection.
  
         A new fact is semantically redundant if any KB fact has cosine
@@ -1068,11 +953,7 @@ class ValidationEngine:
         return redundant
  
     # Kept for backward compatibility — called by legacy code as a named method.
-    def _validate_with_markov_logic(
-        self,
-        kb: _KB,
-        weight: float,
-    ) -> List[Tuple[Any, str]]:
+    def _validate_with_markov_logic(self, kb: _KB, *, weight: float) -> List[Tuple[Any, str]]:
         """Run MLN evaluation and return violations in legacy tuple format.
  
         Returns:
@@ -1085,6 +966,7 @@ class ValidationEngine:
             include_payloads=False,
             raise_on_error=False,
         )
+        self.weight = weight
         return list(report.get("legacy_violations", []))
  
     # ------------------------------------------------------------------
@@ -1100,6 +982,9 @@ class ValidationEngine:
         priority: float = 0.9,
     ) -> None:
         """Log an experience to ReasoningMemory, swallowing any errors."""
+        if self.reasoning_memory is None:
+            return
+
         try:
             experience = {"type": event_type, **payload}
             kwargs: Dict[str, Any] = {"priority": priority}

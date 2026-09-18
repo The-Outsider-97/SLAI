@@ -128,18 +128,19 @@ class ProbabilisticModels(nn.Module):
         self,
         network_data: Optional[NetworkDefinition] = None,
         semantic_frames: Optional[Mapping[str, Any]] = None,
-        knowledge_base: Optional[Mapping[Any, Any]] = None,
+        knowledge_base: Optional[MutableMapping[Any, Any]] = None,
         memory: Optional[ReasoningMemory] = None,
         *,
+        config: Optional[Mapping[str, Any]] = None,
         initialize_components: bool = True,
-    ) -> None:
+        ) -> None:
         super().__init__()
 
-        self.config: Dict[str, Any] = load_global_config()
-        self.prob_config: Dict[str, Any] = get_config_section("probabilistic_models", default={})
-        self.inference_config: Dict[str, Any] = get_config_section("inference")
-        self.storage_config: Dict[str, Any] = get_config_section("storage")
-        self.net_config: Dict[str, Any] = get_config_section("networks")
+        self.config: Dict[str, Any] = dict(config or load_global_config())
+        self.prob_config = dict(get_config_section("probabilistic_models", self.config, default={}) or {})
+        self.inference_config = dict(get_config_section("inference", self.config, default={}) or {})
+        self.storage_config = dict(get_config_section("storage", self.config, default={}) or {})
+        self.net_config = dict(get_config_section("networks", self.config, default={}) or {})
 
         self.semantic_frames_path: str = str(self.config.get("semantic_frames_path", ""))
         self.contradiction_threshold: float = self._cfg_confidence(
@@ -242,7 +243,6 @@ class ProbabilisticModels(nn.Module):
         }
 
         self.bayesian_network_path = str(self.storage_config.get("bayesian_network", ""))
-        self.knowledge_db_path = str(self.storage_config.get("knowledge_db", ""))
         for key, path in self.net_config.items():
             setattr(self, str(key), path)
 
@@ -257,12 +257,17 @@ class ProbabilisticModels(nn.Module):
         self.semantic_frames: Dict[str, Any] = self._normalize_semantic_frames(
             semantic_frames if semantic_frames is not None else self._load_semantic_frames(Path(self.semantic_frames_path))
         )
-        self.knowledge_base: Dict[Fact, float] = self._normalize_knowledge_base(
-            knowledge_base if knowledge_base is not None else self._load_knowledge_base(Path(self.knowledge_db_path))
-        )
+        normalized_knowledge = self._normalize_knowledge_base(knowledge_base or {})
+
+        if isinstance(knowledge_base, MutableMapping):
+            knowledge_base.clear()
+            knowledge_base.update(normalized_knowledge)
+            self.knowledge_base = (knowledge_base)
+        else:
+            self.knowledge_base = (normalized_knowledge)
         self.knowledge_versions: Dict[Fact, List[Dict[str, Any]]] = defaultdict(list)
 
-        self.reasoning_memory = memory or ReasoningMemory()
+        self.reasoning_memory = memory
         self.pgmpy_bn: Optional[PgmpyBayesianNetwork] = None
         self.adaptive_circuit: Optional[AdaptiveCircuit] = None
         self.model_compute: Optional[ModelCompute] = None
@@ -440,8 +445,7 @@ class ProbabilisticModels(nn.Module):
                         "Structural weights resource must contain a mapping",
                         context={
                             "path": str(path),
-                            "actual_type":
-                                type(data).__name__,
+                            "actual_type": type(data).__name__,
                         },
                     )
 
@@ -1427,6 +1431,7 @@ class ProbabilisticModels(nn.Module):
         current_context = context or []
         if not current_context:
             try:
+                assert self.reasoning_memory is not None
                 current_context = self.reasoning_memory.get_current_context()
             except Exception:
                 current_context = []
@@ -1698,8 +1703,10 @@ class ProbabilisticModels(nn.Module):
 
     def _add_memory_event(self, event: Mapping[str, Any], *, tag: Union[str, List[str]], priority: float) -> None:
         try:
+            assert self.reasoning_memory is not None
             self.reasoning_memory.add(json_safe_reasoning_state(dict(event)), tag=tag, priority=priority)
         except TypeError:
+            assert self.reasoning_memory is not None
             self.reasoning_memory.add(json_safe_reasoning_state(dict(event)), tag=str(tag), priority=priority)
         except Exception as exc:
             logger.debug("Reasoning memory event skipped: %s", exc)

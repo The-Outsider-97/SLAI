@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
 
-from .utils.config_loader import load_global_config, get_config_section
+from .utils.config_loader import *
 from .utils.reasoning_errors import *
 from .utils.reasoning_helpers import *
 from .reasoning_memory import ReasoningMemory
@@ -138,13 +138,13 @@ class HybridProbabilisticModels:
         },
     }
 
-    def __init__(self, memory: Optional[ReasoningMemory] = None):
+    def __init__(self, memory: Optional[ReasoningMemory] = None, *, config: Optional[Mapping[str, Any]] = None,):
         super().__init__()
-        self.config = load_global_config()
-        self.net_config = get_config_section("networks") or {}
-        self.hybrid_config = get_config_section("hybrid_models") or {}
+        self.config = dict(config or load_global_config())
+        self.net_config = dict(get_config_section("networks", self.config, default={}) or {})
+        self.hybrid_config = dict(get_config_section("hybrid_models", self.config, default={}) or {})
 
-        self.memory = memory or ReasoningMemory()
+        self.memory = memory
         self.hybrid_networks_cache: "OrderedDict[str, NetworkDict]" = OrderedDict()
         self._source_network_cache: "OrderedDict[str, NetworkDict]" = OrderedDict()
         self._refresh_runtime_config()
@@ -1155,6 +1155,8 @@ class HybridProbabilisticModels:
 
     def _record_memory_event(self, network: Mapping[str, Any]) -> None:
         if not self.record_memory_events or self.memory is None:
+            return
+        if self.memory is None:
             return
         try:
             strategy = network.get("metadata", {}).get("hybrid_strategy", "unknown")
