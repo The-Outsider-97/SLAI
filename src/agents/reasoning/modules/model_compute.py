@@ -8,17 +8,15 @@ handling, timestamps, and JSON-safe state conversion to the reasoning helpers.
 """
 from __future__ import annotations
 
-import math
 import time
 import numpy as np # type: ignore
 import torch # type: ignore
 import torch.nn as nn # type: ignore
 import torch.optim as optim # type: ignore
-import torch.nn.functional as F # type: ignore
 
 from torch.utils.data import DataLoader, TensorDataset # type: ignore
-from collections import deque
-from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from collections import deque, Counter, defaultdict
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union, cast
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.reasoning_errors import *
@@ -72,38 +70,38 @@ class ModelCompute(nn.Module):
                 context={"epsilon": self.epsilon},
             )
 
-        self.batch_size: int = bounded_iterations(
-            self.model_config.get("batch_size", 32), minimum=1, maximum=8192
-        )
-        self.revision_epochs: int = bounded_iterations(
-            self.model_config.get("revision_epochs", 5), minimum=1, maximum=10_000
-        )
-        self.map_steps: int = bounded_iterations(
-            self.model_config.get("map_steps", 100), minimum=1, maximum=10_000
-        )
-        self.marginal_map_steps: int = bounded_iterations(
-            self.model_config.get("marginal_map_steps", 10), minimum=1, maximum=10_000
-        )
-        self.default_sample_count: int = bounded_iterations(
-            self.model_config.get("sample_count", 1000), minimum=1, maximum=250_000
-        )
+        self.batch_size: int = bounded_iterations(self.model_config.get("batch_size", 32), minimum=1, maximum=8192)
+        self.revision_epochs: int = bounded_iterations(self.model_config.get("revision_epochs", 5), minimum=1, maximum=10_000)
+        self.map_steps: int = bounded_iterations(self.model_config.get("map_steps", 100), minimum=1, maximum=10_000)
+        self.marginal_map_steps: int = bounded_iterations(self.model_config.get("marginal_map_steps", 10), minimum=1, maximum=10_000)
+        self.default_sample_count: int = bounded_iterations(self.model_config.get("sample_count", 1000), minimum=1, maximum=250_000)
         self.gradient_clip_norm: float = float(self.model_config.get("gradient_clip_norm", 5.0))
         self.schema_increment: float = float(self.model_config.get("schema_increment", 0.1))
         self.l1_regularization: float = float(self.model_config.get("l1_regularization", 0.01))
-        self.determinism_threshold: float = clamp_confidence(
-            self.model_config.get("determinism_threshold", 0.999)
-        )
+        self.determinism_threshold: float = clamp_confidence(self.model_config.get("determinism_threshold", 0.999))
         self.strict_evidence_bounds: bool = bool(self.model_config.get("strict_evidence_bounds", False))
         self.auto_sigmoid_outputs: bool = bool(self.model_config.get("auto_sigmoid_outputs", True))
         self.project_sum_weights: bool = bool(self.model_config.get("project_sum_weights", False))
-        self.enforce_non_negative_parameters: bool = bool(
-            self.model_config.get("enforce_non_negative_parameters", False)
-        )
-        self.max_explanation_items: int = bounded_iterations(
-            self.model_config.get("max_explanation_items", 32), minimum=1, maximum=10_000
-        )
+        self.enforce_non_negative_parameters: bool = bool(self.model_config.get("enforce_non_negative_parameters", False))
+        self.max_explanation_items: int = bounded_iterations(self.model_config.get("max_explanation_items", 32), minimum=1, maximum=10_000)
         self.seed: Optional[int] = self._optional_int(self.model_config.get("seed"))
         self.device: torch.device = self._resolve_device(self.model_config.get("device", "auto"))
+        # Independent generator for model/circuit sampling.
+        try:
+            self._sample_generator = (torch.Generator(device=self.device))
+        except Exception:
+            # CPU fallback for PyTorch variants with restricted Generator devices.
+            self._sample_generator = (torch.Generator())
+
+        # DataLoader's RandomSampler expects a CPU generator.
+        self._data_generator = (torch.Generator())
+
+        if self.seed is None:
+            self._sample_generator.seed()
+            self._data_generator.seed()
+        else:
+            self._sample_generator.manual_seed(self.seed)
+            self._data_generator.manual_seed(self.seed)
 
         self.optimizer: Optional[optim.Optimizer] = None
         self.loss_fn = self._build_loss_fn()
@@ -115,11 +113,7 @@ class ModelCompute(nn.Module):
             maxlen=bounded_iterations(self.model_config.get("revision_history_size", 256), minimum=1, maximum=100_000)
         )
 
-        printer.status(
-            "INIT",
-            f"Model Compute successfully initialized with: Schema V.{self.schema_version}",
-            "success",
-        )
+        printer.status("INIT", f"Model Compute successfully initialized with: Schema V.{self.schema_version}", "success")
 
     # ------------------------------------------------------------------
     # Circuit binding and configuration
@@ -414,7 +408,7 @@ class ModelCompute(nn.Module):
         try:
             inputs, targets = self._evidence_to_training_data(new_evidence)
             dataset = TensorDataset(inputs, targets)
-            loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True)
+            loader = DataLoader(dataset, batch_size=min(self.batch_size, len(dataset)), shuffle=True, generator=self._data_generator)
             losses: List[float] = []
 
             circuit.train()
@@ -556,7 +550,12 @@ class ModelCompute(nn.Module):
 
         if hasattr(circuit, "trace_activations"):
             try:
-                trace = circuit.trace_activations(input_tensor)
+                trace_activations = getattr(circuit, "trace_activations")
+                trace = (
+                    trace_activations(input_tensor)
+                    if callable(trace_activations)
+                    else trace_activations
+                )
                 for item in self._flatten_trace(trace)[: self.max_explanation_items]:
                     lines.append(f"- {item}")
             except Exception as exc:
@@ -810,29 +809,58 @@ class ModelCompute(nn.Module):
         denom = values.sum(dim=-1, keepdim=True) if values.dim() > 1 else values.sum()
         return values / torch.clamp(denom, min=self.epsilon)
 
-    def _sample_circuit(self, n_samples: int) -> List[Dict[str, float]]:
+    def _sample_circuit(self, n_samples: int, *, seed: Optional[int] = None) -> List[Dict[str, float]]:
         circuit = self._require_circuit()
-        sample_count = bounded_iterations(n_samples, minimum=1, maximum=250_000)
-        if self.seed is not None:
-            torch.manual_seed(self.seed)
-            np.random.seed(self.seed)
+        sample_count = bounded_iterations( n_samples, minimum=1, maximum=250_000)
+        generator = self._sample_generator
 
-        if hasattr(circuit, "sample") and callable(getattr(circuit, "sample")):
-            raw_samples = circuit.sample(sample_count)  # type: ignore[misc]
-            return [self._normalize_sample(sample) for sample in raw_samples]
+        # An explicit call-level seed gets a temporary generator.
+        # The persistent component generator remains untouched.
+        if seed is not None:
+            try:
+                generator = torch.Generator(device=self.device)
+            except Exception:
+                generator = torch.Generator()
 
-        if hasattr(circuit, "to_evidence_dict") and callable(getattr(circuit, "to_evidence_dict")):
-            return [self._normalize_sample(circuit.to_evidence_dict()) for _ in range(sample_count)]  # type: ignore[misc]
+            generator.manual_seed(int(seed))
 
-        random_inputs = torch.rand(
-            sample_count,
-            len(getattr(circuit, "input_vars")),
+        # A custom circuit owns the stochastic semantics of its own sample()
+        # implementation. We deliberately do not modify global RNG state for it.
+        sample_fn = getattr(circuit, "sample", None)
+        if callable(sample_fn):
+            raw_samples = cast(Iterable[Mapping[Any, Any]], sample_fn(sample_count))
+
+            return [self._normalize_sample(sample)
+                for sample
+                in raw_samples
+            ]
+
+        evidence_fn = getattr(circuit, "to_evidence_dict", None)
+        if callable(evidence_fn):
+            return [
+                self._normalize_sample(
+                    cast(Mapping[Any, Any], evidence_fn())
+                )
+                for _
+                in range(sample_count)
+            ]
+
+        random_inputs = torch.rand(sample_count, len(getattr(circuit, "input_vars")),
             dtype=torch.float32,
             device=self.device,
+            generator=generator,
         )
+
         with torch.no_grad():
-            probs = self._forward_probabilities(random_inputs, training=False)
-        return [self._tensor_to_state(probs[i]) for i in range(sample_count)]
+            probabilities = (self._forward_probabilities(random_inputs, training=False))
+
+        return [
+            self._tensor_to_state(
+                probabilities[index]
+            )
+            for index
+            in range(sample_count)
+        ]
 
     def _normalize_sample(self, sample: Mapping[Any, Any]) -> Dict[str, float]:
         if not isinstance(sample, Mapping):
