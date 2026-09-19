@@ -890,7 +890,7 @@ class NLGEngine:
         return NLGContextPacket(
             summary=_text(payload.get("summary", payload.get("context_summary", ""))),
             history=tuple(_json_safe(item) for item in _list(payload.get("history", [])) if isinstance(_json_safe(item), Mapping)),
-            relevant_context=_text(payload.get("relevant_context", payload.get("context", ""))),
+            relevant_context=_text(payload.get("relevant_context", payload.get("context_text",payload.get("context", "")))),
             slots=_mapping(payload.get("slots", payload.get("slot_values", {}))),
             environment=_mapping(payload.get("environment", payload.get("environment_state", {}))),
             unresolved_issues=tuple(_json_safe(item) for item in _list(payload.get("unresolved_issues", [])) if isinstance(_json_safe(item), Mapping)),
@@ -1347,6 +1347,42 @@ class NLGEngine:
             prompt_parts.append(f"\n## Conversation summary\n{context.summary}")
         if context.relevant_context:
             prompt_parts.append(f"\n## Relevant context\n{context.relevant_context}")
+
+        if context.history:
+            history_messages = _int(
+                self.neural_config.get("history_messages", 6),
+                default=6,
+                minimum=1,
+            )
+            history_max_characters = _int(
+                self.neural_config.get("history_max_characters", 2400),
+                default=2400,
+                minimum=128,
+            )
+            history_lines: List[str] = []
+            for item in context.history[-history_messages:]:
+                if not isinstance(item, Mapping):
+                    continue
+                role = _text(item.get("role", "unknown")).strip().lower()
+                if role == "agent":
+                    role = "assistant"
+                content = _text(
+                    item.get(
+                        "content",
+                        item.get("text", ""),
+                    )
+                ).strip()
+                if content:
+                    history_lines.append(f"{role}: {content}")
+            if history_lines:
+                history_text = _truncate(
+                    "\n".join(history_lines),
+                    history_max_characters,
+                )
+                prompt_parts.append(
+                    f"\n## Recent conversation\n{history_text}"
+                )
+
         prompt_parts.extend(
             [
                 "\n## Requirements",

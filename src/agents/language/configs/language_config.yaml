@@ -49,6 +49,30 @@ resource_packs:
 templates:
   nlg_templates_path: src/agents/language/templates/en/nlg_templates.yaml
 
+lantra_runtime:
+  version: '1.0'
+  checkpoint_path: src/agents/language/checkpoints/lantra/lantra_20260919T142819Z.pt
+  device: auto
+  strict_checkpoint_loading: true
+  require_trained_tokenizer: true
+  verify_vocab_compatibility: true
+
+  inference:
+    # Matches train_lantra.py defaults used by the supervised task contracts.
+    source_max_length: 384
+    target_max_length: 160
+    embedding_max_length: 192
+
+    # Greedy is the practical default for a ~46M CPU-served model.
+    # Switch to beam after benchmarking latency/quality on your hardware.
+    generation_strategy: greedy
+    temperature: 1.0
+    top_k: 0
+
+    # Pairwise LANTRA training used normalized encoder representations.
+    embedding_pooling: mean
+    normalize_embeddings: true
+    rerank_top_k: 10
 
 resource_loading:
   mode: pack_first
@@ -1158,7 +1182,7 @@ dialogue_context:
 
 nlg:
   version: '3.0'
-  generation_mode: template
+  generation_mode: hybrid
   templates_path: src/agents/language/templates/en/nlg_templates.yaml
   nlg_pack_path: src/agents/language/resources/en/nlg_pack.yaml
   semantics_pack_path: src/agents/language/resources/en/semantics_pack.yaml
@@ -1272,6 +1296,8 @@ neural_generation:
   temperature: 0.7
   min_words: 1
   max_words: 160
+  history_messages: 6
+  history_max_characters: 2400
 
 
 dialogue_policy:
