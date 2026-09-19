@@ -304,15 +304,32 @@ class LanguageAgent(BaseAgent):
         self.use_structured_nlp = coerce_bool(cfg.get("use_structured_nlp"), default=True)
         self.use_structured_nlg = coerce_bool(cfg.get("use_structured_nlg"), default=True)
         self.session_timeout_seconds = coerce_float(cfg.get("session_timeout_seconds"), default=1800.0, minimum=0.0)
+        self.lantra_policy = ensure_mapping(cfg.get("lantra", {}), field_name="language_agent.lantra", allow_none=True)
+        self.lantra_enabled = coerce_bool(self.lantra_policy.get("enabled", False), default=False)
+        self.lantra_required = coerce_bool(self.lantra_policy.get("required", False), default=False)
+        self.lantra_register_with_nlg = coerce_bool(self.lantra_policy.get("register_with_nlg", True), default=True)
 
         default_order = [stage.value for stage in StageName if stage != StageName.SHARED_MEMORY]
         self.pipeline_order = tuple(self._normalize_stage_name(stage)
             for stage in (cfg.get("pipeline_order") or default_order))
+        default_component_order = [
+            "wordlist",
+            "orthography",
+            "grammar",
+            "dialogue_context",
+            "nlp",
+            "nlu",
+            "nlg",
+        ]
+        if self.lantra_enabled:
+            default_component_order.append("lantra")
+        default_component_order.append("safety")
+
         self.component_init_order = tuple(
             str(item)
             for item in (
                 cfg.get("component_init_order")
-                or ["wordlist", "orthography", "grammar", "dialogue_context", "nlp", "nlu", "nlg", "safety"]
+                or default_component_order
             )
         )
 
@@ -360,6 +377,14 @@ class LanguageAgent(BaseAgent):
             raise LanguageAgentConfigurationError("language_agent.max_input_chars must be positive.")
         if self.session_timeout_seconds < 0:
             raise LanguageAgentConfigurationError("language_agent.session_timeout_seconds cannot be negative.")
+        if self.lantra_enabled:
+            if "lantra" not in self.component_init_order:
+                raise LanguageAgentConfigurationError("language_agent.lantra.enabled=true requires 'lantra' in component_init_order.")
+            if self.lantra_register_with_nlg:
+                if "nlg" not in self.component_init_order:
+                    raise LanguageAgentConfigurationError("LANTRA NLG registration requires 'nlg' in component_init_order.")
+                if self.component_init_order.index("lantra") < self.component_init_order.index("nlg"):
+                    raise LanguageAgentConfigurationError("LANTRA must initialize after NLGEngine when register_with_nlg=true.")
 
     def _initialize_components(self) -> None:
         initializers = {
@@ -370,6 +395,7 @@ class LanguageAgent(BaseAgent):
             "nlp": self._init_nlp,
             "nlu": self._init_nlu,
             "nlg": self._init_nlg,
+            "lantra": self._init_lantra,
             "safety": self._init_safety,
         }
         for name in self.component_init_order:
@@ -386,13 +412,33 @@ class LanguageAgent(BaseAgent):
             except Exception as exc:
                 self._record_component_status(name, False, str(exc), started_at=started, error=exc)
                 logger.error("Language component initialization failed: %s: %s", name, exc, exc_info=True)
-                if self.fail_on_missing_required_component:
+                required = (
+                    self.lantra_required
+                    if name == "lantra"
+                    else self.fail_on_missing_required_component
+                )
+                if required:
                     raise
 
         if not hasattr(self, "safety_guard"):
             self.safety_guard = SafetyGuard()
         if not hasattr(self, "dialogue_context"):
             self.dialogue_context = DialogueContext()
+
+    def _init_lantra(self) -> None:
+        if not self.lantra_enabled:
+            return
+
+        # Lazy by design: optional neural mode must not make LanguageAgent import-time torch-dependent.
+        from .language.lantra_runtime import LantraRuntime
+
+        self.lantra_runtime = LantraRuntime()
+        if self.lantra_register_with_nlg:
+            if not hasattr(self, "nlg_engine"):
+                raise LanguageAgentRuntimeError("LANTRA NLG registration requires NLGEngine to be initialized first.")
+            self.nlg_engine.set_neural_generator(self.lantra_runtime.nlg_generate)
+
+        logger.info("LANTRA runtime attached to LanguageAgent: %s", self.lantra_runtime.health_check())
 
     def _init_wordlist(self) -> None:
         self.wordlist = Wordlist()
@@ -528,6 +574,46 @@ class LanguageAgent(BaseAgent):
         text, session_id, metadata = self._extract_task_payload(input_data)
         result = self.process(text, session_id=session_id, **metadata)
         return result.to_dict() if self.return_structured_from_perform_task else result.response
+
+
+    def _require_lantra(self) -> Any:
+        runtime = getattr(self, "lantra_runtime", None)
+        if runtime is None or not bool(getattr(runtime, "ready", False)):
+            raise LanguageAgentRuntimeError(
+                "LANTRA runtime is unavailable or disabled."
+            )
+        return runtime
+
+    def generate_text(self, prompt: str, *, max_length: Optional[int] = None) -> str:
+        return self._require_lantra().generate(prompt, max_length=max_length).text
+
+    def summarize_text(self, text: str, *, max_length: Optional[int] = None) -> str:
+        return self._require_lantra().summarize(text, max_length=max_length).text
+
+    def translate_text(self, text: str, *, source_language: str,target_language: str, max_length: Optional[int] = None) -> str:
+        return self._require_lantra().translate(
+            text,
+            source_language=source_language,
+            target_language=target_language,
+            max_length=max_length,
+        ).text
+
+    def dialogue_response(self, history: Any, *, max_length: Optional[int] = None) -> str:
+        return self._require_lantra().dialogue(history, max_length=max_length).text
+
+    def classify_text(self, text: str, *, labels: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+        return self._require_lantra().classify( text, labels=labels).to_dict()
+
+    def encode_semantics(self, text: Any) -> Any:
+        """
+        Return the model's tensor representation.
+        This remains an internal/agent-facing API. Converting tensors to lists
+        belongs at a serialization boundary, not inside the model runtime.
+        """
+        return self._require_lantra().embed(text)
+
+    def rerank_texts(self, query: str, candidates: Sequence[str], *, top_k: Optional[int] = None) -> Dict[str, Any]:
+        return self._require_lantra().rerank(query, candidates, top_k=top_k).to_dict()
 
     # ------------------------------------------------------------------
     # Pipeline stages
@@ -861,8 +947,19 @@ class LanguageAgent(BaseAgent):
             "dialogue_context": hasattr(self, "dialogue_context"),
             "nlg_engine": hasattr(self, "nlg_engine"),
             "safety_guard": hasattr(self, "safety_guard"),
+            "lantra_runtime": (
+                not self.lantra_enabled
+                or bool(getattr(getattr(self, "lantra_runtime", None), "ready", False))
+            ),
+            "lantra": (
+                self.lantra_runtime.health_check()
+                if getattr(self, "lantra_runtime", None) is not None
+                else {
+                    "enabled": self.lantra_enabled,
+                    "ready": False,
+                }
+            ),
         }
-
         healthy = bool(self.enabled and all(components.values()))
 
         return {
@@ -891,6 +988,14 @@ class LanguageAgent(BaseAgent):
                 "stage_enabled": dict(self.stage_enabled),
                 "pass_precomputed_nlp_to_nlu": self.pass_precomputed_nlp_to_nlu,
             },
+            "lantra": (
+                self.lantra_runtime.to_dict()
+                if getattr(self, "lantra_runtime", None) is not None
+                else {
+                    "enabled": self.lantra_enabled,
+                    "ready": False,
+                }
+            ),
         }
 
     def clear_context(self) -> bool:
@@ -1280,29 +1385,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Failed to initialize LanguageAgent: {e}", exc_info=True)
         print(f"[Fatal Error] Could not start Language Agent: {e}")
-
-
-#if __name__ == "__main__":
-#    print("\n=== Running  Language agent ===\n")
-#    printer.status("TEST", " Language agent initialized", "info")
-#    from .collaborative.shared_memory import SharedMemory
-
-#    def agent_factory_stub(name: str, cfg: Optional[Mapping[str, Any]] = None) -> Any:
-#        return None
-
-#    shared_memory_instance = SharedMemory()
-#    language_agent = LanguageAgent(shared_memory=shared_memory_instance, agent_factory=agent_factory_stub)
-
-#    session = f"language-agent-test-{int(time_module.time())}"
-#    samples = ["hello there", "what time is it", "define recursion"]
-#    for sample in samples:
-#        result = language_agent.process(sample, session_id=session)
-#        print(f"User: {sample}")
-#        print(f"Agent: {result.response}")
-#        print(f"Intent: {result.intent} | Confidence: {result.confidence:.2f} | Trace: {result.trace_id}\n")
-
-#    health = language_agent.health_check()
-#    assert health["ok"] is True
-#    assert len(language_agent.pipeline_history) >= 1
-
-#    print("\n=== Test ran successfully ===\n")
