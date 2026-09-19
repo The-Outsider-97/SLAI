@@ -265,24 +265,61 @@ def select_top_rules(rules: Sequence[RuleEntry], dynamic_weights: Mapping[str, f
     return rank_rules_by_weight(rules, dynamic_weights)[:k]
 
 
-def sample_rules(rules: Sequence[RuleEntry], dynamic_weights: Mapping[str, float], *, k: int) -> List[RuleEntry]:
-    """Weighted rule sampling for exploration-oriented reasoning phases."""
+def sample_rules(rules: Sequence[RuleEntry], dynamic_weights: Mapping[str, float], *, k: int, rng: Optional[random.Random] = None) -> List[RuleEntry]:
+    """
+    Weighted rule sampling for exploration-oriented reasoning phases.
+
+    Parameters
+    ----------
+    rules:
+        Candidate rule entries.
+    dynamic_weights:
+        Current runtime rule weights.
+    k:
+        Maximum number of rules to select.
+    rng:
+        Optional caller-owned RNG. When omitted the legacy module-level
+        random implementation is used for backward compatibility.
+
+    Notes
+    -----
+    Production Reasoning components should pass a per-instance ``Random``
+    object so one Reasoning subsystem cannot modify or depend on another
+    component's global random state.
+    """
     if not rules:
         return []
+
     k = max(1, min(int(k), len(rules)))
-    scored = [(r, max(float(dynamic_weights.get(r[0], r[2])), 0.0)) for r in rules]
-    weights = [w for _, w in scored]
-    if sum(weights) == 0:
-        return random.sample(list(rules), k=k)
-    chosen = random.choices([r for r, _ in scored], weights=weights, k=k)
-    # deduplicate while preserving order
-    dedup: List[RuleEntry] = []
+    chooser = rng if rng is not None else random
+
+    scored = [(rule, max(float(dynamic_weights.get(rule[0], rule[2])), 0.0)) for rule in rules]
+    weights = [weight for _, weight in scored]
+
+    if sum(weights) <= 0.0:
+        chosen = chooser.sample(list(rules), k=k)
+    else:
+        chosen = chooser.choices(
+            [rule for rule, _ in scored],
+            weights=weights,
+            k=k,
+        )
+
+    # Weighted sampling with replacement may select the same rule more
+    # than once. Deduplicate while retaining selection order.
+    deduplicated: List[RuleEntry] = []
     seen: Set[str] = set()
+
     for item in chosen:
-        if item[0] not in seen:
-            dedup.append(item)
-            seen.add(item[0])
-    return dedup
+        name = item[0]
+
+        if name in seen:
+            continue
+
+        deduplicated.append(item)
+        seen.add(name)
+
+    return deduplicated
 
 
 # ---------------------------------------------------------------------------
