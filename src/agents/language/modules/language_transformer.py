@@ -252,17 +252,16 @@ class LanguageTransformer(BaseTransformer):
         self.do_sample = coerce_bool(generation_config.get("do_sample", self.config.inference_do_sample), default=self.config.inference_do_sample)
         self.repetition_penalty = coerce_float(generation_config.get("repetition_penalty", 1.0), default=1.0, minimum=1e-6)
         self.no_repeat_ngram_size = coerce_int(generation_config.get("no_repeat_ngram_size", 0), default=0, minimum=0)
-        self.pad_token_id = coerce_int(generation_config.get("pad_token_id", self.config.pad_token_id), default=self.config.pad_token_id, minimum=0)
-        self.bos_token_id = coerce_int(
-            generation_config.get("bos_token_id", self.lang_config.get("sos_token", self.config.bos_token_id)),
-            default=self.config.bos_token_id,
-            minimum=0,
-        )
-        self.eos_token_id = coerce_int(
-            generation_config.get("eos_token_id", self.lang_config.get("eos_token", self.config.eos_token_id)),
-            default=self.config.eos_token_id,
-            minimum=0,
-        )
+        # self.pad_token_id = coerce_int(generation_config.get("pad_token_id", self.config.pad_token_id), default=self.config.pad_token_id, minimum=0)
+        # self.bos_token_id = coerce_int(
+        #     generation_config.get("bos_token_id", self.lang_config.get("sos_token", self.config.bos_token_id)),
+        #     default=self.config.bos_token_id, minimum=0)
+        # self.eos_token_id = coerce_int(
+        #     generation_config.get("eos_token_id", self.lang_config.get("eos_token", self.config.eos_token_id)),
+        #     default=self.config.eos_token_id, minimum=0)
+        self.pad_token_id = int(self.config.pad_token_id)
+        self.bos_token_id = int(self.config.bos_token_id)
+        self.eos_token_id = int(self.config.eos_token_id)
         self.ignore_index = coerce_int(eval_config.get("ignore_index", self.config.pad_token_id), default=self.config.pad_token_id, minimum=-100)
         self.checkpoint_dir = ensure_text(checkpoint_config.get("default_dir", "src/agents/language/checkpoints"))
         self.strict_checkpoint_loading = coerce_bool(checkpoint_config.get("strict", True), default=True)
