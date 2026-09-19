@@ -1192,6 +1192,9 @@ def discover_raw_text_files(configured_paths: Sequence[str]) -> List[Path]:
         for item in discovered:
             if not item.is_file() or item.suffix.lower() not in RAW_TEXT_EXTENSIONS:
                 continue
+            # Worm sidecars contain provenance, never training examples.
+            if item.name.startswith("slai_corpus_") and item.name.endswith(".manifest.json"):
+                continue
             key = str(item.resolve())
             if key not in seen:
                 seen.add(key)
@@ -1491,6 +1494,18 @@ def extract_raw_documents(path: Path, *, source_sha256: Optional[str] = None) ->
     source_type = suffix.lstrip(".") or "unknown"
 
     if suffix in {".txt", ".text"}:
+        if path.name.startswith("slai_corpus_") and (path.with_suffix(".manifest.json").exists() or path.with_suffix(".ready").exists()):
+            from src.slai_worm.storage.manifest import read_documents
+            # Validate the entire committed shard before emitting any book.
+            documents = read_documents(path)
+            for logical_index, (body, entry) in enumerate(documents):
+                yield _ExtractedRawDocument(
+                    str(path), source_type, entry["sha256"],
+                    _normalize_document_text(body), entry["title"],
+                    "slai-worm-manifest-v1", logical_index,
+                    {**entry["metadata"], "gutenberg_id": entry["ebook_id"], "shard_sha256": source_hash},
+                )
+            return
         text = _normalize_document_text(_decode_document_bytes(path.read_bytes()))
         if text:
             yield _ExtractedRawDocument(str(path), source_type, source_hash, text, None, "stdlib-text", 0)
