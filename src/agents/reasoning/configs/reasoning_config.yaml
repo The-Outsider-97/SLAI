@@ -5,6 +5,14 @@ symbolic_runtime:
   decay: 0.95
   exploration_rate: 0.10
   max_iterations: 20
+
+  # Phase 2: isolated stochastic exploration.
+  # null = nondeterministic per subsystem instance.
+  seed: 7
+
+  # Number of optimistic snapshot retries when another mutation occurs
+  # while rule functions are executing outside the RuleEngine lock.
+  max_commit_retries: 3
 contradiction_threshold: 0.25   # Confidence conflict threshold between contradictory facts
 markov_logic_weight: 0.7
 
@@ -34,10 +42,15 @@ adaptive_circuit:
   hidden_dim: 128
   num_kb_embeddings: 1000
 
+  # Used only inside torch.random.fork_rng().
+  # It never reseeds SLAI's process-global RNG.
+  seed: 7
+
 hybrid_models:
   cache_enabled: true
   cache_max_size: 128
   source_cache_max_size: 64
+  cache_ttl_seconds: 300.0
   validate_on_create: true
   validate_acyclic: true
   deduplicate_edges: true
@@ -117,45 +130,61 @@ model_compute:
 probabilistic_models:
   strict_resource_loading: false
   strict_inference: false
+
+  # Phase 2: do not construct pgmpy/Torch backends until they are needed.
+  eager_initialize_components: false
+
+  # Per-instance learning-cycle RNG.
+  seed: 7
+
   bayesian_first: true
   neural_fallback: true
   record_memory_events: true
   enable_multi_hop: true
   enable_semantic_similarity: true
   update_knowledge_after_learning: true
+
   default_probability: 0.5
   epsilon: 1.0e-09
+
   observation_buffer_size: 1000
   learning_batch_size: 100
   convergence_threshold: 0.0001
   max_learning_cycles: 100
+
   posterior_cache_ttl_seconds: 300.0
-  posterior_cache_max_size: 2048
-  similarity_cache_max_size: 4096
+
   selector_similarity_threshold: 0.7
   semantic_similarity_threshold: 0.7
   similar_confidence_margin: 0.15
+
   path_decay: 0.95
   max_hop_depth: 5
   hypothesis_depth_limit: 3
   max_graph_neighbors: 128
+
   evidence_confidence_default: 0.9
   knowledge_conflict_threshold: 0.3
   knowledge_update_blend: 0.7
+
   temporal_halflife_days: 180.0
   knowledge_halflife_days: 90.0
   sensor_threshold: 0.7
+
   query_weights:
     base: 0.35
     evidence: 0.25
     semantic: 0.2
     multi_hop: 0.2
+
   similarity_weights:
     - 0.4
     - 0.4
     - 0.2
+
+  # One canonical high-level cache.
   cache_enabled: true
-  cache_max_size: 2048
+  cache_max_size: 4096
   cache_ttl_seconds: 300.0
 
 rules:
