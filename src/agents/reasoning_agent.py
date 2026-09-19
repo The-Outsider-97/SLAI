@@ -1278,23 +1278,56 @@ class ReasoningAgent(BaseAgent):
             return self._multi_hop_symbolic_score(normalized, depth)
 
     def _multi_hop_symbolic_score(self, query: Fact, max_depth: int) -> float:
-        target_s, target_p, target_o = query
-        frontier: List[Tuple[str, float, int]] = [(target_s, 1.0, 0)]
-        visited = {target_s}
+        target_subject, target_predicate, target_object = query
+        frontier: Deque[Tuple[str, float, int]] = deque([(target_subject, 1.0, 0)])
+        visited = {target_subject}
         best = self.knowledge_base.get(query, 0.0)
+
         while frontier:
-            subject, confidence, depth = frontier.pop(0)
+            (
+                subject,
+                confidence,
+                depth,
+            ) = frontier.popleft()
+
             if depth >= max_depth:
                 continue
-            for (s, p, o), fact_conf in self.knowledge_base.items():
-                if s != subject or p != target_p:
+
+            for (
+                fact_subject,
+                fact_predicate,
+                fact_object,
+            ), fact_confidence in (
+                self.knowledge_base.items()
+            ):
+                if (
+                    fact_subject != subject
+                    or fact_predicate
+                    != target_predicate
+                ):
                     continue
-                score = confidence * fact_conf * (self.decay ** depth)
-                if o == target_o:
+
+                score = (
+                    confidence
+                    * fact_confidence
+                    * (
+                        self.decay
+                        ** depth
+                    )
+                )
+
+                if (
+                    fact_object
+                    == target_object
+                ):
                     best = max(best, score)
-                if o not in visited:
-                    visited.add(o)
-                    frontier.append((o, score, depth + 1))
+
+                if fact_object in visited:
+                    continue
+
+                visited.add(fact_object)
+                frontier.append((fact_object, score, depth + 1))
+
         return clamp_confidence(best)
 
     def forward_chaining(self, max_iterations: Optional[int] = None) -> Dict[Fact, float]:
@@ -1696,13 +1729,38 @@ class ReasoningAgent(BaseAgent):
             "report": report.to_dict(),
         }
 
-    def stream_update(self, new_facts: Iterable[Union[str, Sequence[Any]]], confidence: float = 1.0) -> Dict[str, Any]:
-        added = 0
-        for fact in new_facts:
-            if self.add_fact(fact, confidence=confidence, publish=False):
-                added += 1
-        inferred = self.forward_chaining(max_iterations=min(2, self.max_iterations))
-        return {"added": added, "inferred": len(inferred)}
+    def stream_update(self, new_facts: Iterable[Union[str, Sequence[Any]]], confidence: float = 1.0, *, max_inference_rounds: Optional[int] = 2) -> Dict[str, Any]:
+        """
+        Apply a fact stream as one symbolic batch, then run one bounded
+        inference operation.
+
+        No ReasoningMemory or subsystem configuration is exposed here.
+        """
+        safe_confidence = clamp_confidence(confidence)
+        batch: Dict[Fact,float] = {}
+
+        for raw_fact in new_facts:
+            fact = normalize_fact(raw_fact)
+            previous = batch.get(fact, 0.0)
+            batch[fact] = max(previous, safe_confidence )
+
+        if not batch:
+            return {
+                "added": 0,
+                "skipped": 0,
+                "inferred": 0,
+            }
+        accepted, skipped = (self.rule_engine.bulk_assert( batch))
+
+        # RuleEngine and the Agent must already share the same canonical
+        # working KB after Phase 1. No per-fact resynchronization is needed.
+        inferred = self.forward_chaining(max_iterations=(max_inference_rounds))
+
+        return {
+            "added": accepted,
+            "skipped": skipped,
+            "inferred": len(inferred),
+        }
 
     def run_bayesian_learning(self, observations: List[Any]) -> Any:
         runner = getattr(self.probabilistic_models, "run_bayesian_learning_cycle", None)
