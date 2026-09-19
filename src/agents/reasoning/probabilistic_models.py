@@ -21,23 +21,24 @@ import random
 import re
 import time
 import numpy as np  # type: ignore
-import torch.nn as nn  # type: ignore
 
-from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union, TYPE_CHECKING
+from collections import defaultdict, deque
+from threading import RLock
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.reasoning_errors import *
 from .utils.reasoning_helpers import *
-from .modules.model_compute import ModelCompute
-from .modules.adaptive_circuit import AdaptiveCircuit
-from .modules.pgmpy_wrapper import PgmpyBayesianNetwork
-from .reasoning_memory import ReasoningMemory
 from .reasoning_cache import ReasoningCache
+if TYPE_CHECKING:
+    from .reasoning_memory import ReasoningMemory
+    from .modules.model_compute import ModelCompute
+    from .modules.adaptive_circuit import AdaptiveCircuit
+    from .modules.pgmpy_wrapper import PgmpyBayesianNetwork
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Probabilistic Models")
@@ -113,7 +114,7 @@ class LearningCycleReport:
         return json_safe_reasoning_state(self.__dict__)
 
 
-class ProbabilisticModels(nn.Module):
+class ProbabilisticModels():
     """Production facade for Bayesian, neural, and KB-backed probabilities.
 
     Public methods from the previous module are intentionally retained:
@@ -132,12 +133,35 @@ class ProbabilisticModels(nn.Module):
         memory: Optional[ReasoningMemory] = None,
         *,
         config: Optional[Mapping[str, Any]] = None,
-        initialize_components: bool = True,
+        initialize_components: Optional[bool] = None,
         ) -> None:
-        super().__init__()
 
         self.config: Dict[str, Any] = dict(config or load_global_config())
         self.prob_config = dict(get_config_section("probabilistic_models", self.config, default={}) or {})
+        self.eager_initialize_components = bool(self.prob_config.get("eager_initialize_components", False))
+        raw_seed = self.prob_config.get("seed")
+        
+        if (
+            isinstance(raw_seed, str)
+            and raw_seed.strip().lower()
+            in {"", "none", "null"}
+        ):
+            raw_seed = None
+        
+        try:
+            resolved_seed = (
+                None
+                if raw_seed is None
+                else int(raw_seed)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReasoningConfigurationError(
+                "probabilistic_models.seed must be an integer or null",
+                cause=exc,
+                context={"seed": raw_seed},
+            ) from exc
+        
+        self._rng = random.Random(resolved_seed)
         self.inference_config = dict(get_config_section("inference", self.config, default={}) or {})
         self.storage_config = dict(get_config_section("storage", self.config, default={}) or {})
         self.net_config = dict(get_config_section("networks", self.config, default={}) or {})
@@ -164,6 +188,7 @@ class ProbabilisticModels(nn.Module):
         self.enable_multi_hop: bool = bool(self.prob_config.get("enable_multi_hop", True))
         self.enable_semantic_similarity: bool = bool(self.prob_config.get("enable_semantic_similarity", True))
         self.update_knowledge_after_learning: bool = bool(self.prob_config.get("update_knowledge_after_learning", True))
+        self.posterior_cache_ttl_seconds: float = self._cfg_float("posterior_cache_ttl_seconds", 300.0, minimum=0.0, maximum=86_400_000.0)
 
         self.convergence_threshold: float = self._cfg_float(
             "convergence_threshold",
@@ -201,16 +226,8 @@ class ProbabilisticModels(nn.Module):
             minimum=1,
             maximum=100_000,
         )
-        self.posterior_cache_ttl_seconds: float = self._cfg_float(
-            "posterior_cache_ttl_seconds", 300.0, minimum=0.0, maximum=86_400_000.0
-        )
         self.posterior_cache_max_size: int = bounded_iterations(
             self.prob_config.get("posterior_cache_max_size", 2048),
-            minimum=0,
-            maximum=1_000_000,
-        )
-        self.similarity_cache_max_size: int = bounded_iterations(
-            self.prob_config.get("similarity_cache_max_size", 4096),
             minimum=0,
             maximum=1_000_000,
         )
@@ -238,9 +255,7 @@ class ProbabilisticModels(nn.Module):
         self.structural_weights: Dict[str, float] = self._load_structural_weights(
             self.inference_config.get("structural_weights", {})
         )
-        self.sensor_node_mapping: Dict[str, str] = {
-            str(k): str(v) for k, v in dict(self.config.get("sensor_node_mapping", {})).items()
-        }
+        self.sensor_node_mapping: Dict[str, str] = {str(k): str(v) for k, v in dict(self.config.get("sensor_node_mapping", {})).items()}
 
         self.bayesian_network_path = str(self.storage_config.get("bayesian_network", ""))
         for key, path in self.net_config.items():
@@ -267,17 +282,59 @@ class ProbabilisticModels(nn.Module):
             self.knowledge_base = (normalized_knowledge)
         self.knowledge_versions: Dict[Fact, List[Dict[str, Any]]] = defaultdict(list)
 
+        # ProbabilisticModels never owns its lifetime.
         self.reasoning_memory = memory
-        self.pgmpy_bn: Optional[PgmpyBayesianNetwork] = None
-        self.adaptive_circuit: Optional[AdaptiveCircuit] = None
-        self.model_compute: Optional[ModelCompute] = None
+        
+        # ------------------------------------------------------------------
+        # Lazy backend state
+        # ------------------------------------------------------------------
+        self._backend_lock = RLock()
+        self.pgmpy_bn: Optional["PgmpyBayesianNetwork"] = None
+        self.adaptive_circuit: Optional["AdaptiveCircuit"] = None
+        self.model_compute: Optional["ModelCompute"] = None
+        self._exact_backend_error: Optional[BaseException] = None
+        self._neural_backend_error: Optional[BaseException] = None
+        self._exact_backend_initialized = False
+        self._neural_backend_initialized = False
+        
+        # Versions are runtime cache coherency identifiers.
+        # They are not checkpoint versions.
+        self._knowledge_version = 0
+        self._model_version = 0
+        
+        # ------------------------------------------------------------------
+        # Canonical high-level cache
+        # ------------------------------------------------------------------
+        self.cache_enabled = bool(self.prob_config.get("cache_enabled", True))
+        
+        if self.cache_enabled:
+            try:
+                self.cache: Optional[ReasoningCache] = ReasoningCache(
+                    namespace="probabilistic_models",
+                    max_size=self.prob_config.get("cache_max_size", 2048),
+                    default_ttl_seconds=(self.prob_config.get("cache_ttl_seconds", 300.0)),
+                )
+        
+            except Exception as exc:
+                logger.warning("Failed to initialize ReasoningCache for ProbabilisticModels: %s", exc)
+                self.cache_enabled = False
+                self.cache = None
+        else:
+            self.cache = None
+        
+        # Tracks which posterior values still need to be materialized
+        # into the working KB after a learning cycle.
+        self._pending_posterior_nodes: Set[str] = set()
+        self.observation_buffer: Deque[Any] = deque(maxlen=self.observation_buffer_size)
+        self.hypothesis_graph: Dict[Fact, List[Tuple[str, Fact]]] = defaultdict(list)
+        self.last_selection: Optional[NetworkSelectionDecision] = None
+        self.last_learning_report: Optional[LearningCycleReport] = None
+        self.last_inference_trace: Optional[InferenceTrace] = None
+        
+        if initialize_components is None:
+            initialize_components = self.eager_initialize_components
         if initialize_components:
             self._initialize_components()
-
-        self.agent: Any = None
-        self.domain: Optional[str] = None
-        self.posterior_cache: "OrderedDict[str, Tuple[float, float]]" = OrderedDict()
-        self.similarity_cache: "OrderedDict[Tuple[str, str], float]" = OrderedDict()
         self.cache_enabled = self.prob_config.get("cache_enabled", True)
         if self.cache_enabled:
             try:
@@ -324,21 +381,58 @@ class ProbabilisticModels(nn.Module):
             return "fallback_signature"
 
     def _cache_key(self, prefix: str, *args: Any) -> str:
-        """Generate a deterministic cache key for probabilistic results."""
-        key_data = (prefix, self._definition_signature, args)
-        return hashlib.sha256(
-            json.dumps(key_data, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-
-    def _cache_get(self, key: str) -> Optional[Any]:
-        if not self.cache_enabled or self.cache is None:
+        key_data = (
+            prefix,
+            self._definition_signature,
+            self._model_version,
+            self._knowledge_version,
+            args,
+        )
+    
+        return hashlib.sha256(json.dumps(key_data, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    
+    
+    @staticmethod
+    def _cache_namespace(category: str) -> str:
+        return (
+            f"probabilistic_models:"
+            f"{str(category).strip().lower()}"
+        )
+    
+    
+    def _cache_get(self, key: str, *, category: str = "query") -> Optional[Any]:
+        if (
+            not self.cache_enabled
+            or self.cache is None
+        ):
             return None
-        return self.cache.get(key, default=None)
+    
+        return self.cache.get(key, default=None, namespace=self._cache_namespace(category))
 
-    def _cache_set(self, key: str, value: Any, ttl_seconds: Optional[float] = None) -> None:
-        if not self.cache_enabled or self.cache is None:
+    def _cache_set(self, key: str, value: Any, ttl_seconds: Optional[float] = None, *, category: str = "query") -> None:
+        if (
+            not self.cache_enabled
+            or self.cache is None
+        ):
             return
-        self.cache.set(key, value, ttl_seconds=ttl_seconds)
+    
+        self.cache.set(key, value, ttl_seconds=ttl_seconds, namespace=self._cache_namespace(category))
+    
+    
+    def _invalidate_cache_category(self, category: str, *, reason: str) -> int:
+        if self.cache is None:
+            return 0
+    
+        return self.cache.invalidate_namespace(self._cache_namespace(category), reason=reason)
+    
+    
+    def _mark_knowledge_changed(self) -> None:
+        self._knowledge_version += 1
+        self._invalidate_cache_category("query", reason="knowledge_changed")
+
+    def _mark_model_changed(self) -> None:
+        self._model_version += 1
+        self._invalidate_cache_category("query", reason="model_changed")
 
     # ------------------------------------------------------------------
     # Configuration helpers
@@ -506,20 +600,21 @@ class ProbabilisticModels(nn.Module):
         logger.info("Linked ProbabilisticModels to ReasoningAgent")
 
     def load_from_dict(self, network_data: Dict[str, Any]) -> None:
-        """Replace the active Bayesian network and rebuild dependent components."""
-        self.bayesian_network = self._validate_network_definition(network_data, source="load_from_dict")
-        self.pgmpy_bn = PgmpyBayesianNetwork(self.bayesian_network)
-        self.adaptive_circuit = AdaptiveCircuit(
-            network_structure=self.bayesian_network,
-            knowledge_base=self.knowledge_base, # type: ignore
-        )
-        if self.model_compute is None:
-            self.model_compute = ModelCompute(circuit=self.adaptive_circuit)
-        elif hasattr(self.model_compute, "set_circuit"):
-            self.model_compute.set_circuit(self.adaptive_circuit)  # type: ignore[attr-defined]
-        else:
-            self.model_compute = ModelCompute(circuit=self.adaptive_circuit)
+        """
+        Replace the active network definition.
+    
+        Backends are rebuilt lazily after the definition changes.
+        """
+        self.bayesian_network = (self._validate_network_definition(network_data, source="load_from_dict"))
+        self._definition_signature = (self._compute_network_signature(self.bayesian_network))
+    
+        self._model_version += 1
+    
+        self._reset_backends()
         self.clear_caches()
+    
+        if self.eager_initialize_components:
+            self._initialize_components()
 
     # ------------------------------------------------------------------
     # Network selection
@@ -907,103 +1002,300 @@ class ProbabilisticModels(nn.Module):
     # ------------------------------------------------------------------
     # Inference APIs
     # ------------------------------------------------------------------
-    def bayesian_inference(self, query: str, evidence: Optional[Dict[str, Any]] = None) -> float:
-        """Exact Bayesian query with neural fallback when configured.
-
-        Returns ``P(query=True | evidence)`` for binary networks.  Exact pgmpy
-        inference is preferred; neural circuit inference is only used when exact
-        inference is unavailable/fails and ``neural_fallback`` is enabled.
+    def bayesian_inference(
+        self,
+        query: str,
+        evidence: Optional[
+            Dict[str, Any]
+        ] = None,
+    ) -> float:
+        """
+        Bayesian query with lazy exact initialization and lazy neural fallback.
         """
         start = time.monotonic()
-        query_node = str(query).strip()
-        evidence_map = self._normalize_bn_evidence(evidence or {})
-        nodes = set(self.bayesian_network.get("nodes", []))
+    
+        query_node = str(
+            query
+        ).strip()
+    
+        evidence_map = (
+            self._normalize_bn_evidence(
+                evidence or {}
+            )
+        )
+    
+        nodes = set(
+            self.bayesian_network.get(
+                "nodes",
+                [],
+            )
+        )
+    
         if query_node not in nodes:
             return self._handle_inference_failure(
-                ModelInferenceError("Query node is not present in Bayesian network", context={"query": query_node}),
+                ModelInferenceError(
+                    "Query node is not present in Bayesian network",
+                    context={
+                        "query": query_node,
+                    },
+                ),
                 query=query_node,
                 evidence=evidence_map,
                 start=start,
             )
-
-        # ---- Cache check ----
-        cache_key = self._cache_key("bayesian_inference", query_node, frozenset(evidence_map.items()))
-        cached = self._cache_get(cache_key)
+    
+        evidence_signature = tuple(
+            sorted(
+                evidence_map.items(),
+                key=lambda item:
+                    str(item[0]),
+            )
+        )
+    
+        cache_key = self._cache_key(
+            "bayesian_inference",
+            query_node,
+            evidence_signature,
+        )
+    
+        cached = self._cache_get(
+            cache_key,
+            category="query",
+        )
+    
         if cached is not None:
-            self._record_inference_trace(InferenceTrace(
-                query=query_node, evidence=evidence_map, method="cache_hit",
-                result=cached, duration_seconds=0.0, used_cache=True
-            ))
-            return cached
-
-        if self.bayesian_first and self.pgmpy_bn is not None:
+            result = self._safe_probability(
+                cached
+            )
+    
+            self._record_inference_trace(
+                InferenceTrace(
+                    query=query_node,
+                    evidence=evidence_map,
+                    method="cache_hit",
+                    result=result,
+                    duration_seconds=0.0,
+                    used_cache=True,
+                )
+            )
+    
+            return result
+    
+        exact_error: Optional[
+            BaseException
+        ] = None
+    
+        if self.bayesian_first:
             try:
-                result = self._safe_probability(self.pgmpy_bn.query(query_node, evidence_map))
+                exact_backend = (
+                    self._ensure_exact_backend()
+                )
+    
+                result = self._safe_probability(
+                    exact_backend.query(
+                        query_node,
+                        evidence_map,
+                    )
+                )
+    
+                self._cache_set(
+                    cache_key,
+                    result,
+                    ttl_seconds=(
+                        self.posterior_cache_ttl_seconds
+                    ),
+                    category="query",
+                )
+    
                 self._record_inference_trace(
                     InferenceTrace(
                         query=query_node,
                         evidence=evidence_map,
                         method="pgmpy_exact",
                         result=result,
-                        duration_seconds=elapsed_seconds(start),
+                        duration_seconds=(
+                            elapsed_seconds(
+                                start
+                            )
+                        ),
                     )
                 )
+    
                 return result
+    
             except Exception as exc:
+                exact_error = exc
+    
                 if not self.neural_fallback:
-                    return self._handle_inference_failure(exc, query=query_node, evidence=evidence_map, start=start)
-                logger.warning("Exact Bayesian inference failed for %s; trying neural fallback: %s", query_node, exc)
-
-        if self.neural_fallback and self.model_compute is not None:
-            try:
-                numeric_evidence = {key: 1.0 if self._coerce_bool_state(value) else 0.0 for key, value in evidence_map.items()}
-                result = self._safe_probability(
-                    self.model_compute.compute_marginal_probability((query_node,), numeric_evidence)
+                    return (
+                        self._handle_inference_failure(
+                            exc,
+                            query=query_node,
+                            evidence=evidence_map,
+                            start=start,
+                        )
+                    )
+    
+                logger.warning(
+                    "Exact Bayesian inference failed for %s; "
+                    "trying neural fallback: %s",
+                    query_node,
+                    exc,
                 )
+    
+        if self.neural_fallback:
+            try:
+                compute = (
+                    self._ensure_neural_backend()
+                )
+    
+                numeric_evidence = {
+                    key:
+                        1.0
+                        if self._coerce_bool_state(
+                            value
+                        )
+                        else 0.0
+                    for key, value
+                    in evidence_map.items()
+                }
+    
+                result = self._safe_probability(
+                    compute.compute_marginal_probability(
+                        (query_node,),
+                        numeric_evidence,
+                    )
+                )
+    
+                self._cache_set(
+                    cache_key,
+                    result,
+                    ttl_seconds=(
+                        self.posterior_cache_ttl_seconds
+                    ),
+                    category="query",
+                )
+    
                 self._record_inference_trace(
                     InferenceTrace(
                         query=query_node,
                         evidence=evidence_map,
                         method="adaptive_circuit",
                         result=result,
-                        duration_seconds=elapsed_seconds(start),
+                        duration_seconds=(
+                            elapsed_seconds(
+                                start
+                            )
+                        ),
+                        diagnostics={
+                            "exact_backend_error":
+                                str(exact_error)
+                                if exact_error
+                                else None,
+                        },
                     )
                 )
+    
                 return result
+    
             except Exception as exc:
-                return self._handle_inference_failure(exc, query=query_node, evidence=evidence_map, start=start)
-
-        result= self._handle_inference_failure(
-            ModelInferenceError("No probabilistic inference backend is available"),
+                return self._handle_inference_failure(
+                    exc,
+                    query=query_node,
+                    evidence=evidence_map,
+                    start=start,
+                )
+    
+        result = self._handle_inference_failure(
+            ModelInferenceError(
+                "No probabilistic inference backend is available"
+            ),
             query=query_node,
             evidence=evidence_map,
             start=start,
         )
-        self._cache_set(cache_key, result, ttl_seconds=self.posterior_cache_ttl_seconds)
+    
+        self._cache_set(
+            cache_key,
+            result,
+            ttl_seconds=(
+                self.posterior_cache_ttl_seconds
+            ),
+            category="query",
+        )
+    
         return result
 
-    def get_all_marginals(self, evidence: Optional[Mapping[str, Any]] = None) -> Dict[str, float]:
-        """Return all Bayesian/network marginals using the best available backend."""
-        evidence_map = self._normalize_bn_evidence(evidence or {})
-        if self.pgmpy_bn is not None and hasattr(self.pgmpy_bn, "get_all_marginals"):
-            try:
-                return {str(k): self._safe_probability(v) for k, v in self.pgmpy_bn.get_all_marginals(evidence_map).items()}
-            except Exception as exc:
-                logger.warning("Exact all-marginals query failed: %s", exc)
-        if self.model_compute is not None and hasattr(self.model_compute, "compute_all_marginals"):
-            return {str(k): self._safe_probability(v) for k, v in self.model_compute.compute_all_marginals(evidence_map).items()}  # type: ignore[attr-defined]
-        return {node: self.bayesian_inference(node, evidence_map) for node in self.bayesian_network.get("nodes", [])}
+    def get_all_marginals(
+        self,
+        evidence: Optional[
+            Mapping[str, Any]
+        ] = None,
+    ) -> Dict[str, float]:
+        evidence_map = (
+            self._normalize_bn_evidence(
+                evidence or {}
+            )
+        )
+    
+        try:
+            exact = (
+                self._ensure_exact_backend()
+            )
+    
+            return {
+                str(key):
+                    self._safe_probability(
+                        value
+                    )
+                for key, value
+                in exact.get_all_marginals(
+                    evidence_map
+                ).items()
+            }
+    
+        except Exception as exc:
+            logger.warning(
+                "Exact all-marginals query failed: %s",
+                exc,
+            )
+    
+        try:
+            compute = (
+                self._ensure_neural_backend()
+            )
+    
+            return {
+                str(key):
+                    self._safe_probability(
+                        value
+                    )
+                for key, value
+                in compute.compute_all_marginals(
+                    evidence_map
+                ).items()
+            }
+    
+        except Exception as exc:
+            logger.warning(
+                "Adaptive all-marginals query failed: %s",
+                exc,
+            )
+    
+        return {
+            node:
+                self.bayesian_inference(
+                    node,
+                    evidence_map,
+                )
+            for node
+            in self.bayesian_network.get(
+                "nodes",
+                [],
+            )
+        }
 
-    def map_estimate(self, evidence: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-        """Return a MAP assignment when supported by the active exact wrapper."""
-        evidence_map = self._normalize_bn_evidence(evidence or {})
-        if self.pgmpy_bn is not None and hasattr(self.pgmpy_bn, "map_query"):
-            try:
-                return dict(self.pgmpy_bn.map_query(evidence_map))
-            except Exception as exc:
-                logger.warning("MAP query failed: %s", exc)
-        marginals = self.get_all_marginals(evidence_map)
-        return {node: prob >= 0.5 for node, prob in marginals.items()}
+    
 
     def sample_network(self, n_samples: int = 1000, *, seed: Optional[int] = None) -> List[Dict[str, Any]]:
         """Sample the active Bayesian network through the wrapper if available."""
@@ -1131,6 +1423,8 @@ class ProbabilisticModels(nn.Module):
     def run_bayesian_learning_cycle(self, observations: Sequence[Any], context: Optional[List[Any]] = None) -> LearningCycleReport:
         """Refine posterior cache from observations and optionally update KB."""
         start = time.monotonic()
+        # Learning explicitly requires the adaptive backend.
+        self._ensure_neural_backend()
         if observations:
             self.observation_buffer.extend(observations)
         cycles_run = 0
@@ -1145,7 +1439,7 @@ class ProbabilisticModels(nn.Module):
             if not self.observation_buffer:
                 break
             batch_size = min(self.learning_batch_size, len(self.observation_buffer))
-            batch = random.sample(list(self.observation_buffer), batch_size)
+            batch = self._rng.sample(list(self.observation_buffer), batch_size)
             delta_norm = 0.0
             updated_this_cycle = 0
 
@@ -1188,7 +1482,8 @@ class ProbabilisticModels(nn.Module):
             if cycle > 0 and final_avg_delta <= self.convergence_threshold:
                 converged = True
                 break
-
+            if nodes_updated > 0:
+                self._mark_model_changed()
         if self.update_knowledge_after_learning and nodes_updated > 0:
             self._update_knowledge_base()
 
@@ -1200,7 +1495,7 @@ class ProbabilisticModels(nn.Module):
             final_avg_delta=final_avg_delta,
             converged=converged,
             duration_seconds=elapsed_seconds(start),
-            posterior_count=len(self.posterior_cache),
+            posterior_count=len(self._pending_posterior_nodes),
         )
         self.last_learning_report = report
         if self.record_memory_events:
@@ -1446,33 +1741,94 @@ class ProbabilisticModels(nn.Module):
         return self._safe_probability(base_conf)
 
     def _semantic_similarity(self, fact1: Any, fact2: Any) -> float:
-        """Semantic similarity with frame-aware predicate comparison and lexical fallback."""
-        s1, s2 = str(fact1), str(fact2)
-        cache_key = self._cache_key("semantic_similarity", s1, s2)
-        cached = self._cache_get(cache_key)
-        if cached is not None:
-            return cached
+        """
+        Compute semantic similarity using the canonical ReasoningCache.
 
-        if isinstance(fact1, tuple) and isinstance(fact2, tuple):
+        Similarity is calculated from:
+        - subject similarity;
+        - predicate / semantic-frame similarity;
+        - object similarity.
+
+        Results are cached in the dedicated ``similarity`` namespace so this
+        component does not maintain a second, competing similarity cache.
+        """
+        s1 = str(fact1)
+        s2 = str(fact2)
+
+        # --------------------------------------------------------------
+        # Canonical cache lookup
+        # --------------------------------------------------------------
+        cache_key = self._cache_key("semantic_similarity", s1, s2)
+        cached = self._cache_get(cache_key, category="similarity")
+
+        if cached is not None:
+            return self._safe_probability(cached)
+
+        # --------------------------------------------------------------
+        # Compute similarity
+        # --------------------------------------------------------------
+        if (
+            isinstance(fact1, tuple)
+            and isinstance(fact2, tuple)
+        ):
             components = [
-                ("subject", fact1[0] if len(fact1) > 0 else "", fact2[0] if len(fact2) > 0 else ""),
-                ("predicate", fact1[1] if len(fact1) > 1 else "", fact2[1] if len(fact2) > 1 else ""),
-                ("object", fact1[2] if len(fact1) > 2 else "", fact2[2] if len(fact2) > 2 else ""),
+                (
+                    "subject",
+                    fact1[0]
+                    if len(fact1) > 0
+                    else "",
+                    fact2[0]
+                    if len(fact2) > 0
+                    else "",
+                ),
+                (
+                    "predicate",
+                    fact1[1]
+                    if len(fact1) > 1
+                    else "",
+                    fact2[1]
+                    if len(fact2) > 1
+                    else "",
+                ),
+                (
+                    "object",
+                    fact1[2]
+                    if len(fact1) > 2
+                    else "",
+                    fact2[2]
+                    if len(fact2) > 2
+                    else "",
+                ),
             ]
+
             scores: List[float] = []
-            for comp_type, val1, val2 in components:
-                if comp_type == "predicate":
-                    scores.append(self._predicate_similarity(str(val1), str(val2)))
+
+            for (
+                component_type,
+                value1,
+                value2,
+            ) in components:
+
+                if component_type == "predicate":
+                    score = self._predicate_similarity(str(value1), str(value2))
                 else:
-                    scores.append(self._entity_similarity(str(val1), str(val2)))
-            sim = sum(weight * score for weight, score in zip(self.similarity_weights, scores))
+                    score = self._entity_similarity(str(value1), str(value2))
+                scores.append(score)
+
+            sim = sum(
+                weight * score
+                for weight, score
+                in zip(self.similarity_weights, scores))
+
         else:
             sim = SequenceMatcher(None, s1, s2).ratio()
 
+        # --------------------------------------------------------------
+        # Normalize and cache
+        # --------------------------------------------------------------
         sim = self._safe_probability(sim)
-        self._cache_set(cache_key, sim, ttl_seconds=None)  # persist until eviction
-        if len(self.similarity_cache) < self.similarity_cache_max_size:
-            self.similarity_cache[cache_key] = sim # type: ignore
+        self._cache_set(cache_key, sim,ttl_seconds=None, category="similarity")
+
         return sim
 
     def _predicate_similarity(self, pred1: str, pred2: str) -> float:
@@ -1526,14 +1882,6 @@ class ProbabilisticModels(nn.Module):
         if self.domain == "medical" and "symptom" in e1.lower() and "symptom" in e2.lower():
             sim *= 1.2
         return self._safe_probability(sim)
-
-    def _cache_similarity(self, key: Tuple[str, str], value: float) -> None:
-        if self.similarity_cache_max_size == 0:
-            return
-        self.similarity_cache[key] = value
-        self.similarity_cache.move_to_end(key)
-        while len(self.similarity_cache) > self.similarity_cache_max_size:
-            self.similarity_cache.popitem(last=False)
 
     # ------------------------------------------------------------------
     # Evidence and fact utilities
@@ -1715,18 +2063,33 @@ class ProbabilisticModels(nn.Module):
     # Diagnostics and maintenance
     # ------------------------------------------------------------------
     def clear_caches(self) -> None:
-        self.posterior_cache.clear()
-        self.similarity_cache.clear()
-        if self.pgmpy_bn is not None and hasattr(self.pgmpy_bn, "clear_cache"):
+        self._pending_posterior_nodes.clear()
+
+        if self.cache is not None:
+            self.cache.clear()
+
+        if (
+            self.pgmpy_bn is not None
+            and hasattr(self.pgmpy_bn, "clear_cache")
+        ):
             self.pgmpy_bn.clear_cache()
 
     def cache_metrics(self) -> Dict[str, Any]:
-        pgmpy_summary = getattr(self.pgmpy_bn, "summary", {}) if self.pgmpy_bn is not None else {}
+        high_level = (
+            self.cache.metrics()
+            if self.cache is not None
+            else {"enabled": False}
+        )
+
+        pgmpy_summary = (
+            getattr(self.pgmpy_bn, "summary", {})
+            if self.pgmpy_bn is not None
+            else {}
+        )
+
         return {
-            "posterior_cache_size": len(self.posterior_cache),
-            "posterior_cache_max_size": self.posterior_cache_max_size,
-            "similarity_cache_size": len(self.similarity_cache),
-            "similarity_cache_max_size": self.similarity_cache_max_size,
+            "high_level_cache": high_level,
+            "pending_posterior_nodes": len(self._pending_posterior_nodes),
             "pgmpy_summary": pgmpy_summary,
         }
 
@@ -1755,15 +2118,68 @@ class ProbabilisticModels(nn.Module):
 
     def health_check(self) -> Dict[str, Any]:
         issues: List[str] = []
+
         if not self.bayesian_network.get("nodes"):
             issues.append("empty_bayesian_network")
-        if self.pgmpy_bn is None:
-            issues.append("pgmpy_backend_unavailable")
-        if self.model_compute is None:
-            issues.append("model_compute_unavailable")
-        if not self.knowledge_base:
-            issues.append("empty_knowledge_base")
-        return {"healthy": not issues, "issues": issues, "diagnostics": self.diagnostics()}
+
+        exact_state = (
+            "ready"
+            if self.pgmpy_bn is not None
+            else (
+                "error"
+                if self._exact_backend_error
+                is not None
+                else "lazy"
+            )
+        )
+
+        neural_state = (
+            "ready"
+            if self.model_compute is not None
+            else (
+                "error"
+                if self._neural_backend_error
+                is not None
+                else "lazy"
+            )
+        )
+
+        if (
+            self._exact_backend_error
+            is not None
+            and self._neural_backend_error
+            is not None
+        ):
+            issues.append("all_probabilistic_backends_failed")
+
+        return {
+            "healthy": not issues,
+            "issues": issues,
+            "backend_state": {
+                "exact": exact_state,
+                "neural": neural_state,
+            },
+            "diagnostics": self.diagnostics(),
+        }
+
+    def shutdown(self) -> None:
+        """
+        Release only resources owned by ProbabilisticModels.
+
+        Borrowed ReasoningMemory, knowledge interfaces, shared memory,
+        checkpointing, and Agent lifecycle are deliberately untouched.
+        """
+        self.clear_caches()
+        self._reset_backends()
+
+        self.hypothesis_graph.clear()
+        self.observation_buffer.clear()
+
+        self.last_selection = None
+        self.last_learning_report = None
+        self.last_inference_trace = None
+
+        logger.info("ProbabilisticModels shut down")
 
 
 if __name__ == "__main__":

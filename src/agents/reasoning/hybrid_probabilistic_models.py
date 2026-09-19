@@ -6,15 +6,17 @@ import json
 import math
 import re
 
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union, TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .reasoning_memory import ReasoningMemory
 from .utils.config_loader import *
 from .utils.reasoning_errors import *
 from .utils.reasoning_helpers import *
-from .reasoning_memory import ReasoningMemory
+from .reasoning_cache import ReasoningCache
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Hybrid Models")
@@ -145,9 +147,17 @@ class HybridProbabilisticModels:
         self.hybrid_config = dict(get_config_section("hybrid_models", self.config, default={}) or {})
 
         self.memory = memory
-        self.hybrid_networks_cache: "OrderedDict[str, NetworkDict]" = OrderedDict()
-        self._source_network_cache: "OrderedDict[str, NetworkDict]" = OrderedDict()
         self._refresh_runtime_config()
+        self._hybrid_cache = ReasoningCache(
+            namespace="hybrid_models:built",
+            max_size=self.cache_max_size,
+            default_ttl_seconds=self.cache_ttl_seconds,
+        )
+        self._source_cache = ReasoningCache(
+            namespace="hybrid_models:source",
+            max_size=self.source_cache_max_size,
+            default_ttl_seconds=self.cache_ttl_seconds,
+        )
         logger.info("Hybrid Probabilistic Models initialized.")
 
     # ------------------------------------------------------------------
@@ -171,7 +181,6 @@ class HybridProbabilisticModels:
         self.default_grid_key = str(cfg.get("default_grid_key", "gn2x2"))
         self.max_strategy_candidates = bounded_iterations(cfg.get("max_strategy_candidates", 8), minimum=1, maximum=64)
         self.max_explicit_cpt_parents = bounded_iterations(cfg.get("max_explicit_cpt_parents", 12), minimum=0, maximum=32)
-
         self.default_probability = clamp_confidence(cfg.get("default_probability", 0.5))
         self.min_probability = clamp_confidence(cfg.get("min_probability", 0.01))
         self.max_probability = clamp_confidence(cfg.get("max_probability", 0.99))
@@ -181,7 +190,12 @@ class HybridProbabilisticModels:
         self.aggregator_false_probability = clamp_confidence(cfg.get("aggregator_false_probability", 0.05))
         self.or_gate_true_probability = clamp_confidence(cfg.get("or_gate_true_probability", 0.95))
         self.or_gate_false_probability = clamp_confidence(cfg.get("or_gate_false_probability", 0.01))
-
+        self.cache_ttl_seconds = float(cfg.get("cache_ttl_seconds", 300.0))
+        if self.cache_ttl_seconds < 0.0:
+            raise ReasoningConfigurationError("hybrid_models.cache_ttl_seconds must be >= 0", context={
+                    "cache_ttl_seconds": self.cache_ttl_seconds,
+                },
+            )
         if self.min_probability > self.max_probability:
             raise ReasoningConfigurationError(
                 "hybrid_models.min_probability must be <= max_probability",
@@ -311,11 +325,17 @@ class HybridProbabilisticModels:
             )
         params = dict(connection_params or {})
 
-        cache_key = self._cache_key(base_bn_path, base_grid_path, strategy, params)
-        if self.cache_enabled and cache_key in self.hybrid_networks_cache:
-            self.hybrid_networks_cache.move_to_end(cache_key)
-            logger.info("Returning cached hybrid network.")
-            return copy.deepcopy(self.hybrid_networks_cache[cache_key])
+        cache_key = (self._hybrid_result_cache_key(base_bn_path, base_grid_path, strategy, params,))
+
+        if self.cache_enabled:
+            cached = self._hybrid_cache.get(cache_key, default=None)
+
+            if cached is not None:
+                logger.debug("Returning cached hybrid network")
+
+                # Returned networks are mutable; never expose
+                # the cache's canonical reference.
+                return copy.deepcopy(cached)
 
         base_bn = self.load_network(base_bn_path, role="bayesian")
         base_grid = self.load_network(base_grid_path, role="grid")
@@ -343,9 +363,8 @@ class HybridProbabilisticModels:
         self._record_memory_event(hybrid_network)
 
         if self.cache_enabled:
-            self.hybrid_networks_cache[cache_key] = copy.deepcopy(hybrid_network)
-            self.hybrid_networks_cache.move_to_end(cache_key)
-            self._trim_cache(self.hybrid_networks_cache, self.cache_max_size)
+            self._hybrid_cache.set(cache_key, copy.deepcopy(hybrid_network), ttl_seconds=self.cache_ttl_seconds)
+
         return hybrid_network
 
     def create_hybrid_network_from_data(
@@ -567,28 +586,63 @@ class HybridProbabilisticModels:
     # Loading / validation
     # ------------------------------------------------------------------
     def load_network(self, network_path: Union[str, Path], *, role: str = "network") -> NetworkDict:
-        """Load and validate a JSON network definition with bounded caching."""
-        path = str(Path(network_path).expanduser())
-        if self.cache_enabled and path in self._source_network_cache:
-            self._source_network_cache.move_to_end(path)
-            return copy.deepcopy(self._source_network_cache[path])
-
-        resolved = Path(path)
+        """
+        Load and validate a network resource with version-aware caching.
+        """
+        resolved = Path(network_path).expanduser().resolve()
         if not resolved.exists():
-            raise ResourceLoadError(f"{role} network file not found", context={"path": path})
+            raise ResourceLoadError(
+                f"{role} network file not found",
+                context={
+                    "path": str(resolved),
+                },
+            )
+
+        source_key = (self._source_fingerprint(resolved))
+        if self.cache_enabled:
+            cached = self._source_cache.get(source_key, default=None)
+            if cached is not None:
+                return copy.deepcopy(cached)
         try:
             with resolved.open("r", encoding="utf-8") as handle:
                 network = json.load(handle)
         except json.JSONDecodeError as exc:
-            raise ResourceLoadError(f"Invalid JSON in {role} network", cause=exc, context={"path": path}) from exc
-        except OSError as exc:
-            raise ResourceLoadError(f"Failed to read {role} network", cause=exc, context={"path": path}) from exc
+            raise ResourceLoadError(
+                f"Invalid JSON in {role} network",
+                cause=exc,
+                context={
+                    "path":
+                        str(resolved),
+                },
+            ) from exc
 
-        self._validate_base_network(network, role=role, source=path)
+        except OSError as exc:
+            raise ResourceLoadError(
+                f"Failed to read {role} network",
+                cause=exc,
+                context={
+                    "path":
+                        str(resolved),
+                },
+            ) from exc
+
+        self._validate_base_network(
+            network,
+            role=role,
+            source=str(resolved),
+        )
+
         if self.cache_enabled:
-            self._source_network_cache[path] = copy.deepcopy(network)
-            self._source_network_cache.move_to_end(path)
-            self._trim_cache(self._source_network_cache, self.source_cache_max_size)
+            self._source_cache.set(
+                source_key,
+                copy.deepcopy(
+                    network
+                ),
+                ttl_seconds=(
+                    self.cache_ttl_seconds
+                ),
+            )
+
         return network
 
     def validate_hybrid_network(self, network: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1129,18 +1183,6 @@ class HybridProbabilisticModels:
             raise KnowledgePersistenceError("Failed to save hybrid network", cause=exc, context={"path": str(path)}) from exc
         return str(path)
 
-    def clear_cache(self) -> None:
-        self.hybrid_networks_cache.clear()
-        self._source_network_cache.clear()
-
-    def cache_metrics(self) -> Dict[str, Any]:
-        return {
-            "hybrid_cache_size": len(self.hybrid_networks_cache),
-            "source_cache_size": len(self._source_network_cache),
-            "cache_enabled": self.cache_enabled,
-            "cache_max_size": self.cache_max_size,
-        }
-
     def _build_report(self, network: Mapping[str, Any]) -> HybridBuildReport:
         diagnostics = network.get("metadata", {}).get("validation") or self.validate_hybrid_network(network)
         return HybridBuildReport(
@@ -1204,6 +1246,52 @@ class HybridProbabilisticModels:
             else:
                 cache.pop(next(iter(cache)))
 
+    @staticmethod
+    def _source_fingerprint(network_path: Union[str, Path]) -> Tuple[str, int, int]:
+        path = Path(network_path).expanduser().resolve()
+
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            raise ResourceLoadError("Unable to inspect network resource", cause=exc, context={"path": str(path)}) from exc
+
+        return (
+            str(path),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+        )
+
+
+    def _hybrid_result_cache_key(
+        self,
+        base_bn_path: str,
+        base_grid_path: str,
+        strategy: str,
+        params: Mapping[str, Any],
+    ) -> Tuple[Any, ...]:
+        return (
+            self._source_fingerprint(base_bn_path),
+            self._source_fingerprint(base_grid_path),
+            str(strategy),
+            json.dumps(dict(params), sort_keys=True, default=str),
+        )
+
+    def clear_caches(self) -> None:
+        self._hybrid_cache.clear()
+        self._source_cache.clear()
+
+
+    def cache_metrics(self) -> Dict[str, Any]:
+        return {
+            "hybrid": self._hybrid_cache.metrics(),
+            "source": self._source_cache.metrics(),
+        }
+
+
+    def shutdown(self) -> None:
+        self.clear_caches()
+
+        logger.info("HybridProbabilisticModels shut down")
 
 if __name__ == "__main__":
     print("\n=== Running Hybrid Models ===\n")
