@@ -252,16 +252,7 @@ class LanguageTransformer(BaseTransformer):
         self.do_sample = coerce_bool(generation_config.get("do_sample", self.config.inference_do_sample), default=self.config.inference_do_sample)
         self.repetition_penalty = coerce_float(generation_config.get("repetition_penalty", 1.0), default=1.0, minimum=1e-6)
         self.no_repeat_ngram_size = coerce_int(generation_config.get("no_repeat_ngram_size", 0), default=0, minimum=0)
-        # self.pad_token_id = coerce_int(generation_config.get("pad_token_id", self.config.pad_token_id), default=self.config.pad_token_id, minimum=0)
-        # self.bos_token_id = coerce_int(
-        #     generation_config.get("bos_token_id", self.lang_config.get("sos_token", self.config.bos_token_id)),
-        #     default=self.config.bos_token_id, minimum=0)
-        # self.eos_token_id = coerce_int(
-        #     generation_config.get("eos_token_id", self.lang_config.get("eos_token", self.config.eos_token_id)),
-        #     default=self.config.eos_token_id, minimum=0)
-        self.pad_token_id = int(self.config.pad_token_id)
-        self.bos_token_id = int(self.config.bos_token_id)
-        self.eos_token_id = int(self.config.eos_token_id)
+        self._sync_special_token_ids_from_base_config()
         self.ignore_index = coerce_int(eval_config.get("ignore_index", self.config.pad_token_id), default=self.config.pad_token_id, minimum=-100)
         self.checkpoint_dir = ensure_text(checkpoint_config.get("default_dir", "src/agents/language/checkpoints"))
         self.strict_checkpoint_loading = coerce_bool(checkpoint_config.get("strict", True), default=True)
@@ -276,6 +267,18 @@ class LanguageTransformer(BaseTransformer):
             f"Language Transformer initialized task={self.task_type}, d_model={self.config.d_model}, vocab={self.config.tgt_vocab_size}",
             "success",
         )
+
+    def _sync_special_token_ids_from_base_config(self) -> None:
+        """
+        Synchronize runtime special-token IDs with the trained BaseTransformer
+        architecture contract.
+
+        Special-token IDs are tokenizer/model vocabulary properties, not
+        generation preferences. Checkpoint base_config is therefore authoritative.
+        """
+        self.pad_token_id = int(self.config.pad_token_id)
+        self.bos_token_id = int(self.config.bos_token_id)
+        self.eos_token_id = int(self.config.eos_token_id)
 
     @staticmethod
     def _resolve_base_overrides(lang_config: Mapping[str, Any], explicit_overrides: Mapping[str, Any]) -> Dict[str, Any]:
@@ -328,9 +331,7 @@ class LanguageTransformer(BaseTransformer):
         self.do_sample = coerce_bool(payload.get("do_sample", self.do_sample), default=self.do_sample)
         self.repetition_penalty = coerce_float(payload.get("repetition_penalty", self.repetition_penalty), default=self.repetition_penalty, minimum=1e-6)
         self.no_repeat_ngram_size = coerce_int(payload.get("no_repeat_ngram_size", self.no_repeat_ngram_size), default=self.no_repeat_ngram_size, minimum=0)
-        self.pad_token_id = coerce_int(payload.get("pad_token_id", self.pad_token_id), default=self.pad_token_id, minimum=0)
-        self.bos_token_id = coerce_int(payload.get("bos_token_id", self.bos_token_id), default=self.bos_token_id, minimum=0)
-        self.eos_token_id = coerce_int(payload.get("eos_token_id", self.eos_token_id), default=self.eos_token_id, minimum=0)
+        self._sync_special_token_ids_from_base_config()
 
     def language_config_snapshot(self) -> Dict[str, Any]:
         return {
@@ -872,14 +873,40 @@ class LanguageTransformer(BaseTransformer):
         target = resolve_path(path, must_exist=True, field_name="path")
         try:
             checkpoint = torch.load(target, map_location=device)
-            base_config = ensure_mapping(checkpoint.get("base_config", checkpoint.get("config", {})), field_name="checkpoint.base_config", allow_none=True)
-            if overrides:
-                base_config.update(dict(overrides))
-            model = cls(**base_config)
-            language_config = ensure_mapping(checkpoint.get("language_config", {}), field_name="checkpoint.language_config", allow_none=True)
+            base_config = ensure_mapping(
+                checkpoint.get("base_config", {}),
+                field_name="checkpoint.base_config",
+                allow_none=True,
+            )
+            model_config = dict(base_config)
+            model_config.update(dict(overrides or {}))
+            model = cls(**model_config)
+
+            language_config = ensure_mapping(
+                checkpoint.get("language_config", {}),
+                field_name="checkpoint.language_config",
+                allow_none=True,
+            )
+
             if language_config:
                 model._restore_language_runtime_config(language_config)
-            model.load_state_dict(checkpoint["state_dict"], strict=model.strict_checkpoint_loading if strict is None else bool(strict))
+
+            # Base checkpoint config is authoritative for vocabulary IDs.
+            model._sync_special_token_ids_from_base_config()
+
+            model.load_state_dict(
+                checkpoint["state_dict"],
+                strict=(
+                    model.strict_checkpoint_loading
+                    if strict is None
+                    else bool(strict)
+                ),
+            )
+
+            # State dict does not contain these scalar runtime values, but synchronizing
+            # once more makes the post-load invariant explicit.
+            model._sync_special_token_ids_from_base_config()
+
             if device is not None:
                 model = model.to(device)
             model._record_language_event("load_language_model", path=str(target))
