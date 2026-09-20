@@ -876,15 +876,47 @@ class LantraRuntime:
     # NLGEngine neural-generator contract
     # ------------------------------------------------------------------
     def nlg_generate(self, prompt: str, frame: Any, context: Mapping[str, Any]) -> str:
-        """
-        Adapter matching NLGEngine.NeuralGenerator:
-            Callable[[str, LinguisticFrame, Mapping[str, Any]], str]
+        """Use the trained dialogue contract for conversational NLG calls.
 
-        NLGEngine owns prompt construction and neural/template/hybrid policy.
-        LANTRA owns the model-facing `task: generation` serialization.
+        Keep general generation available to callers without a conversation.
+        Reuse DialogueContext history; do not serialize internal intent/slot
+        diagnostics as if they were user instructions.
         """
-        del frame, context  # NLGEngine already serialized these into `prompt`.
-        return self.generate(prompt).text
+        history = context.get("history", ())
+        turns: List[Dict[str, str]] = []
+        if isinstance(history, Sequence) and not isinstance(history, (str, bytes)):
+            for item in history:
+                if not isinstance(item, Mapping):
+                    continue
+                role = ensure_text(item.get("role", "")).strip().lower()
+                role = "assistant" if role == "agent" else role
+                content = ensure_text(item.get("content", item.get("text", ""))).strip()
+                if role in {"user", "assistant"} and content:
+                    turns.append({"role": role, "content": content})
+        if not turns:
+            user_text = ensure_text(getattr(frame, "propositional_content", "")).strip()
+            if user_text:
+                turns.append({"role": "user", "content": user_text})
+        if not turns:
+            return self.generate(prompt).text
+
+        # Remove old complete messages before tokenizer truncation can discard
+        # the latest user turn. A single overlong turn is rejected explicitly.
+        neural_config = get_config_section("neural_generation") or {}
+        history_limit = coerce_int(neural_config.get("history_messages", 6), default=6, minimum=1)
+        turns = turns[-history_limit:]
+        while True:
+            source = self._dialogue_source(turns)
+            encoded = self.tokenizer.encode(
+                source, add_special_tokens=True, truncation=False,
+                padding=False, return_tensors=None,
+            )
+            if len(encoded["input_ids"]) <= self.source_max_length:
+                break
+            if len(turns) == 1:
+                raise ValueError("Latest dialogue turn exceeds LANTRA source token budget.")
+            turns.pop(0)
+        return self.dialogue(turns).text
 
     # ------------------------------------------------------------------
     # Lifecycle / observability

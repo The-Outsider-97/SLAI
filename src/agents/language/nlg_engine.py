@@ -37,7 +37,7 @@ import yaml
 
 from collections import Counter, deque
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from string import Formatter
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple, Union
@@ -790,6 +790,7 @@ class NLGEngine:
         frame = self._normalize_frame(frame, context_packet)
         self.intent_counts[frame.intent] += 1
 
+        neural_result: Optional[NLGGenerationResult] = None
         try:
             if self.generation_mode in {"neural", "hybrid"}:
                 neural_result = self._try_neural_generation(frame, context_packet)
@@ -800,13 +801,28 @@ class NLGEngine:
                     raise NLGGenerationError("Neural generation unavailable or failed validation.", frame=frame, context=context_packet.to_dict(), error_type="neural_generation_failed")
 
             result = self._template_generation(frame, context_packet)
+            if self.generation_mode in {"neural", "hybrid"}:
+                reasons = neural_result.issues if neural_result else ("neural_generator_missing",)
+                result = replace(
+                    result,
+                    fallback_used=True,
+                    attempts=(neural_result.attempts if neural_result else ()) + result.attempts,
+                    issues=tuple(reasons) + result.issues,
+                    metadata={**result.metadata, "fallback_from": "neural"},
+                )
+                logger.warning("NLG neural -> template: %s", "; ".join(str(reason) for reason in reasons))
             result = self._finalize_result(result, started_at=started_at)
             self._record_generation(result)
             return result
         except Exception as exc:
             self.failed_generation_count += 1
+            if self.generation_mode == "neural" and not self.fallback_after_retries:
+                raise
             logger.error("NLG generation failed: %s", exc)
             fallback = self._fallback_generation(frame, context_packet, reason=str(exc), started_at=started_at)
+            if neural_result is not None:
+                fallback = replace(fallback, attempts=neural_result.attempts + fallback.attempts,
+                                   issues=neural_result.issues + fallback.issues)
             self._record_generation(fallback)
             return fallback
 

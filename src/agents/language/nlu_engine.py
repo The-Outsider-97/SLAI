@@ -1113,17 +1113,9 @@ class NLUEngine:
                     )
                 )
 
-        # Keyword overlap fallback using configured intent keywords/examples.
-        for intent, patterns in self.intent_patterns.items():
-            words = set()
-            for pattern_text in patterns:
-                words.update(part.casefold() for part in re.findall(r"\b\w+\b", pattern_text) if len(part) > 2)
-            if not words:
-                continue
-            overlap = len(words.intersection(token_lowers))
-            if overlap:
-                score = min(0.75, 0.20 + overlap / max(len(words), 1))
-                candidates.append(IntentCandidate(intent=intent, confidence=score, source=IntentMatchSource.KEYWORD, evidence=tuple(sorted(words.intersection(token_lowers)))))
+        # Keywords, triggers and examples already have phrase recognizers.
+        # Splitting those phrases (and regex syntax) into a bag of words
+        # creates false evidence, e.g. "you" matching gratitude/time requests.
 
         # Entity-driven intent hints.
         if entity_labels:
@@ -1407,6 +1399,10 @@ class NLUEngine:
     def _build_frame(self, *, text: str, intents: Sequence[IntentCandidate], entities: Sequence[EntityMention], sentiment: float, modality: str, lexical_coverage: float) -> LinguisticFrame:
         best = intents[0] if intents else IntentCandidate(self.default_intent, 0.0, IntentMatchSource.FALLBACK)
         confidence = self._overall_confidence(best_intent=best, entities=entities, sentiment=sentiment, lexical_coverage=lexical_coverage)
+        # Entity/lexical coverage is not evidence of intent correctness.
+        ambiguous = len(intents) > 1 and best.confidence - intents[1].confidence < self.intent_margin_threshold
+        if best.confidence < self.low_confidence_threshold or ambiguous:
+            confidence = min(confidence, max(0.0, self.low_confidence_threshold - 1e-6))
         act_type = self._speech_act_for(best.intent, modality, best)
         return LinguisticFrame(
             intent=best.intent,
