@@ -513,14 +513,7 @@ knowledge_agent:
 language_agent:
   lantra:
     enabled: true
-
-    # false preserves the existing lightweight LanguageAgent fallback:
-    # if LANTRA cannot initialize, template NLG can still run.
-    required: false
-
-    # Registers LantraRuntime.nlg_generate with the already-existing
-    # NLGEngine.set_neural_generator(...) hook.
-    register_with_nlg: true
+    required: true
 
 
 learning_agent:
