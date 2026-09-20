@@ -1,0 +1,375 @@
+{
+  "completed_at": "2026-09-17T16:19:05.070558Z",
+  "config": {
+    "balance_tasks": true,
+    "clip_grad": 1.0,
+    "data_paths": [],
+    "device": "auto",
+    "embedding_margin": 0.2,
+    "embedding_max_length": 192,
+    "epochs": 12,
+    "generation_eval_records": 8,
+    "glove_batch_size": 128,
+    "glove_bootstrap": true,
+    "glove_epochs": 1,
+    "glove_learning_rate": 0.0001,
+    "glove_max_tokens": 0,
+    "glove_path": null,
+    "gradient_accumulation": 8,
+    "init_from": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260917T103934Z.pt",
+    "label_smoothing": 0.05,
+    "learning_rate": 0.0003,
+    "log_every": 100,
+    "max_eval_records": 2000,
+    "min_delta": 0.0001,
+    "min_learning_rate": 3e-06,
+    "min_task_samples": 8,
+    "output_dir": "src/agents/language/checkpoints/lantra",
+    "patience": 3,
+    "raw_chunk_chars": 2000,
+    "raw_corruption_probability": 0.15,
+    "raw_max_length": 256,
+    "raw_max_segments": 100000,
+    "raw_min_chars": 40,
+    "raw_pretrain_epochs": 2,
+    "raw_segments_per_epoch": 20000,
+    "raw_test_fraction": 0.02,
+    "raw_text_paths": [],
+    "raw_validation_fraction": 0.02,
+    "report_dir": "src/agents/language/artifacts/training/lantra",
+    "require_all_supervised_tasks": false,
+    "reranking_margin": 0.15,
+    "retrain_tokenizer": false,
+    "seed": 42,
+    "source_max_length": 384,
+    "target_max_length": 160,
+    "test_fraction": 0.05,
+    "tokenizer_min_frequency": 2,
+    "tokenizer_vocab_size": 50000,
+    "validation_fraction": 0.05,
+    "warmup_steps": 1000,
+    "weight_decay": 0.0001
+  },
+  "elapsed_seconds": 7636.365646099905,
+  "environment": {
+    "device": "cpu",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.10.11 (tags/v3.10.11:7d4cc5a, Apr  5 2023, 00:38:17) [MSC v.1929 64 bit (AMD64)]"
+  },
+  "glove": null,
+  "objective_contract": {
+    "classification": {
+      "mode": "seq2seq",
+      "source_prefix": "task: classification\ntext:",
+      "target": "label text"
+    },
+    "dialogue": {
+      "mode": "seq2seq",
+      "source_prefix": "task: dialogue\nconversation:",
+      "target": "assistant response"
+    },
+    "embedding": {
+      "inference": "mean-pool encoder memory over non-padding tokens, then L2-normalize",
+      "mode": "triplet_cosine_margin",
+      "text_prefix": "task: embedding\ntext:"
+    },
+    "generation": {
+      "mode": "seq2seq",
+      "source_prefix": "task: generation\nprompt:",
+      "target": "completion"
+    },
+    "reranking": {
+      "document_prefix": "task: reranking\ndocument:",
+      "inference": "rank candidate documents by cosine(query_embedding, document_embedding)",
+      "mode": "pairwise_cosine_margin",
+      "query_prefix": "task: reranking\nquery:"
+    },
+    "summarization": {
+      "mode": "seq2seq",
+      "source_prefix": "task: summarization\ndocument:",
+      "target": "summary"
+    },
+    "translation": {
+      "mode": "seq2seq",
+      "source_prefix": "task: translation",
+      "target": "translated text"
+    }
+  },
+  "raw_corpus": {
+    "deduplication": {
+      "duplicate_documents_exact": 0,
+      "duplicate_documents_normalized": 0,
+      "duplicate_files_exact": 0,
+      "duplicate_segments": 8
+    },
+    "documents": 43,
+    "documents_by_split": {
+      "test": 1,
+      "train": 41,
+      "validation": 1
+    },
+    "documents_by_type": {
+      "epub": 1,
+      "md": 14,
+      "pdf": 27,
+      "txt": 1
+    },
+    "extraction_failures": [],
+    "files": [
+      "data\\library\\20230223_20minSuburbs-1677186785.pdf",
+      "data\\library\\ATALA.md",
+      "data\\library\\All The Light We Cannot See - Anthony Doerr.epub",
+      "data\\library\\All_the_Light_We_Cannot_See_1x01.pdf",
+      "data\\library\\BEYOND THE STARS.md",
+      "data\\library\\Covey - The 7 habits of highly effective people.pdf",
+      "data\\library\\Desiring God.pdf",
+      "data\\library\\George_R__R__Martin_-_A_Song_Of_Ice_And_Fire_1b_-_.pdf",
+      "data\\library\\Gospel of Thomas Lambdin.pdf",
+      "data\\library\\I am a Nucleus.md",
+      "data\\library\\Jesus Calling.pdf",
+      "data\\library\\Malazan 2 - Deadhouse Gates.pdf",
+      "data\\library\\Malazan 3 - Memories of Ice.pdf",
+      "data\\library\\Malazan 4 - House of Chains.pdf",
+      "data\\library\\Malazan 5 - Midnight Tides.pdf",
+      "data\\library\\Men Like Gods.pdf",
+      "data\\library\\Muslims in Spain, 1492 - 1814.pdf",
+      "data\\library\\Narnia_3_The_horse_and_his_boy.md",
+      "data\\library\\PHANTOM DUEL.md",
+      "data\\library\\Palladio_s architectural orders from practice to theory.pdf",
+      "data\\library\\Plot & Strcucture.pdf",
+      "data\\library\\RESEARCH IN KINEMATICS OF TURN FOR VEHICLES AND SEMITRAILERS.pdf",
+      "data\\library\\Ripley_1x01.pdf",
+      "data\\library\\SARA_A PRINCESS.md",
+      "data\\library\\SERMONS BY THE LATE Rev.md",
+      "data\\library\\THE FOUNDATION TRILOGY.md",
+      "data\\library\\THE ODYSSEY.txt",
+      "data\\library\\THE STINGY RECEIVER.md",
+      "data\\library\\THE WIND BLOWETH.md",
+      "data\\library\\THE WORLD OF WATERS.md",
+      "data\\library\\The Book of Jubilees.pdf",
+      "data\\library\\The Feeling.md",
+      "data\\library\\The Gospel According To Peter.pdf",
+      "data\\library\\The Gospel Of The Lord.pdf",
+      "data\\library\\The Gospel of Pseudo-Matthew.pdf",
+      "data\\library\\The Gospel of the Prophet Mani.pdf",
+      "data\\library\\The Innovators Dilemma.pdf",
+      "data\\library\\The_Ice_Maiden.md",
+      "data\\library\\WAR AND PEACE.md",
+      "data\\library\\business_innovaTion_Design_Thinking.pdf",
+      "data\\library\\ecap-100016v-1016-105c (1).pdf",
+      "data\\library\\good_to_great.pdf",
+      "data\\library\\the-four-loves.pdf"
+    ],
+    "fingerprint_sha256": "b2bfee4569cf26d08a1f6ac3af66ebc9b496884fe3a985e65693cbec20a0faf1",
+    "provenance_manifest": "src\\agents\\language\\artifacts\\training\\lantra\\lantra_corpus_manifest_20260917T141148Z.json",
+    "segments": {
+      "test": 279,
+      "total": 11799,
+      "train": 10661,
+      "validation": 859
+    }
+  },
+  "run_id": "20260917T141148Z",
+  "schema": "slai.lantra.training-report.v3",
+  "started_at": "2026-09-17T14:11:48.704360Z",
+  "status": "completed",
+  "supervised_dataset": null,
+  "tokenizer": {
+    "algorithm": "bpe",
+    "decode_calls": 0,
+    "diagnostics_count": 0,
+    "encode_calls": 23319,
+    "history_length": 200,
+    "merge_count": 50000,
+    "model_path": "data\\bpe_200d_50k_model.json",
+    "request_id": "tokenizer_20260917T141549Z_733f3a5c8b8b",
+    "special_token_count": 9,
+    "token_counts_size": 0,
+    "tokenize_calls": 23319,
+    "trained": true,
+    "training_runs": 0,
+    "unknown_token_count": 591972,
+    "version": "2.1",
+    "vocab_path": "data\\bpe_200d_50k_vocab.json",
+    "vocab_size": 49913
+  },
+  "trainer": {
+    "direct_third_party_imports": [],
+    "module": "train_lantra",
+    "slai_components": [
+      "src.agents.language.modules.language_tokenizer.LanguageTokenizer",
+      "src.agents.language.modules.language_transformer.LanguageTransformer",
+      "logs.logger"
+    ],
+    "training_pipeline": [
+      "bpe_tokenizer_bootstrap",
+      "glove_semantic_bootstrap",
+      "raw_text_denoising_pretraining",
+      "supervised_multitask_specialization"
+    ],
+    "transitive_runtime_note": "LanguageTransformer/LanguageTokenizer retain SLAI's own PyTorch/regex dependencies; this trainer does not import those packages directly."
+  },
+  "training": {
+    "final_checkpoint": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260917T141148Z.pt",
+    "mode": "bootstrap_pretraining_only",
+    "model_stats": {
+      "base_stats": {
+        "created_at": "2026-09-17T16:18:47+00:00",
+        "d_model": 256,
+        "decoder_layers": 4,
+        "device": "cpu",
+        "encoder_layers": 4,
+        "history_length": 200,
+        "memory_enabled": false,
+        "nhead": 8,
+        "request_id": "transformer_20260917T161847Z_013df994160f",
+        "total_parameters": 45707008,
+        "trainable_parameters": 45707008
+      },
+      "beam_width": 5,
+      "current_device": "cpu",
+      "diagnostics_count": 0,
+      "history_length": 200,
+      "length_penalty": 0.6,
+      "max_generation_length": 100,
+      "request_id": "transformer_20260917T161847Z_013df994160f",
+      "task_type": "generation",
+      "temperature": 1.0,
+      "version": "2.0"
+    },
+    "phases": {
+      "bpe": {
+        "status": "completed",
+        "tokenizer_stats": {
+          "algorithm": "bpe",
+          "decode_calls": 0,
+          "diagnostics_count": 0,
+          "encode_calls": 0,
+          "history_length": 0,
+          "merge_count": 50000,
+          "model_path": "data\\bpe_200d_50k_model.json",
+          "request_id": "tokenizer_20260917T141549Z_733f3a5c8b8b",
+          "special_token_count": 9,
+          "token_counts_size": 0,
+          "tokenize_calls": 0,
+          "trained": true,
+          "training_runs": 0,
+          "unknown_token_count": 0,
+          "version": "2.1",
+          "vocab_path": "data\\bpe_200d_50k_vocab.json",
+          "vocab_size": 49913
+        },
+        "vocab_size": 49913
+      },
+      "glove": {
+        "reason": "no compatible/configured GloVe resource",
+        "status": "skipped"
+      },
+      "raw_text": {
+        "best_objective": 5.271649460020942,
+        "checkpoint": "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_best.pt",
+        "corpus": {
+          "deduplication": {
+            "duplicate_documents_exact": 0,
+            "duplicate_documents_normalized": 0,
+            "duplicate_files_exact": 0,
+            "duplicate_segments": 8
+          },
+          "documents": 43,
+          "documents_by_split": {
+            "test": 1,
+            "train": 41,
+            "validation": 1
+          },
+          "documents_by_type": {
+            "epub": 1,
+            "md": 14,
+            "pdf": 27,
+            "txt": 1
+          },
+          "extraction_failures": [],
+          "files": [
+            "data\\library\\20230223_20minSuburbs-1677186785.pdf",
+            "data\\library\\ATALA.md",
+            "data\\library\\All The Light We Cannot See - Anthony Doerr.epub",
+            "data\\library\\All_the_Light_We_Cannot_See_1x01.pdf",
+            "data\\library\\BEYOND THE STARS.md",
+            "data\\library\\Covey - The 7 habits of highly effective people.pdf",
+            "data\\library\\Desiring God.pdf",
+            "data\\library\\George_R__R__Martin_-_A_Song_Of_Ice_And_Fire_1b_-_.pdf",
+            "data\\library\\Gospel of Thomas Lambdin.pdf",
+            "data\\library\\I am a Nucleus.md",
+            "data\\library\\Jesus Calling.pdf",
+            "data\\library\\Malazan 2 - Deadhouse Gates.pdf",
+            "data\\library\\Malazan 3 - Memories of Ice.pdf",
+            "data\\library\\Malazan 4 - House of Chains.pdf",
+            "data\\library\\Malazan 5 - Midnight Tides.pdf",
+            "data\\library\\Men Like Gods.pdf",
+            "data\\library\\Muslims in Spain, 1492 - 1814.pdf",
+            "data\\library\\Narnia_3_The_horse_and_his_boy.md",
+            "data\\library\\PHANTOM DUEL.md",
+            "data\\library\\Palladio_s architectural orders from practice to theory.pdf",
+            "data\\library\\Plot & Strcucture.pdf",
+            "data\\library\\RESEARCH IN KINEMATICS OF TURN FOR VEHICLES AND SEMITRAILERS.pdf",
+            "data\\library\\Ripley_1x01.pdf",
+            "data\\library\\SARA_A PRINCESS.md",
+            "data\\library\\SERMONS BY THE LATE Rev.md",
+            "data\\library\\THE FOUNDATION TRILOGY.md",
+            "data\\library\\THE ODYSSEY.txt",
+            "data\\library\\THE STINGY RECEIVER.md",
+            "data\\library\\THE WIND BLOWETH.md",
+            "data\\library\\THE WORLD OF WATERS.md",
+            "data\\library\\The Book of Jubilees.pdf",
+            "data\\library\\The Feeling.md",
+            "data\\library\\The Gospel According To Peter.pdf",
+            "data\\library\\The Gospel Of The Lord.pdf",
+            "data\\library\\The Gospel of Pseudo-Matthew.pdf",
+            "data\\library\\The Gospel of the Prophet Mani.pdf",
+            "data\\library\\The Innovators Dilemma.pdf",
+            "data\\library\\The_Ice_Maiden.md",
+            "data\\library\\WAR AND PEACE.md",
+            "data\\library\\business_innovaTion_Design_Thinking.pdf",
+            "data\\library\\ecap-100016v-1016-105c (1).pdf",
+            "data\\library\\good_to_great.pdf",
+            "data\\library\\the-four-loves.pdf"
+          ],
+          "fingerprint_sha256": "b2bfee4569cf26d08a1f6ac3af66ebc9b496884fe3a985e65693cbec20a0faf1",
+          "provenance_manifest": "src\\agents\\language\\artifacts\\training\\lantra\\lantra_corpus_manifest_20260917T141148Z.json",
+          "segments": {
+            "test": 279,
+            "total": 11799,
+            "train": 10661,
+            "validation": 859
+          }
+        },
+        "heldout_test_loss": 5.401048706423852,
+        "history": [
+          {
+            "epoch": 1,
+            "examples": 10661,
+            "global_optimizer_step": 1333,
+            "mean_train_loss": 5.509890543040275,
+            "optimizer_steps": 1333,
+            "validation_loss": 5.374604707546922
+          },
+          {
+            "epoch": 2,
+            "examples": 10661,
+            "global_optimizer_step": 2666,
+            "mean_train_loss": 5.215904863922181,
+            "optimizer_steps": 1333,
+            "validation_loss": 5.271649460020942
+          }
+        ],
+        "status": "completed",
+        "test_segments": 279,
+        "train_segments": 10661,
+        "validation_segments": 859
+      },
+      "supervised": {
+        "reason": "no supervised task corpus",
+        "status": "skipped"
+      }
+    }
+  }
+}

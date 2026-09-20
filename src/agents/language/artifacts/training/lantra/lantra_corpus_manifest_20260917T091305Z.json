@@ -1,0 +1,782 @@
+{
+  "created_at": "2026-09-17T09:21:29.124744Z",
+  "documents": [
+    {
+      "character_count": 749998,
+      "content_sha256": "26da354727cb50a20bb6f6e97f0bf8c4165f4fbec3075f621028a98115cf3a7a",
+      "document_id": "0542a05b6b2806e882b5260f",
+      "extractor": "stdlib-epub-zip+xml+html",
+      "metadata": {
+        "chapters": 227
+      },
+      "normalized_text_sha256": "d7db58ca576e9f982ec4aa89689160ccab170e5dd1f492f80b23383ca31758ff",
+      "segment_count": 374,
+      "source_path": "data\\library\\All The Light We Cannot See - Anthony Doerr.epub",
+      "source_sha256": "7a0f45ce1f480b797ad4fbdcab15c467607d868eeeb19da4305fcf844a68dcae",
+      "source_type": "epub",
+      "split": "train",
+      "title": "All the Light We Cannot See: A Novel"
+    },
+    {
+      "character_count": 86031,
+      "content_sha256": "25d263752678b24a44f5654045b3a555a42b8f22bb18e49b6d856e92961c0e6d",
+      "document_id": "05e1ca150458eecc33bd2147",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "c110d27be4229873a191374d2fd18b9f5872e78a215a8ba51b60141e4285bb21",
+      "segment_count": 43,
+      "source_path": "data\\library\\PHANTOM DUEL.md",
+      "source_sha256": "a45fd0cb22c1e0eca8385f3e9e77cdc6787075712e9e320edc30679e3c971455",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 247425,
+      "content_sha256": "47e30ff857976107846b6fde22339e632716bb401eeb86af2caeed1bd3794e1b",
+      "document_id": "09e41c129ed502269f0e996b",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 176,
+        "pages_with_text": 174
+      },
+      "normalized_text_sha256": "34423c723e57ae8aab97ade6c0ea62cc752a00ab23e8f9961179ca4fdf98cd45",
+      "segment_count": 123,
+      "source_path": "data\\library\\ecap-100016v-1016-105c (1).pdf",
+      "source_sha256": "bb9f2c7cdc3b0c846f16ce6f9df2cb668fca656f1327f2b18a5be62d394949e4",
+      "source_type": "pdf",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 147985,
+      "content_sha256": "aa4611ae12d8956fa05e19394c9c1c855a92b4c209e0b19c75d4c7c72218da0a",
+      "document_id": "0ce3ecb3ac83de4816911a20",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "4eb30ea768be9637c703feb900b1202ab4abb04cd94da6e882dc47f7436cfb20",
+      "segment_count": 74,
+      "source_path": "data\\library\\The_Ice_Maiden.md",
+      "source_sha256": "a2e7249ee90328f2e9df5c92fc1d3642d6cb223c42b07801974c7f9d71bd3494",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 1935823,
+      "content_sha256": "ecc29227dd030ba10324e3d8a4fb15c3386f835fb85b4037acbf7a5859b4c4a9",
+      "document_id": "0f02e6bf1645c2b0d6d6934a",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 700,
+        "pages_with_text": 698
+      },
+      "normalized_text_sha256": "4b8eef9fb7e17ae365d5a8bc7e841daa17912be72941cf5f9f2f6397e1e1079f",
+      "segment_count": 968,
+      "source_path": "data\\library\\Muslims in Spain, 1492 - 1814.pdf",
+      "source_sha256": "87b3987e4073218e58f00879fc2dd68e20ae43e5d1ab31b26d16e2a011f7b9ae",
+      "source_type": "pdf",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 279360,
+      "content_sha256": "51d9204f344822d02e522a4ee64d26db44a75fe6d7eee054b6142fb88ecebd2f",
+      "document_id": "10c341468d477826e75e599b",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 162,
+        "pages_with_text": 158
+      },
+      "normalized_text_sha256": "5acd1004409a732b5ddfbb6ebecab0118d8efb740a75c21247093e6cb5e8a34e",
+      "segment_count": 140,
+      "source_path": "data\\library\\The Gospel According To Peter.pdf",
+      "source_sha256": "3749f17587e09456a7816c94674d9620dd4bd69c341aecaffa157f67bbae20ca",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "The Gospel According To Peter"
+    },
+    {
+      "character_count": 559899,
+      "content_sha256": "6be23f8c0ac9c9d72f7c09c3efee9a9ab294a0368258e2cdcd5b35a772076526",
+      "document_id": "1405bbfebe1753f89ad02202",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "e7b949219be52a258ce266cf925c00910290c192f85d38a33fc40a8eef7bb6a5",
+      "segment_count": 279,
+      "source_path": "data\\library\\SERMONS BY THE LATE Rev.md",
+      "source_sha256": "8aaa82ad9c5bfd63e7368467127986bab18c45ccd34e13d9a651d0b2ab31f08b",
+      "source_type": "md",
+      "split": "test",
+      "title": null
+    },
+    {
+      "character_count": 86713,
+      "content_sha256": "89c4723316bdf043ebac6e36d882752a4eeae123ef93d6153fd875635c7e5724",
+      "document_id": "16eb6d6bf4785d7102eca1c0",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 100,
+        "pages_with_text": 80
+      },
+      "normalized_text_sha256": "d91862e34c1f090bfb3b0c37fcc785568b7be37b649305efbc17fda2bbb75023",
+      "segment_count": 44,
+      "source_path": "data\\library\\good_to_great.pdf",
+      "source_sha256": "29a63dd4d56c0443a830768cd02ff1fc3a8b8b43748c3ede9996d781d081dc74",
+      "source_type": "pdf",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 84559,
+      "content_sha256": "577546d6f490a9a2362aa273197683a877ff2411376843ce33072334cf145e94",
+      "document_id": "19190305e2c89e87378fce21",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 34,
+        "pages_with_text": 34
+      },
+      "normalized_text_sha256": "5cdbb54ab1634a1c7ff5425c6a7ca8dfe8cb54413a559f1da2f74d4091064ea0",
+      "segment_count": 43,
+      "source_path": "data\\library\\The Gospel of Pseudo-Matthew.pdf",
+      "source_sha256": "17b79d90305b4e9c62da274cb58915528fd2307d163bfcdc58cff5babf588fd2",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "THE GOSPEL OF PSEUDO-MATTHEW"
+    },
+    {
+      "character_count": 465260,
+      "content_sha256": "84b17706b72b622934b7a0e38050fb070c7d1be9a9259b1e5c123dbf7e55fbfe",
+      "document_id": "23fabbd88724e8c280386d63",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 399,
+        "pages_with_text": 397
+      },
+      "normalized_text_sha256": "82cbf18ddcf99bbc788f15591f15c8c5d96544a8b87d849676483f4cf1ee926b",
+      "segment_count": 233,
+      "source_path": "data\\library\\Jesus Calling.pdf",
+      "source_sha256": "87785a55be7b2cae154798cc2bfcbdd86d988dc912fdf722f4feba2b2e084df6",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Jesus Calling"
+    },
+    {
+      "character_count": 169855,
+      "content_sha256": "f9059bf4ffd08836abac24417abd99997218fb310a11f90bcfe117447a1165a3",
+      "document_id": "26e4e954c1b15c8dc848ae17",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 51,
+        "pages_with_text": 51
+      },
+      "normalized_text_sha256": "156a2d8bdbb829b527260e13dddc8a20955d2e68147802fa39851a21f785573b",
+      "segment_count": 85,
+      "source_path": "data\\library\\George_R__R__Martin_-_A_Song_Of_Ice_And_Fire_1b_-_.pdf",
+      "source_sha256": "1314fdb8fa260b56812e7f28799d861191ed0e8260e5991815c11fa27e326a45",
+      "source_type": "pdf",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 1537307,
+      "content_sha256": "b9041a5c51f74616d6f306ac48c4739a2616c64dbd819e8d27917f8b1441285d",
+      "document_id": "28d34ba89e11871e79cda67d",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 738,
+        "pages_with_text": 738
+      },
+      "normalized_text_sha256": "49d198d966f61e1eab1b13bf8a25ef59e27b486b5b4a5fa16870772b91ac107c",
+      "segment_count": 763,
+      "source_path": "data\\library\\Malazan 5 - Midnight Tides.pdf",
+      "source_sha256": "ed919916754497b65841e843e8d485b5a7f07250ce5a2ef443b32d1fa2191781",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Malazan 5"
+    },
+    {
+      "character_count": 830813,
+      "content_sha256": "50c2e326888ff3cd775b03cd1c574e2ca95283974b693f4a77997e069fafd321",
+      "document_id": "2ab99e61e810ea916b063022",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 588,
+        "pages_with_text": 581
+      },
+      "normalized_text_sha256": "d52d57af31486050fa813853addbc84aa0796fed98bed63c8b79a1f0c9809e4e",
+      "segment_count": 415,
+      "source_path": "data\\library\\The Gospel of the Prophet Mani.pdf",
+      "source_sha256": "74897b879057914b1290df3ca1b03a40f7f8edf5a7b6f64a232c9f8e27a00e22",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "The Gospel of the Prophet Mani"
+    },
+    {
+      "character_count": 629426,
+      "content_sha256": "a9d6e8befffe92f6800a94c35fcfe66707f8fb911269b7a7a29c2067b867b96d",
+      "document_id": "3afd22644648f5e491c3ed1e",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 219,
+        "pages_with_text": 219
+      },
+      "normalized_text_sha256": "80f4acc7d9dea49c5f4ad1a7d978d0d66db9e4e53968c3458ce2b7c56cef7b7c",
+      "segment_count": 314,
+      "source_path": "data\\library\\Covey - The 7 habits of highly effective people.pdf",
+      "source_sha256": "7ebfab969b575fd823621a1e80b9a118247284e53c272070f3bbf4ec10e7f87d",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Stephen R. Covey - The 7 Habits of Highly Eff People.pdf"
+    },
+    {
+      "character_count": 141396,
+      "content_sha256": "e3e2dd4a23c90b1cdd023d96414dff606723d2e4ebfda024ca421a2d33146dd6",
+      "document_id": "3f995b93ddff420e8a69bca2",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 54,
+        "pages_with_text": 54
+      },
+      "normalized_text_sha256": "54e3127a167680ea2d5a030b0ed3e656c00cf1c7d698eb417f788f37ad34d0ec",
+      "segment_count": 71,
+      "source_path": "data\\library\\Palladio_s architectural orders from practice to theory.pdf",
+      "source_sha256": "9948654e6dd2f30114933acb339d5f450df3e3b28077243c3cb1e892f2694314",
+      "source_type": "pdf",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 1999673,
+      "content_sha256": "5318d2f4c53214cfd58b046fc3d0bd6c908e1ed29d6699278d438dc8581301ca",
+      "document_id": "40a47a9663f92f80329d8bc8",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 878,
+        "pages_with_text": 878
+      },
+      "normalized_text_sha256": "fa69058a1bb32b05873619b13d077b4f2b2557badc1ec5dfc9bad5a53121c1e9",
+      "segment_count": 994,
+      "source_path": "data\\library\\Malazan 3 - Memories of Ice.pdf",
+      "source_sha256": "8cdd658703ab86769872a37711b5731f4439e17c027f60fa3d338d752285f5cd",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Malazan 3"
+    },
+    {
+      "character_count": 800914,
+      "content_sha256": "de7ac144db762d7d177a9bd3a1aaa34c6ea06f6f6712bc6eb33d2b71ce8b2550",
+      "document_id": "45a94e07b2c0506a07673af4",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 399,
+        "pages_with_text": 393
+      },
+      "normalized_text_sha256": "8a4232b178426971d1e80f28c7bd6222cd106f857b5ecbc63602678eddde82de",
+      "segment_count": 400,
+      "source_path": "data\\library\\Desiring God.pdf",
+      "source_sha256": "9ece9ca2660be106abf14418eed6710a083ffda5441028c54f9e208088435a60",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Desiring God: Meditations of a Christian Hedonist"
+    },
+    {
+      "character_count": 186954,
+      "content_sha256": "3ece567ba05efe65e67cf6850f8a0deb9283c1ddd57f99a7f721fdd20b2f2636",
+      "document_id": "5043d2f2986df15991616f88",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 165,
+        "pages_with_text": 165
+      },
+      "normalized_text_sha256": "b5a4c1c9ae1dfd4ede44276cecbd9832aa02c7ced8d1f64014cd2b0b49980b7e",
+      "segment_count": 94,
+      "source_path": "data\\library\\business_innovaTion_Design_Thinking.pdf",
+      "source_sha256": "3315dbf9ec95e112c566e97cc617ae5b587163b823bd2ffedaed34efbbb7c7ad",
+      "source_type": "pdf",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 450040,
+      "content_sha256": "d836c6729ce2bc88e99ec1e5a548d275c2eaeae40fca16f4afb1aaed273fbb51",
+      "document_id": "5d5c61fa51ef3698f838aaa9",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 240,
+        "pages_with_text": 238
+      },
+      "normalized_text_sha256": "6d3753df10dbc703b961af14dad53ea8b79e948f92989ed83cf086c0bc5dde4b",
+      "segment_count": 225,
+      "source_path": "data\\library\\Plot & Strcucture.pdf",
+      "source_sha256": "36b128821a03f9d5c97368d85fcf889be8a1e4827e4cf8be3f93515ef63b31d8",
+      "source_type": "pdf",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 29251,
+      "content_sha256": "a6fe41b915729939c24cfdacec7f8884817468b625c4ba09fd45522a1b203266",
+      "document_id": "67e469214a4604f743e8a471",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "ad840b704ac48c243c1e74d626e32387d7d33b2e5f77140856da8ac4859c3c3b",
+      "segment_count": 15,
+      "source_path": "data\\library\\The Feeling.md",
+      "source_sha256": "53e1fc37ef8be3c750e1a31203998f2a60e2d4ffbcfdbf6e867993789b8618b1",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 27696,
+      "content_sha256": "9bf2f69aa5a238333ac7fbbf2b37e98b4fb7000daaa5d4e35069db65e21cd382",
+      "document_id": "67e9bb36872f89cba6d135f2",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 12,
+        "pages_with_text": 12
+      },
+      "normalized_text_sha256": "cdf33b55ba26a123995438d911c55bdb642fc0cd8c14e13382e6395d3653fcb8",
+      "segment_count": 14,
+      "source_path": "data\\library\\Gospel of Thomas Lambdin.pdf",
+      "source_sha256": "c3ffcb1b86b17e1e01e07d23f678bbd9fba17ffd76b7a68b7c084402c5a592c5",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Gospel of Thomas"
+    },
+    {
+      "character_count": 16840,
+      "content_sha256": "cdf9c0a77ec5cb5d1fae94424a3817c0541c8409063f21c39dabb6a83185d3b4",
+      "document_id": "69100611e44d05e1321f56e8",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 6,
+        "pages_with_text": 6
+      },
+      "normalized_text_sha256": "12c2a065835e4cbc61dc2ac332e5695cc6e9b3cca88d2243ccb6d04e8d07daed",
+      "segment_count": 9,
+      "source_path": "data\\library\\RESEARCH IN KINEMATICS OF TURN FOR VEHICLES AND SEMITRAILERS.pdf",
+      "source_sha256": "6f729a879815cbceef01a024cd027b54c7e27b342cc59058f479a2af1ffbcee4",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Microsoft Word - 34_Berjoza.doc"
+    },
+    {
+      "character_count": 33092,
+      "content_sha256": "ef998aa7a6120e9ba4ed3fff4fe45e1db65cbeca6f6c65bf56b20bd4b7a7e82b",
+      "document_id": "6eb577d4576a446cf04105d5",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 34,
+        "pages_with_text": 33
+      },
+      "normalized_text_sha256": "0a79bfa7bf79412cc620d70b53f92c158c7eafc85c3d83e79863982ccc42ab10",
+      "segment_count": 17,
+      "source_path": "data\\library\\20230223_20minSuburbs-1677186785.pdf",
+      "source_sha256": "8c0a08245317d9a851577abd1c2218ae1adf497fe1aaf402e453e34f256a677b",
+      "source_type": "pdf",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 406920,
+      "content_sha256": "a61804ea6b414deee44d1436a6bb93464bdb8ebc1df19dd021fad8f077e79ff0",
+      "document_id": "779ddf8ee07b7173d7a44d02",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "10beeb86e9019721ca40864da9f6e841f6403d38d5958aa4cd684a57e3b1232d",
+      "segment_count": 203,
+      "source_path": "data\\library\\SARA_A PRINCESS.md",
+      "source_sha256": "4cf4005ba4bb4e4a8ea53414e47f1980e7f22374cde98631b9bdb61b4585be9b",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 40693,
+      "content_sha256": "b8e8ca13c71f7c4e834933384e6d2ca7c08a579eaf52fe55693e5d46eb6ae13b",
+      "document_id": "791c27e060f7a1e3b444b100",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 14,
+        "pages_with_text": 14
+      },
+      "normalized_text_sha256": "1069d766aedcc139a415b8ec927bf4448535efb65aaa0319d296d58b295e656e",
+      "segment_count": 21,
+      "source_path": "data\\library\\The Innovators Dilemma.pdf",
+      "source_sha256": "4f22a1a075cec734989dd113c87cc166928a7007536dfdc9d15064d7086db93b",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "The Innovator's Dilemma"
+    },
+    {
+      "character_count": 273819,
+      "content_sha256": "ace45fd5f9343683e6dc8bbdf99163ee35c4db5795357c3a29ed60ba08fdfb42",
+      "document_id": "7e399f6d6bc160bd6d7a8bfe",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 99,
+        "pages_with_text": 99
+      },
+      "normalized_text_sha256": "366188e930c66bb6bd0866fd480b96f6cd720139c1c156e333fdcbe7fb9793d8",
+      "segment_count": 137,
+      "source_path": "data\\library\\The Book of Jubilees.pdf",
+      "source_sha256": "79a13de9dac42beb8b93373fcbaf1839e17925d23817d6ffe3cd344b2cc84d79",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "THE BOOK OF JUBILEES"
+    },
+    {
+      "character_count": 3221256,
+      "content_sha256": "e1ffbdefaed99d2b0ae2f64f67eda05d55e6dfe1bdad602794f31e6f6f5f312e",
+      "document_id": "7e51762ec8841442fad3583f",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "21de248b033d3bea3d243a2d0a313681744996de1be5e1b2812a01cedcd762f5",
+      "segment_count": 1607,
+      "source_path": "data\\library\\WAR AND PEACE.md",
+      "source_sha256": "cdd28f0b0ed2a9c6e84d65dd46da23eac37e20d8dccf60420df73fca08eae159",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 168186,
+      "content_sha256": "d1ff1e9b5fa42606b647438fcf423b3ec12d9cc0b248f2c779fb5e083317c7ac",
+      "document_id": "7e53ddf4097514cbbb6fdc41",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "3a2fe9bd5533d00d302ab3d52d455c51af4528208b735f2e7e2bfae055e1d2f7",
+      "segment_count": 85,
+      "source_path": "data\\library\\ATALA.md",
+      "source_sha256": "e5f92b76a707b88f67adb6fa462974cb258fa1cefcde0501d8438d110413d893",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 447367,
+      "content_sha256": "2b155c73a545297bee90d452e5854d36b722d8122f148b00c27f470d46ea6613",
+      "document_id": "8637b787f6388c321a4722c5",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "29710a83aa584d4b3fcc090e27899265fbff6a5534bb998b509747068029d5be",
+      "segment_count": 222,
+      "source_path": "data\\library\\THE WIND BLOWETH.md",
+      "source_sha256": "f417d7bbfa4ae76c66989e6949fa945d4847380ecbf3a019e4eafd9d52b7466f",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 1725727,
+      "content_sha256": "d6465d1f9cc99a1553ac7062d2878bd51bbc435d014e78ced386fbfd8b122477",
+      "document_id": "877ef8dcd138d30ace749ec8",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 748,
+        "pages_with_text": 747
+      },
+      "normalized_text_sha256": "07af7cf9c5de82ddff39ec3bbe1990ff265aaa9bd0868236bfe7a05cbb218918",
+      "segment_count": 859,
+      "source_path": "data\\library\\Malazan 4 - House of Chains.pdf",
+      "source_sha256": "3256d9edf3c6faa5a55a82bba995b3535731a24bb1a03bd011c5bde185e46dab",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Malazan 4"
+    },
+    {
+      "character_count": 1543619,
+      "content_sha256": "c20d5721f23526111359e44866d0d8a93aa5aa56d39d9e093413bf7c0925b5ee",
+      "document_id": "88cf564e55da04c84f6a5b2f",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 657,
+        "pages_with_text": 657
+      },
+      "normalized_text_sha256": "c71aefe190e1d1be3bbd3c170d66535282e8d62d1790fe49d310d0becdee123c",
+      "segment_count": 768,
+      "source_path": "data\\library\\Malazan 2 - Deadhouse Gates.pdf",
+      "source_sha256": "ad8a4de1d4106e8b2809403b77aff7f2ce3844f2a33cb693cee09d35e8b5d74e",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Malazan 2"
+    },
+    {
+      "character_count": 175933,
+      "content_sha256": "1c0e85123713a3ca7010eb180066fabd1cb80e3ea09213b9514124728c3e4477",
+      "document_id": "910216af2269f2a1e53356af",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "7905c52b15b874a7d63e30f8ccdf8604f1ed12b6cb2de992297b7af29ad1f4a7",
+      "segment_count": 86,
+      "source_path": "data\\library\\THE STINGY RECEIVER.md",
+      "source_sha256": "3c07f3f80c8b1eaf403931ffd784553685525f6daa9d6941f1dbf59ffc85d27a",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 546245,
+      "content_sha256": "7db14586541255705ab8831b3f559cf0ef3f07a4c6e5c0e36ee66b46863ea7b2",
+      "document_id": "a2c906ca50c70b322fbc120a",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "9217737c65d087e861de5750122d1d715bbbc59321c0102a44000a7875075827",
+      "segment_count": 273,
+      "source_path": "data\\library\\THE WORLD OF WATERS.md",
+      "source_sha256": "fa016dff0da820dd6ebadbe1013b5d4868b11dc3429fd0146b9ee10acdb85513",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 72803,
+      "content_sha256": "757b170c96c5f5bc185153355f98ca8de9bc041b6fd26965f32af6d5f14695f9",
+      "document_id": "a4975395072f35f3c0088ab5",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 59,
+        "pages_with_text": 59
+      },
+      "normalized_text_sha256": "f756be2c0a4a64afee8bae6cd39f5c571159521a065b9d51c4343804b19b3f05",
+      "segment_count": 36,
+      "source_path": "data\\library\\Ripley_1x01.pdf",
+      "source_sha256": "abb96daff88c281fb9ef524a503e4ebd7080e05a9eb014a5fa3ca9885018be2f",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "*Ripley EP1 FINAL DRAFT 6.29.21"
+    },
+    {
+      "character_count": 137613,
+      "content_sha256": "d35be65beef1da36980d3fd3241345347b85d29dcdf63e783bc48889c67f9c1c",
+      "document_id": "b2e2064807ecf86445be9e76",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 88,
+        "pages_with_text": 78
+      },
+      "normalized_text_sha256": "1aa64bb8a8bb58fa4589379986cd021a8a6545e5fb446ac9736ad0bdbac3cbdc",
+      "segment_count": 69,
+      "source_path": "data\\library\\The Gospel Of The Lord.pdf",
+      "source_sha256": "5d81a5e778298fc68857a769de0410d30baf575475f3bff8dc92abc383335f92",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "The Gospel of the Lord"
+    },
+    {
+      "character_count": 274567,
+      "content_sha256": "869172aea3969d798e20cdf78f1dcf87ed28661ab309b50027de0ed73994461d",
+      "document_id": "c9067c290514bca08aaa9565",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "9aaa5bdac9ef09328656a1f29dff7c5602f480c0e764dbde0ddcf4aeab5ffc0f",
+      "segment_count": 133,
+      "source_path": "data\\library\\BEYOND THE STARS.md",
+      "source_sha256": "fd6c440ca93aea650ba605d5d996c9543f63916cb7cc6a58196b20e55dab5536",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 231753,
+      "content_sha256": "6aa5b31fa353198d8e54cd3b36aa8ebfeb14ae133a0c86955c92afddd3c606b4",
+      "document_id": "ce6a7f671d47e6f710fc1b46",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "0500dbc781dd5e64deb86c35b4846ec078453664f6c72a2b36b19626a23dd497",
+      "segment_count": 116,
+      "source_path": "data\\library\\Narnia_3_The_horse_and_his_boy.md",
+      "source_sha256": "f6d124035ef517de63eb68b896ba8c33a4b26a3e29bd8d3898a26d1783289584",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 473162,
+      "content_sha256": "b4d8480ed0e390be6467087e4d85ba27a898a174162002d604a23951a33f4146",
+      "document_id": "d50f9cc9b12250cef7b27902",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 132,
+        "pages_with_text": 132
+      },
+      "normalized_text_sha256": "75a93fc7627cebd7c2f0b37a1b19e4f35d0c19e073f14401406652cdf91ac6ac",
+      "segment_count": 236,
+      "source_path": "data\\library\\Men Like Gods.pdf",
+      "source_sha256": "c9fbfb62c17ada1c55e1bf13a2b0a20ec0ad3af3d61b51d7ee77d227e3e74b06",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "Men Like Gods"
+    },
+    {
+      "character_count": 89654,
+      "content_sha256": "8316a622407c8e1171296b22c23663a1443e36530b09d3c13374ec4286607652",
+      "document_id": "e1cbf7dceeaaabee31711d5b",
+      "extractor": "pypdf",
+      "metadata": {
+        "failed_pages": 0,
+        "pages": 68,
+        "pages_with_text": 68
+      },
+      "normalized_text_sha256": "faafbc3af04fe6bab41bd73499f5bb3e551cf4a67b111029d065218509699b25",
+      "segment_count": 45,
+      "source_path": "data\\library\\All_the_Light_We_Cannot_See_1x01.pdf",
+      "source_sha256": "f42c8342ef41b67d1c68be83d56c75fdc87f9ff443c4808a6010426724058977",
+      "source_type": "pdf",
+      "split": "train",
+      "title": "EP1_ATLWCS_working cherry_July11th2022"
+    },
+    {
+      "character_count": 1260524,
+      "content_sha256": "1955f1c54b21682aca77c6c8e9bf693d7778e01ebbd1e4e6ddff466321fcedf1",
+      "document_id": "edb8e75db44890af5501a9d9",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "e601ee08ba9a9c7eb227a2546673c7e6a00098657b2ae1e32d1e77886422ab7a",
+      "segment_count": 628,
+      "source_path": "data\\library\\THE FOUNDATION TRILOGY.md",
+      "source_sha256": "3c1161dc43b7d349dd1be1de67f4b6b6a0c27b1834c9090beb689c0c535e5773",
+      "source_type": "md",
+      "split": "validation",
+      "title": null
+    },
+    {
+      "character_count": 741167,
+      "content_sha256": "2d745eaf820af962d8a8ab9a251a478ca585ba1e5c9b7ad443910cb2dbd22f07",
+      "document_id": "efc770ceec1abaab1d399066",
+      "extractor": "stdlib-text",
+      "metadata": {},
+      "normalized_text_sha256": "5c581ce3ca48efd6d9eab450caa55b0f6fe99bffeab3c91d2aef5c2885f3ad81",
+      "segment_count": 370,
+      "source_path": "data\\library\\THE ODYSSEY.txt",
+      "source_sha256": "614c4b4de822e232fb81071ab06550c23e53cd89f0a6549e6728ad31d74fc76a",
+      "source_type": "txt",
+      "split": "train",
+      "title": null
+    },
+    {
+      "character_count": 80369,
+      "content_sha256": "0039caf4fe9bd55aa657db7b21e1b6be542ec7b7e5fc1a9cd2b56a37e2f24e19",
+      "document_id": "fc7cba8b0af1e20dc4bbc8ff",
+      "extractor": "stdlib-markdown",
+      "metadata": {},
+      "normalized_text_sha256": "dcf6d739c2783883a15134ff8d423a88ea0896c617e9a1cc9b010380efd813a3",
+      "segment_count": 41,
+      "source_path": "data\\library\\I am a Nucleus.md",
+      "source_sha256": "f17e8cc71e16598382144fd7bf7026d05ce8afee28524df4e8e7c5e4915be486",
+      "source_type": "md",
+      "split": "train",
+      "title": null
+    }
+  ],
+  "fingerprint_sha256": "164cb567c267945df1c7b25449f8ff8a09759f94e666a3682581baa6fa34c80d",
+  "run_id": "20260917T091305Z",
+  "schema": "slai.lantra.raw-corpus-manifest.v1",
+  "summary": {
+    "deduplication": {
+      "duplicate_documents_exact": 0,
+      "duplicate_documents_normalized": 0,
+      "duplicate_files_exact": 0,
+      "duplicate_segments": 8
+    },
+    "documents": 42,
+    "documents_by_split": {
+      "test": 1,
+      "train": 40,
+      "validation": 1
+    },
+    "documents_by_type": {
+      "epub": 1,
+      "md": 14,
+      "pdf": 26,
+      "txt": 1
+    },
+    "extraction_failures": [
+      {
+        "error_type": "NoTextExtracted",
+        "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+        "source_path": "data\\library\\the-four-loves.pdf",
+        "source_type": "pdf"
+      }
+    ],
+    "files": [
+      "data\\library\\20230223_20minSuburbs-1677186785.pdf",
+      "data\\library\\ATALA.md",
+      "data\\library\\All The Light We Cannot See - Anthony Doerr.epub",
+      "data\\library\\All_the_Light_We_Cannot_See_1x01.pdf",
+      "data\\library\\BEYOND THE STARS.md",
+      "data\\library\\Covey - The 7 habits of highly effective people.pdf",
+      "data\\library\\Desiring God.pdf",
+      "data\\library\\George_R__R__Martin_-_A_Song_Of_Ice_And_Fire_1b_-_.pdf",
+      "data\\library\\Gospel of Thomas Lambdin.pdf",
+      "data\\library\\I am a Nucleus.md",
+      "data\\library\\Jesus Calling.pdf",
+      "data\\library\\Malazan 2 - Deadhouse Gates.pdf",
+      "data\\library\\Malazan 3 - Memories of Ice.pdf",
+      "data\\library\\Malazan 4 - House of Chains.pdf",
+      "data\\library\\Malazan 5 - Midnight Tides.pdf",
+      "data\\library\\Men Like Gods.pdf",
+      "data\\library\\Muslims in Spain, 1492 - 1814.pdf",
+      "data\\library\\Narnia_3_The_horse_and_his_boy.md",
+      "data\\library\\PHANTOM DUEL.md",
+      "data\\library\\Palladio_s architectural orders from practice to theory.pdf",
+      "data\\library\\Plot & Strcucture.pdf",
+      "data\\library\\RESEARCH IN KINEMATICS OF TURN FOR VEHICLES AND SEMITRAILERS.pdf",
+      "data\\library\\Ripley_1x01.pdf",
+      "data\\library\\SARA_A PRINCESS.md",
+      "data\\library\\SERMONS BY THE LATE Rev.md",
+      "data\\library\\THE FOUNDATION TRILOGY.md",
+      "data\\library\\THE ODYSSEY.txt",
+      "data\\library\\THE STINGY RECEIVER.md",
+      "data\\library\\THE WIND BLOWETH.md",
+      "data\\library\\THE WORLD OF WATERS.md",
+      "data\\library\\The Book of Jubilees.pdf",
+      "data\\library\\The Feeling.md",
+      "data\\library\\The Gospel According To Peter.pdf",
+      "data\\library\\The Gospel Of The Lord.pdf",
+      "data\\library\\The Gospel of Pseudo-Matthew.pdf",
+      "data\\library\\The Gospel of the Prophet Mani.pdf",
+      "data\\library\\The Innovators Dilemma.pdf",
+      "data\\library\\The_Ice_Maiden.md",
+      "data\\library\\WAR AND PEACE.md",
+      "data\\library\\business_innovaTion_Design_Thinking.pdf",
+      "data\\library\\ecap-100016v-1016-105c (1).pdf",
+      "data\\library\\good_to_great.pdf"
+    ],
+    "fingerprint_sha256": "164cb567c267945df1c7b25449f8ff8a09759f94e666a3682581baa6fa34c80d",
+    "provenance_manifest": "src\\agents\\language\\artifacts\\training\\lantra\\lantra_corpus_manifest_20260917T091305Z.json",
+    "segments": {
+      "test": 279,
+      "total": 11672,
+      "train": 10765,
+      "validation": 628
+    }
+  }
+}
