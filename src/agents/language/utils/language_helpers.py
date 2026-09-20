@@ -1148,6 +1148,8 @@ def get_attr_or_key(value: Any, name: str, default: Any = None) -> Any:
 
 
 def token_text(token: TokenLike) -> str:
+    if isinstance(token, str):
+        return token
     return ensure_text(first_non_none(get_attr_or_key(token, "text"), get_attr_or_key(token, "orth"), get_attr_or_key(token, "word"), default=""))
 
 
