@@ -1051,9 +1051,13 @@ class LanguageAgent(BaseAgent):
                 method(issue, slot)
 
     def _clear_low_confidence(self) -> None:
-        issues = getattr(self.dialogue_context, "unresolved_issues", None)
-        if isinstance(issues, list):
-            self.dialogue_context.unresolved_issues = [issue for issue in issues if issue_description(issue) != "low_confidence_intent"]
+        resolver = getattr(self.dialogue_context, "resolve_unresolved", None)
+        if callable(resolver):
+            resolver(description="low_confidence_intent")
+        else:
+            issues = getattr(self.dialogue_context, "unresolved_issues", None)
+            if isinstance(issues, list):
+                self.dialogue_context.unresolved_issues = [issue for issue in issues if issue_description(issue) != "low_confidence_intent"]
         self._env_set("pending_intent", None)
         self._env_set("pending_entities", {})
 
