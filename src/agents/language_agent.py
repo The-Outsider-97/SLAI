@@ -796,95 +796,85 @@ class LanguageAgent(BaseAgent):
             self._handle_stage_failure(stage, exc)
 
     def _generate_response(self, user_text: str, frame: LinguisticFrame, trace: PipelineTrace) -> str:
-        """
-        Execute the model-facing response pipeline.
-
-        Canonical flow
-        --------------
-        NLU/DialogueContext
-            -> LANTRA neural candidate
-            -> LANTRA semantic relevance
-            -> NLGEngine selection/fallback
-            -> output safety
-
-        LANTRA does not decide final presentation policy.
-        NLGEngine does not invoke LANTRA.
-        LanguageAgent owns orchestration.
-        """
-
         stage = StageName.NLG
         started = time_module.time()
 
         try:
-            if self._needs_clarification(frame):
-                frame = self._clarification_frame(frame)
-
             neural_candidate: Optional[str] = None
             neural_relevance: Optional[float] = None
-
             generation_mode = str(getattr(self.nlg_engine, "generation_mode", "template")).strip().lower()
-            template_authoritative = set(getattr(self.nlg_engine, "template_authoritative_intents", ()))
+
+            # ----------------------------------------------------------
+            # LANTRA FIRST.
+            #
+            # No intent bypasses LANTRA merely because a template exists.
+            # ----------------------------------------------------------
             should_run_lantra = (
                 generation_mode in {"neural", "hybrid"}
                 and self.lantra_enabled
-                and frame.intent not in template_authoritative
             )
 
             if should_run_lantra:
                 runtime = getattr(self, "lantra_runtime", None)
 
-                if runtime is not None and bool(getattr(runtime, "ready", False)):
+                if (
+                    runtime is not None
+                    and bool(getattr(runtime, "ready", False))
+                ):
                     try:
-                        # --------------------------------------------------
-                        # 1. Build the exact DialogueContext payload.
-                        # --------------------------------------------------
                         context_payload: Dict[str, Any] = {}
                         build_context = getattr(self.dialogue_context, "build_nlg_context", None)
                         if callable(build_context):
                             built = build_context(frame=frame)
-                            if hasattr(built, "to_dict"):
-                                context_payload = dict(built.to_dict())
+                            to_dict = getattr(built, "to_dict", None)
+                            if callable(to_dict):
+                                serialized = to_dict()
+                                if isinstance(serialized, Mapping):
+                                    context_payload = {
+                                        str(key): value
+                                        for key, value in serialized.items()
+                                    }
                             elif isinstance(built, Mapping):
-                                context_payload = dict(built)
+                                context_payload = {
+                                    str(key): value
+                                    for key, value in built.items()
+                                }
 
-                        # --------------------------------------------------
-                        # 2. LANTRA dialogue/generation.
-                        # --------------------------------------------------
+                        # ----------------------------------------------
+                        # Actual trained LANTRA checkpoint inference.
+                        # ----------------------------------------------
                         candidate = runtime.nlg_generate("", frame, context_payload)
                         candidate = ensure_text(candidate).strip()
                         if candidate:
                             neural_candidate = candidate
 
-                            # ----------------------------------------------
-                            # 3. Candidate relevance.
-                            #
-                            # This uses LANTRA's EXISTING reranking task.
-                            # No new relevance module is needed.
-                            # ----------------------------------------------
-                            ranking = runtime.rerank(ensure_text(user_text), [candidate], top_k=1)
-                            if ranking.candidates:
-                                neural_relevance = float(ranking.candidates[0].score)
+                            # ------------------------------------------
+                            # Existing LANTRA reranking capability.
+                            # Metadata/quality signal for NLG.
+                            # ------------------------------------------
+                            try:
+                                ranking = runtime.rerank(ensure_text(user_text), [candidate], top_k=1)
+                                if ranking.candidates:
+                                    neural_relevance = float(ranking.candidates[0].score)
+
+                            except Exception as rerank_exc:
+                                logger.debug("LANTRA response relevance scoring unavailable: %s", rerank_exc)
 
                     except Exception as exc:
-                        # LANTRA failure is recoverable in hybrid mode.
+                        # Hybrid may fall through to NLG template fallback.
                         trace.warn(
-                            f"LANTRA candidate generation failed: "
+                            "LANTRA generation failed: "
                             f"{type(exc).__name__}: {exc}"
                         )
 
-                        logger.warning(
-                            "LANTRA candidate generation failed; "
-                            "NLG template fallback remains available: %s",
-                            exc,
-                        )
+                        logger.warning("LANTRA generation failed; NLG fallback remains available: %s", exc)
 
-            # --------------------------------------------------------------
-            # 4. NLG consumes candidate. It does NOT call LANTRA.
-            # --------------------------------------------------------------
-            if (
-                self.use_structured_nlg
-                and callable(getattr(self.nlg_engine, "generate_detailed", None))
-            ):
+            # ----------------------------------------------------------
+            # NLG consumes LANTRA's result.
+            #
+            # It does NOT invoke the model itself.
+            # ----------------------------------------------------------
+            if (self.use_structured_nlg and callable(getattr(self.nlg_engine, "generate_detailed", None))):
                 result = self.nlg_engine.generate_detailed(
                     frame=frame,
                     context=self.dialogue_context,
@@ -908,47 +898,23 @@ class LanguageAgent(BaseAgent):
                     stage,
                     bool(text),
                     started,
-                    "LANTRA -> NLG response selection complete.",
+                    "LANTRA -> NLG processing complete.",
                     metadata={
-                        "neural_candidate": bool(neural_candidate),
-                        "neural_relevance": neural_relevance,
-                        "result": compact(
-                            metadata,
-                            self.trace_preview_chars,
-                        ),
+                        "lantra_called": should_run_lantra,
+                        "lantra_candidate": bool(neural_candidate),
+                        "lantra_relevance": neural_relevance,
+                        "generation_mode": getattr(result, "generation_mode", None),
+                        "fallback_used": getattr(result, "fallback_used", None),
+                        "result": compact(metadata, self.trace_preview_chars),
                     },
                 )
 
-                return text or self._policy_error_response("nlg_error")
-
-            # Compatibility path.
-            text = ensure_text(
-                self.nlg_engine.generate(
-                    frame=frame,
-                    context=self.dialogue_context,
-                )
-            )
-
-            self._add_stage_record(
-                trace,
-                stage,
-                bool(text),
-                started,
-                "NLG generation complete.",
-            )
-
-            return text or self._policy_error_response("nlg_error")
+                return (text or self._policy_error_response("nlg_error"))
+            text = ensure_text(self.nlg_engine.generate(frame=frame, context=self.dialogue_context))
+            return (text or self._policy_error_response("nlg_error"))
 
         except Exception as exc:
-            self._add_stage_record(
-                trace,
-                stage,
-                False,
-                started,
-                "LANTRA/NLG response generation failed.",
-                error=exc,
-            )
-
+            self._add_stage_record(trace, stage, False, started, "LANTRA/NLG response generation failed.", error=exc)
             self._handle_stage_failure(stage, exc)
 
             return self._policy_error_response("nlg_error")
@@ -1361,8 +1327,11 @@ def grammar_issue_count(result: Optional[GrammarAnalysisResult]) -> int:
 def frame_to_dict(frame: Optional[LinguisticFrame]) -> Optional[Dict[str, Any]]:
     if frame is None:
         return None
-    if hasattr(frame, "to_dict") and callable(getattr(frame, "to_dict")):
-        return frame.to_dict()
+    to_dict = getattr(frame, "to_dict", None)
+    if callable(to_dict):
+        serialized = to_dict()
+        if isinstance(serialized, Mapping):
+            return dict(serialized)
     return {
         "intent": getattr(frame, "intent", None),
         "entities": json_safe(getattr(frame, "entities", {})),
