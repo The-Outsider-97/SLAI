@@ -52,8 +52,6 @@ templates:
   nlg_templates_path: src/agents/language/templates/en/nlg_templates.yaml
 
 
-
-
 lantra_runtime:
   version: '1.0'
   checkpoint_path: src/agents/language/checkpoints/lantra/lantra_20260919T142819Z.pt
@@ -1184,16 +1182,6 @@ dialogue_context:
 
 
 nlg:
-  routing:
-    template_authoritative_intents:
-      - greeting
-      - farewell
-      - gratitude
-      - clarification_request
-      - nlp_error
-      - nlu_error
-      - internal_error
-      - grammar_warning
   version: '3.0'
   generation_mode: hybrid
   templates_path: src/agents/language/templates/en/nlg_templates.yaml
@@ -1307,16 +1295,14 @@ neural_generation:
   fallback_after_retries: true
   max_tokens: 512
   temperature: 0.7
-
   min_words: 1
   max_words: 160
-
   history_messages: 6
   history_max_characters: 2400
 
   # LANTRA candidate acceptance.
   # Candidate score comes from the existing LANTRA reranking embeddings.
-  min_relevance: 0.15
+  min_relevance: null
 
   # Prevent a bad assistant response from recursively contaminating
   # subsequent dialogue generations.

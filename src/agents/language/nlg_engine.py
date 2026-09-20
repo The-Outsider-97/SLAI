@@ -571,6 +571,12 @@ class NLGEngine:
         self.validation_failure_count = 0
         self.intent_counts: Counter[str] = Counter()
 
+        raw_min_relevance = self.neural_config.get("min_relevance")
+        if raw_min_relevance in {None, "", "none", "null"}:
+            self.min_neural_relevance = None
+        else:
+            self.min_neural_relevance = _float(raw_min_relevance, default=0.15, minimum=-1.0, maximum=1.0)
+
         logger.info("NLG Engine initialized with %s intents and %s templates", len(self.templates), self._template_count())
         printer.status("INIT", f"NLG Engine initialized with {len(self.templates)} intents", "success")
 
@@ -816,29 +822,24 @@ class NLGEngine:
         context_packet = self._build_context_packet(context, frame)
         frame = self._normalize_frame(frame, context_packet)
         self.intent_counts[frame.intent] += 1
+
+        # --------------------------------------------------------------
+        # Explicit template-only mode.
+        # --------------------------------------------------------------
+        if self.generation_mode == "template":
+            result = self._template_generation(frame, context_packet)
+            result = self._finalize_result(result, started_at=started_at)
+            self._record_generation(result)
+            return result
+
         neural_result: Optional[NLGGenerationResult] = None
 
         try:
-            # --------------------------------------------------------------
-            # Closed conversational intents are deterministic.
+            # ----------------------------------------------------------
+            # HYBRID / NEURAL:
             #
-            # LANTRA should not invent an answer to "hi", "thanks", "bye",
-            # pipeline errors, etc.
-            # --------------------------------------------------------------
-            if (
-                self.generation_mode == "template"
-                or frame.intent in self.template_authoritative_intents
-            ):
-                result = self._template_generation(frame, context_packet)
-                result = self._finalize_result(result, started_at=started_at)
-                self._record_generation(result)
-
-                return result
-
-            # --------------------------------------------------------------
-            # Neural / hybrid response candidate.
-            # LANTRA was already called by LanguageAgent.
-            # --------------------------------------------------------------
+            # LANTRA candidate is ALWAYS considered first.
+            # ----------------------------------------------------------
             if self.generation_mode in {"neural", "hybrid"}:
                 neural_result = self._try_neural_generation(
                     frame,
@@ -847,8 +848,11 @@ class NLGEngine:
                     relevance=neural_relevance,
                 )
 
-                if neural_result and neural_result.ok:
-                    neural_result = self._finalize_result(neural_result, started_at=started_at)
+                if neural_result is not None and neural_result.ok:
+                    neural_result = self._finalize_result(
+                        neural_result,
+                        started_at=started_at,
+                    )
                     self._record_generation(neural_result)
                     return neural_result
 
@@ -857,36 +861,36 @@ class NLGEngine:
                     and not self.fallback_after_retries
                 ):
                     raise NLGGenerationError(
-                        "LANTRA neural candidate was unavailable "
-                        "or failed response validation.",
+                        "LANTRA did not produce an acceptable response.",
                         frame=frame,
                         context=context_packet.to_dict(),
-                        error_type="neural_generation_failed",
+                        error_type="lantra_candidate_rejected",
                     )
 
-            # --------------------------------------------------------------
-            # Template fallback.
-            # --------------------------------------------------------------
+            # ----------------------------------------------------------
+            # LAST RESORT:
+            # templates only after LANTRA is unavailable/rejected.
+            # ----------------------------------------------------------
             result = self._template_generation(frame, context_packet)
 
             if self.generation_mode in {"neural", "hybrid"}:
                 reasons = (
                     neural_result.issues
-                    if neural_result
-                    else ("neural_candidate_missing",)
+                    if neural_result is not None
+                    else ("lantra_candidate_missing",)
+                )
+
+                attempts = (
+                    neural_result.attempts
+                    if neural_result is not None
+                    else ()
                 )
 
                 result = replace(
                     result,
                     fallback_used=True,
-                    attempts=(
-                        neural_result.attempts
-                        if neural_result
-                        else ()
-                    )
-                    + result.attempts,
-                    issues=tuple(reasons)
-                    + result.issues,
+                    attempts=attempts + result.attempts,
+                    issues=tuple(reasons) + result.issues,
                     metadata={
                         **result.metadata,
                         "fallback_from": "lantra",
@@ -894,7 +898,13 @@ class NLGEngine:
                     },
                 )
 
-                logger.warning("NLG LANTRA -> template fallback: %s", "; ".join(str(reason) for reason in reasons))
+                logger.warning(
+                    "NLG LANTRA -> template fallback: %s",
+                    "; ".join(
+                        str(reason)
+                        for reason in reasons
+                    ),
+                )
 
             result = self._finalize_result(result, started_at=started_at)
             self._record_generation(result)
@@ -914,8 +924,8 @@ class NLGEngine:
 
             if neural_result is not None:
                 fallback = replace(fallback, attempts=(neural_result.attempts + fallback.attempts), issues=(neural_result.issues + fallback.issues))
-            self._record_generation(fallback)
 
+            self._record_generation(fallback)
             return fallback
 
     # ------------------------------------------------------------------
@@ -1041,13 +1051,22 @@ class NLGEngine:
         reasons: List[str] = []
         valid, base_reasons = self._validate_response(response)
         reasons.extend(base_reasons)
+        if (
+            self.min_neural_relevance is not None
+            and relevance is not None
+            and relevance < self.min_neural_relevance
+        ):
+            reasons.append(f"low_candidate_relevance:{relevance:.4f}")
 
         # --------------------------------------------------------------
         # Semantic relevance from LANTRA reranking.
         # --------------------------------------------------------------
         if relevance is None:
             reasons.append("missing_candidate_relevance")
-        elif relevance < self.min_neural_relevance:
+        elif (
+            self.min_neural_relevance is not None
+            and relevance < self.min_neural_relevance
+        ):
             reasons.append(f"low_candidate_relevance:{relevance:.4f}")
 
         # --------------------------------------------------------------
@@ -1072,19 +1091,15 @@ class NLGEngine:
                     continue
 
                 role = _text(item.get("role", "")).strip().lower()
-
                 if role not in {"assistant", "agent"}:
                     continue
 
                 previous = _clean_space(_text(item.get("content", item.get("text", "")))).casefold()
 
                 if (
-                    previous
-                    and normalized_response
-                    == previous
+                    previous and normalized_response == previous
                 ):
                     reasons.append("repeated_assistant_response")
-
                 break
 
         # --------------------------------------------------------------
@@ -1094,11 +1109,7 @@ class NLGEngine:
 
         if (
             len(words) <= 4
-            and re.search(
-                r"\b(?:error|exception|failure|failed)\b",
-                response,
-                re.IGNORECASE,
-            )
+            and re.search(r"\b(?:error|exception|failure|failed)\b", response, re.IGNORECASE)
         ):
             reasons.append("degenerate_error_fragment")
 
