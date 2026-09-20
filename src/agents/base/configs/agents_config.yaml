@@ -440,20 +440,6 @@ evaluation_agent:
           success: true
 
 
-language_agent:
-  lantra:
-    enabled: true
-
-    # false preserves the existing lightweight LanguageAgent fallback:
-    # if LANTRA cannot initialize, template NLG can still run.
-    required: false
-
-    # Registers LantraRuntime.nlg_generate with the already-existing
-    # NLGEngine.set_neural_generator(...) hook.
-    register_with_nlg: true
-
-
-
 handler_agent:
   enabled: true
   enable_recovery: true
@@ -524,7 +510,17 @@ knowledge_agent:
     max_workers: 8
 
 
-language_agent: {}
+language_agent:
+  lantra:
+    enabled: true
+
+    # false preserves the existing lightweight LanguageAgent fallback:
+    # if LANTRA cannot initialize, template NLG can still run.
+    required: false
+
+    # Registers LantraRuntime.nlg_generate with the already-existing
+    # NLGEngine.set_neural_generator(...) hook.
+    register_with_nlg: true
 
 
 learning_agent:
