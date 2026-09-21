@@ -7,8 +7,11 @@ Training stages
 ---------------
 0. BPE bootstrap      - load SLAI's configured BPE tokenizer/vocabulary
 1. GloVe bootstrap    - initialize token embeddings and distill static semantics
-2. Raw-text pretrain  - denoising encoder-decoder self-supervised pretraining
-3. Supervised tune    - optional seven-task multi-task specialization
+2A. Denoising         - ordinary raw denoising + knowledge-aware reconstruction
+2B. Retrieval         - embedding/reranking with Knowledge hard negatives
+2C. Reasoning         - validated factual/reasoning curriculum
+2D. Perception        - optional frozen offline filtering/alignment metadata
+3. Supervised tune    - real non-synthetic seven-task specialization
 
 Supported objectives
 --------------------
@@ -102,19 +105,21 @@ import traceback
 import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
+
 from html.parser import HTMLParser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from logs.logger import PrettyPrinter, configure_logging, get_logger
 from src.agents.language.modules.language_tokenizer import LanguageTokenizer
 from src.agents.language.modules.language_transformer import LanguageTransformer
+from src.training.lantra_phase_scheduler import *
+from logs.logger import PrettyPrinter, configure_logging, get_logger
 
 
 LOGGER = get_logger("LANTRA Trainer")
-PRINTER = PrettyPrinter
+PRINTER = PrettyPrinter()
 
 SUPPORTED_TASKS: Tuple[str, ...] = (
     "generation",
@@ -290,6 +295,11 @@ class TrainerConfig:
     tokenizer_min_frequency: int
     init_from: Optional[str]
     require_all_supervised_tasks: bool
+    curriculum_enabled: bool
+    curriculum_2a_epochs: int
+    curriculum_2b_epochs: int
+    curriculum_2c_epochs: int
+    curriculum_min_task_samples: int
     glove_bootstrap: bool
     glove_epochs: int
     glove_batch_size: int
@@ -2212,7 +2222,10 @@ def semantic_bootstrap_train(
 
 
 def _encode_raw_ids(tokenizer: LanguageTokenizer, text: str, max_length: int) -> List[int]:
-    payload = tokenizer.encode(
+    # The tokenizer's overloads describe several list-based return formats;
+    # this call explicitly requests tensors, so keep the static type aligned
+    # with the runtime contract without importing the tensor library here.
+    payload: Any = tokenizer.encode(
         text,
         add_special_tokens=True,
         truncation=True,
@@ -2228,7 +2241,12 @@ def _encode_raw_ids(tokenizer: LanguageTokenizer, text: str, max_length: int) ->
     values = payload.get("input_ids")
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
         raise LantraTrainingError("LanguageTokenizer returned invalid input_ids for raw-text pretraining.")
-    return [int(value) for value in values]
+    encoded_ids: List[int] = []
+    for value in values:
+        if not isinstance(value, int):
+            raise LantraTrainingError("LanguageTokenizer returned non-integer input_ids for raw-text pretraining.")
+        encoded_ids.append(value)
+    return encoded_ids
 
 
 def corrupt_token_ids(
@@ -2291,7 +2309,12 @@ def raw_reconstruction_loss(
     decoder_input = target[:, :-1]
     labels = target[:, 1:]
     output = model.language_forward(src, decoder_input, return_dict=True)
-    logits = output["logits"]
+    if isinstance(output, dict):
+        logits = output["logits"]
+    else:
+        # Some backends return the logits tensor directly even when
+        # ``return_dict`` is requested.
+        logits = output
     return model.compute_loss(logits, labels, ignore_index=int(tokenizer.pad_token_id))
 
 
@@ -2333,6 +2356,8 @@ def raw_text_pretrain(
     model: LanguageTransformer,
     device: str,
     run_id: str,
+    *,
+    evaluate_test_split: bool = True,
 ) -> Tuple[LanguageTransformer, Dict[str, Any]]:
     if config.raw_pretrain_epochs <= 0 or not corpus.train_segments:
         return model, {"status": "skipped", "reason": "no raw training segments or raw_pretrain_epochs=0"}
@@ -2490,12 +2515,16 @@ def raw_text_pretrain(
 
     if best_path.is_file():
         model = LanguageTransformer.load_language_model(best_path, device=device, strict=True)
-    test_loss = evaluate_raw_pretraining(
-        model,
-        tokenizer,
-        test_segments,
-        config,
-        device,
+    test_loss = (
+        evaluate_raw_pretraining(
+            model,
+            tokenizer,
+            test_segments,
+            config,
+            device,
+        )
+        if evaluate_test_split
+        else None
     )
     return model, {
         "status": "completed",
@@ -2508,6 +2537,7 @@ def raw_text_pretrain(
         "checkpoint_every_steps": config.checkpoint_every_steps,
         "best_objective": best_validation,
         "heldout_test_loss": test_loss,
+        "test_evaluation_deferred": not evaluate_test_split,
         "checkpoint": str(best_path if best_path.is_file() else latest_path),
     }
 
@@ -2533,8 +2563,8 @@ def encode_text(
         return_tokens=False,
         return_tensors="pt",
     )
-    ids = payload.get("input_ids")
-    mask = payload.get("attention_mask")
+    ids: Any = payload.get("input_ids")
+    mask: Any = payload.get("attention_mask")
     if ids is None or mask is None:
         raise LantraTrainingError("LanguageTokenizer.encode did not return input_ids and attention_mask.")
     if ids.dim() != 1 or mask.dim() != 1:
@@ -2612,7 +2642,11 @@ def seq2seq_loss(
         memory_key_padding_mask=src_padding_mask,
         return_dict=True,
     )
-    logits = output["logits"]
+    # ``language_forward`` may be typed as either a tensor or a mapping even
+    # when ``return_dict=True``; narrow the result before accessing logits.
+    logits = output.get("logits") if isinstance(output, Mapping) else getattr(output, "logits", None)
+    if logits is None:
+        raise LantraTrainingError("Language model forward output did not contain logits.")
     return model.compute_loss(
         logits,
         labels,
@@ -2964,12 +2998,17 @@ def generate_prediction(
     # LanguageTransformer greedy/sample wrapper does not forward a source padding
     # mask into BaseTransformer.inference, so deliberately keep this source
     # unpadded rather than pretending that an ignored mask is honored.
-    generated = model.generate(
+    generated: Any = model.generate(
         src,
         strategy="greedy",
         max_len=config.target_max_length,
         return_dict=False,
     )
+    # Some generation implementations return an output wrapper even when
+    # return_dict=False is requested; use its tensor payload when present.
+    sequences = getattr(generated, "sequences", None)
+    if sequences is not None:
+        generated = sequences
     if generated.dim() != 2 or generated.size(0) < 1:
         raise LantraTrainingError(f"Unexpected generated tensor shape: {list(generated.shape)}")
     return tokenizer.decode(generated[0], skip_special_tokens=True)
@@ -3058,7 +3097,8 @@ def evaluate(
                 normalized_loss = mean_task_loss / max(config.embedding_margin, 1e-6)
             elif task == "reranking":
                 normalized_loss = mean_task_loss / max(config.reranking_margin, 1e-6)
-            normalized_task_losses.append(float(normalized_loss))
+            if normalized_loss is not None:
+                normalized_task_losses.append(float(normalized_loss))
         task_metrics[task] = {
             "examples": count,
             "mean_loss": mean_task_loss,
@@ -3146,11 +3186,13 @@ def save_checkpoint(
     global_optimizer_step: int,
     validation_metrics: Optional[Mapping[str, Any]] = None,
     status: str,
+    stage_name: str = "supervised",
     extra_metadata: Optional[Mapping[str, Any]] = None,
 ) -> str:
     metadata = {
         "trainer": "train_lantra",
         "run_id": run_id,
+        "stage": stage_name,
         "status": status,
         "epoch": epoch,
         "global_optimizer_step": global_optimizer_step,
@@ -3177,16 +3219,43 @@ def train(
     model: LanguageTransformer,
     device: str,
     run_id: str,
+    *,
+    stage_name: str = "supervised",
+    epochs: Optional[int] = None,
+    evaluate_test_split: bool = True,
 ) -> Dict[str, Any]:
+    """Train one explicit LANTRA objective stage.
+
+    Each stage gets a fresh optimizer/schedule but starts from the selected best
+    model of the preceding stage. Validation is used for checkpoint selection.
+    Intermediate curriculum stages deliberately do not inspect their test split;
+    their test metrics are deferred until the entire training sequence finishes.
+    """
+    stage_epochs = config.epochs if epochs is None else int(epochs)
+    if stage_epochs <= 0:
+        raise LantraTrainingError(f"Stage {stage_name!r} epochs must be > 0.")
+    if not dataset.train or not dataset.validation:
+        raise LantraTrainingError(
+            f"Stage {stage_name!r} requires non-empty train and validation splits."
+        )
+    if evaluate_test_split and not dataset.test:
+        raise LantraTrainingError(f"Stage {stage_name!r} requested test evaluation with an empty test split.")
+
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    best_path = output_dir / "lantra_best.pt"
-    latest_path = output_dir / "lantra_latest.pt"
-    final_path = output_dir / f"lantra_{run_id}.pt"
+    stage_slug = re.sub(r"[^a-z0-9]+", "_", str(stage_name).strip().lower()).strip("_") or "stage"
+    checkpoint_prefix = "lantra" if stage_slug == "supervised" else f"lantra_{stage_slug}"
+    best_path = output_dir / f"{checkpoint_prefix}_best.pt"
+    latest_path = output_dir / f"{checkpoint_prefix}_latest.pt"
+    final_path = (
+        output_dir / f"lantra_{run_id}.pt"
+        if stage_slug == "supervised"
+        else output_dir / f"{checkpoint_prefix}_{run_id}.pt"
+    )
 
     optimizer = model.configure_optimizer()
     total_optimizer_steps = count_optimizer_steps(
-        len(dataset.train), config.epochs, config.gradient_accumulation
+        len(dataset.train), stage_epochs, config.gradient_accumulation
     )
     effective_warmup_steps = min(
         config.warmup_steps,
@@ -3207,7 +3276,7 @@ def train(
         learning_rate: float,
     ) -> None:
         interval_path = output_dir / (
-            f"lantra_supervised_{run_id}_step_{optimizer_step:08d}.pt"
+            f"{checkpoint_prefix}_{run_id}_step_{optimizer_step:08d}.pt"
         )
         saved = save_checkpoint(
             model,
@@ -3220,6 +3289,7 @@ def train(
             global_optimizer_step=optimizer_step,
             validation_metrics=None,
             status="interval",
+            stage_name=stage_name,
             extra_metadata={
                 "checkpoint_kind": "optimizer_step_interval",
                 "checkpoint_every_steps": config.checkpoint_every_steps,
@@ -3229,25 +3299,28 @@ def train(
         )
         interval_checkpoints.append(saved)
         LOGGER.info(
-            "Supervised interval checkpoint saved at optimizer step %d/%d: %s",
+            "LANTRA stage=%s interval checkpoint optimizer_step=%d/%d: %s",
+            stage_name,
             optimizer_step,
             total_optimizer_steps,
             saved,
         )
 
     LOGGER.info(
-        "Training LANTRA: train=%d validation=%d test=%d epochs=%d device=%s total_optimizer_steps=%d warmup_steps=%d",
+        "Training LANTRA stage=%s train=%d validation=%d test=%d epochs=%d device=%s "
+        "total_optimizer_steps=%d warmup_steps=%d",
+        stage_name,
         len(dataset.train),
         len(dataset.validation),
         len(dataset.test),
-        config.epochs,
+        stage_epochs,
         device,
         total_optimizer_steps,
         effective_warmup_steps,
     )
 
     try:
-        for epoch in range(1, config.epochs + 1):
+        for epoch in range(1, stage_epochs + 1):
             epoch_started = time.perf_counter()
             train_stats, global_optimizer_step = train_epoch(
                 model,
@@ -3273,6 +3346,7 @@ def train(
             val_loss = validation_objective(validation_metrics)
             elapsed = time.perf_counter() - epoch_started
             record = {
+                "stage": stage_name,
                 "epoch": epoch,
                 "seconds": elapsed,
                 "global_optimizer_step": global_optimizer_step,
@@ -3299,6 +3373,7 @@ def train(
                     global_optimizer_step=global_optimizer_step,
                     validation_metrics=validation_metrics,
                     status="best",
+                    stage_name=stage_name,
                 )
             else:
                 epochs_without_improvement += 1
@@ -3314,11 +3389,13 @@ def train(
                 global_optimizer_step=global_optimizer_step,
                 validation_metrics=validation_metrics,
                 status="latest",
+                stage_name=stage_name,
             )
 
             PRINTER.pretty(
-                "LANTRA EPOCH",
+                "LANTRA STAGE EPOCH",
                 {
+                    "stage": stage_name,
                     "epoch": epoch,
                     "seconds": round(elapsed, 3),
                     "train_loss": train_stats.raw_loss_sum / max(1, train_stats.examples),
@@ -3334,7 +3411,8 @@ def train(
 
             if epochs_without_improvement >= config.patience:
                 LOGGER.info(
-                    "Early stopping after epoch %d; best epoch=%d validation_objective=%.6f",
+                    "Early stopping stage=%s after epoch %d; best epoch=%d validation_objective=%.6f",
+                    stage_name,
                     epoch,
                     best_epoch,
                     best_validation_objective,
@@ -3342,8 +3420,12 @@ def train(
                 break
 
     except KeyboardInterrupt:
-        interrupted_path = output_dir / "lantra_interrupted.pt"
-        LOGGER.warning("Training interrupted; saving recoverable model checkpoint to %s", interrupted_path)
+        interrupted_path = output_dir / f"{checkpoint_prefix}_interrupted.pt"
+        LOGGER.warning(
+            "Training stage=%s interrupted; saving recoverable checkpoint to %s",
+            stage_name,
+            interrupted_path,
+        )
         save_checkpoint(
             model,
             optimizer,
@@ -3355,26 +3437,26 @@ def train(
             global_optimizer_step=global_optimizer_step,
             validation_metrics=history[-1]["validation"] if history else None,
             status="interrupted",
+            stage_name=stage_name,
         )
         raise
 
     if not best_path.is_file():
-        raise LantraTrainingError("Training completed without producing a best checkpoint.")
+        raise LantraTrainingError(f"Stage {stage_name!r} completed without producing a best checkpoint.")
 
-    LOGGER.info("Reloading best LANTRA checkpoint for held-out test evaluation: %s", best_path)
+    LOGGER.info("Reloading best LANTRA checkpoint for stage=%s: %s", stage_name, best_path)
     best_model = LanguageTransformer.load_language_model(best_path, device=device, strict=True)
-    test_metrics = evaluate(
-        best_model,
-        tokenizer,
-        dataset.test,
-        config,
-        device,
-        include_generation_metrics=True,
-    )
+    test_metrics = None
+    if evaluate_test_split:
+        test_metrics = evaluate(
+            best_model,
+            tokenizer,
+            dataset.test,
+            config,
+            device,
+            include_generation_metrics=True,
+        )
 
-    # Save a run-specific deployment checkpoint from the selected best model.
-    # Do not attach a freshly initialized optimizer state: the native best
-    # checkpoint already contains the real optimizer state from its selected epoch.
     final_saved = save_checkpoint(
         best_model,
         None,
@@ -3389,17 +3471,25 @@ def train(
             "best_validation_objective": best_validation_objective,
         },
         status="final_best",
+        stage_name=stage_name,
+        extra_metadata={
+            "test_evaluation_deferred": not evaluate_test_split,
+        },
     )
 
     return {
+        "status": "completed",
+        "stage": stage_name,
         "best_epoch": best_epoch,
         "selection_metric": "macro_normalized_task_loss",
         "best_validation_objective": best_validation_objective,
         "best_global_optimizer_step": best_global_optimizer_step,
+        "epochs_requested": stage_epochs,
         "epochs_completed": len(history),
         "global_optimizer_steps": global_optimizer_step,
         "history": history,
         "test": test_metrics,
+        "test_evaluation_deferred": not evaluate_test_split,
         "checkpoint_every_steps": config.checkpoint_every_steps,
         "interval_checkpoints": interval_checkpoints,
         "checkpoints": {
@@ -3410,6 +3500,53 @@ def train(
         "model_stats": best_model.stats().to_dict(),
     }
 
+
+def dataset_from_phase_partition(
+    partition: PhasePartition,
+    parent: DatasetSplit,
+) -> Optional[DatasetSplit]:
+    if partition.empty:
+        return None
+    return DatasetSplit(
+        train=tuple(partition.train),
+        validation=tuple(partition.validation),
+        test=tuple(partition.test),
+        files=parent.files,
+        fingerprint=partition.fingerprint,
+        duplicate_count=0,
+    )
+
+
+def train_explicit_stage(
+    config: TrainerConfig,
+    dataset: Optional[DatasetSplit],
+    tokenizer: LanguageTokenizer,
+    model: LanguageTransformer,
+    device: str,
+    run_id: str,
+    *,
+    stage_name: str,
+    epochs: int,
+    evaluate_test_split: bool,
+) -> Tuple[LanguageTransformer, Dict[str, Any]]:
+    if dataset is None:
+        return model, {"status": "skipped", "reason": "no records for stage", "stage": stage_name}
+    if epochs <= 0:
+        return model, {"status": "skipped", "reason": "configured epochs=0", "stage": stage_name}
+    result = train(
+        config,
+        dataset,
+        tokenizer,
+        model,
+        device,
+        run_id,
+        stage_name=stage_name,
+        epochs=epochs,
+        evaluate_test_split=evaluate_test_split,
+    )
+    selected = Path(result["checkpoints"]["final"])
+    model = LanguageTransformer.load_language_model(selected, device=device, strict=True)
+    return model, result
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -3476,7 +3613,35 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--require-all-supervised-tasks",
         action="store_true",
-        help="Fail unless all seven task types are present in train/validation/test.",
+        help="Fail unless all seven task types are present in real Phase 3 train/validation/test.",
+    )
+
+    # Agent-enriched curriculum scheduling.
+    parser.add_argument(
+        "--no-agent-curriculum",
+        action="store_true",
+        help="Ignore agent-enriched 2A/2B/2C records while still allowing real Phase 3 supervision.",
+    )
+    parser.add_argument(
+        "--curriculum-2a-epochs",
+        type=int,
+        default=int(os.getenv("SLAI_LANTRA_2A_EPOCHS", "1")),
+    )
+    parser.add_argument(
+        "--curriculum-2b-epochs",
+        type=int,
+        default=int(os.getenv("SLAI_LANTRA_2B_EPOCHS", "1")),
+    )
+    parser.add_argument(
+        "--curriculum-2c-epochs",
+        type=int,
+        default=int(os.getenv("SLAI_LANTRA_2C_EPOCHS", "1")),
+    )
+    parser.add_argument(
+        "--curriculum-min-task-samples",
+        type=int,
+        default=2,
+        help="Minimum training examples per active task within each curriculum phase.",
     )
 
     # Tokenizer.
@@ -3551,6 +3716,11 @@ def config_from_args(args: argparse.Namespace) -> TrainerConfig:
         tokenizer_min_frequency=int(args.tokenizer_min_frequency),
         init_from=str(args.init_from) if args.init_from else None,
         require_all_supervised_tasks=bool(args.require_all_supervised_tasks),
+        curriculum_enabled=not bool(args.no_agent_curriculum),
+        curriculum_2a_epochs=int(args.curriculum_2a_epochs),
+        curriculum_2b_epochs=int(args.curriculum_2b_epochs),
+        curriculum_2c_epochs=int(args.curriculum_2c_epochs),
+        curriculum_min_task_samples=int(args.curriculum_min_task_samples),
         glove_bootstrap=not bool(args.no_glove_bootstrap),
         glove_epochs=int(args.glove_epochs),
         glove_batch_size=int(args.glove_batch_size),
@@ -3579,6 +3749,7 @@ def validate_config(config: TrainerConfig) -> None:
         "raw_max_length": config.raw_max_length,
         "patience": config.patience,
         "min_task_samples": config.min_task_samples,
+        "curriculum_min_task_samples": config.curriculum_min_task_samples,
         "tokenizer_vocab_size": config.tokenizer_vocab_size,
         "tokenizer_min_frequency": config.tokenizer_min_frequency,
         "glove_batch_size": config.glove_batch_size,
@@ -3599,6 +3770,9 @@ def validate_config(config: TrainerConfig) -> None:
         "generation_eval_records": config.generation_eval_records,
         "log_every": config.log_every,
         "checkpoint_every_steps": config.checkpoint_every_steps,
+        "curriculum_2a_epochs": config.curriculum_2a_epochs,
+        "curriculum_2b_epochs": config.curriculum_2b_epochs,
+        "curriculum_2c_epochs": config.curriculum_2c_epochs,
     }
     for name, value in nonnegative.items():
         if value < 0:
@@ -3658,7 +3832,7 @@ def build_report(
             "coverage": dict(supervised_coverage or {}),
         }
     return {
-        "schema": "slai.lantra.training-report.v3",
+        "schema": "slai.lantra.training-report.v4",
         "run_id": run_id,
         "started_at": started_at,
         "completed_at": utc_now(),
@@ -3667,10 +3841,14 @@ def build_report(
         "trainer": {
             "module": "train_lantra",
             "training_pipeline": [
-                "bpe_tokenizer_bootstrap",
-                "glove_semantic_bootstrap",
-                "raw_text_denoising_pretraining",
-                "supervised_multitask_specialization",
+                "phase_0_bpe_tokenizer",
+                "phase_1_glove_semantic_bootstrap",
+                "phase_2a_raw_plus_knowledge_denoising",
+                "phase_2b_retrieval_representation_learning",
+                "phase_2c_validated_factual_reasoning_curriculum",
+                "phase_2d_optional_offline_perception_filtering",
+                "phase_3_real_supervised_specialization",
+                "final_heldout_evaluation",
             ],
             "direct_third_party_imports": [],
             "slai_components": [
@@ -3710,12 +3888,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         seed_runtime(config.seed)
 
         # --------------------------------------------------------------
-        # Discover optional raw corpus and optional supervised corpus.
+        # Discover raw corpus and normalized supervised/curriculum data.
         # --------------------------------------------------------------
-        # Loading a large document library can take minutes.  It is only needed
-        # when raw pretraining is enabled or when the tokenizer is explicitly
-        # being retrained from raw text.  Supervised-only continuation runs must
-        # not pay the document-extraction cost.
         needs_raw_corpus = config.raw_pretrain_epochs > 0 or config.retrain_tokenizer
         if needs_raw_corpus:
             raw_files = discover_raw_text_files(config.raw_text_paths)
@@ -3741,9 +3915,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         supervised_files = discover_data_files(config.data_paths)
         dataset: Optional[DatasetSplit] = None
+        phase_plan: Optional[LantraPhasePlan] = None
+        phase_datasets: Dict[str, Optional[DatasetSplit]] = {
+            "2a": None,
+            "2b": None,
+            "2c": None,
+            "3": None,
+        }
+        curriculum_coverage: Dict[str, Any] = {}
         supervised_coverage: Optional[Dict[str, Any]] = None
+        cross_phase_split_validation: Dict[str, Any] = {
+            "status": "not_applicable",
+            "reason": "curriculum or raw corpus not loaded",
+        }
+
         if supervised_files:
-            LOGGER.info("LANTRA supervised data files: %s", [str(path) for path in supervised_files])
+            LOGGER.info("LANTRA task/curriculum data files: %s", [str(path) for path in supervised_files])
             examples, duplicate_count, fingerprint = load_examples(supervised_files)
             dataset = split_examples(
                 examples,
@@ -3754,25 +3941,67 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 fingerprint=fingerprint,
                 duplicate_count=duplicate_count,
             )
-            supervised_coverage = validate_task_coverage(
-                dataset,
-                config.min_task_samples,
-                require_all_tasks=config.require_all_supervised_tasks,
-            )
+            try:
+                phase_plan = partition_lantra_dataset(dataset)
+                for phase in ("2a", "2b", "2c"):
+                    partition = phase_plan.partition(phase)
+                    phase_datasets[phase] = dataset_from_phase_partition(partition, dataset)
+                    if config.curriculum_enabled:
+                        curriculum_coverage[phase] = validate_phase_coverage(
+                            partition,
+                            min_train_samples_per_task=config.curriculum_min_task_samples,
+                        )
+                    else:
+                        curriculum_coverage[phase] = {
+                            "status": "disabled",
+                            "reason": "agent curriculum disabled",
+                            "phase": phase,
+                            "counts": partition.counts(),
+                        }
+                phase_datasets["3"] = dataset_from_phase_partition(phase_plan.phase_3, dataset)
+                if config.curriculum_enabled and raw_corpus.documents:
+                    cross_phase_split_validation = validate_curriculum_source_splits(
+                        phase_plan,
+                        {document.document_id: document.split for document in raw_corpus.documents},
+                    )
+                elif config.curriculum_enabled:
+                    cross_phase_split_validation = {
+                        "status": "skipped",
+                        "reason": "raw denoising corpus was not loaded; no raw/curriculum source overlap to verify",
+                    }
+                else:
+                    cross_phase_split_validation = {
+                        "status": "disabled",
+                        "reason": "agent curriculum disabled",
+                    }
+            except LantraPhaseScheduleError as exc:
+                raise LantraTrainingError(f"Invalid LANTRA curriculum schedule: {exc}") from exc
+
+            if phase_datasets["3"] is not None:
+                supervised_coverage = validate_task_coverage(
+                    phase_datasets["3"],
+                    config.min_task_samples,
+                    require_all_tasks=config.require_all_supervised_tasks,
+                )
+
             PRINTER.pretty(
-                "LANTRA SUPERVISED DATASET",
+                "LANTRA DATASET PLAN",
                 {
                     "fingerprint_sha256": dataset.fingerprint,
                     "duplicates_removed": dataset.duplicate_count,
-                    "counts": dataset.counts(),
-                    "coverage": supervised_coverage,
+                    "all_records": dataset.counts(),
+                    "phase_plan": phase_plan.summary(),
+                    "curriculum_coverage": curriculum_coverage,
+                    "phase_3_coverage": supervised_coverage,
+                    "cross_phase_source_split_validation": cross_phase_split_validation,
+                    "curriculum_enabled": config.curriculum_enabled,
                 },
                 "success",
             )
         else:
             PRINTER.status(
-                "LANTRA SUPERVISED",
-                "No supervised LANTRA task corpus found; task specialization will be skipped.",
+                "LANTRA DATA",
+                "No supervised/curriculum LANTRA JSONL corpus found; phases 2A-agent/2B/2C/3 will be skipped.",
                 "info",
             )
 
@@ -3797,7 +4026,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
         phases: Dict[str, Any] = {
-            "bpe": {
+            "phase_0_bpe": {
                 "status": "completed",
                 "vocab_size": len(tokenizer.vocab),
                 "tokenizer_stats": tokenizer.stats().to_dict() if hasattr(tokenizer, "stats") else {},
@@ -3826,18 +4055,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 device,
                 run_id,
             )
-            phases["glove"] = {
-                "initialization": initialization,
-                **glove_result,
-            }
+            phases["phase_1_glove"] = {"initialization": initialization, **glove_result}
             genuine_training_signal = genuine_training_signal or glove_result.get("status") == "completed"
             PRINTER.pretty("LANTRA GLOVE ASSET", glove_asset.to_dict(), "success")
         else:
-            phases["glove"] = {"status": "skipped", "reason": "no compatible/configured GloVe resource"}
+            phases["phase_1_glove"] = {
+                "status": "skipped",
+                "reason": "no compatible/configured GloVe resource",
+            }
             PRINTER.status("LANTRA GLOVE", "No compatible GloVe bootstrap resource selected.", "info")
 
         # --------------------------------------------------------------
-        # Phase 2: raw-text denoising self-supervised pretraining.
+        # Phase 2A: ordinary raw denoising + knowledge-aware reconstruction.
         # --------------------------------------------------------------
         model, raw_result = raw_text_pretrain(
             config,
@@ -3846,54 +4075,210 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             model,
             device,
             run_id,
+            evaluate_test_split=False,
         )
-        phases["raw_text"] = raw_result
-        genuine_training_signal = genuine_training_signal or raw_result.get("status") == "completed"
+        phase_2a_agent: Dict[str, Any]
+        if config.curriculum_enabled:
+            model, phase_2a_agent = train_explicit_stage(
+                config,
+                phase_datasets["2a"],
+                tokenizer,
+                model,
+                device,
+                run_id,
+                stage_name="phase_2a_knowledge",
+                epochs=config.curriculum_2a_epochs,
+                evaluate_test_split=False,
+            )
+        else:
+            phase_2a_agent = {"status": "skipped", "reason": "agent curriculum disabled"}
+        phases["phase_2a"] = {
+            "status": (
+                "completed"
+                if raw_result.get("status") == "completed" or phase_2a_agent.get("status") == "completed"
+                else "skipped"
+            ),
+            "raw_denoising": raw_result,
+            "knowledge_aware": phase_2a_agent,
+        }
+        genuine_training_signal = genuine_training_signal or phases["phase_2a"]["status"] == "completed"
 
         # --------------------------------------------------------------
-        # Phase 3: supervised specialization when real labelled data exists.
+        # Phase 2B: retrieval representation learning.
         # --------------------------------------------------------------
-        if dataset is not None:
-            supervised_result = train(config, dataset, tokenizer, model, device, run_id)
-            phases["supervised"] = supervised_result
-            genuine_training_signal = True
-            training_result: Dict[str, Any] = {
-                "mode": "staged_with_supervised_specialization",
-                "phases": phases,
-                "final_checkpoint": supervised_result["checkpoints"]["final"],
-                "model_stats": supervised_result["model_stats"],
+        if config.curriculum_enabled:
+            model, phase_2b_result = train_explicit_stage(
+                config,
+                phase_datasets["2b"],
+                tokenizer,
+                model,
+                device,
+                run_id,
+                stage_name="phase_2b_retrieval",
+                epochs=config.curriculum_2b_epochs,
+                evaluate_test_split=False,
+            )
+        else:
+            phase_2b_result = {"status": "skipped", "reason": "agent curriculum disabled"}
+        phases["phase_2b"] = phase_2b_result
+        genuine_training_signal = genuine_training_signal or phase_2b_result.get("status") == "completed"
+
+        # --------------------------------------------------------------
+        # Phase 2C: validated factual/reasoning curriculum.
+        # --------------------------------------------------------------
+        if config.curriculum_enabled:
+            model, phase_2c_result = train_explicit_stage(
+                config,
+                phase_datasets["2c"],
+                tokenizer,
+                model,
+                device,
+                run_id,
+                stage_name="phase_2c_reasoning",
+                epochs=config.curriculum_2c_epochs,
+                evaluate_test_split=False,
+            )
+        else:
+            phase_2c_result = {"status": "skipped", "reason": "agent curriculum disabled"}
+        phases["phase_2c"] = phase_2c_result
+        genuine_training_signal = genuine_training_signal or phase_2c_result.get("status") == "completed"
+
+        # --------------------------------------------------------------
+        # Phase 2D: optional frozen Perception participation.
+        # --------------------------------------------------------------
+        perception_records = phase_plan.perception_offline_records if phase_plan is not None else 0
+        if perception_records > 0 and config.curriculum_enabled:
+            phases["phase_2d"] = {
+                "status": "completed",
+                "mode": "offline_perception_filtering_only",
+                "records": perception_records,
+                "optimizer_updates": 0,
+                "representation_distillation": False,
+                "note": (
+                    "Frozen Perception representations were used by build_lantra_curriculum.py to "
+                    "filter/annotate Phase 2B hard negatives. No unvalidated LANTRA distillation loss is fabricated."
+                ),
             }
         else:
-            phases["supervised"] = {"status": "skipped", "reason": "no supervised task corpus"}
-            if not genuine_training_signal:
-                raise LantraTrainingError(
-                    "LANTRA found a valid BPE tokenizer but no genuine model-training signal. "
-                    "Provide/restore a compatible GloVe JSON, add raw text via --raw-text/SLAI_LANTRA_RAW_TEXT, "
-                    "or add supervised task data. BPE vocabulary alone does not train Transformer weights."
+            phases["phase_2d"] = {
+                "status": "skipped",
+                "reason": "no Perception-filtered curriculum records",
+            }
+
+        # --------------------------------------------------------------
+        # Phase 3: real supervised specialization only.
+        # --------------------------------------------------------------
+        phase_3_result: Dict[str, Any]
+        if phase_datasets["3"] is not None:
+            model, phase_3_result = train_explicit_stage(
+                config,
+                phase_datasets["3"],
+                tokenizer,
+                model,
+                device,
+                run_id,
+                stage_name="supervised",
+                epochs=config.epochs,
+                evaluate_test_split=True,
+            )
+            genuine_training_signal = True
+        else:
+            phase_3_result = {
+                "status": "skipped",
+                "reason": "no non-synthetic supervised task corpus",
+            }
+        phases["phase_3"] = phase_3_result
+
+        if not genuine_training_signal:
+            raise LantraTrainingError(
+                "LANTRA found a valid BPE tokenizer but no genuine model-training signal. "
+                "Provide/restore a compatible GloVe JSON, add raw text, build an agent curriculum, "
+                "or add real supervised task data. BPE vocabulary alone does not train Transformer weights."
+            )
+
+        # --------------------------------------------------------------
+        # Final held-out evaluation. No intermediate curriculum stage sees test.
+        # --------------------------------------------------------------
+        final_evaluation: Dict[str, Any] = {
+            "policy": "test_splits_deferred_until_training_sequence_complete",
+            "raw_denoising_test_loss": None,
+            "curriculum": {},
+            "phase_3": phase_3_result.get("test") if isinstance(phase_3_result, Mapping) else None,
+        }
+        if raw_corpus.test_segments:
+            final_evaluation["raw_denoising_test_loss"] = evaluate_raw_pretraining(
+                model,
+                tokenizer,
+                raw_corpus.test_segments,
+                config,
+                device,
+            )
+        if config.curriculum_enabled:
+            for phase in ("2a", "2b", "2c"):
+                phase_dataset = phase_datasets[phase]
+                if phase_dataset is None or not phase_dataset.test:
+                    continue
+                final_evaluation["curriculum"][phase] = evaluate(
+                    model,
+                    tokenizer,
+                    phase_dataset.test,
+                    config,
+                    device,
+                    include_generation_metrics=False,
                 )
+
+        curriculum_completed = any(
+            result.get("status") == "completed"
+            for result in (phase_2a_agent, phase_2b_result, phase_2c_result)
+        )
+
+        if phase_3_result.get("status") == "completed":
+            final_checkpoint = str(phase_3_result["checkpoints"]["final"])
+            mode = (
+                "evolved_curriculum_with_supervised_specialization"
+                if curriculum_completed
+                else "staged_with_supervised_specialization"
+            )
+        else:
             final_path = Path(config.output_dir) / f"lantra_{run_id}.pt"
-            final_saved = save_phase_checkpoint(
+            final_checkpoint = save_phase_checkpoint(
                 model,
                 None,
                 final_path,
                 run_id=run_id,
-                phase="bootstrap_pretrained_final",
+                phase="evolved_pretraining_final",
                 metadata={
                     "phases": phases,
+                    "phase_plan": phase_plan.summary() if phase_plan is not None else None,
+                    "final_evaluation": final_evaluation,
                     "capability_note": (
-                        "No supervised task corpus was supplied. This checkpoint contains semantic/bootstrap "
-                        "and/or raw-text pretraining, not validated seven-task specialization."
+                        "No real non-synthetic Phase 3 corpus was supplied. The checkpoint contains "
+                        "bootstrap/raw and/or validated agent curriculum training, not full supervised specialization."
                     ),
                 },
             )
-            training_result = {
-                "mode": "bootstrap_pretraining_only",
-                "phases": phases,
-                "final_checkpoint": final_saved,
-                "model_stats": model.stats().to_dict(),
-            }
+            mode = (
+                "evolved_curriculum_pretraining_only"
+                if curriculum_completed
+                else "bootstrap_pretraining_only"
+            )
+
+        training_result: Dict[str, Any] = {
+            "mode": mode,
+            "phase_plan": phase_plan.summary() if phase_plan is not None else None,
+            "phases": phases,
+            "final_evaluation": final_evaluation,
+            "final_checkpoint": final_checkpoint,
+            "model_stats": model.stats().to_dict(),
+        }
 
         elapsed = time.perf_counter() - started_clock
+        report_coverage: Dict[str, Any] = {
+            "curriculum": curriculum_coverage,
+            "phase_3": supervised_coverage,
+            "cross_phase_source_split_validation": cross_phase_split_validation,
+            "phase_plan": phase_plan.summary() if phase_plan is not None else None,
+        }
         report = build_report(
             run_id=run_id,
             started_at=started_at,
@@ -3905,7 +4290,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             tokenizer=tokenizer,
             device=device,
             training_result=training_result,
-            supervised_coverage=supervised_coverage,
+            supervised_coverage=report_coverage,
         )
         report_path = Path(config.report_dir) / f"lantra_training_{run_id}.json"
         atomic_json_write(report_path, report)
@@ -3925,7 +4310,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             },
             "success",
         )
-        LOGGER.info("LANTRA staged training completed successfully: %s", training_result["final_checkpoint"])
+        LOGGER.info("LANTRA evolved staged training completed successfully: %s", final_checkpoint)
         return 0
 
     except LantraTrainingError as exc:
@@ -3948,7 +4333,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "error",
         )
         return 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
