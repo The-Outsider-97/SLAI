@@ -153,25 +153,12 @@ class ReasoningTypes:
         and external callers that still create strategies explicitly.
         """
         context_dict = dict(context or {})
-
-        component_names = getattr(
-            reasoning_engine,
-            "component_names",
-            None,
-        )
-
+        component_names = getattr(reasoning_engine, "component_names", None)
         if component_names:
-            return self._execute_combined(
-                list(component_names),
-                problem,
-                context_dict,
-            )
+            return self._execute_combined(list(component_names), problem, context_dict)
 
         for strategy_name, strategy_cls in self._TASK_TYPES.items():
-            if isinstance(
-                reasoning_engine,
-                strategy_cls,
-            ):
+            if isinstance(reasoning_engine, strategy_cls):
                 return self._invoke_component(
                     strategy_name,
                     reasoning_engine,
@@ -181,12 +168,7 @@ class ReasoningTypes:
 
         # Registered extension strategies are required to respect BaseReasoning's
         # declared input_data/context contract.
-        performer = getattr(
-            reasoning_engine,
-            "perform_reasoning",
-            None,
-        )
-
+        performer = getattr(reasoning_engine, "perform_reasoning", None)
         if not callable(performer):
             raise ReasoningTypeError(
                 "Reasoning engine does not expose perform_reasoning",
@@ -196,42 +178,557 @@ class ReasoningTypes:
                 },
             )
 
-        return performer(
-            problem,
-            context_dict,
-        )
+        return performer(problem, context_dict)
+
+    def select_reasoning_strategy(self, problem: str) -> Dict[str, Any]:
+        """Return the existing keyword-policy decision plus observable evidence.
+
+        This remains a deterministic heuristic.  It deliberately does not claim
+        to be a learned selector; the match evidence is exposed so Evaluation /
+        Tuning can assess the policy empirically later without coupling the hot
+        runtime path to those systems.
+        """
+        text = str(problem or "").lower()
+        matches: Dict[str, List[str]] = {}
+
+        for strategy, keywords in self.strategy_keywords.items():
+            matched_keywords = [
+                str(keyword)
+                for keyword in keywords
+                if str(keyword).lower() in text
+            ]
+            if matched_keywords:
+                matches[str(strategy)] = matched_keywords
+
+        if not matches:
+            return {
+                "strategy": self.default_strategy,
+                "method": "keyword_policy_default",
+                "matches": {},
+            }
+
+        # Preserve the existing v2.3 deterministic ordering/combination policy.
+        names = sorted(matches)
+        if len(names) > self.max_combined_types:
+            names = names[: self.max_combined_types]
+
+        return {
+            "strategy": "+".join(names),
+            "method": "keyword_policy",
+            "matches": {name: matches[name] for name in names},
+        }
 
     def determine_reasoning_strategy(self, problem: str) -> str:
+        """Backward-compatible strategy string API."""
+        return str(self.select_reasoning_strategy(problem)["strategy"])
+
+    def reason(self, task_type: str, problem: Any, context: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """Execute and normalize one reasoning request into the Phase-3 contract.
+
+        ``execute`` intentionally remains unchanged and returns the concrete
+        strategy's native result.  ``reason`` is the canonical semantic boundary
+        used by ReasoningAgent.
         """
-        Suggest a reasoning strategy based on keyword matching.
+        normalized = str(task_type or "").strip().lower()
+        if not normalized:
+            raise ReasoningTypeError(
+                "reasoning type is required",
+                context={"task_type": task_type},
+            )
 
-        Args:
-            problem: Natural language description of the problem.
+        context_dict = dict(context or {})
+        raw = self.execute(normalized, problem, context_dict)
+        return self.normalize_result(
+            normalized,
+            raw,
+            problem=problem,
+            context=context_dict,
+        )
 
-        Returns:
-            A reasoning type string (e.g., "abduction") or a combined type
-            if multiple keywords match; otherwise the default strategy.
-        """
-        text = (problem or "").lower()
-        matched = set()
-        for strategy, keywords in self.strategy_keywords.items():
-            if any(kw in text for kw in keywords):
-                matched.add(strategy)
+    def normalize_result(
+        self,
+        task_type: str,
+        raw_result: Any,
+        *,
+        problem: Any = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Normalize native strategy output without erasing strategy detail."""
+        strategy = str(task_type or "").strip().lower()
+        context_dict = dict(context or {})
 
-        if not matched:
-            return self.default_strategy
+        if "+" in strategy:
+            return self._normalize_combined_result(
+                strategy,
+                raw_result,
+                problem=problem,
+                context=context_dict,
+            )
 
-        # If more than one strategy matches, combine them (up to max_combined_types)
-        sorted_matches = sorted(matched)  # deterministic order
-        if len(sorted_matches) > self.max_combined_types:
-            sorted_matches = sorted_matches[:self.max_combined_types]
-        return "+".join(sorted_matches)
+        raw: Dict[str, Any] = (
+            dict(raw_result)
+            if isinstance(raw_result, Mapping)
+            else {"value": raw_result}
+        )
+
+        conclusion = self._extract_conclusion(strategy, raw)
+        confidence = self._extract_confidence(strategy, raw)
+        evidence = self._extract_evidence(strategy, raw, context_dict)
+        assumptions = self._extract_assumptions(raw, context_dict)
+        contradictions = self._extract_contradictions(raw)
+        validation = self._extract_validation(strategy, raw)
+        steps = self._extract_steps(strategy, raw)
+        outcome = self._infer_outcome(strategy, raw, conclusion)
+        fallback = self._extract_fallback(strategy, raw)
+
+        validation_status = str(
+            validation.get(
+                "validation_status",
+                validation.get("status", ""),
+            )
+        ).strip().lower() if validation else ""
+        degraded = bool(raw.get("degraded", False)) or validation_status in {
+            "failed",
+            "partial",
+            "unavailable",
+        }
+
+        result = {
+            "schema": "slai.reasoning.result.v1",
+            "strategy": strategy,
+            "status": "success",
+            "outcome": outcome,
+            "conclusion": conclusion,
+            "confidence": confidence,
+            "evidence": evidence,
+            "assumptions": assumptions,
+            "contradictions": contradictions,
+            "validation": validation,
+            "steps": steps,
+            "step_count": len(steps),
+            "stop_reason": self._infer_stop_reason(
+                strategy,
+                raw,
+                outcome,
+                fallback,
+            ),
+            "fallback": fallback,
+            "degraded": degraded,
+            "provenance": {
+                "strategy": strategy,
+                "input_type": type(problem).__name__,
+                "explicit_context_keys": sorted(
+                    str(key)
+                    for key in context_dict
+                    if not str(key).startswith("_")
+                ),
+                "evidence_count": len(evidence),
+                "assumption_count": len(assumptions),
+                "native_reasoning_type": raw.get("reasoning_type"),
+            },
+            # Never discard the concrete reasoner's richer native report.
+            "output": raw,
+        }
+        return json_safe_reasoning_state(result)
+
+    def _normalize_combined_result(
+        self,
+        strategy: str,
+        raw_result: Any,
+        *,
+        problem: Any,
+        context: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        raw = dict(raw_result) if isinstance(raw_result, Mapping) else {}
+        names = self._parse_combined_types(strategy)
+        native_steps = raw.get("combined_result", {})
+        component_results: List[Dict[str, Any]] = []
+
+        for index, name in enumerate(names, start=1):
+            native = None
+            if isinstance(native_steps, Mapping):
+                # Current v2.3 combined execution keys are intentionally not
+                # assumed to be the only possible representation.
+                for key in (
+                    f"step_{index}_{name}",
+                    f"step_{index}",
+                    name,
+                ):
+                    if key in native_steps:
+                        native = native_steps[key]
+                        break
+            if native is None and index == len(names):
+                native = raw.get("final_output")
+            if native is None:
+                continue
+            component_results.append(
+                self.normalize_result(
+                    name,
+                    native,
+                    problem=problem,
+                    context=context,
+                )
+            )
+
+        final = component_results[-1] if component_results else None
+        if final is None:
+            final_native = raw.get("final_output")
+            final = {
+                "conclusion": final_native,
+                "confidence": {
+                    "value": None,
+                    "type": "unavailable",
+                    "calibrated": False,
+                    "calibration_method": None,
+                    "source": None,
+                },
+                "evidence": [],
+                "assumptions": self._extract_assumptions(raw, context),
+                "contradictions": [],
+                "validation": {},
+                "outcome": "completed",
+                "fallback": {"used": False, "reason": None, "source": None},
+                "degraded": False,
+            }
+
+        return json_safe_reasoning_state(
+            {
+                "schema": "slai.reasoning.result.v1",
+                "strategy": strategy,
+                "status": "success",
+                "outcome": final.get("outcome", "completed"),
+                "conclusion": final.get("conclusion"),
+                "confidence": final.get("confidence"),
+                "evidence": final.get("evidence", []),
+                "assumptions": final.get("assumptions", []),
+                "contradictions": final.get("contradictions", []),
+                "validation": final.get("validation", {}),
+                "steps": component_results,
+                "step_count": len(component_results),
+                "stop_reason": "combined_sequence_complete",
+                "fallback": final.get(
+                    "fallback",
+                    {"used": False, "reason": None, "source": None},
+                ),
+                "degraded": any(
+                    bool(item.get("degraded", False))
+                    for item in component_results
+                ),
+                "provenance": {
+                    "strategy": strategy,
+                    "component_strategies": names,
+                    "input_type": type(problem).__name__,
+                    "explicit_context_keys": sorted(
+                        str(key)
+                        for key in context
+                        if not str(key).startswith("_")
+                    ),
+                },
+                "output": raw,
+            }
+        )
+
+    @staticmethod
+    def _as_mapping(value: Any) -> Dict[str, Any]:
+        return dict(value) if isinstance(value, Mapping) else {}
+
+    @staticmethod
+    def _safe_confidence(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return clamp_confidence(value)
+        except ReasoningError:
+            return None
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_confidence(self, strategy: str, raw: Mapping[str, Any]) -> Dict[str, Any]:
+        value: Optional[float] = None
+        semantic_type = "heuristic_confidence"
+        source: Optional[str] = None
+
+        if strategy == "deduction":
+            value = self._safe_confidence(raw.get("certainty"))
+            semantic_type = "deductive_certainty"
+            source = "certainty"
+
+        elif strategy == "abduction":
+            best = self._as_mapping(raw.get("best_explanation"))
+            value = self._safe_confidence(
+                best.get("composite_score", best.get("confidence"))
+            )
+            semantic_type = "abductive_hypothesis_score"
+            source = (
+                "best_explanation.composite_score"
+                if best.get("composite_score") is not None
+                else "best_explanation.confidence"
+            )
+
+        elif strategy == "induction":
+            metrics = self._as_mapping(raw.get("metrics"))
+            value = self._safe_confidence(metrics.get("theory_confidence"))
+            semantic_type = "inductive_support"
+            source = "metrics.theory_confidence"
+
+        elif strategy == "analogical":
+            best = self._as_mapping(raw.get("best_transfer"))
+            value = self._safe_confidence(
+                best.get("transfer_score", best.get("confidence"))
+            )
+            semantic_type = "analogical_transfer_score"
+            source = (
+                "best_transfer.transfer_score"
+                if best.get("transfer_score") is not None
+                else "best_transfer.confidence"
+            )
+
+        elif strategy == "cause_effect":
+            relationships = raw.get("validated_relationships", [])
+            scores: List[float] = []
+            if isinstance(relationships, list):
+                for item in relationships:
+                    if not isinstance(item, Mapping):
+                        continue
+                    candidate = self._safe_confidence(
+                        item.get(
+                            "confidence",
+                            item.get("causal_score", item.get("score")),
+                        )
+                    )
+                    if candidate is not None:
+                        scores.append(candidate)
+            if scores:
+                value = sum(scores) / len(scores)
+                source = "validated_relationships.mean_confidence"
+            semantic_type = "heuristic_causal_support"
+
+        elif strategy == "decompositional":
+            metrics = self._as_mapping(raw.get("metrics"))
+            understanding = self._as_mapping(raw.get("system_understanding"))
+            value = self._safe_confidence(
+                metrics.get(
+                    "confidence",
+                    understanding.get("confidence"),
+                )
+            )
+            semantic_type = "decomposition_quality_score"
+            source = (
+                "metrics.confidence"
+                if metrics.get("confidence") is not None
+                else "system_understanding.confidence"
+            )
+
+        if value is None:
+            for key in ("confidence", "certainty", "score", "probability"):
+                value = self._safe_confidence(raw.get(key))
+                if value is not None:
+                    source = key
+                    break
+
+        # Phase 4 safety: a bounded score is NOT empirically calibrated merely
+        # because it lies in [0, 1].
+        return {
+            "value": value,
+            "type": semantic_type if value is not None else "unavailable",
+            "calibrated": False,
+            "calibration_method": None,
+            "source": source,
+        }
+
+    def _extract_conclusion(self, strategy: str, raw: Mapping[str, Any]) -> Any:
+        if strategy == "deduction":
+            return raw.get("hypothesis")
+        if strategy == "abduction":
+            return self._as_mapping(raw.get("best_explanation")).get("hypothesis")
+        if strategy == "induction":
+            theory = self._as_mapping(raw.get("theory"))
+            return theory.get("theory", theory or None)
+        if strategy == "analogical":
+            return raw.get("best_transfer")
+        if strategy == "cause_effect":
+            return raw.get("predictions") or raw.get("causal_model")
+        if strategy == "decompositional":
+            return raw.get("system_understanding") or raw.get("decomposition_tree")
+        for key in ("conclusion", "result", "final_output", "answer", "value"):
+            if key in raw:
+                return raw.get(key)
+        return None
+
+    def _extract_evidence(
+        self,
+        strategy: str,
+        raw: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> List[Any]:
+        evidence: List[Any] = []
+
+        for key in ("evidence", "evidence_sources"):
+            value = context.get(key)
+            if isinstance(value, list):
+                evidence.extend(value)
+
+        if strategy == "abduction" and isinstance(raw.get("evidence_used"), list):
+            evidence.extend(raw["evidence_used"])
+        elif strategy == "deduction" and isinstance(raw.get("premises"), list):
+            evidence.extend(raw["premises"])
+        elif strategy == "induction":
+            supporting = self._as_mapping(raw.get("supporting_data"))
+            observations = supporting.get("observations_used")
+            if isinstance(observations, list):
+                evidence.extend(observations)
+        elif strategy == "analogical":
+            analogies = raw.get("alternative_analogies")
+            if isinstance(analogies, list):
+                evidence.extend(analogies)
+        elif strategy == "cause_effect":
+            relationships = raw.get("validated_relationships")
+            if isinstance(relationships, list):
+                evidence.extend(relationships)
+
+        # Preserve order while deduplicating JSON-safe representations.
+        unique: List[Any] = []
+        seen = set()
+        for item in evidence:
+            marker = repr(json_safe_reasoning_state(item))
+            if marker in seen:
+                continue
+            seen.add(marker)
+            unique.append(item)
+        return unique
+
+    def _extract_assumptions(self, raw: Mapping[str, Any], context: Mapping[str, Any]) -> List[Any]:
+        # Only explicit assumptions are reported.  The normalizer never invents
+        # hidden premises on behalf of a concrete strategy.
+        assumptions: List[Any] = []
+        for source in (context.get("assumptions"), raw.get("assumptions")):
+            if source is None:
+                continue
+            if isinstance(source, list):
+                assumptions.extend(source)
+            else:
+                assumptions.append(source)
+        return assumptions
+
+    def _extract_contradictions(self, raw: Mapping[str, Any]) -> List[Any]:
+        source = raw.get("contradictions", [])
+        if isinstance(source, list):
+            return list(source)
+        if not isinstance(source, Mapping):
+            return []
+
+        contradictions: List[Any] = []
+        for key in (
+            "internal_contradictions",
+            "hypothesis_contradictions",
+            "conflicts",
+        ):
+            value = source.get(key)
+            if isinstance(value, list):
+                contradictions.extend(value)
+        return contradictions
+
+    def _extract_validation(self, strategy: str, raw: Mapping[str, Any]) -> Dict[str, Any]:
+        if isinstance(raw.get("validation"), Mapping):
+            return dict(raw["validation"])
+
+        if strategy == "abduction":
+            best = self._as_mapping(raw.get("best_explanation"))
+            if best:
+                return {
+                    "is_supported": bool(best.get("is_supported", False)),
+                    "explanatory_power": best.get("explanatory_power"),
+                }
+
+        if strategy == "analogical":
+            best = self._as_mapping(raw.get("best_transfer"))
+            if isinstance(best.get("validation"), Mapping):
+                return dict(best["validation"])
+
+        if strategy == "deduction":
+            return {
+                "proven": bool(raw.get("proven", False)),
+                "certainty": raw.get("certainty"),
+            }
+
+        return {}
+
+    def _extract_steps(self, strategy: str, raw: Mapping[str, Any]) -> List[Any]:
+        if strategy == "deduction" and isinstance(raw.get("proof_steps"), list):
+            return list(raw["proof_steps"])
+        for key in ("steps", "trace", "reasoning_steps"):
+            value = raw.get(key)
+            if isinstance(value, list):
+                return list(value)
+        return []
+
+    def _infer_outcome(self, strategy: str, raw: Mapping[str, Any], conclusion: Any) -> str:
+        if strategy == "deduction":
+            return "supported" if bool(raw.get("proven", False)) else "indeterminate"
+        if strategy == "abduction":
+            return "supported" if raw.get("best_explanation") is not None else "indeterminate"
+        if strategy == "induction":
+            validation = self._as_mapping(raw.get("validation"))
+            return "supported" if bool(validation.get("is_valid", False)) else "indeterminate"
+        if strategy == "analogical":
+            return "supported" if raw.get("best_transfer") is not None else "indeterminate"
+        if strategy == "cause_effect":
+            relationships = raw.get("validated_relationships")
+            return "supported" if isinstance(relationships, list) and relationships else "indeterminate"
+        if strategy == "decompositional":
+            return "completed" if conclusion is not None else "indeterminate"
+
+        metrics = self._as_mapping(raw.get("metrics"))
+        if metrics.get("success") is True:
+            return "supported"
+        return "completed" if conclusion is not None else "indeterminate"
+
+    def _extract_fallback(self, strategy: str, raw: Mapping[str, Any]) -> Dict[str, Any]:
+        existing = raw.get("fallback")
+        if isinstance(existing, Mapping):
+            return {
+                "used": bool(existing.get("used", False)),
+                "reason": existing.get("reason"),
+                "source": existing.get("source"),
+            }
+
+        if strategy == "abduction":
+            best = self._as_mapping(raw.get("best_explanation"))
+            mode = str(best.get("selection_mode", "strict"))
+            if mode != "strict":
+                return {
+                    "used": True,
+                    "reason": mode,
+                    "source": "abduction_hypothesis_selection",
+                }
+
+        return {"used": False, "reason": None, "source": None}
+
+    @staticmethod
+    def _infer_stop_reason(
+        strategy: str,
+        raw: Mapping[str, Any],
+        outcome: str,
+        fallback: Mapping[str, Any],
+    ) -> str:
+        explicit = raw.get("stop_reason")
+        if explicit:
+            return str(explicit)
+        if strategy == "deduction":
+            return "proof_established" if bool(raw.get("proven", False)) else "proof_not_established"
+        if strategy == "abduction":
+            if raw.get("best_explanation") is None:
+                return "no_hypothesis_accepted"
+            return "fallback_hypothesis_selected" if fallback.get("used") else "hypothesis_selected"
+        if outcome == "indeterminate":
+            return "insufficient_support"
+        return "strategy_complete"
 
     def get_memory(self) -> Optional[ReasoningMemory]:
         """Return the shared reasoning memory instance."""
         return self.reasoning_memory
 
-    def get_cache(self) -> Optional[ReasoningCache]:
+    def get_cache(self) -> Optional[Any]:
         """Return the optional instance cache, if enabled."""
         return self._instance_cache
     
@@ -370,10 +867,7 @@ class ReasoningTypes:
     def _determine_reasoning_strategy(self, problem: str) -> str:
         return self.determine_reasoning_strategy(problem)
 
-    def _parse_combined_types(
-        self,
-        combined_type: str,
-    ) -> List[str]:
+    def _parse_combined_types(self, combined_type: str) -> List[str]:
         names = [
             name.strip().lower()
             for name in combined_type.split("+")
@@ -450,12 +944,8 @@ class ReasoningTypes:
         context: Mapping[str, Any],
     ) -> Any:
         """Adapt the canonical Reasoning request to one concrete strategy."""
-        strategy = str(
-            strategy_name
-        ).strip().lower()
-
+        strategy = str(strategy_name).strip().lower()
         context_dict = dict(context or {})
-
         problem_payload: Dict[str, Any] = (
             dict(problem)
             if isinstance(problem, Mapping)
@@ -465,10 +955,7 @@ class ReasoningTypes:
         if strategy == "abduction":
             observations = context_dict.get(
                 "observations",
-                problem_payload.get(
-                    "observations",
-                    problem,
-                ),
+                problem_payload.get("observations", problem),
             )
 
             return getattr(component, "perform_reasoning")(  # type: ignore[call-arg]
@@ -739,6 +1226,7 @@ if __name__ == "__main__":
 
     # 6. Memory integration
     memory = factory.get_memory()
+    assert memory is not None
     memory.add({"type": "test", "content": "reasoning_types_test"}, priority=0.8)
     assert memory.size() >= 1
     printer.status("PASS", "Memory integration OK", "success")

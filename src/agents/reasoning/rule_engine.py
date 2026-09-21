@@ -38,7 +38,7 @@ from types import MappingProxyType
 from collections import defaultdict
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Set, Tuple, Union, cast
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.reasoning_errors import *
@@ -511,11 +511,11 @@ class RuleEngine:
     # Built-in symbolic rules
     # ------------------------------------------------------------------
  
-    def _builtin_identity_rule(self, kb: Dict[Fact, float]) -> Dict[Fact, float]:
+    def _builtin_identity_rule(self, kb: Mapping[Fact, float]) -> Dict[Fact, float]:
         """Identity rule: assert each fact with its own confidence (no-op baseline)."""
         return {fact: conf for fact, conf in kb.items()}
  
-    def _builtin_transitive_rule(self, kb: Dict[Fact, float]) -> Dict[Fact, float]:
+    def _builtin_transitive_rule(self, kb: Mapping[Fact, float]) -> Dict[Fact, float]:
         """
         Infer ``A-R-C`` from ``A-R-B`` and ``B-R-C``.
 
@@ -668,6 +668,111 @@ class RuleEngine:
                 }
                 for name in self._rule_registry
             ]
+
+    def rule_entries(self) -> List[Tuple[str, _RuleFunc, float]]:
+        """Return an immutable-style snapshot of executable rule entries.
+
+        This is the supported bridge for ValidationEngine and agent-facing
+        orchestration.  External callers no longer need to read the private
+        ``_rule_registry`` or hold a mutable reference to ``rule_weights``.
+        """
+        with self._lock:
+            return [
+                (
+                    name,
+                    rule_func,
+                    clamp_confidence(self.rule_weights.get(name, 0.0)),
+                )
+                for name, rule_func in self._rule_registry.items()
+            ]
+
+    def rule_weight_snapshot(self) -> Dict[str, float]:
+        """Return a defensive snapshot of current adaptive rule weights."""
+        with self._lock:
+            return {
+                str(name): clamp_confidence(weight)
+                for name, weight in self.rule_weights.items()
+            }
+
+    def restore_rule_weights(self, weights: Mapping[str, Any]) -> None:
+        """Restore adaptive weights for rules present in the active runtime.
+
+        Checkpoints persist numeric adaptive state, not executable callables.
+        Consequently every restored rule must already be registered by the
+        current code/configuration.  This prevents a checkpoint from silently
+        manufacturing a rule implementation that no longer exists.
+        """
+        if not isinstance(weights, Mapping):
+            raise ReasoningValidationError(
+                "weights must be a mapping",
+                context={"actual_type": type(weights).__name__},
+            )
+
+        normalized = {
+            str(name): clamp_confidence(value)
+            for name, value in weights.items()
+        }
+
+        with self._lock:
+            unknown = sorted(set(normalized) - set(self._rule_registry))
+            if unknown:
+                raise ReasoningValidationError(
+                    "Cannot restore weights for rules absent from the active RuleEngine",
+                    context={"unknown_rules": unknown},
+                )
+
+            changed = False
+            for name, value in normalized.items():
+                if self.rule_weights.get(name) != value:
+                    self.rule_weights[name] = value
+                    changed = True
+
+            if changed:
+                self._touch_state_locked()
+
+    def replace_knowledge(
+        self,
+        facts: Mapping[Union[Fact, Any], float],
+        *,
+        allow_contradiction: bool = False,
+    ) -> int:
+        """Atomically replace the canonical working KB through RuleEngine.
+
+        This is primarily for controlled runtime reload/checkpoint restore.  It
+        preserves the identity of ``self.knowledge_base`` so ValidationEngine
+        and ProbabilisticModels can continue sharing the same mapping object.
+        """
+        if not isinstance(facts, Mapping):
+            raise ReasoningValidationError(
+                "facts must be a mapping",
+                context={"actual_type": type(facts).__name__},
+            )
+
+        normalized: Dict[Fact, float] = {
+            normalize_fact(raw_fact): clamp_confidence(raw_confidence)
+            for raw_fact, raw_confidence in facts.items()
+        }
+
+        if not allow_contradiction:
+            checked: Dict[Fact, float] = {}
+            for fact, confidence in normalized.items():
+                ensure_non_contradictory(
+                    fact,
+                    checked,
+                    threshold=self.contradiction_threshold,
+                    source="replace_knowledge",
+                )
+                checked[fact] = confidence
+
+        with self._lock:
+            if dict(self.knowledge_base) == normalized:
+                return len(normalized)
+
+            self.knowledge_base.clear()
+            self.knowledge_base.update(normalized)
+            self._touch_state_locked()
+
+        return len(normalized)
  
     # ------------------------------------------------------------------
     # Knowledge base mutation
@@ -824,7 +929,14 @@ class RuleEngine:
                 # Enforce the rule purity contract.
                 kb_view = MappingProxyType(kb_snapshot)
 
-                ranked_rules = rank_rules_by_weight(rule_snapshot, weight_snapshot)
+                # The helper's legacy RuleEntry type uses a mutable-Dict
+                # callback, while registered rules intentionally accept any
+                # Mapping.  Keep the registry's stricter, read-only contract
+                # and bridge the helper's narrower annotation here.
+                ranked_rules = rank_rules_by_weight(
+                    cast(Any, rule_snapshot),
+                    weight_snapshot,
+                )
 
                 if (
                     self.exploration_rate > 0.0
@@ -864,7 +976,7 @@ class RuleEngine:
 
                     try:
                         result = (
-                            rule_func(kb_view)
+                            rule_func(dict(kb_view))
                             or {}
                         )
 
@@ -1251,7 +1363,7 @@ class RuleEngine:
                 def _make_rule(
                     antecedents: tuple, consequents: tuple, conf: float
                 ) -> _RuleFunc:
-                    def rule_func(kb: Dict[Fact, float]) -> Dict[Fact, float]:
+                    def rule_func(kb: Mapping[Fact, float]) -> Mapping[Fact, float]:
                         matches = [f for f in kb if all(e in f for e in antecedents)]
                         if not matches:
                             return {}
@@ -1943,33 +2055,6 @@ class RuleEngine:
     # ------------------------------------------------------------------
     # RuleEngine state API
     # ------------------------------------------------------------------
- 
-    def rule_entries(self) -> List[Tuple[str, _RuleFunc, float]]:
-        """Return a stable snapshot of registered symbolic rules."""
-        with self._lock:
-            return [
-                (name, rule_func, self.rule_weights.get(name, 0.0))
-                for name, rule_func
-                in self._rule_registry.items()
-            ]
-
-
-    def replace_knowledge(self, knowledge: Mapping[Any, Any]) -> None:
-        """
-        Replace the working symbolic KB in place.
-
-        In-place replacement preserves references held by ValidationEngine and
-        ProbabilisticModels.
-        """
-        normalized: Dict[Fact, float] = {}
-
-        for raw_fact, confidence in knowledge.items():
-            normalized[normalize_fact(raw_fact)] = clamp_confidence(confidence)
-
-        with self._lock:
-            self.knowledge_base.clear()
-            self.knowledge_base.update(normalized)
-
 
     def set_fact_confidence(self, fact: Any, confidence: float) -> None:
         """Set one fact confidence exactly, rather than merge upward."""
