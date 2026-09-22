@@ -99,9 +99,7 @@ def normalize_curriculum_phase(value: Any) -> Optional[str]:
     }
     normalized = aliases.get(phase)
     if normalized is None:
-        raise LantraPhaseScheduleError(
-            f"Unsupported curriculum phase {value!r}; expected 2a, 2b, 2c, 2d, or 3."
-        )
+        raise LantraPhaseScheduleError(f"Unsupported curriculum phase {value!r}; expected 2a, 2b, 2c, 2d, or 3.")
     return normalized
 
 
@@ -226,9 +224,7 @@ def partition_lantra_dataset(dataset: Any) -> LantraPhasePlan:
     for split_name in VALID_SPLITS:
         records = getattr(dataset, split_name, None)
         if records is None:
-            raise LantraPhaseScheduleError(
-                f"Dataset object is missing required split attribute {split_name!r}."
-            )
+            raise LantraPhaseScheduleError(f"Dataset object is missing required split attribute {split_name!r}.")
         for example in records:
             meta = _metadata(example)
             phase = normalize_curriculum_phase(meta.get("curriculum_phase"))
