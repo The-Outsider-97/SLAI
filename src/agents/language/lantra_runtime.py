@@ -1,63 +1,35 @@
 from __future__ import annotations
 
-"""
-LANTRA Runtime / Inference Adapter
+"""LANTRA inference runtime for SLAI v2.3.
 
-Core function
--------------
-Bind SLAI's trained LANTRA LanguageTransformer checkpoint to the existing
-LanguageTokenizer and expose stable inference contracts for the seven LANTRA
-tasks without duplicating tokenizer, transformer, checkpoint, or model logic.
+This module binds the existing LanguageTokenizer and LanguageTransformer to the
+trained LANTRA checkpoint. It owns inference-time model/tokenizer binding and
+exposes the seven LANTRA task contracts. It does not define a second model,
+second tokenizer, retrieval system, or NLU implementation.
 
-Ownership
----------
-LanguageTokenizer
-    Owns BPE tokenization and BPE resources.
-
-LanguageTransformer
-    Owns the encoder-decoder architecture, generation, representation extraction,
-    sequence scoring, and checkpoint loading.
-
-LantraRuntime
-    Owns inference-time binding of tokenizer + trained checkpoint, exact task
-    prompt serialization, device placement, runtime validation, batching for
-    representation tasks, and task-facing inference APIs.
-
-NLGEngine
-    Owns template/neural/hybrid response-generation policy.
-
-LanguageAgent
-    Owns orchestration and decides whether LANTRA is enabled for the agent.
-
-Important
----------
-This module deliberately does not train, fine-tune, mutate task-specific model
-parameters, perform retrieval, or duplicate KnowledgeAgent search. It consumes
-the already-trained LANTRA checkpoint and can embed/rerank caller-supplied
-candidates.
+NLUEngine may consume this runtime as semantic evidence, but only after its
+normal deterministic intent analysis reports ambiguity or low confidence.
 """
 
 import threading
 import time as time_module
-import torch
-
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
+import torch
+
 from .modules.language_tokenizer import LanguageTokenizer
 from .modules.language_transformer import LanguageTransformer
 from .utils.config_loader import get_config_section
-from .utils.language_error import *
-from .utils.language_helpers import *
+from .utils.language_error import *  # type: ignore
+from .utils.language_helpers import *  # type: ignore
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
-
 
 logger = get_logger("LANTRA Runtime")
 printer = PrettyPrinter()
 
-TextSequence = Sequence[str]
 DialogueInput = Union[str, Sequence[Mapping[str, Any]]]
 
 
@@ -136,6 +108,7 @@ class LantraRuntimeStats:
     classification_calls: int
     embedding_calls: int
     rerank_calls: int
+    semantic_similarity_calls: int
     total_inference_calls: int
     total_inference_ms: float
 
@@ -144,16 +117,9 @@ class LantraRuntimeStats:
 
 
 class LantraRuntime:
-    """Inference-only runtime for the trained LANTRA small language model."""
+    """Inference-only runtime for the trained SLAI LANTRA model."""
 
-    VERSION = "1.0"
-    SUPPORTED_SEQ2SEQ_TASKS: Tuple[str, ...] = (
-        "generation",
-        "classification",
-        "translation",
-        "summarization",
-        "dialogue",
-    )
+    VERSION = "1.1"
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
         configured = get_config_section("lantra_runtime") or {}
@@ -170,16 +136,13 @@ class LantraRuntime:
         )
         self.device_policy = ensure_text(self.config.get("device", "auto")).strip().lower()
         self.strict_checkpoint_loading = coerce_bool(
-            self.config.get("strict_checkpoint_loading", True),
-            default=True,
+            self.config.get("strict_checkpoint_loading", True), default=True
         )
         self.require_trained_tokenizer = coerce_bool(
-            self.config.get("require_trained_tokenizer", True),
-            default=True,
+            self.config.get("require_trained_tokenizer", True), default=True
         )
         self.verify_vocab_compatibility = coerce_bool(
-            self.config.get("verify_vocab_compatibility", True),
-            default=True,
+            self.config.get("verify_vocab_compatibility", True), default=True
         )
 
         inference = ensure_mapping(
@@ -187,52 +150,21 @@ class LantraRuntime:
             field_name="lantra_runtime.inference",
             allow_none=True,
         )
-        self.generation_strategy = ensure_text(
-            inference.get("generation_strategy", "greedy")
-        ).strip().lower()
+        self.source_max_length = coerce_int(inference.get("source_max_length", 384), default=384, minimum=8)
+        self.target_max_length = coerce_int(inference.get("target_max_length", 160), default=160, minimum=2)
+        self.embedding_max_length = coerce_int(inference.get("embedding_max_length", 192), default=192, minimum=8)
+        self.generation_strategy = ensure_text(inference.get("generation_strategy", "greedy")).strip().lower()
+        self.temperature = coerce_float(inference.get("temperature", 1.0), default=1.0, minimum=1e-6)
+        self.top_k = coerce_int(inference.get("top_k", 0), default=0, minimum=0)
+        self.embedding_pooling = ensure_text(inference.get("embedding_pooling", "mean")).strip().lower()
+        self.normalize_embeddings = coerce_bool(inference.get("normalize_embeddings", True), default=True)
+        self.default_rerank_top_k = coerce_int(inference.get("rerank_top_k", 10), default=10, minimum=1)
+
         if self.generation_strategy not in {"greedy", "beam", "beam_search", "sample", "sampling"}:
             self._raise_config(
                 "Unsupported LANTRA generation strategy.",
                 details={"generation_strategy": self.generation_strategy},
             )
-
-        self.source_max_length = coerce_int(
-            inference.get("source_max_length", 384),
-            default=384,
-            minimum=8,
-        )
-        self.target_max_length = coerce_int(
-            inference.get("target_max_length", 160),
-            default=160,
-            minimum=2,
-        )
-        self.embedding_max_length = coerce_int(
-            inference.get("embedding_max_length", 192),
-            default=192,
-            minimum=8,
-        )
-        self.embedding_pooling = ensure_text(
-            inference.get("embedding_pooling", "mean")
-        ).strip().lower()
-        self.normalize_embeddings = coerce_bool(
-            inference.get("normalize_embeddings", True),
-            default=True,
-        )
-        self.temperature = coerce_float(
-            inference.get("temperature", 1.0),
-            default=1.0,
-            minimum=1e-6,
-        )
-        self.top_k = coerce_int(
-            inference.get("top_k", 0),
-            default=0,
-            minimum=0,
-        )
-        self.default_rerank_top_k = coerce_int(
-            inference.get("rerank_top_k", 10),
-            default=10,
-            minimum=1,
-        )
 
         self._lock = threading.RLock()
         self._loaded_at: Optional[float] = None
@@ -240,6 +172,7 @@ class LantraRuntime:
         self._classification_calls = 0
         self._embedding_calls = 0
         self._rerank_calls = 0
+        self._semantic_similarity_calls = 0
         self._total_inference_calls = 0
         self._total_inference_ms = 0.0
 
@@ -249,7 +182,7 @@ class LantraRuntime:
         self._load_runtime()
 
     # ------------------------------------------------------------------
-    # Initialization and validation
+    # Initialization
     # ------------------------------------------------------------------
     def _resolve_device(self, policy: str) -> torch.device:
         value = (policy or "auto").strip().lower()
@@ -264,25 +197,15 @@ class LantraRuntime:
         try:
             device = torch.device(value)
         except Exception as exc:
-            self._raise_config(
-                "Invalid LANTRA device configuration.",
-                details={"device": value, "exception": str(exc)},
-                cause=exc,
-            )
+            self._raise_config("Invalid LANTRA device configuration.", details={"device": value}, cause=exc)
             raise AssertionError("unreachable")
 
         if device.type == "cuda" and not torch.cuda.is_available():
-            self._raise_config(
-                "LANTRA is configured for CUDA, but CUDA is not available.",
-                details={"device": value},
-            )
+            self._raise_config("LANTRA is configured for CUDA, but CUDA is unavailable.", details={"device": value})
         if device.type == "mps":
             mps = getattr(torch.backends, "mps", None)
             if mps is None or not mps.is_available():
-                self._raise_config(
-                    "LANTRA is configured for MPS, but MPS is not available.",
-                    details={"device": value},
-                )
+                self._raise_config("LANTRA is configured for MPS, but MPS is unavailable.", details={"device": value})
         return device
 
     def _load_runtime(self) -> None:
@@ -313,7 +236,6 @@ class LantraRuntime:
                 strict=self.strict_checkpoint_loading,
             )
             model.eval()
-
             self.tokenizer = tokenizer
             self.model = model
             self._validate_model_tokenizer_contract()
@@ -325,97 +247,56 @@ class LantraRuntime:
             self._raise_model(
                 "Failed to initialize LANTRA runtime.",
                 code=LanguageErrorCode.MODEL_LOAD_FAILED,
-                details={
-                    "checkpoint_path": str(checkpoint),
-                    "device": str(self.device),
-                    "exception": str(exc),
-                },
+                details={"checkpoint_path": str(checkpoint), "device": str(self.device), "exception": str(exc)},
                 cause=exc,
             )
 
         elapsed_ms = (time_module.perf_counter() - started) * 1000.0
         logger.info(
-            "LANTRA runtime loaded checkpoint=%s device=%s tokenizer_vocab=%s d_model=%s in %.3f ms",
+            "LANTRA runtime loaded checkpoint=%s device=%s tokenizer_vocab=%s in %.3f ms",
             checkpoint,
             self.device,
             len(self.tokenizer.vocab),
-            self.model.config.d_model,
             elapsed_ms,
         )
-        printer.status(
-            "INIT",
-            f"LANTRA runtime ready: {checkpoint.name} on {self.device}",
-            "success",
-        )
+        printer.status("INIT", f"LANTRA runtime ready: {checkpoint.name} on {self.device}", "success")
 
     def _validate_model_tokenizer_contract(self) -> None:
         if not self.verify_vocab_compatibility:
             return
-
         tokenizer_vocab = len(self.tokenizer.vocab)
-        src_vocab = int(self.model.config.src_vocab_size)
-        tgt_vocab = int(self.model.config.tgt_vocab_size)
         problems: List[str] = []
-
-        if tokenizer_vocab != src_vocab:
-            problems.append(
-                f"tokenizer vocab ({tokenizer_vocab}) != model src vocab ({src_vocab})"
-            )
-        if tokenizer_vocab != tgt_vocab:
-            problems.append(
-                f"tokenizer vocab ({tokenizer_vocab}) != model tgt vocab ({tgt_vocab})"
-            )
-
-        special_pairs = {
-            "pad_token_id": (
-                int(self.tokenizer.pad_token_id),
-                int(self.model.pad_token_id),
-            ),
-            "bos_token_id": (
-                int(self.tokenizer.bos_token_id),
-                int(self.model.bos_token_id),
-            ),
-            "eos_token_id": (
-                int(self.tokenizer.eos_token_id),
-                int(self.model.eos_token_id),
-            ),
+        if tokenizer_vocab != int(self.model.config.src_vocab_size):
+            problems.append(f"tokenizer vocab ({tokenizer_vocab}) != model src vocab ({self.model.config.src_vocab_size})")
+        if tokenizer_vocab != int(self.model.config.tgt_vocab_size):
+            problems.append(f"tokenizer vocab ({tokenizer_vocab}) != model tgt vocab ({self.model.config.tgt_vocab_size})")
+        pairs = {
+            "pad_token_id": (int(self.tokenizer.pad_token_id), int(self.model.pad_token_id)),
+            "bos_token_id": (int(self.tokenizer.bos_token_id), int(self.model.bos_token_id)),
+            "eos_token_id": (int(self.tokenizer.eos_token_id), int(self.model.eos_token_id)),
         }
-        for name, (tokenizer_value, model_value) in special_pairs.items():
+        for name, (tokenizer_value, model_value) in pairs.items():
             if tokenizer_value != model_value:
-                problems.append(
-                    f"{name}: tokenizer={tokenizer_value}, model={model_value}"
-                )
-
+                problems.append(f"{name}: tokenizer={tokenizer_value}, model={model_value}")
         if problems:
             self._raise_model(
                 "LANTRA tokenizer/model contract mismatch.",
                 code=LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH,
-                details={
-                    "problems": problems,
-                    "checkpoint_path": self.checkpoint_path,
-                },
+                details={"problems": problems, "checkpoint_path": self.checkpoint_path},
             )
 
     def _validate_sequence_limits(self) -> None:
-        max_positions = int(self.model.config.max_position_embeddings)
+        maximum = int(self.model.config.max_position_embeddings)
         configured = {
             "source_max_length": self.source_max_length,
             "target_max_length": self.target_max_length,
             "embedding_max_length": self.embedding_max_length,
         }
-        too_large = {
-            key: value
-            for key, value in configured.items()
-            if value > max_positions
-        }
-        if too_large:
+        invalid = {key: value for key, value in configured.items() if value > maximum}
+        if invalid:
             self._raise_config(
                 "LANTRA inference sequence limit exceeds model positional capacity.",
-                details={
-                    "max_position_embeddings": max_positions,
-                    "configured": configured,
-                    "invalid": too_large,
-                },
+                details={"max_position_embeddings": maximum, "invalid": invalid},
             )
 
     @property
@@ -429,7 +310,7 @@ class LantraRuntime:
         )
 
     # ------------------------------------------------------------------
-    # Exact LANTRA task prompt contracts
+    # Prompt contracts
     # ------------------------------------------------------------------
     @staticmethod
     def _generation_source(prompt: str) -> str:
@@ -440,11 +321,7 @@ class LantraRuntime:
         return f"task: classification\ntext:\n{text}\nlabel:"
 
     @staticmethod
-    def _translation_source(
-        text: str,
-        source_language: str,
-        target_language: str,
-    ) -> str:
+    def _translation_source(text: str, source_language: str, target_language: str) -> str:
         return (
             "task: translation\n"
             f"source_language: {source_language}\n"
@@ -458,8 +335,7 @@ class LantraRuntime:
 
     @classmethod
     def _dialogue_source(cls, history: DialogueInput) -> str:
-        conversation = cls._format_dialogue_history(history)
-        return f"task: dialogue\nconversation:\n{conversation}\nassistant:"
+        return f"task: dialogue\nconversation:\n{cls._format_dialogue_history(history)}\nassistant:"
 
     @staticmethod
     def _embedding_source(text: str) -> str:
@@ -480,28 +356,17 @@ class LantraRuntime:
             if not value:
                 raise ValueError("Dialogue history cannot be empty.")
             return value
-
         if not isinstance(history, Sequence):
-            raise TypeError(
-                "Dialogue history must be a string or sequence of role/content mappings."
-            )
-
+            raise TypeError("Dialogue history must be a string or sequence of role/content mappings.")
         turns: List[str] = []
         for index, turn in enumerate(history):
             if not isinstance(turn, Mapping):
-                raise TypeError(
-                    f"Dialogue history item {index} must be a mapping."
-                )
+                raise TypeError(f"Dialogue history item {index} must be a mapping.")
             role = ensure_text(turn.get("role", "unknown")).strip().lower() or "unknown"
-            content = ensure_text(
-                turn.get("content", turn.get("text", turn.get("message", "")))
-            ).strip()
+            content = ensure_text(turn.get("content", turn.get("text", turn.get("message", "")))).strip()
             if not content:
-                raise ValueError(
-                    f"Dialogue history item {index} has no content."
-                )
+                raise ValueError(f"Dialogue history item {index} has no content.")
             turns.append(f"{role}: {content}")
-
         if not turns:
             raise ValueError("Dialogue history cannot be empty.")
         return "\n".join(turns)
@@ -509,12 +374,7 @@ class LantraRuntime:
     # ------------------------------------------------------------------
     # Token/model adapters
     # ------------------------------------------------------------------
-    def _encode_source(
-        self,
-        text: str,
-        *,
-        max_length: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _encode_source(self, text: str, *, max_length: int) -> Tuple[torch.Tensor, torch.Tensor]:
         payload = self.tokenizer.encode(
             ensure_text(text),
             add_special_tokens=True,
@@ -541,15 +401,9 @@ class LantraRuntime:
             self._raise_model(
                 "Unexpected LANTRA tokenizer tensor shape.",
                 code=LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH,
-                details={
-                    "input_ids_shape": list(ids_tensor.shape),
-                    "attention_mask_shape": list(mask_tensor.shape),
-                },
+                details={"input_ids_shape": list(ids_tensor.shape), "attention_mask_shape": list(mask_tensor.shape)},
             )
-        return (
-            ids_tensor.unsqueeze(0).to(self.device),
-            mask_tensor.unsqueeze(0).to(self.device),
-        )
+        return ids_tensor.unsqueeze(0).to(self.device), mask_tensor.unsqueeze(0).to(self.device)
 
     def _generate_source(
         self,
@@ -560,27 +414,17 @@ class LantraRuntime:
         strategy: Optional[str] = None,
     ) -> LantraTextResult:
         if not self.ready:
-            self._raise_model(
-                "LANTRA runtime is not ready.",
-                code=LanguageErrorCode.MODEL_UNAVAILABLE,
-            )
-
+            self._raise_model("LANTRA runtime is not ready.", code=LanguageErrorCode.MODEL_UNAVAILABLE)
         started = time_module.perf_counter()
-        effective_strategy = ensure_text(
-            strategy or self.generation_strategy
-        ).strip().lower()
+        effective_strategy = ensure_text(strategy or self.generation_strategy).strip().lower()
         effective_max_length = coerce_int(
             max_length if max_length is not None else self.target_max_length,
             default=self.target_max_length,
             minimum=2,
             maximum=int(self.model.config.max_position_embeddings),
         )
-
         with self._lock, torch.inference_mode():
-            src, _mask = self._encode_source(
-                source_text,
-                max_length=self.source_max_length,
-            )
+            src, _ = self._encode_source(source_text, max_length=self.source_max_length)
             generated = self.model.generate(
                 src,
                 strategy=effective_strategy,
@@ -597,25 +441,16 @@ class LantraRuntime:
                         code=LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH,
                         details={"type": type(generated).__name__},
                     )
-                    raise TypeError("LanguageTransformer.generate returned no tensor sequence.")
                 generated = sequences
-
-            if not isinstance(generated, torch.Tensor):
-                raise TypeError("LanguageTransformer.generate returned no tensor sequence.")
-
-            if generated.dim() != 2 or generated.size(0) < 1:
+            if not isinstance(generated, torch.Tensor) or generated.dim() != 2 or generated.size(0) < 1:
                 self._raise_model(
                     "LanguageTransformer.generate returned an invalid sequence shape.",
                     code=LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH,
-                    details={"shape": list(generated.shape)},
                 )
-
+            assert isinstance(generated, torch.Tensor)
             text = self.tokenizer.decode(
-                generated[0],
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=True,
+                generated[0], skip_special_tokens=True, clean_up_tokenization_spaces=True
             ).strip()
-
         latency_ms = (time_module.perf_counter() - started) * 1000.0
         self._generation_calls += 1
         self._record_call(latency_ms)
@@ -623,52 +458,32 @@ class LantraRuntime:
             task=task,
             text=text,
             latency_ms=latency_ms,
-            metadata={
-                "strategy": effective_strategy,
-                "device": str(self.device),
-                "max_length": effective_max_length,
-            },
+            metadata={"strategy": effective_strategy, "device": str(self.device), "max_length": effective_max_length},
         )
 
-    def _embedding_batch(
-        self,
-        texts: Sequence[str],
-        *,
-        prefix_builder: Any,
-    ) -> torch.Tensor:
+    def _embedding_batch(self, texts: Sequence[str], *, prefix_builder: Any) -> torch.Tensor:
         values = [ensure_text(text).strip() for text in texts]
         if not values or any(not value for value in values):
             raise ValueError("Embedding inputs must contain non-empty text.")
-
         encoded_ids: List[torch.Tensor] = []
         encoded_masks: List[torch.Tensor] = []
         for value in values:
-            ids, mask = self._encode_source(
-                prefix_builder(value),
-                max_length=self.embedding_max_length,
-            )
+            ids, mask = self._encode_source(prefix_builder(value), max_length=self.embedding_max_length)
             encoded_ids.append(ids.squeeze(0))
             encoded_masks.append(mask.squeeze(0))
-
         max_len = max(int(item.size(0)) for item in encoded_ids)
-        batch_size = len(encoded_ids)
+        batch = len(encoded_ids)
         ids_batch = torch.full(
-            (batch_size, max_len),
+            (batch, max_len),
             fill_value=int(self.tokenizer.pad_token_id),
             dtype=torch.long,
             device=self.device,
         )
-        mask_batch = torch.zeros(
-            (batch_size, max_len),
-            dtype=torch.long,
-            device=self.device,
-        )
-
+        mask_batch = torch.zeros((batch, max_len), dtype=torch.long, device=self.device)
         for row, (ids, mask) in enumerate(zip(encoded_ids, encoded_masks)):
             length = int(ids.size(0))
             ids_batch[row, :length] = ids
             mask_batch[row, :length] = mask
-
         output = self.model.encode_representations(
             ids_batch,
             attention_mask=mask_batch,
@@ -678,39 +493,19 @@ class LantraRuntime:
         return output.embeddings
 
     # ------------------------------------------------------------------
-    # Public seven-task inference API
+    # Public task API
     # ------------------------------------------------------------------
-    def generate(
-        self,
-        prompt: str,
-        *,
-        max_length: Optional[int] = None,
-        strategy: Optional[str] = None,
-    ) -> LantraTextResult:
+    def generate(self, prompt: str, *, max_length: Optional[int] = None, strategy: Optional[str] = None) -> LantraTextResult:
         value = ensure_text(prompt).strip()
         if not value:
             raise ValueError("Generation prompt cannot be empty.")
-        return self._generate_source(
-            self._generation_source(value),
-            task="generation",
-            max_length=max_length,
-            strategy=strategy,
-        )
+        return self._generate_source(self._generation_source(value), task="generation", max_length=max_length, strategy=strategy)
 
-    def summarize(
-        self,
-        text: str,
-        *,
-        max_length: Optional[int] = None,
-    ) -> LantraTextResult:
+    def summarize(self, text: str, *, max_length: Optional[int] = None) -> LantraTextResult:
         value = ensure_text(text).strip()
         if not value:
             raise ValueError("Summarization input cannot be empty.")
-        return self._generate_source(
-            self._summarization_source(value),
-            task="summarization",
-            max_length=max_length,
-        )
+        return self._generate_source(self._summarization_source(value), task="summarization", max_length=max_length)
 
     def translate(
         self,
@@ -726,26 +521,15 @@ class LantraRuntime:
         if not value:
             raise ValueError("Translation input cannot be empty.")
         if not source or not target:
-            raise ValueError(
-                "source_language and target_language are required for LANTRA translation."
-            )
+            raise ValueError("source_language and target_language are required for LANTRA translation.")
         return self._generate_source(
             self._translation_source(value, source, target),
             task="translation",
             max_length=max_length,
         )
 
-    def dialogue(
-        self,
-        history: DialogueInput,
-        *,
-        max_length: Optional[int] = None,
-    ) -> LantraTextResult:
-        return self._generate_source(
-            self._dialogue_source(history),
-            task="dialogue",
-            max_length=max_length,
-        )
+    def dialogue(self, history: DialogueInput, *, max_length: Optional[int] = None) -> LantraTextResult:
+        return self._generate_source(self._dialogue_source(history), task="dialogue", max_length=max_length)
 
     def classify(
         self,
@@ -757,56 +541,40 @@ class LantraRuntime:
         value = ensure_text(text).strip()
         if not value:
             raise ValueError("Classification input cannot be empty.")
-
         started = time_module.perf_counter()
         source_text = self._classification_source(value)
-
         if labels:
-            candidates = []
             seen = set()
-            for raw_label in labels:
-                label = ensure_text(raw_label).strip()
+            candidates = []
+            for raw in labels:
+                label = ensure_text(raw).strip()
                 if label and label not in seen:
                     candidates.append(label)
                     seen.add(label)
             if not candidates:
                 raise ValueError("Classification labels cannot be empty.")
-
             losses: Dict[str, float] = {}
             with self._lock, torch.inference_mode():
-                src, _src_mask = self._encode_source(
-                    source_text,
-                    max_length=self.source_max_length,
-                )
+                src, _ = self._encode_source(source_text, max_length=self.source_max_length)
                 for label in candidates:
-                    target, _target_mask = self._encode_source(
-                        label,
-                        max_length=self.target_max_length,
-                    )
+                    target, _ = self._encode_source(label, max_length=self.target_max_length)
                     score = self.model.sequence_score(
                         src,
                         target,
                         ignore_index=int(self.tokenizer.pad_token_id),
                     )
                     losses[label] = float(score.loss)
-
-            selected = min(losses, key=losses.get) # type: ignore
+            selected = min(losses, key=losses.get)  # type: ignore[arg-type]
             mode = "candidate_sequence_score"
+            latency_ms = (time_module.perf_counter() - started) * 1000.0
+            self._record_call(latency_ms)
         else:
-            generated = self._generate_source(
-                source_text,
-                task="classification",
-                max_length=max_length,
-            )
+            generated = self._generate_source(source_text, task="classification", max_length=max_length)
             selected = generated.text.strip()
             losses = {}
             mode = "generated_label"
-
-        latency_ms = (time_module.perf_counter() - started) * 1000.0
+            latency_ms = (time_module.perf_counter() - started) * 1000.0
         self._classification_calls += 1
-        if labels:
-            self._record_call(latency_ms)
-
         return LantraClassificationResult(
             label=selected,
             mode=mode,
@@ -825,6 +593,28 @@ class LantraRuntime:
         self._record_call(latency_ms)
         return embeddings
 
+    def semantic_similarity(self, query: str, candidate: str) -> float:
+        """Score one query/candidate pair with LANTRA's trained reranking space.
+
+        This is intentionally separate from ``rerank``: a one-candidate rerank is
+        an ordering operation with no comparative meaning. NLG uses this method
+        when it needs an absolute semantic relevance signal for one generated
+        candidate.
+        """
+        query_text = ensure_text(query).strip()
+        candidate_text = ensure_text(candidate).strip()
+        if not query_text or not candidate_text:
+            raise ValueError("semantic_similarity requires non-empty query and candidate text.")
+        started = time_module.perf_counter()
+        with self._lock, torch.inference_mode():
+            query_embedding = self._embedding_batch([query_text], prefix_builder=self._rerank_query_source)
+            candidate_embedding = self._embedding_batch([candidate_text], prefix_builder=self._rerank_document_source)
+            score = torch.matmul(candidate_embedding, query_embedding[0].unsqueeze(-1)).squeeze()
+        latency_ms = (time_module.perf_counter() - started) * 1000.0
+        self._semantic_similarity_calls += 1
+        self._record_call(latency_ms)
+        return float(score.detach().cpu().item())
+
     def rerank(self, query: str, candidates: Sequence[str], *, top_k: Optional[int] = None) -> LantraRerankResult:
         query_text = ensure_text(query).strip()
         documents = [ensure_text(item).strip() for item in candidates]
@@ -833,22 +623,14 @@ class LantraRuntime:
             raise ValueError("Reranking query cannot be empty.")
         if not documents:
             raise ValueError("Reranking requires at least one non-empty candidate.")
-
         started = time_module.perf_counter()
         with self._lock, torch.inference_mode():
             query_embedding = self._embedding_batch([query_text], prefix_builder=self._rerank_query_source)
             document_embeddings = self._embedding_batch(documents, prefix_builder=self._rerank_document_source)
-            # Training uses normalized representations and dot-product cosine
-            # similarity. Keep inference mathematically identical.
-            scores = torch.matmul(
-                document_embeddings,
-                query_embedding[0].unsqueeze(-1),
-            ).squeeze(-1)
-
-        requested_top_k = self.default_rerank_top_k if top_k is None else int(top_k)
-        effective_top_k = max(1, min(requested_top_k, len(documents)))
-        ranked_indices = torch.argsort(scores, descending=True).tolist()[:effective_top_k]
-
+            scores = torch.matmul(document_embeddings, query_embedding[0].unsqueeze(-1)).squeeze(-1)
+        requested = self.default_rerank_top_k if top_k is None else int(top_k)
+        effective = max(1, min(requested, len(documents)))
+        ranked_indices = torch.argsort(scores, descending=True).tolist()[:effective]
         ranked = tuple(
             LantraRankedCandidate(
                 index=int(index),
@@ -857,7 +639,6 @@ class LantraRuntime:
             )
             for index in ranked_indices
         )
-
         latency_ms = (time_module.perf_counter() - started) * 1000.0
         self._rerank_calls += 1
         self._record_call(latency_ms)
@@ -865,26 +646,16 @@ class LantraRuntime:
             query=query_text,
             candidates=ranked,
             latency_ms=latency_ms,
-            metadata={
-                "device": str(self.device),
-                "candidate_count": len(documents),
-                "top_k": effective_top_k,
-            },
+            metadata={"device": str(self.device), "candidate_count": len(documents), "top_k": effective},
         )
 
     # ------------------------------------------------------------------
-    # NLGEngine neural-generator contract
+    # NLG adapter
     # ------------------------------------------------------------------
     def nlg_generate(self, prompt: str, frame: Any, context: Mapping[str, Any]) -> str:
-        """Use the trained dialogue contract for conversational NLG calls.
-
-        Keep general generation available to callers without a conversation.
-        Reuse DialogueContext history; do not serialize internal intent/slot
-        diagnostics as if they were user instructions.
-        """
         history = context.get("history", ())
         turns: List[Dict[str, str]] = []
-        if isinstance(history, Sequence) and not isinstance(history, (str, bytes)):
+        if isinstance(history, Sequence) and not isinstance(history, (str, bytes, bytearray)):
             for item in history:
                 if not isinstance(item, Mapping):
                     continue
@@ -900,16 +671,17 @@ class LantraRuntime:
         if not turns:
             return self.generate(prompt).text
 
-        # Remove old complete messages before tokenizer truncation can discard
-        # the latest user turn. A single overlong turn is rejected explicitly.
         neural_config = get_config_section("neural_generation") or {}
         history_limit = coerce_int(neural_config.get("history_messages", 6), default=6, minimum=1)
         turns = turns[-history_limit:]
         while True:
             source = self._dialogue_source(turns)
             encoded = self.tokenizer.encode(
-                source, add_special_tokens=True, truncation=False,
-                padding=False, return_tensors=None,
+                source,
+                add_special_tokens=True,
+                truncation=False,
+                padding=False,
+                return_tensors=None,
             )
             if len(encoded["input_ids"]) <= self.source_max_length:
                 break
@@ -919,7 +691,7 @@ class LantraRuntime:
         return self.dialogue(turns).text
 
     # ------------------------------------------------------------------
-    # Lifecycle / observability
+    # Lifecycle / diagnostics
     # ------------------------------------------------------------------
     def reload(self, checkpoint_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
         with self._lock:
@@ -935,18 +707,14 @@ class LantraRuntime:
     def stats(self) -> LantraRuntimeStats:
         parameter_count = 0
         if hasattr(self, "model"):
-            counter = cast(Any, getattr(self.model, "parameter_count", None))
+            counter = getattr(self.model, "parameter_count", None)
             if callable(counter):
                 try:
                     parameter_count = int(cast(Any, counter(trainable_only=False)))
                 except TypeError:
                     parameter_count = int(cast(Any, counter()))
             else:
-                parameter_count = sum(
-                    int(parameter.numel())
-                    for parameter in self.model.parameters()
-                )
-
+                parameter_count = sum(int(parameter.numel()) for parameter in self.model.parameters())
         model_config = getattr(getattr(self, "model", None), "config", None)
         return LantraRuntimeStats(
             version=self.version,
@@ -957,26 +725,23 @@ class LantraRuntime:
             d_model=int(getattr(model_config, "d_model", 0) or 0),
             src_vocab_size=int(getattr(model_config, "src_vocab_size", 0) or 0),
             tgt_vocab_size=int(getattr(model_config, "tgt_vocab_size", 0) or 0),
-            tokenizer_vocab_size=len(getattr(self.tokenizer, "vocab", {}))
-            if hasattr(self, "tokenizer")
-            else 0,
+            tokenizer_vocab_size=len(getattr(self.tokenizer, "vocab", {})) if hasattr(self, "tokenizer") else 0,
             generation_calls=self._generation_calls,
             classification_calls=self._classification_calls,
             embedding_calls=self._embedding_calls,
             rerank_calls=self._rerank_calls,
+            semantic_similarity_calls=self._semantic_similarity_calls,
             total_inference_calls=self._total_inference_calls,
             total_inference_ms=round(self._total_inference_ms, 3),
         )
 
     def health_check(self) -> Dict[str, Any]:
-        stats = self.stats().to_dict()
-        stats.update(
+        payload = self.stats().to_dict()
+        payload.update(
             {
                 "health": "healthy" if self.ready else "degraded",
                 "loaded_at": self._loaded_at,
-                "tokenizer_trained": bool(
-                    getattr(getattr(self, "tokenizer", None), "is_trained", False)
-                ),
+                "tokenizer_trained": bool(getattr(getattr(self, "tokenizer", None), "is_trained", False)),
                 "generation_strategy": self.generation_strategy,
                 "source_max_length": self.source_max_length,
                 "target_max_length": self.target_max_length,
@@ -985,7 +750,7 @@ class LantraRuntime:
                 "normalize_embeddings": self.normalize_embeddings,
             }
         )
-        return stats
+        return payload
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -995,9 +760,6 @@ class LantraRuntime:
             "config": json_safe(self.config),
         }
 
-    # ------------------------------------------------------------------
-    # Existing language-error hierarchy reuse
-    # ------------------------------------------------------------------
     @staticmethod
     def _raise_config(
         message: str,
@@ -1013,11 +775,7 @@ class LantraRuntime:
             recoverable=False,
             details=dict(details or {}),
         )
-        raise ConfigurationLanguageError(
-            issue,
-            recoverable=False,
-            cause=cause,
-        )
+        raise ConfigurationLanguageError(issue, recoverable=False, cause=cause)
 
     @staticmethod
     def _raise_model(
@@ -1035,11 +793,7 @@ class LantraRuntime:
             recoverable=False,
             details=dict(details or {}),
         )
-        raise ModelLanguageError(
-            issue,
-            recoverable=False,
-            cause=cause,
-        )
+        raise ModelLanguageError(issue, recoverable=False, cause=cause)
 
 
 __all__ = [
