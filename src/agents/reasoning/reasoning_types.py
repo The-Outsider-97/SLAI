@@ -41,7 +41,7 @@ class ReasoningTypes:
     _TASK_TYPES: Dict[str, Type[BaseReasoning]] = {
         "abduction": ReasoningAbduction,
         "deduction": ReasoningDeductive,
-        "induction": ReasoningInductive,
+        "inductionu": ReasoningInductive,
         "analogical": ReasoningAnalogical,
         # "analitical": ReasoningAnalogical,      # backward‑compatible typo
         "decompositional": ReasoningDecompositional,
@@ -587,14 +587,25 @@ class ReasoningTypes:
                 evidence.extend(relationships)
 
         # Preserve order while deduplicating JSON-safe representations.
+        #
+        # json_safe_reasoning_state() intentionally accepts a Mapping as its
+        # root payload. Evidence items, however, may legitimately be scalar
+        # values such as strings (e.g. deductive premises), tuples, sets, or
+        # mappings. Wrap each item in a temporary mapping before serialization
+        # so the helper's contract is respected.
         unique: List[Any] = []
         seen = set()
+
         for item in evidence:
-            marker = repr(json_safe_reasoning_state(item))
+            safe_item = json_safe_reasoning_state({"value": item})["value"]
+            marker = repr(safe_item)
+
             if marker in seen:
                 continue
+
             seen.add(marker)
             unique.append(item)
+
         return unique
 
     def _extract_assumptions(self, raw: Mapping[str, Any], context: Mapping[str, Any]) -> List[Any]:
