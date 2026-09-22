@@ -1135,10 +1135,16 @@ class SecurityFeatures:
     def _scan_text_from_driver(self, driver: Any) -> str:
         if driver is None:
             return ""
-        source = safe_call(lambda: get_page_html(driver, max_length=self.options.max_scan_text_chars), default="") or ""
-        body = safe_call(lambda: get_body_text(driver, max_length=min(self.options.max_scan_text_chars, 50000)), default="") or ""
-        url = safe_call(lambda: get_current_url(driver), default="") or ""
-        title = safe_call(lambda: get_page_title(driver), default="") or ""
+        source = safe_call(
+            lambda: str(get_page_html(driver, max_length=self.options.max_scan_text_chars)),
+            default="",
+        ) or ""
+        body = safe_call(
+            lambda: str(get_body_text(driver, max_length=min(self.options.max_scan_text_chars, 50000))),
+            default="",
+        ) or ""
+        url = safe_call(lambda: str(get_current_url(driver)), default="") or ""
+        title = safe_call(lambda: str(get_page_title(driver)), default="") or ""
         return truncate_text("\n".join([url, title, body, source]), self.options.max_scan_text_chars)
 
     def _domain_from_url(self, url: str) -> str:
@@ -1323,6 +1329,43 @@ def _error_for_decision(decision: SecurityDecision, *, context: Optional[Mapping
     if SecurityFindingCategory.PRIVATE_NETWORK.value in categories:
         return PermissionDeniedError(message, context=context)
     return BrowserSecurityError(message, context=context)
+
+
+__all__ = [
+    # Constants / defaults
+    "SECURITY_SCHEMA_VERSION",
+    "DEFAULT_SECURITY_NAMESPACE",
+    "SECURITY_ACTION_SCAN",
+    "SECURITY_ACTION_ASSESS_URL",
+    "SECURITY_ACTION_ASSESS_ACTION",
+    "SECURITY_ACTION_ENFORCE",
+    "DEFAULT_ALLOWED_SCHEMES",
+    "DEFAULT_BLOCKED_SCHEMES",
+    "DEFAULT_CAPTCHA_INDICATORS",
+    "DEFAULT_BOT_BLOCK_INDICATORS",
+    "DEFAULT_RATE_LIMIT_INDICATORS",
+    "DEFAULT_LOGIN_WALL_INDICATORS",
+    "DEFAULT_SENSITIVE_VALUE_PATTERNS",
+    "DEFAULT_DOWNLOAD_EXTENSIONS",
+    "DEFAULT_HIGH_RISK_TLDS",
+    "DEFAULT_INTERNAL_HOSTNAMES",
+    "DEFAULT_SECURITY_FEATURES_CONFIG",
+    # Enums
+    "SecurityDecisionStatus",
+    "SecurityFindingCategory",
+    # Dataclasses
+    "SecurityOptions",
+    "SecurityFinding",
+    "SecurityDecision",
+    "SecurityReport",
+    # Standalone functions
+    "exponential_backoff",
+    "configured_backoff",
+    # Main class
+    "SecurityFeatures",
+    # Directly imported dependency (kept for backward compatibility)
+    "BrowserMemory",
+]
 
 
 # ---------------------------------------------------------------------------

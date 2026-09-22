@@ -49,7 +49,7 @@ from .Browser_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Browser Driver")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 # ---------------------------------------------------------------------------
@@ -750,13 +750,25 @@ BrowserDriverManager = BrowserDriver
 
 
 __all__ = [
-    "BrowserDriver",
-    "BrowserDriverManager",
+    # Module metadata
+    "BROWSER_DRIVER_SCHEMA_VERSION",
+    "DEFAULT_BROWSER_BACKEND",
+    "SUPPORTED_BROWSER_BACKENDS",
+    "DEFAULT_USER_AGENT",
+    "DEFAULT_WINDOW_SIZE",
+    "DEFAULT_CHROME_ARGS",
+    "DEFAULT_EVENT_HISTORY_LIMIT",
+    "VALID_PAGE_LOAD_STRATEGIES",
+    # Type alias
+    "DriverFactory",
+    # Dataclasses
     "BrowserDriverOptions",
     "BrowserDriverState",
     "BrowserDriverEvent",
+    # Manager class
+    "BrowserDriver",
+    "BrowserDriverManager",
 ]
-
 
 if __name__ == "__main__":
     print("\n=== Running Browser Driver ===\n")

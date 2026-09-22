@@ -31,7 +31,6 @@ import time as time_module
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-
 from selenium.common.exceptions import (
     ElementNotInteractableException,
     JavascriptException,
@@ -47,13 +46,13 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.config_loader import *
 from ..utils.browser_errors import *
 from ..utils.Browser_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Type")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 DEFAULT_TYPE_STRATEGIES: Tuple[str, ...] = (
@@ -993,6 +992,30 @@ class DoType:
         """Alias for frameworks that call this operation input_text."""
 
         return self.type_text(selector, text, clear_before=clear_before, **kwargs)
+
+
+__all__ = [
+    # Strategy sets
+    "DEFAULT_TYPE_STRATEGIES",
+    "DEFAULT_CLEAR_STRATEGIES",
+    "SUPPORTED_TYPE_STRATEGIES",
+    "SUPPORTED_CLEAR_STRATEGIES",
+    # Validation constants
+    "VALID_NEWLINE_MODES",
+    "VALID_VERIFY_MODES",
+    "TEXT_INPUT_TYPES",
+    "WRITABLE_TAGS",
+    "CONTENTEDITABLE_VALUES",
+    # Dataclasses
+    "TypeOptions",
+    "TypeRequest",
+    "TypeExecutionContext",
+    # Standalone helpers
+    "normalize_type_strategies",
+    "normalize_clear_strategies",
+    # Executor class
+    "DoType",
+]
 
 
 if __name__ == "__main__":

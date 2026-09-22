@@ -1086,6 +1086,39 @@ class BrowserFunctions:
         return success_result(action="close", message="BrowserFunctions closed", duration_ms=elapsed_ms(start_ms))
 
 
+__all__ = [
+    # Module metadata / constants
+    "BROWSER_FUNCTIONS_SCHEMA_VERSION",
+    "DEFAULT_FUNCTION_HISTORY_LIMIT",
+    "DEFAULT_PAGE_TEXT_LIMIT",
+    "DEFAULT_HTML_LIMIT",
+    "DEFAULT_SCREENSHOT_FORMAT",
+    "CANONICAL_FUNCTIONS",
+    "DEFAULT_ALIASES",
+    "MEMORY_ACTION_NAMESPACE",
+    "MEMORY_WORKFLOW_NAMESPACE",
+    "MEMORY_PAGE_NAMESPACE",
+    # Type alias
+    "BrowserCallable",
+    # Dataclasses
+    "BrowserFunctionsOptions",
+    "BrowserFunctionSpec",
+    "BrowserFunctionCall",
+    "BrowserFunctionExecution",
+    # Standalone helpers
+    "normalize_function_name",
+    "normalize_call_payload",
+    "function_result_status",
+    "is_success_result",
+    "filter_kwargs_for_callable",
+    "maybe_await",
+    # Manager class
+    "BrowserFunctions",
+    # Directly imported dependency (kept for backward compatibility)
+    "BrowserMemory",
+]
+
+
 # ---------------------------------------------------------------------------
 # Self-test block
 # ---------------------------------------------------------------------------

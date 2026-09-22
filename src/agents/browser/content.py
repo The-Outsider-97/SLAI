@@ -377,7 +377,7 @@ class ContentHandling:
         """Extract text from a PDF URL and return text for legacy callers."""
 
         handler = ContentHandling()
-        result = handler.extract_pdf(url, return_result=True)
+        result = cast(ContentExtractionResult, handler.extract_pdf(url, return_result=True))
         if result.status == "success":
             return result.text[: handler.options.preview_chars]
         message = result.error.get("message") if isinstance(result.error, Mapping) else "unknown error"
@@ -388,7 +388,7 @@ class ContentHandling:
         """Extract the abstract from an arXiv page and return text for legacy callers."""
 
         handler = ContentHandling()
-        result = handler.extract_arxiv(driver=driver, return_result=True)
+        result = cast(ContentExtractionResult, handler.extract_arxiv(driver=driver, return_result=True))
         if result.status == "success":
             return result.text[: handler.options.preview_chars]
         message = result.error.get("message") if isinstance(result.error, Mapping) else "unknown error"
@@ -403,7 +403,7 @@ class ContentHandling:
         """
 
         handler = ContentHandling()
-        processed = handler.postprocess_result(result, driver=driver, return_result=False)
+        processed = handler.postprocess_result(result, driver=driver, return_result=False) # type: ignore
         return processed if isinstance(processed, dict) else result
 
     # ------------------------------------------------------------------
@@ -424,7 +424,7 @@ class ContentHandling:
     async def do_postprocess_result(self, result: Mapping[str, Any], driver=None, **overrides: Any) -> Dict[str, Any]:
         return cast(
             Dict[str, Any],
-            await asyncio.to_thread(self.postprocess_result, result, driver=driver, return_result=False, **overrides),
+            await asyncio.to_thread(self.postprocess_result, result, driver=driver, return_result=False, **overrides), # type: ignore
         )
 
     # ------------------------------------------------------------------
@@ -451,7 +451,10 @@ class ContentHandling:
                 )
             return dict(result)
 
-        extraction = self.extract(request.url, kind=kind, driver=driver, request=request, options=options, return_result=True)
+        extraction = cast(
+            ContentExtractionResult,
+            self.extract(request.url, kind=kind, driver=driver, request=request, options=options, return_result=True),
+        )
         if return_result:
             return extraction
 
@@ -498,15 +501,15 @@ class ContentHandling:
                 raise ContentExtractionError("Content handling is disabled", context={"url": request.url})
             resolved_kind = self.classify(url=request.url, result=request.result, driver=driver, requested_kind=request.kind, options=options)
             if resolved_kind == "pdf":
-                result = self.extract_pdf(request.url, options=options, request=request, return_result=True)
+                result = cast(ContentExtractionResult, self.extract_pdf(request.url, options=options, request=request, return_result=True))
             elif resolved_kind == "arxiv":
-                result = self.extract_arxiv(driver=driver, url=request.url, options=options, request=request, return_result=True)
+                result = cast(ContentExtractionResult, self.extract_arxiv(driver=driver, url=request.url, options=options, request=request, return_result=True))
             elif resolved_kind == "page":
-                result = self.extract_page(driver, options=options, request=request, return_result=True)
+                result = cast(ContentExtractionResult, self.extract_page(driver, options=options, request=request, return_result=True))
             elif resolved_kind in {"html", "text", "json", "xml", "markdown"}:
-                result = self.extract_remote_text(request.url, kind=resolved_kind, options=options, request=request, return_result=True)
+                result = cast(ContentExtractionResult, self.extract_remote_text(request.url, kind=resolved_kind, options=options, request=request, return_result=True))
             else:
-                result = self._handle_unsupported(request=request, options=options, kind=resolved_kind)
+                result = cast(ContentExtractionResult, self._handle_unsupported(request=request, options=options, kind=resolved_kind))
             if result.metadata.duration_ms is None:
                 result = self._replace_duration(result, elapsed_ms(start_ms))
             if options.remember_results:
@@ -586,7 +589,16 @@ class ContentHandling:
         start_ms = monotonic_ms()
         try:
             if driver is None and request.url:
-                remote_result = self.extract_remote_text(request.url, kind="html", options=options, request=request, return_result=True)
+                remote_result = cast(
+                    ContentExtractionResult,
+                    self.extract_remote_text(
+                        request.url,
+                        kind="html",
+                        options=options,
+                        request=request,
+                        return_result=True,
+                    ),
+                )
                 if remote_result.status != "success":
                     return remote_result
                 abstract = self._extract_arxiv_abstract_from_html(remote_result.raw.get("html", "") if remote_result.raw else remote_result.text, options=options)
@@ -1215,6 +1227,45 @@ def safe_driver_html(driver) -> str:
         return str(driver.page_source or "")
     except Exception:
         return ""
+
+
+__all__ = [
+    # Constants
+    "CONTENT_ACTION",
+    "SUPPORTED_CONTENT_KINDS",
+    "DEFAULT_USER_AGENT",
+    "ARXIV_ABSTRACT_SELECTORS",
+    "ARXIV_TITLE_SELECTORS",
+    "DEFAULT_TEXT_SEPARATORS",
+    "PDF_MIME_TYPES",
+    "TEXTUAL_MIME_PREFIXES",
+    "TEXTUAL_MIME_TYPES",
+    "HTML_MIME_TYPES",
+    # Dataclasses
+    "ContentHandlingOptions",
+    "ContentRequest",
+    "ContentMetadata",
+    "ContentExtractionResult",
+    # Main class
+    "ContentHandling",
+    # Module-level helpers
+    "normalize_content_kind",
+    "classify_content_type",
+    "guess_content_type",
+    "guess_kind_from_url",
+    "get_header_value",
+    "extract_charset",
+    "strip_html_tags",
+    "unescape_html",
+    "html_to_readable_text",
+    "clean_arxiv_abstract",
+    "safe_domain_from_url",
+    "safe_driver_url",
+    "safe_driver_title",
+    "safe_driver_html",
+    # Directly imported dependency (kept for backward compatibility)
+    "BrowserMemory",
+]
 
 
 if __name__ == "__main__":

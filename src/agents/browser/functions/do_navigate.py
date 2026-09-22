@@ -26,12 +26,10 @@ Design goals
 import time as time_module
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
-from selenium.common.exceptions import TimeoutException, WebDriverException
-
-from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.config_loader import *
 from ..utils.browser_errors import *
 from ..utils.Browser_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
@@ -675,6 +673,17 @@ class DoNavigate:
         if action == "refresh":
             return "Page refreshed"
         return f"Navigation action '{action}' completed"
+
+
+__all__ = [
+    # Dataclasses
+    "NavigateOptions",
+    "NavigationRequest",
+    "NavigationState",
+    "NavigationHistoryEntry",
+    # Executor class
+    "DoNavigate",
+]
 
 
 if __name__ == "__main__":

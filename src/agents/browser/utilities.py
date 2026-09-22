@@ -608,6 +608,21 @@ class SignalHandler:
         }
 
 
+__all__ = [
+    # Constants
+    "DEFAULT_INTERRUPTIBLE_TASK_PATTERNS",
+    # Dataclasses
+    "UtilityOptions",
+    "SignalHandlerOptions",
+    "UtilityEvent",
+    # Classes
+    "Utilities",
+    "SignalHandler",
+    # Directly imported dependency (kept for backward compatibility)
+    "BrowserMemory",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Utilities ===\n")
     printer.status("TEST", "Utilities initialized", "info")

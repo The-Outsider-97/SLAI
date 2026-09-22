@@ -1798,3 +1798,167 @@ def log_result(result: Mapping[str, Any], *, level: int = logger.info) -> None:
     except Exception:
         logger.log(level, "%s", redact_data(result))
 
+
+
+def bounded_iterations(max_iterations: Any, *, minimum: int = 1, maximum: int = 10_000) -> int:
+    """Normalize iteration budget into safe bounded integer range."""
+    try:
+        n = int(max_iterations)
+    except (TypeError, ValueError) as exc:
+        raise RuleDefinitionError("max_iterations must be an integer") from exc
+    if minimum > maximum:
+        raise RuleDefinitionError("minimum cannot exceed maximum")
+    return max(minimum, min(n, maximum))
+
+
+__all__ = [
+    # Type aliases
+    "JsonMapping",
+    "MutableJsonMapping",
+    "Predicate",
+    # Constants
+    "HTTP_SCHEMES",
+    "SAFE_RESOURCE_SCHEMES",
+    "TRACKING_QUERY_PARAMS",
+    "SENSITIVE_KEY_PATTERNS",
+    "DEFAULT_SEARCH_BOX_SELECTORS",
+    "SEARCH_RESULT_LINK_SELECTORS",
+    "CONSENT_BUTTON_SELECTORS",
+    "CAPTCHA_INDICATORS",
+    "BROWSER_ACTIONS",
+    "TEXT_INPUT_TAGS",
+    "INTERACTIVE_TAGS",
+    "MAX_CONTEXT_TEXT",
+    "MAX_HTML_CONTEXT",
+    "MAX_URL_LENGTH",
+    # Dataclasses
+    "RetryPolicy",
+    "BrowserURL",
+    "ElementSnapshot",
+    "PageSnapshot",
+    "SearchResultSnapshot",
+    "ActionOutcome",
+    # Time / identifiers / hashing
+    "utc_now",
+    "utc_now_iso",
+    "monotonic_ms",
+    "elapsed_ms",
+    "new_correlation_id",
+    "stable_hash",
+    "fingerprint_text",
+    "truncate_text",
+    "normalize_whitespace",
+    "normalize_newlines",
+    "compact_text",
+    # Serialization / redaction
+    "is_sensitive_key",
+    "redact_scalar",
+    "redact_mapping",
+    "redact_data",
+    "looks_like_secret",
+    "safe_serialize",
+    "safe_json_dumps",
+    "safe_json_loads",
+    "prune_none",
+    "merge_dicts",
+    # Coercion / validation
+    "ensure_list",
+    "coerce_bool",
+    "coerce_int",
+    "coerce_float",
+    "clamp",
+    "require_non_empty_string",
+    # Error construction / result helpers
+    "make_browser_exception",
+    "exception_to_error_payload",
+    "success_result",
+    "error_result",
+    "normalize_result",
+    # URL helpers
+    "ensure_url_scheme",
+    "normalize_url",
+    "parse_browser_url",
+    "is_valid_url",
+    "validate_url",
+    "same_origin",
+    "domain_matches",
+    "strip_url_fragment",
+    "redact_url",
+    "join_browser_url",
+    "classify_resource_url",
+    "is_probably_pdf_url",
+    "is_arxiv_url",
+    # Selector helpers
+    "normalize_selector",
+    "validate_selector",
+    "css_escape_identifier",
+    "css_string",
+    "attr_selector",
+    "id_selector",
+    "class_selector",
+    "selector_candidates_from_metadata",
+    "combine_selectors",
+    # Driver / element helpers
+    "is_web_element",
+    "safe_call",
+    "safe_get_attribute",
+    "element_text",
+    "element_classes",
+    "element_snapshot",
+    "element_metadata",
+    "is_interactive_element",
+    "is_text_input_element",
+    "find_first_element",
+    "find_elements",
+    "wait_for_page_load",
+    "get_document_ready_state",
+    "get_current_url",
+    "get_page_title",
+    "get_body_text",
+    "get_page_html",
+    "get_viewport",
+    "get_performance_timing",
+    "detect_captcha_text",
+    "detect_captcha",
+    "capture_screenshot_b64",
+    "page_snapshot",
+    "page_snapshot_dict",
+    # Search / relevance helpers
+    "tokenize_query",
+    "score_text_relevance",
+    "search_result_from_element",
+    "extract_link_snapshots",
+    "select_best_link",
+    "search_result_dicts",
+    # Content helpers
+    "html_to_text",
+    "limit_content",
+    "content_fingerprint",
+    "extract_title_from_html",
+    "classify_content_type",
+    # Retry / timing helpers
+    "calculate_backoff_delay",
+    "sleep_backoff",
+    "retry_operation",
+    # Workflow / task normalization
+    "normalize_action_name",
+    "normalize_workflow_step",
+    "normalize_workflow",
+    "normalize_task_payload",
+    # Config helpers
+    "get_config_value",
+    "get_browser_helper_config",
+    "config_bool",
+    "config_int",
+    "config_float",
+    # Misc utilities
+    "first_truthy",
+    "dedupe_preserve_order",
+    "chunk_sequence",
+    "safe_filename",
+    "infer_file_extension_from_url",
+    "build_artifact_name",
+    "env_flag",
+    "log_result",
+    "bounded_iterations",
+]

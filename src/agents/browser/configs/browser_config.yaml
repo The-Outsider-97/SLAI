@@ -218,6 +218,9 @@ browser_functions:
       description: Workflow steps with action and params keys.
 
 
+browser_scraper: {}
+
+
 browser_driver:
   enabled: true
   auto_start: true

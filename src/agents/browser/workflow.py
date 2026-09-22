@@ -36,7 +36,7 @@ from .utils.Browser_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Workflow")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 WORKFLOW_SCHEMA_VERSION = "1.0"
@@ -1130,6 +1130,34 @@ class _MissingVariableType:
 
 
 _MissingVariable = _MissingVariableType()
+
+
+__all__ = [
+    # Constants
+    "WORKFLOW_SCHEMA_VERSION",
+    "WORKFLOW_ACTION",
+    "DEFAULT_SUPPORTED_ACTIONS",
+    "DEFAULT_ALIASES",
+    "DEFAULT_PARAM_ALIASES",
+    "DEFAULT_REQUIRED_PARAMS",
+    "SELECTOR_PARAM_NAMES",
+    "URL_PARAM_NAMES",
+    "CONTROL_KEYS",
+    # Enums
+    "WorkflowIssueSeverity",
+    "WorkflowIssueCode",
+    # Dataclasses
+    "WorkflowOptions",
+    "WorkflowValidationIssue",
+    "WorkflowStep",
+    "WorkflowDefinition",
+    "CompiledWorkflow",
+    "WorkflowDryRun",
+    # Standalone helper
+    "normalize_workflow_name",
+    # Compiler class
+    "WorkFlow",
+]
 
 
 if __name__ == "__main__":
