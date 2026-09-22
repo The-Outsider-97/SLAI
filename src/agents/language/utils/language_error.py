@@ -1575,9 +1575,19 @@ __all__ = [
     "NLGValidationError",
     "TemplateNotFoundError",
     "NLGGenerationError",
-    # Runtime errors
+    # Language-agent error base classes
     "LanguageAgentRuntimeError",
     "LanguageAgentConfigurationError",
+    # Language-agent runtime specializations
+    "LanguageAgentDisabledError",
+    "LanguageAgentInputTooLargeError",
+    "LanguageAgentStageExecutionError",
+    "LanguageAgentComponentError",
+    # Language-agent configuration specializations
+    "LanguageAgentUnsupportedStageError",
+    "LanguageAgentUnsupportedPolicyError",
+    "LanguageAgentInvalidValueError",
+    "LanguageAgentUnknownComponentError",
     # Factory
     "make_issue",
 ]
