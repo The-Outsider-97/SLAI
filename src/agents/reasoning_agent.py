@@ -1833,36 +1833,24 @@ class ReasoningAgent(BaseAgent):
             return {
                 "status": "success",
                 "task_type": task_type,
-                "added": self.add_fact(
-                    require("fact"),
-                    payload.get("confidence", 1.0),
-                ),
+                "added": self.add_fact(require("fact"), payload.get("confidence", 1.0)),
             }
 
         if task_type == "validate_fact":
-            return self.validate_fact(
-                require("fact"),
-                payload.get("threshold", 0.75),
-            )
+            return self.validate_fact(require("fact"), payload.get("threshold", 0.75))
 
         if task_type == "probabilistic_query":
             return {
                 "status": "success",
                 "task_type": task_type,
-                "probability": self.probabilistic_query(
-                    require("fact"),
-                    payload.get("evidence"),
-                ),
+                "probability": self.probabilistic_query(require("fact"), payload.get("evidence")),
             }
 
         if task_type == "multi_hop_reasoning":
             return {
                 "status": "success",
                 "task_type": task_type,
-                "score": self.multi_hop_reasoning(
-                    require("query"),
-                    payload.get("max_depth", 3),
-                ),
+                "score": self.multi_hop_reasoning(require("query"), payload.get("max_depth", 3)),
             }
 
         if task_type == "reason":
@@ -1918,11 +1906,7 @@ class ReasoningAgent(BaseAgent):
 
         for fact in batch:
             if fact in self.working_knowledge:
-                self._publish_knowledge_candidate(
-                    "stream_assert",
-                    fact,
-                    self.working_knowledge[fact],
-                )
+                self._publish_knowledge_candidate("stream_assert", fact, self.working_knowledge[fact])
 
         return {
             "added": accepted,
@@ -1951,8 +1935,8 @@ class ReasoningAgent(BaseAgent):
     # Explainable evidence-path helpers
     # ------------------------------------------------------------------
     def generate_reasoning_path(self, query: Union[str, Sequence[Any]], depth: int = 3) -> List[Dict[str, Any]]:
-        """Return a bounded path through explicit working facts.
-
+        """
+        Return a bounded path through explicit working facts.
         This is an evidence/provenance path, not hidden model chain-of-thought.
         """
         fact = normalize_fact(query)
@@ -1989,7 +1973,8 @@ class ReasoningAgent(BaseAgent):
         return [json_safe_reasoning_state(item) for item in path]
 
     def generate_chain_of_thought(self, query: Union[str, Sequence[Any]], depth: int = 3) -> List[str]:
-        """Legacy alias for explicit evidence-path display.
+        """
+        Legacy alias for explicit evidence-path display.
 
         The name is retained for v2.3 caller compatibility only; the returned
         content is derived from stored facts and is not private chain-of-thought.
@@ -2069,9 +2054,7 @@ class ReasoningAgent(BaseAgent):
                 "rule_count": len(self.rule_engine.list_rules()),
                 "rule_weights": self._rule_weight_snapshot(),
                 "conflict_count": self.conflict_count,
-                "last_forward_chaining_duration_seconds": (
-                    self.last_forward_chaining_duration_seconds
-                ),
+                "last_forward_chaining_duration_seconds": self.last_forward_chaining_duration_seconds,
                 "operation_counts": dict(self.operation_counts),
                 "history_size": len(self.reasoning_history),
                 "reasoning_types": self.types.get_stats(),
@@ -2084,9 +2067,7 @@ class ReasoningAgent(BaseAgent):
                 },
                 "component_diagnostics": {
                     "rule_engine": self._safe_component_diagnostics(self.rule_engine),
-                    "probabilistic_models": self._safe_component_diagnostics(
-                        self.probabilistic_models
-                    ),
+                    "probabilistic_models": self._safe_component_diagnostics(self.probabilistic_models),
                 },
             }
         )
@@ -2116,16 +2097,12 @@ class ReasoningAgent(BaseAgent):
 if __name__ == "__main__":
     print("\n=== Running Reasoning Agent ===\n")
     printer.status("TEST", "Reasoning Agent initialized", "info")
-
     from .agent_factory import AgentFactory
     from .collaborative.shared_memory import SharedMemory
 
     shared_memory = SharedMemory()
     agent_factory = AgentFactory()
-    agent = ReasoningAgent(
-        shared_memory=shared_memory,
-        agent_factory=agent_factory,
-    )
+    agent = ReasoningAgent(shared_memory=shared_memory, agent_factory=agent_factory)
 
     assert agent.add_fact(("Apple", "is", "Fruit"), 0.9)
     assert agent.add_fact(("Fruit", "is", "Healthy"), 0.85)
@@ -2140,14 +2117,8 @@ if __name__ == "__main__":
             "hypothesis": "Socrates is mortal",
         },
     )
-    action = agent.execute_action(
-        "query_knowledge_base",
-        {"key": ("Apple", "is", "Fruit")},
-    )
-    stream = agent.stream_update(
-        [("Banana", "is", "Fruit")],
-        confidence=0.8,
-    )
+    action = agent.execute_action("query_knowledge_base", {"key": ("Apple", "is", "Fruit")})
+    stream = agent.stream_update([("Banana", "is", "Fruit")], confidence=0.8)
     health = agent.health_check()
 
     assert isinstance(inferred, dict)
