@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 """
 Production-grade Browser Agent facade.
@@ -46,6 +46,7 @@ from .base_agent import BaseAgent
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base.utils.config_contract import assert_valid_config_contract
 from .browser.browser_functions import BrowserFunctions
+from .browser.browser_scraper import *
 from .browser.content import ContentHandling
 from .browser.security import SecurityFeatures, exponential_backoff
 from .browser.utilities import Utilities
@@ -56,7 +57,7 @@ from .browser.utils.browser_driver import BrowserDriver
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Browser Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 # ---------------------------------------------------------------------------
@@ -242,10 +243,12 @@ class BrowserAgent(BaseAgent):
     browser operations are routed through ``BrowserFunctions``.
     """
 
-    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None, driver: Any = None, *,
+    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None, driver: Any = None,
+        *,
         browser_driver: Optional[BrowserDriver] = None,
         browser_functions: Optional[BrowserFunctions] = None,
         content_handler: Optional[ContentHandling] = None,
+        scraper: Optional[BrowserScraper] = None,
         security: Optional[SecurityFeatures] = None,
         workflow: Optional[WorkFlow] = None,
         utilities: Optional[Utilities] = None,
@@ -320,6 +323,7 @@ class BrowserAgent(BaseAgent):
 
         self.browser_functions = browser_functions or self._build_browser_functions(self.driver)
         self.content = content_handler or ContentHandling()
+        self.scraper = scraper or BrowserScraper()
         self.security = security or SecurityFeatures(driver=self.driver)
         self.workflow = workflow or WorkFlow(config=self.browser_agent_config.get("workflow_config"))
         self.utilities = utilities or Utilities()
@@ -670,6 +674,10 @@ class BrowserAgent(BaseAgent):
 
     async def async_search(self, query: str, **kwargs: Any) -> Dict[str, Any]:
         return await asyncio.to_thread(self.search, query, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Scraper
+    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Workflow and task entrypoints
