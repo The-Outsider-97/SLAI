@@ -27,7 +27,7 @@ from .config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter  # type: ignore
 
 logger = get_logger("Alignment Error")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 T = TypeVar("T")
 
@@ -816,3 +816,47 @@ def wrap_alignment_exception(
         tags=tags,
         metadata=metadata,
     )
+
+__all__ = [
+    "AlignmentErrorType",
+    "AlignmentError",
+    "ConfigurationError",
+    "InitializationError",
+    "ValidationError",
+    "DataValidationError",
+    "MissingFieldError",
+    "TypeMismatchError",
+    "SensitiveAttributeError",
+    "AlignmentStateError",
+    "AlignmentMemoryError",
+    "BiasDetectionError",
+    "FairnessEvaluationError",
+    "EthicalConstraintError",
+    "CounterfactualAuditError",
+    "CausalModelError",
+    "ValueEmbeddingError",
+    "RiskAssessmentError",
+    "ConceptDriftError",
+    "PolicyAdjustmentError",
+    "HumanOversightError",
+    "AuthorizationError",
+    "AlignmentTimeoutError",
+    "TimeoutError",
+    "InterventionError",
+    "PersistenceError",
+    "ExternalDependencyError",
+    "DiagnosticsError",
+    "HumanOversightValidationError",
+    "HumanOversightAuthError",
+    "ensure_not_none",
+    "ensure_instance",
+    "ensure_non_empty_string",
+    "ensure_mapping",
+    "ensure_sequence",
+    "ensure_keys_present",
+    "ensure_columns_present",
+    "ensure_numeric_range",
+    "ensure_path_exists",
+    "validate_sensitive_attributes",
+    "wrap_alignment_exception",
+]

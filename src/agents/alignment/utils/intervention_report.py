@@ -27,7 +27,7 @@ from .config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter # type: ignore
 
 logger = get_logger("Intervention Report")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 @dataclass(frozen=True)
 class ReportMetadata:
@@ -599,3 +599,10 @@ class InterventionReport:
         if isinstance(value, datetime):
             return value.isoformat()
         return str(value)
+
+__all__ = [
+    "InterventionReport",
+    "Recommendation",
+    "ReportMetadata",
+    "TimelineEvent",
+]
