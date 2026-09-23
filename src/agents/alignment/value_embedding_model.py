@@ -9,10 +9,7 @@ Implements:
 
 from __future__ import annotations
 
-import json
-import math
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -25,7 +22,7 @@ from .alignment_memory import AlignmentMemory
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Value Embedding Model")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class ValueDataset(torch.utils.data.Dataset):
     """Dataset for ethical alignment training and evaluation."""
@@ -586,6 +583,14 @@ class ValueAuditor:
         max_dists, _ = torch.max(torch.cdist(emb, emb), dim=1)
         return float(max_dists.mean().item() * emb.size(1))
 
+__all__ = [
+    # Dataset
+    "ValueDataset",
+    # Model / training / auditing classes
+    "ValueEmbeddingModel",
+    "ValueTrainer",
+    "ValueAuditor",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Value Embedding Model ===\n")

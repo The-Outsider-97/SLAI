@@ -13,7 +13,7 @@ import random
 import numpy as np
 import pandas as pd
 
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, cast
 from itertools import combinations
 from scipy import stats
 from statsmodels.tsa.seasonal import STL
@@ -26,7 +26,7 @@ from .alignment_memory import AlignmentMemory
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Bias Detection")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class BiasDetector:
@@ -912,7 +912,7 @@ class BiasDetector:
         reject, pvals_corrected, _, _ = multipletests(p_values, alpha=alpha, method="fdr_bh")
         for index, (group_id, result) in enumerate(valid_items):
             result["significant"] = bool(reject[index])
-            result["adj_p_value"] = float(pvals_corrected[index])
+            result["adj_p_value"] = float(pvals_corrected[index]) # type: ignore
             report[group_id] = result
         return report
 
@@ -1051,13 +1051,17 @@ class BiasDetector:
                 "significant_groups": int(metric_data["stat_significance"].fillna(False).astype(bool).sum()),
             }
 
-            worst_idx = abs_values.idxmax()
-            worst_group = metric_data.loc[worst_idx]
+            # ``loc`` may return a DataFrame when the source has duplicate
+            # index labels; selecting by position guarantees a single row.
+            worst_position = int(np.argmax(abs_values.to_numpy(dtype=float)))
+            worst_group = metric_data.iloc[worst_position]
+            ratio_value: Any = worst_group["ratio_to_reference"]
+            significance_value: Any = worst_group["stat_significance"]
             report["worst_performers"][metric] = {
                 "group": worst_group["group_id"],
                 "abs_disparity": float(worst_group["abs_disparity"]),
-                "ratio_to_reference": float(worst_group["ratio_to_reference"]) if pd.notna(worst_group["ratio_to_reference"]) else None,
-                "significance": bool(worst_group["stat_significance"]) if pd.notna(worst_group["stat_significance"]) else False,
+                "ratio_to_reference": float(ratio_value) if pd.notna(ratio_value) else None,
+                "significance": bool(significance_value) if pd.notna(significance_value) else False,
             }
 
         pivot = current.pivot_table(index="group_id", columns="metric", values="abs_disparity", aggfunc="mean")
@@ -1118,8 +1122,8 @@ class BiasDetector:
             if values.empty:
                 continue
             aggregate["distribution_analysis"][metric] = {
-                "skewness": float(values.skew()) if len(values) > 2 else 0.0,
-                "kurtosis": float(values.kurtosis()) if len(values) > 3 else 0.0,
+                "skewness": float(cast(Any, values.skew())) if len(values) > 2 else 0.0,
+                "kurtosis": float(cast(Any, values.kurtosis())) if len(values) > 3 else 0.0,
                 "normality_test": self._shapiro_wilk_test(values),
             }
             aggregate["effect_sizes"][metric] = {
@@ -1243,6 +1247,9 @@ class BiasDetector:
     def _generate_run_id(self) -> str:
         return f"bias_audit_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}"
 
+__all__ = [
+    "BiasDetector",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Bias Detector ===\n")
