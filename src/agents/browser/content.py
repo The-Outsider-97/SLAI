@@ -41,21 +41,23 @@ or packaging failures should surface clearly during development and deployment.
 import asyncio
 import mimetypes
 import re
+import threading
 import time as time_module
 import requests
 
 from io import BytesIO
 from pypdf import PdfReader
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from selenium.webdriver.common.by import By
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, cast
 from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
 
-from .utils.config_loader import load_global_config, get_config_section
+from .utils.config_loader import *
 from .utils.browser_errors import *
 from .utils.Browser_helpers import *
 from .browser_memory import BrowserMemory
+from .security import SecurityFeatures
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Content Handling")
@@ -98,6 +100,16 @@ TEXTUAL_MIME_TYPES = {
     "application/atom+xml",
 }
 HTML_MIME_TYPES = {"text/html", "application/xhtml+xml"}
+REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+SENSITIVE_SESSION_HEADERS = frozenset({
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "x-api-key",
+    "api-key",
+})
 
 
 @dataclass(frozen=True)
@@ -136,6 +148,7 @@ class ContentHandlingOptions:
     classify_from_headers: bool = True
     classify_from_url: bool = True
     safe_result_text_on_error: bool = True
+    enforce_security_url_policy: bool = True
     retries: int = 1
     retry_backoff_base: float = 0.25
     retry_backoff_multiplier: float = 1.8
@@ -154,6 +167,7 @@ class ContentHandlingOptions:
         retry_cfg = dict(cfg.get("retry") or {})
         classification_cfg = dict(cfg.get("classification") or {})
         policy_cfg = dict(cfg.get("policy") or {})
+        nested_retry_attempts = retry_cfg.get("max_attempts")
 
         merged = {
             "enabled": cfg.get("enabled", True),
@@ -188,7 +202,35 @@ class ContentHandlingOptions:
             "classify_from_headers": classification_cfg.get("from_headers", cfg.get("classify_from_headers", True)),
             "classify_from_url": classification_cfg.get("from_url", cfg.get("classify_from_url", True)),
             "safe_result_text_on_error": policy_cfg.get("safe_result_text_on_error", cfg.get("safe_result_text_on_error", True)),
-            "retries": retry_cfg.get("max_attempts", cfg.get("retries", 1)),
+            "safe_result_text_on_error": policy_cfg.get("safe_result_text_on_error", cfg.get("safe_result_text_on_error", True)),
+
+            "enforce_security_url_policy": policy_cfg.get(
+                "enforce_security_url_policy",
+                cfg.get("enforce_security_url_policy", True),
+            ),
+
+            # `retry.max_attempts` means TOTAL attempts.
+            #
+            # The older flat `retries` setting continues to mean retries
+            # AFTER the first request for backwards compatibility.
+            "retries": (
+                max(
+                    0,
+                    coerce_int(
+                        nested_retry_attempts,
+                        default=1,
+                        minimum=1,
+                        maximum=21,
+                    ) - 1,
+                )
+                if nested_retry_attempts is not None
+                else cfg.get("retries", 1)
+            ),
+
+            "retry_backoff_base": retry_cfg.get("base_delay", cfg.get("retry_backoff_base", 0.25)),
+            "retry_backoff_multiplier": retry_cfg.get("multiplier", cfg.get("retry_backoff_multiplier", 1.8)),
+            "retry_backoff_max": retry_cfg.get("max_delay", cfg.get("retry_backoff_max", 3.0)),
+            "retry_jitter": retry_cfg.get("jitter", cfg.get("retry_jitter", 0.05)),
             "retry_backoff_base": retry_cfg.get("base_delay", cfg.get("retry_backoff_base", 0.25)),
             "retry_backoff_multiplier": retry_cfg.get("multiplier", cfg.get("retry_backoff_multiplier", 1.8)),
             "retry_backoff_max": retry_cfg.get("max_delay", cfg.get("retry_backoff_max", 3.0)),
@@ -238,6 +280,7 @@ class ContentHandlingOptions:
             classify_from_headers=coerce_bool(merged.get("classify_from_headers"), default=True),
             classify_from_url=coerce_bool(merged.get("classify_from_url"), default=True),
             safe_result_text_on_error=coerce_bool(merged.get("safe_result_text_on_error"), default=True),
+            enforce_security_url_policy=coerce_bool(merged.get("enforce_security_url_policy"), default=True),
             retries=coerce_int(merged.get("retries"), default=1, minimum=0, maximum=20),
             retry_backoff_base=coerce_float(merged.get("retry_backoff_base"), default=0.25, minimum=0.0, maximum=60.0),
             retry_backoff_multiplier=coerce_float(merged.get("retry_backoff_multiplier"), default=1.8, minimum=1.0, maximum=10.0),
@@ -356,12 +399,24 @@ class _LimitedBytesBuffer:
 class ContentHandling:
     """Content extractor and post-processor for browser results."""
 
-    def __init__(self, memory: Optional[BrowserMemory] = None, session: Optional[requests.Session] = None) -> None:
+    def __init__(
+            self,
+            memory: Optional[BrowserMemory] = None,
+            session: Optional[requests.Session] = None,
+            security: Optional[SecurityFeatures] = None,
+            *,
+            notation: Optional[str] = None,
+            content: Optional[str] = None,
+            ) -> None:
         self.config = load_global_config()
         self.content_config = get_config_section("content_handling") or {}
         self.options = ContentHandlingOptions.from_config(self.content_config)
         self.memory = memory if memory is not None else BrowserMemory()
-        self.session = session or requests.Session()
+        self.security = security if security is not None else SecurityFeatures(memory=self.memory)
+        self._owns_session = session is None
+        self.session = session if session is not None else requests.Session()
+        self._session_lock = threading.RLock()
+        self._closed = False
         self._configure_session()
         logger.info("Content Handling initialized.")
 
@@ -369,42 +424,81 @@ class ContentHandling:
         self.session.headers.update({"User-Agent": self.options.user_agent})
         self.session.max_redirects = self.options.max_redirects
 
+    def close(self) -> None:
+        """Release resources owned by ContentHandling."""
+
+        with self._session_lock:
+            if self._closed:
+                return
+
+            if self._owns_session:
+                self.session.close()
+
+            self._closed = True
+
+    def __enter__(self) -> "ContentHandling":
+        if self._closed:
+            raise RuntimeError("Cannot enter a closed ContentHandling instance")
+
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ContentExtractionError("ContentHandling is closed")
+
     # ------------------------------------------------------------------
     # Backwards-compatible public static entry points
     # ------------------------------------------------------------------
     @staticmethod
     def handle_pdf(url: str) -> str:
-        """Extract text from a PDF URL and return text for legacy callers."""
+        """Extract text from a PDF URL for legacy callers."""
+        with ContentHandling() as handler:
+            result = cast(ContentExtractionResult, handler.extract_pdf(url, return_result=True))
+            if result.status == "success":
+                return result.text[:handler.options.preview_chars]
 
-        handler = ContentHandling()
-        result = cast(ContentExtractionResult, handler.extract_pdf(url, return_result=True))
-        if result.status == "success":
-            return result.text[: handler.options.preview_chars]
-        message = result.error.get("message") if isinstance(result.error, Mapping) else "unknown error"
-        return f"Failed to extract PDF: {message}"
+            message = (
+                result.error.get("message")
+                if isinstance(result.error, Mapping)
+                else "unknown error"
+            )
+
+            return f"Failed to extract PDF: {message}"
 
     @staticmethod
     def handle_arxiv(driver) -> str:
-        """Extract the abstract from an arXiv page and return text for legacy callers."""
+        """Extract an arXiv abstract for legacy callers."""
+        with ContentHandling() as handler:
+            result = cast(ContentExtractionResult, handler.extract_arxiv(driver=driver, return_result=True))
+            if result.status == "success":
+                return result.text[:handler.options.preview_chars]
 
-        handler = ContentHandling()
-        result = cast(ContentExtractionResult, handler.extract_arxiv(driver=driver, return_result=True))
-        if result.status == "success":
-            return result.text[: handler.options.preview_chars]
-        message = result.error.get("message") if isinstance(result.error, Mapping) else "unknown error"
-        return f"Failed to extract arXiv content: {message}"
+            message = (
+                result.error.get("message")
+                if isinstance(result.error, Mapping)
+                else "unknown error"
+            )
+
+            return f"Failed to extract arXiv content: {message}"
 
     @staticmethod
     def postprocess_if_special(result: dict, driver) -> dict:
-        """Preserve legacy search-result post-processing contract.
+        """Preserve legacy special-result postprocessing."""
+        with ContentHandling() as handler:
+            processed = handler.postprocess_result(
+                result,
+                driver=driver,
+                return_result=False,  # type: ignore[arg-type]
+            )
 
-        Mutates and returns ``result`` when a URL has a specialized handler.
-        For richer diagnostics, use ``ContentHandling().postprocess_result``.
-        """
-
-        handler = ContentHandling()
-        processed = handler.postprocess_result(result, driver=driver, return_result=False) # type: ignore
-        return processed if isinstance(processed, dict) else result
+            return (
+                processed
+                if isinstance(processed, dict)
+                else result
+            )
 
     # ------------------------------------------------------------------
     # Async wrappers
@@ -799,18 +893,72 @@ class ContentHandling:
         return "unknown"
 
     def _fetch_bytes(self, url: str, *, options: ContentHandlingOptions, expected_kind: str = "auto") -> Tuple[bytes, Dict[str, Any]]:
+        """Fetch bounded remote content using controlled retry semantics."""
+
+        self._ensure_open()
         last_error: Optional[BaseException] = None
         for attempt in range(options.retries + 1):
+            response: Optional[requests.Response] = None
+
             try:
-                timeout = (options.connect_timeout, options.read_timeout)
-                response = self.session.get(
-                    url,
-                    timeout=timeout,
-                    allow_redirects=options.follow_redirects,
-                    verify=options.verify_ssl,
-                    stream=options.stream_downloads,
-                )
+                response = self._request_with_redirect_policy(url, options=options)
+
+                # Retry only statuses that are normally transient.
+                if (
+                    response.status_code
+                    in RETRYABLE_HTTP_STATUS_CODES
+                ):
+                    last_error = HTTPRequestError(
+                        (
+                            "Retryable HTTP status "
+                            f"{response.status_code}"
+                        ),
+                        retryable=True,
+                        context={
+                            "url": response.url,
+                            "status_code": response.status_code,
+                        },
+                    )
+
+                    if attempt >= options.retries:
+                        break
+
+                    delay = calculate_backoff_delay(
+                        attempt_index=attempt,
+                        base_delay=options.retry_backoff_base,
+                        max_delay=options.retry_backoff_max,
+                        multiplier=options.retry_backoff_multiplier,
+                        jitter=options.retry_jitter,
+                    )
+
+                    time_module.sleep(delay)
+                    continue
+
                 response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        announced_bytes = int(content_length)
+                    except (TypeError, ValueError):
+                        announced_bytes = None
+
+                    if (
+                        announced_bytes is not None
+                        and announced_bytes
+                        > options.max_download_bytes
+                    ):
+                        raise ContentExtractionError(
+                            (
+                                "Remote content exceeds "
+                                "configured byte limit"
+                            ),
+                            context={
+                                "url": response.url,
+                                "content_length": announced_bytes,
+                                "max_bytes": options.max_download_bytes,
+                            },
+                        )
+
                 body = self._read_response_bytes(response, options=options)
                 content_type = response.headers.get("content-type", "")
                 metadata = {
@@ -821,11 +969,64 @@ class ContentHandling:
                     "downloaded_bytes": len(body),
                     "expected_kind": expected_kind,
                 }
+
                 return body, metadata
-            except Exception as exc:
+
+            except requests.exceptions.SSLError as exc:
+                raise HTTPRequestError(
+                    (
+                        "TLS validation failed while fetching "
+                        "browser content"
+                    ),
+                    retryable=False,
+                    context={"url": url},
+                    cause=exc,
+                ) from exc
+
+            except requests.exceptions.TooManyRedirects as exc:
+                raise HTTPRequestError(
+                    (
+                        "Browser content request exceeded "
+                        "redirect limit"
+                    ),
+                    retryable=False,
+                    context={
+                        "url": url,
+                        "max_redirects": options.max_redirects,
+                    },
+                    cause=exc,
+                ) from exc
+
+            except requests.HTTPError as exc:
+                status_code = (
+                    exc.response.status_code
+                    if exc.response is not None
+                    else None
+                )
+
+                raise HTTPRequestError(
+                    (
+                        "Browser content request failed with "
+                        f"HTTP status {status_code}"
+                    ),
+                    retryable=False,
+                    context={
+                        "url": url,
+                        "status_code": status_code,
+                    },
+                    cause=exc,
+                ) from exc
+
+            except (
+                requests.Timeout,
+                requests.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+            ) as exc:
                 last_error = exc
+
                 if attempt >= options.retries:
                     break
+
                 delay = calculate_backoff_delay(
                     attempt_index=attempt,
                     base_delay=options.retry_backoff_base,
@@ -833,13 +1034,145 @@ class ContentHandling:
                     multiplier=options.retry_backoff_multiplier,
                     jitter=options.retry_jitter,
                 )
+
                 time_module.sleep(delay)
+
+            except BrowserError:
+                # Policy failures, validation failures, content-size failures,
+                # etc. are deterministic and must not be retried.
+                raise
+
+            except requests.RequestException as exc:
+                raise HTTPRequestError(
+                    "Browser content request failed",
+                    retryable=False,
+                    context={"url": url},
+                    cause=exc,
+                ) from exc
+
+            finally:
+                if response is not None:
+                    response.close()
+
         raise wrap_browser_exception(
-            last_error or RuntimeError("Unknown fetch failure"),
+            last_error
+            or RuntimeError("Unknown fetch failure"),
             action="fetch_content",
             message=f"Failed to fetch content from {url}",
-            context={"url": url, "expected_kind": expected_kind},
+            context={
+                "url": url,
+                "expected_kind": expected_kind,
+            },
             default_error_cls=HTTPRequestError,
+        )
+
+    def _request_with_redirect_policy(self, url: str, *, options: ContentHandlingOptions) -> requests.Response:
+        """GET a URL while validating every redirect before following it."""
+
+        current_url = self._validate_remote_url(url, options=options)
+        timeout = (options.connect_timeout, options.read_timeout)
+        with self._session_lock:
+            for redirect_index in range(
+                options.max_redirects + 1
+            ):
+                response = self.session.get(
+                    current_url,
+                    timeout=timeout,
+                    # Redirects are intentionally followed manually so the
+                    # security layer sees every target before connection.
+                    allow_redirects=False,
+                    verify=options.verify_ssl,
+                    stream=options.stream_downloads,
+                )
+
+                if (
+                    not options.follow_redirects
+                    or response.status_code
+                    not in REDIRECT_STATUS_CODES
+                ):
+                    return response
+
+                location = response.headers.get("location")
+
+                if not location:
+                    return response
+
+                if redirect_index >= options.max_redirects:
+                    response.close()
+
+                    raise requests.exceptions.TooManyRedirects(
+                        (
+                            f"Exceeded {options.max_redirects} "
+                            f"redirects for {url}"
+                        )
+                    )
+
+                next_url = urljoin(response.url or current_url, location)
+                # Critically, validation occurs BEFORE requesting the new
+                # location.
+                validated_next_url = self._validate_remote_url(next_url, options=options)
+                source_origin = self._origin(response.url or current_url)
+                target_origin = self._origin(validated_next_url)
+
+                # Manual redirects plus Session.auth can otherwise carry
+                # credentials to another origin.
+                if (
+                    source_origin != target_origin
+                    and self._session_has_sensitive_credentials()
+                ):
+                    response.close()
+
+                    raise HTTPRequestError(
+                        (
+                            "Cross-origin redirect blocked because "
+                            "the HTTP session carries credentials"
+                        ),
+                        retryable=False,
+                        context={
+                            "source_origin": source_origin,
+                            "target_origin": target_origin,
+                        },
+                    )
+                response.close()
+                current_url = validated_next_url
+
+        raise requests.exceptions.TooManyRedirects(
+            (
+                f"Exceeded {options.max_redirects} "
+                f"redirects for {url}"
+            )
+        )
+
+    @staticmethod
+    def _origin(url: str) -> Tuple[str, str, Optional[int]]:
+        """Return a normalized HTTP origin tuple."""
+
+        parsed = urlparse(str(url or ""))
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+
+        if port is None:
+            if scheme == "https":
+                port = 443
+            elif scheme == "http":
+                port = 80
+
+        return scheme, host, port
+
+    def _session_has_sensitive_credentials(self) -> bool:
+        """Check whether the reusable Session carries credentials."""
+
+        if getattr(self.session, "auth", None) is not None:
+            return True
+
+        if len(self.session.cookies) > 0:
+            return True
+
+        return any(
+            str(header).lower()
+            in SENSITIVE_SESSION_HEADERS
+            for header in self.session.headers.keys()
         )
 
     def _read_response_bytes(self, response: requests.Response, *, options: ContentHandlingOptions) -> bytes:
@@ -858,8 +1191,22 @@ class ContentHandling:
                 buffer.write(chunk)
         return buffer.getvalue()
 
-    def _validate_remote_url(self, url: str) -> str:
-        return validate_url(normalize_url(url), field_name="url", allowed_schemes=("http", "https"))
+    def _validate_remote_url(self, url: str, *, options: Optional[ContentHandlingOptions] = None) -> str:
+        """Validate URL syntax and apply browser network-security policy."""
+
+        resolved_options = (
+            options
+            if options is not None
+            else self.options
+        )
+        validated = validate_url(normalize_url(url), field_name="url", allowed_schemes=("http", "https"))
+        if (
+            resolved_options.enforce_security_url_policy
+            and self.security is not None
+        ):
+            self.security.guard_navigation(validated, raise_on_block=True)
+
+        return validated
 
     # ------------------------------------------------------------------
     # Low-level extraction helpers

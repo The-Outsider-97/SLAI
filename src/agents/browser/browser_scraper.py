@@ -409,11 +409,7 @@ def _coerce_int_tuple(
     return tuple(normalized) or default
 
 
-def _coerce_str_tuple(
-    value: Any,
-    *,
-    default: Tuple[str, ...],
-) -> Tuple[str, ...]:
+def _coerce_str_tuple(value: Any, *, default: Tuple[str, ...]) -> Tuple[str, ...]:
     if value is None:
         return default
 
@@ -440,11 +436,7 @@ def _coerce_str_tuple(
     return tuple(normalized) or default
 
 
-def _parse_retry_after(
-    value: Optional[str],
-    *,
-    max_seconds: float = 3600.0,
-) -> float:
+def _parse_retry_after(value: Optional[str], *, max_seconds: float = 3600.0) -> float:
     """Parse Retry-After seconds or HTTP-date into a bounded delay."""
 
     if not value:
@@ -479,9 +471,7 @@ def _parse_retry_after(
         return 0.0
 
 
-def _mapping_error_code(
-    data: Mapping[str, Any],
-) -> Tuple[str, Dict[str, Any]]:
+def _mapping_error_code(data: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     raw_error = data.get("error")
 
     if not isinstance(raw_error, Mapping):
@@ -570,9 +560,7 @@ class BrowserScraper:
             ) from exc
 
         parsed_endpoint = urlparse(self.api_url)
-        self._endpoint_host = (
-            parsed_endpoint.hostname or ""
-        ).lower()
+        self._endpoint_host = (parsed_endpoint.hostname or "").lower()
 
         if not self._endpoint_host:
             raise BrowserConfigurationError(
@@ -593,7 +581,6 @@ class BrowserScraper:
         )
 
         self.memory = memory
-
         # Backward-compatible attribute name from the unfinished v2.3 module.
         self.reasoning_memory = memory
 
@@ -602,11 +589,9 @@ class BrowserScraper:
         self.last = 0.0
 
         self._lock = threading.RLock()
-
         self._request_count = 0
         self._success_count = 0
         self._retry_count = 0
-
         self._last_error: Optional[str] = None
 
         logger.info(
@@ -622,9 +607,7 @@ class BrowserScraper:
         )
 
     @staticmethod
-    def _resolve_config(
-        config: Optional[Mapping[str, Any]],
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _resolve_config(config: Optional[Mapping[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Resolve both whole-config and section-only constructor inputs.
 
         Sibling browser modules accept section-specific overrides, while the
@@ -714,12 +697,7 @@ class BrowserScraper:
             else ("https",)
         )
 
-        normalized = validate_url(
-            final_url,
-            field_name="response_url",
-            allowed_schemes=allowed_schemes,
-        )
-
+        normalized = validate_url(final_url, field_name="response_url", allowed_schemes=allowed_schemes)
         final_host = (urlparse(normalized).hostname or "").lower()
 
         if (
@@ -760,9 +738,7 @@ class BrowserScraper:
                     },
                 )
 
-        body = response.read(
-            self.options.max_response_bytes + 1
-        )
+        body = response.read(self.options.max_response_bytes + 1)
 
         if len(body) > self.options.max_response_bytes:
             raise HTTPRequestError(
@@ -777,16 +753,10 @@ class BrowserScraper:
                 },
             )
 
-        charset = (
-            response.headers.get_content_charset()
-            or "utf-8"
-        )
+        charset = (response.headers.get_content_charset() or "utf-8")
 
         try:
-            text = body.decode(
-                charset,
-                errors="strict",
-            )
+            text = body.decode(charset, errors="strict")
         except (
             LookupError,
             UnicodeDecodeError,
@@ -807,9 +777,7 @@ class BrowserScraper:
             raise HTTPRequestError(
                 "Browser scraper received invalid JSON",
                 retryable=False,
-                context={
-                    "response_bytes": len(body),
-                },
+                context={"response_bytes": len(body)},
                 cause=exc,
             ) from exc
 

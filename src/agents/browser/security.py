@@ -45,6 +45,7 @@ packaging or path problems fail clearly during development and deployment.
 
 import ipaddress
 import re
+import socket
 import time as time_module
 
 from dataclasses import asdict, dataclass, field
@@ -67,7 +68,6 @@ printer = PrettyPrinter()
 # ---------------------------------------------------------------------------
 SECURITY_SCHEMA_VERSION = "1.0"
 DEFAULT_SECURITY_NAMESPACE = "security"
-
 SECURITY_ACTION_SCAN = "security_scan"
 SECURITY_ACTION_ASSESS_URL = "assess_url"
 SECURITY_ACTION_ASSESS_ACTION = "assess_action"
@@ -147,22 +147,10 @@ DEFAULT_SENSITIVE_VALUE_PATTERNS: Tuple[str, ...] = (
 )
 
 DEFAULT_DOWNLOAD_EXTENSIONS: Tuple[str, ...] = (
-    ".exe",
-    ".msi",
-    ".dmg",
-    ".pkg",
-    ".deb",
-    ".rpm",
-    ".apk",
-    ".bat",
-    ".cmd",
-    ".com",
-    ".scr",
-    ".ps1",
-    ".vbs",
-    ".js",
-    ".jar",
-    ".sh",
+    ".exe", ".msi", ".dmg", ".pkg",
+    ".deb", ".rpm", ".apk", ".bat",
+    ".cmd", ".com", ".scr", ".ps1",
+    ".vbs", ".js", ".jar", ".sh",
     ".appimage",
 )
 
@@ -196,6 +184,13 @@ DEFAULT_SECURITY_FEATURES_CONFIG: Dict[str, Any] = {
     "blocked_domain_suffixes": [],
     "high_risk_tlds": list(DEFAULT_HIGH_RISK_TLDS),
     "internal_hostnames": list(DEFAULT_INTERNAL_HOSTNAMES),
+    "internal_hostnames": list(DEFAULT_INTERNAL_HOSTNAMES),
+    "network": {
+        "resolve_hostnames": True,
+        "block_on_dns_resolution_error": False,
+        "max_resolved_addresses": 32,
+    },
+    "blocked_download_extensions": list(DEFAULT_DOWNLOAD_EXTENSIONS),
     "blocked_download_extensions": list(DEFAULT_DOWNLOAD_EXTENSIONS),
     "indicators": {
         "captcha": list(DEFAULT_CAPTCHA_INDICATORS),
@@ -279,6 +274,9 @@ class SecurityOptions:
     blocked_domain_suffixes: Tuple[str, ...] = ()
     high_risk_tlds: Tuple[str, ...] = DEFAULT_HIGH_RISK_TLDS
     internal_hostnames: Tuple[str, ...] = DEFAULT_INTERNAL_HOSTNAMES
+    resolve_hostnames: bool = True
+    block_on_dns_resolution_error: bool = False
+    max_resolved_addresses: int = 32
     blocked_download_extensions: Tuple[str, ...] = DEFAULT_DOWNLOAD_EXTENSIONS
     captcha_indicators: Tuple[str, ...] = DEFAULT_CAPTCHA_INDICATORS
     bot_block_indicators: Tuple[str, ...] = DEFAULT_BOT_BLOCK_INDICATORS
@@ -309,6 +307,7 @@ class SecurityOptions:
         backoff = dict(cfg.get("backoff") or {})
         diagnostics = dict(cfg.get("diagnostics") or {})
         memory_cfg = dict(cfg.get("memory") or {})
+        network_cfg = dict(cfg.get("network") or {})
 
         return cls(
             enabled=coerce_bool(cfg.get("enabled"), default=True),
@@ -331,6 +330,9 @@ class SecurityOptions:
             blocked_domain_suffixes=tuple(_normalize_domain_list(cfg.get("blocked_domain_suffixes"))),
             high_risk_tlds=tuple(_normalize_string_list(cfg.get("high_risk_tlds"))),
             internal_hostnames=tuple(_normalize_domain_list(cfg.get("internal_hostnames"))) or DEFAULT_INTERNAL_HOSTNAMES,
+            resolve_hostnames=coerce_bool(network_cfg.get("resolve_hostnames"), default=True),
+            block_on_dns_resolution_error=coerce_bool(network_cfg.get("block_on_dns_resolution_error"), default=False),
+            max_resolved_addresses=coerce_int(network_cfg.get("max_resolved_addresses"),default=32, minimum=1, maximum=256),
             blocked_download_extensions=tuple(_normalize_extensions(cfg.get("blocked_download_extensions"))) or DEFAULT_DOWNLOAD_EXTENSIONS,
             captcha_indicators=tuple(_normalize_indicators(indicators.get("captcha"))) or DEFAULT_CAPTCHA_INDICATORS,
             bot_block_indicators=tuple(_normalize_indicators(indicators.get("bot_block"))) or DEFAULT_BOT_BLOCK_INDICATORS,
@@ -1135,16 +1137,17 @@ class SecurityFeatures:
     def _scan_text_from_driver(self, driver: Any) -> str:
         if driver is None:
             return ""
-        source = safe_call(
-            lambda: str(get_page_html(driver, max_length=self.options.max_scan_text_chars)),
-            default="",
-        ) or ""
-        body = safe_call(
-            lambda: str(get_body_text(driver, max_length=min(self.options.max_scan_text_chars, 50000))),
-            default="",
-        ) or ""
-        url = safe_call(lambda: str(get_current_url(driver)), default="") or ""
-        title = safe_call(lambda: str(get_page_title(driver)), default="") or ""
+
+        def _safe_text(operation: Any) -> str:
+            try:
+                return str(operation())
+            except Exception:
+                return ""
+
+        source = _safe_text(lambda: get_page_html(driver, max_length=self.options.max_scan_text_chars))
+        body = _safe_text(lambda: get_body_text(driver, max_length=min(self.options.max_scan_text_chars, 50000)))
+        url = _safe_text(lambda: get_current_url(driver))
+        title = _safe_text(lambda: get_page_title(driver))
         return truncate_text("\n".join([url, title, body, source]), self.options.max_scan_text_chars)
 
     def _domain_from_url(self, url: str) -> str:
@@ -1183,16 +1186,134 @@ class SecurityFeatures:
         return any(host.endswith(tld if tld.startswith(".") else f".{tld}") for tld in self.options.high_risk_tlds)
 
     def _is_private_or_internal_host(self, host: str) -> bool:
-        host = host.lower().strip(".")
+        """Return whether a hostname targets a non-public network address.
+
+        Literal IP addresses are checked directly. Ordinary hostnames may also
+        be resolved so a public-looking DNS name cannot trivially bypass the
+        private-network policy by resolving to loopback, RFC1918, link-local,
+        reserved, multicast, unspecified, or otherwise non-global addresses.
+
+        This is a policy-layer protection. It does not claim to provide full
+        DNS-rebinding resistance because DNS may theoretically change between
+        this assessment and the transport connection.
+        """
+
+        host = str(host or "").lower().strip(".")
         if not host:
             return False
-        if host in self.options.internal_hostnames or any(host.endswith(f".{name}") for name in self.options.internal_hostnames):
+
+        # Explicitly configured internal names.
+        if (
+            host in self.options.internal_hostnames
+            or any(
+                host.endswith(f".{name}")
+                for name in self.options.internal_hostnames
+                if name
+            )
+        ):
             return True
+
+        # Conventional non-public hostname suffixes.
+        if (
+            host.endswith(".local")
+            or host.endswith(".internal")
+            or host.endswith(".lan")
+        ):
+            return True
+
+        # Literal IPv4 / IPv6 target.
         try:
             ip = ipaddress.ip_address(host)
-            return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
         except ValueError:
-            return host.endswith(".local") or host.endswith(".internal") or host.endswith(".lan")
+            ip = None
+
+        if ip is not None:
+            return self._ip_is_non_public(ip)
+
+        # DNS resolution can be disabled for deployments that provide their
+        # own lower-level network policy.
+        if not self.options.resolve_hostnames:
+            return False
+
+        try:
+            resolved_addresses = self._resolve_host_addresses(host)
+        except OSError as exc:
+            logger.debug("DNS resolution failed during browser security assessment for %s: %s", host, exc)
+            return self.options.block_on_dns_resolution_error
+
+        if not resolved_addresses:
+            return self.options.block_on_dns_resolution_error
+
+        # If even one returned address is non-public, conservatively classify
+        # the hostname as non-public. Mixed public/private DNS answers should
+        # not be allowed to bypass the policy.
+        return any(
+            self._ip_is_non_public(address)
+            for address in resolved_addresses
+        )
+
+    @staticmethod
+    def _ip_is_non_public(
+        value: Union[
+            str,
+            ipaddress.IPv4Address,
+            ipaddress.IPv6Address,
+        ],
+    ) -> bool:
+        """Classify addresses that must not be treated as public web targets."""
+
+        if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            ip = value
+        else:
+            # IPv6 socket results may carry a scope identifier.
+            raw = str(value or "").split("%", 1)[0]
+            ip = ipaddress.ip_address(raw)
+
+        return bool(
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+            or not ip.is_global
+        )
+
+    def _resolve_host_addresses(self, host: str) -> Tuple[Union[ipaddress.IPv4Address, ipaddress.IPv6Address], ...]:
+        """Resolve a hostname to a bounded, de-duplicated IP address set."""
+        host = str(host or "").strip()
+        if not host:
+            return ()
+
+        results = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        addresses: List[Union[ipaddress.IPv4Address, ipaddress.IPv6Address]] = []
+        seen: set[str] = set()
+
+        for result in results:
+            sockaddr = result[4]
+
+            if not sockaddr:
+                continue
+
+            raw_address = str(sockaddr[0] or "").split("%", 1)[0]
+            if not raw_address:
+                continue
+
+            try:
+                address = ipaddress.ip_address(raw_address)
+            except ValueError:
+                continue
+
+            canonical = str(address)
+            if canonical in seen:
+                continue
+
+            seen.add(canonical)
+            addresses.append(address)
+            if len(addresses) >= self.options.max_resolved_addresses:
+                break
+
+        return tuple(addresses)
 
     def _blocked_download_extension(self, path: str) -> Optional[str]:
         lowered = str(path or "").lower()
