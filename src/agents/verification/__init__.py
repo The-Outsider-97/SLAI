@@ -1,8 +1,17 @@
-"""
-Top-level exports for the Verification Agent subsystem.
-"""
+from .verification_memory import *
+from .verification_proof import *
+from .verification_result import *
+from .verification_types import *
 
-__version__ = "2.2.0"
 
+from .verification_memory import __all__ as _verification_memory_exports
+from .verification_proof import __all__ as _verification_proof_exports
+from .verification_result import __all__ as _verification_result_exports
+from .verification_types import __all__ as _verification_types_exports
 
-__all__ = []
+__all__ = [
+    *_verification_memory_exports,
+    *_verification_proof_exports,
+    *_verification_result_exports,
+    *_verification_types_exports,
+] # type: ignore
