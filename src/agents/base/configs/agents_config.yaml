@@ -363,17 +363,31 @@ adaptive_agent:
 
 
 alignment_agent:
+  enabled: true
+
+  # Existing v2.3 agent-level compatibility controls.
   safety_buffer: 0.10
   learning_rate: 0.01
   momentum: 0.90
   risk_threshold: 0.50
   alignment_ttl: 604800
 
+  strict_subsystem_failures: false
+  enable_bias_detection: true
+  enable_individual_fairness: true
+  enable_counterfactual_audit: false
+  enable_value_alignment: true
+  enable_ethics_check: true
+
   operation_limiter:
     max_requests: 10
-    interval: 60
+    interval_seconds: 60
+    cooldown_seconds: 60
     penalty: "cool_down"
 
+  # Retained for compatibility with existing v2.3 deployments. The structured
+  # assessor below does not collapse heterogeneous evidence into this legacy
+  # weighting scheme.
   weight:
     stat_parity: 0.40
     equal_opp: 0.40
@@ -384,11 +398,67 @@ alignment_agent:
       - threshold: 0.80
         action: "human_intervention"
       - threshold: 0.50
-        action: "automatic_adjustment"
+        action: "review_required"
       - threshold: 0.30
         action: "alert_only"
 
   fail_safe_action_space: []
+
+  # Agent-owned assessment policy. The agent injects this into
+  # src/agents/alignment/assessment.py; the assessment module does not load the
+  # central agent config itself.
+  assessment:
+    aligned_threshold: 0.75
+    misaligned_threshold: 0.35
+    min_confidence: 0.50
+    min_coverage: 0.50
+    conflict_confidence: 0.60
+    drift_threshold: 0.15
+    trajectory_window: 8
+    trajectory_history_limit: 120
+
+    required_dimensions:
+      - user_intent
+      - task_objective
+      - constraint
+
+    dimension_weights:
+      user_intent: 1.00
+      task_objective: 1.00
+      constraint: 1.00
+      environment: 0.75
+      preference: 0.75
+      trajectory: 0.75
+      self_constraint: 0.50
+      multi_agent: 0.50
+
+  # Agent-owned orchestration switches consumed by AlignmentSubsystem through
+  # constructor injection. Private specialist modules continue to load their
+  # own algorithmic settings from alignment_config.yaml.
+  runtime:
+    memory_logging_enabled: true
+    strict_memory_integration: false
+    run_statistical_diagnostics: true
+    use_statistical_diagnostics_as_alignment_evidence: false
+    value_model_requires_ready_marker: true
+    value_model_ready: false
+    value_model_provenance: null
+
+  # SLAI SharedMemory is the cross-agent/runtime coordination layer.
+  # alignment_memory.py remains private evidence/history memory for the
+  # Alignment subsystem itself.
+  shared_memory:
+    enabled: true
+    publish_events: true
+    log_interventions: true
+    fail_closed_on_write_error: false
+    ttl_seconds: 604800
+    result_key_prefix: "alignment_agent.result"
+    summary_key_prefix: "alignment_agent.summary"
+    feedback_key_prefix: "alignment_agent.feedback"
+    state_key: "alignment_agent.runtime_state"
+    latest_key: "alignment_agent.latest"
+    event_channel: "alignment.events"
 
 
 browser_agent:
