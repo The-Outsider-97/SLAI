@@ -1,0 +1,16 @@
+solver:
+  preferred_backends:
+    - z3
+  timeout_seconds: 10.0
+  produce_models: true
+  produce_unsat_cores: false
+
+model_checking:
+  max_states: 10000
+  max_transitions: 50000
+  max_depth: null
+  timeout_seconds: 10.0
+
+abstract_interpretation:
+  max_iterations: 256
+  widening_after: null
