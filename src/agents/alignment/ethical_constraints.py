@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-
 import numpy as np
 import networkx as nx
 
@@ -24,7 +23,7 @@ from .alignment_memory import AlignmentMemory
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Ethical Constraints")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 @dataclass
 class ConstraintRecord:
@@ -1432,6 +1431,10 @@ class EthicalConstraints:
         compliant = propositions[rule]
         return not compliant
 
+__all__ = [
+    "ConstraintRecord",
+    "EthicalConstraints",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Ethical Constraints ===\n")
