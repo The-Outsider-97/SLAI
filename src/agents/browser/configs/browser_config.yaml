@@ -279,7 +279,6 @@ content_handling:
   enabled: true
   normalize_text: true
   collapse_whitespace: false
-
   requests:
     timeout: 15.0
     connect_timeout: 5.0
@@ -289,48 +288,43 @@ content_handling:
     verify_ssl: true
     max_redirects: 8
     user_agent: "Mozilla/5.0 (compatible; BrowserAgentContentHandling/1.0)"
-
   limits:
     max_download_bytes: 12000000
     max_text_chars: 20000
     preview_chars: 2000
     min_extracted_chars: 0
-
   pdf:
     max_pages: 25
     password: null
-
   arxiv:
     body_fallback_chars: 4000
     strip_abstract_label: true
-
   classification:
     from_headers: true
     from_url: true
-
   diagnostics:
     include_metadata: true
     include_raw_html: false
     include_page_snapshot: false
     include_headers: false
     redact_headers: true
-
   memory:
     enabled: true
     namespace: "content"
     ttl_seconds: 86400
-
-  policy:
-    raise_on_failure: false
-    unsupported_content_policy: "text_fallback"  # text_fallback | skip | error
-    safe_result_text_on_error: true
-
   retry:
     max_attempts: 1
     base_delay: 0.25
     multiplier: 1.8
     max_delay: 3.0
     jitter: 0.05
+  policy:
+    raise_on_failure: false
+    unsupported_content_policy: "text_fallback"
+    safe_result_text_on_error: true
+    # Enforce SecurityFeatures URL/network checks for direct HTTP extraction
+    # and every manually-followed redirect.
+    enforce_security_url_policy: true
 
 
 security_features:
@@ -354,6 +348,10 @@ security_features:
     additional_text_indicators: {}
     additional_regex_indicators: {}
     additional_selectors: {}
+  network:
+    resolve_hostnames: true
+    block_on_dns_resolution_error: false
+    max_resolved_addresses: 32
 
 
 workflow:
