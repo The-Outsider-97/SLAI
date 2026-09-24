@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import collections
 import re
+
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .enrichment_contracts import (
@@ -36,19 +37,13 @@ class KnowledgeAdapter:
         self.config = config
         for method in ("add_document", "retrieve"):
             if not callable(getattr(agent, method, None)):
-                raise CurriculumCompatibilityError(
-                    f"KnowledgeAgent does not expose required method {method}()."
-                )
+                raise CurriculumCompatibilityError(f"KnowledgeAgent does not expose required method {method}().")
         ontology = getattr(agent, "ontology_manager", None)
         if ontology is None:
-            raise CurriculumCompatibilityError(
-                "KnowledgeAgent does not expose ontology_manager required by LANTRA enrichment."
-            )
+            raise CurriculumCompatibilityError("KnowledgeAgent does not expose ontology_manager required by LANTRA enrichment.")
         for method in ("get_relations", "get_types"):
             if not callable(getattr(ontology, method, None)):
-                raise CurriculumCompatibilityError(
-                    f"Knowledge ontology manager does not expose {method}()."
-                )
+                raise CurriculumCompatibilityError(f"Knowledge ontology manager does not expose {method}().")
         self.ontology = ontology
         self._segment_by_id: Dict[str, SourceSegment] = {}
         self._relation_cache: Dict[str, Tuple[KnowledgeFact, ...]] = {}
@@ -78,6 +73,11 @@ class KnowledgeAdapter:
             )
             after = len(getattr(self.agent, "doc_index", {}))
             indexed += int(after > before)
+        finalize = getattr(self.agent, "finalize_retrieval_index", None)
+
+        if callable(finalize):
+            finalize()
+
         return indexed
 
     def retrieval_triplet(
@@ -245,10 +245,7 @@ class KnowledgeAdapter:
         tokens = [match.group(0) for match in _TOKEN_RE.finditer(text)]
         # Ontology labels may be lowercase. Prefer informative longer tokens and
         # short local n-grams, while keeping work tightly bounded.
-        ranked_tokens = sorted(
-            set(tokens),
-            key=lambda token: (-len(token), token.casefold()),
-        )
+        ranked_tokens = sorted(set(tokens), key=lambda token: (-len(token), token.casefold()))
         for token in ranked_tokens[:32]:
             if len(token) >= 4:
                 add(token)
