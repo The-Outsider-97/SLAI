@@ -223,6 +223,7 @@ class AgentFactory:
         "reader": {"module_path": "src.agents.reader_agent", "class_name": "ReaderAgent"},
         "reasoning": {"module_path": "src.agents.reasoning_agent", "class_name": "ReasoningAgent"},
         "safety": {"module_path": "src.agents.safety_agent", "class_name": "SafetyAgent"},
+        "simulation": {"module_path": "src.agents.simulation_agent", "class_name": "SimulationAgent"},
         "verification": {"module_path": "src.agents.verification_agent", "class_name": "VerificationAgent"},
     }
 
@@ -233,13 +234,14 @@ class AgentFactory:
 
         "reader_agent": "reader",
         "language_agent": "language",
+        "evaluation_agent": "evaluation",
         "knowledge_agent": "knowledge",
         "privacy_agent": "privacy",
         "quality_agent": "quality",
-        "safety_agent": "safety",
         "observability_agent": "observability",
         "reasoning_agent": "reasoning",
-        "evaluation_agent": "evaluation",
+        "safety_agent": "safety",
+        "simulation_agent": "simulation",
         "verification_agent": "verification"
     }
 
@@ -259,6 +261,7 @@ class AgentFactory:
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
         "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
         "perception": {"torch_required": True, "notes": "Perception encoder/decoder stack is torch-based."},
+        "simulation": {"torch_required": False, "notes": ""},
         "verification": {"torch_required": False, "notes": (
             "Formal verification/model-checking orchestration is torch-free; "
             "SAT/SMT backends remain optional dependencies of the "
@@ -358,12 +361,7 @@ class AgentFactory:
         *,
         retryable: bool = True,
     ) -> None:
-        record = self._runtime_status.mark_degraded(
-            channel,
-            operation,
-            error,
-            retryable=retryable,
-        )
+        record = self._runtime_status.mark_degraded(channel, operation, error, retryable=retryable)
         if record.occurrences == 1:
             logger.warning(
                 "AgentFactory %s operation '%s' is degraded: %s",
@@ -483,6 +481,8 @@ class AgentFactory:
             "reader",
             "reasoning",
             "safety",
+            "simulation",
+            "verification",
         )
         return defaults
 
@@ -679,9 +679,7 @@ class AgentFactory:
     @staticmethod
     def _base_agent_class() -> Type[Any]:
         """Import BaseAgent only for operations that require subclass checks."""
-
         from .base_agent import BaseAgent
-
         return BaseAgent
 
     def normalize_agent_type(self, agent_type: str) -> str:
