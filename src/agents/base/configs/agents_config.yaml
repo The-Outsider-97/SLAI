@@ -125,6 +125,7 @@ agent_factory:
       observability_agent: observability
       reasoning_agent: reasoning
       evaluation_agent: evaluation
+      verification_agent: verification
     out_of_process_fallback_agents:
       - adaptive
       - alignment
@@ -185,6 +186,9 @@ agent_factory:
       perception:
         torch_required: true
         notes: "Perception encoder/decoder stack is torch-based."
+      verification:
+        torch_required: false
+        notes: "Formal verification/model-checking orchestration is torch-free; SAT/SMT backends remain optional dependencies of the Verification subsystem."
     agent_specs:
       adaptive:
         module_path: src.agents.adaptive_agent
@@ -272,7 +276,14 @@ agent_factory:
         module_path: src.agents.safety_agent
         class_name: SafetyAgent
         capabilities: [safety, risk_assessment, policy_enforcement]
-
+      verification:
+        module_path: src.agents.verification_agent
+        class_name: VerificationAgent
+        capabilities:
+          - formal_verification
+          - satisfiability
+          - model_checking
+          - invariant_verification
 
 base_agent:
     defer_initialization: true
@@ -1409,3 +1420,22 @@ safety_agent:
   formal_specs: {}
   fault_tree_config: {}
 
+
+verification_agent:
+  enabled: true
+  publish_shared_memory: true
+  fail_on_shared_memory_error: false
+  publish_evidence_metadata: true
+  shared_memory_ttl_seconds: 604800
+
+  max_shared_trace_steps: 64
+  max_shared_model_entries: 128
+  max_shared_list_items: 128
+  max_prior_references: 32
+
+  request_key_prefix: "verification_agent.request"
+  result_key_prefix: "verification_agent.result"
+  summary_key_prefix: "verification_agent.summary"
+  error_key_prefix: "verification_agent.error"
+  event_key_prefix: "verification_agent.event"
+  latest_result_key: "verification_agent.latest"
