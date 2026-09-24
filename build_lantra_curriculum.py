@@ -497,20 +497,21 @@ def _source_segment_from_payload(value: Mapping[str, Any]) -> SourceSegment:
 
 
 def _write_gzip_jsonl(path: Path, items: Iterable[Mapping[str, Any]]) -> None:
+    """Write deterministic gzip-compressed JSONL and durably flush it to disk."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wt", encoding="utf-8", newline="\n") as handle:
-        for item in items:
-            handle.write(
-                json.dumps(
-                    item,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    allow_nan=False,
-                )
-            )
-            handle.write("\n")
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
+    # Keep the actual filesystem descriptor writable until after the gzip
+    # stream has been finalized. This is required for reliable fsync()
+    # behaviour on Windows.
+    with path.open("wb") as raw_handle:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=0) as compressed_handle:
+            for item in items:
+                line = (json.dumps(item, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n")
+                compressed_handle.write(line.encode("utf-8"))
+
+        # GzipFile has now emitted its footer, while raw_handle is still writable and valid.
+        raw_handle.flush()
+        os.fsync(raw_handle.fileno())
 
 
 def _save_prepared_corpus(
