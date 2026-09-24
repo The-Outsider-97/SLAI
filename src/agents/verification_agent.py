@@ -110,3 +110,19 @@ class VerificationAgent(BaseAgent):
 
     def _publish_verification_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
         pass
+
+__all__ = []
+
+
+if __name__ == "__main__":
+    print("\n=== Running Verification Agent ===\n")
+    printer.status("TEST", "Verification Agent initialized", "info")
+    from .agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+
+    shared_memory = SharedMemory()
+    agent_factory = AgentFactory()
+    agent = VerificationAgent(shared_memory=shared_memory, agent_factory=agent_factory)
+    printer.status("START", agent, "info")
+
+    print("\n=== Test ran successfully ===\n")
