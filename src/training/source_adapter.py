@@ -189,14 +189,12 @@ class CanonicalLantraSourceAdapter:
     def segment_documents(self, documents: Sequence[SourceDocument]) -> Tuple[SourceSegment, ...]:
         """Chunk after split assignment and globally deduplicate exact normalized segments."""
 
-        if any(document.split is None for document in documents):
-            raise CurriculumError("Documents must be split before segment construction.")
-
         owner_by_hash: Dict[str, SourceSegment] = {}
         per_document_count: Dict[str, int] = collections.defaultdict(int)
 
         for document in documents:
-            assert document.split is not None
+            if document.split is None:
+                raise CurriculumError("Documents must be split before segment construction.")
             try:
                 chunks = self._trainer.segment_raw_document(
                     document.text,
@@ -230,14 +228,8 @@ class CanonicalLantraSourceAdapter:
 
                     # The same text must never survive in multiple partitions. Pick
                     # one owner deterministically and adjust per-document counts.
-                    current_key = stable_unit_interval(
-                        existing.document_id + canonical_hash,
-                        self.config.seed + 13,
-                    )
-                    candidate_key = stable_unit_interval(
-                        candidate.document_id + canonical_hash,
-                        self.config.seed + 13,
-                    )
+                    current_key = stable_unit_interval(existing.document_id + canonical_hash, self.config.seed + 13)
+                    candidate_key = stable_unit_interval(candidate.document_id + canonical_hash, self.config.seed + 13)
                     if candidate_key < current_key:
                         per_document_count[existing.document_id] = max(
                             0, per_document_count[existing.document_id] - 1
@@ -246,9 +238,7 @@ class CanonicalLantraSourceAdapter:
                         per_document_count[candidate.document_id] += 1
             except Exception as exc:
                 if self.config.fail_on_agent_error:
-                    raise CurriculumError(
-                        f"LANTRA segment construction failed for document {document.document_id}: {exc}"
-                    ) from exc
+                    raise CurriculumError(f"LANTRA segment construction failed for document {document.document_id}: {exc}") from exc
 
         retained = sorted(
             owner_by_hash.values(),
