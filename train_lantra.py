@@ -1181,34 +1181,57 @@ def empty_raw_corpus() -> RawCorpus:
 
 
 def discover_raw_text_files(configured_paths: Sequence[str]) -> List[Path]:
-    # data/library is always a first-class local corpus source. Explicit --raw-text
-    # paths and SLAI_LANTRA_RAW_TEXT add sources; they do not suppress the library.
-    candidates: List[Path] = [Path("data/library")]
+    # Explicit --raw-text paths override the automatic raw corpus roots.
+    # With no explicit paths, data/library remains the default corpus.
     if configured_paths:
-        candidates.extend(Path(value) for value in configured_paths)
+        candidates: List[Path] = [
+            Path(value) for value in configured_paths
+        ]
     else:
+        candidates = [Path("data/library")]
+
         env_path = os.getenv("SLAI_LANTRA_RAW_TEXT", "").strip()
         if env_path:
             candidates.append(Path(env_path))
         else:
-            candidates.extend(Path(value) for value in DEFAULT_RAW_TEXT_CANDIDATES if value != "data/library")
+            candidates.extend(
+                Path(value)
+                for value in DEFAULT_RAW_TEXT_CANDIDATES
+                if value != "data/library"
+            )
 
     files: List[Path] = []
     seen: set[str] = set()
+
     for candidate in candidates:
         if not candidate.exists():
             continue
-        discovered = [candidate] if candidate.is_file() else sorted(candidate.rglob("*"))
+
+        discovered = (
+            [candidate]
+            if candidate.is_file()
+            else sorted(candidate.rglob("*"))
+        )
+
         for item in discovered:
-            if not item.is_file() or item.suffix.lower() not in RAW_TEXT_EXTENSIONS:
+            if (
+                not item.is_file()
+                or item.suffix.lower() not in RAW_TEXT_EXTENSIONS
+            ):
                 continue
-            # Worm sidecars contain provenance, never training examples.
-            if item.name.startswith("slai_corpus_") and item.name.endswith(".manifest.json"):
+
+            if (
+                item.name.startswith("slai_corpus_")
+                and item.name.endswith(".manifest.json")
+            ):
                 continue
+
             key = str(item.resolve())
+
             if key not in seen:
                 seen.add(key)
                 files.append(item)
+
     return sorted(files, key=lambda item: str(item))
 
 
