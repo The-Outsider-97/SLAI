@@ -15,10 +15,12 @@ The emitted JSONL files use only LANTRA's existing seven task schemas. No new
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import importlib
 import json
 import os
+import shutil
 import threading
 import time
 
@@ -401,6 +403,228 @@ def _load_existing_result(output_dir: Path) -> CurriculumBuildResult:
     )
 
 
+_PREPARED_CACHE_SCHEMA = "slai.lantra.prepared-corpus.v1"
+
+
+def _prepared_corpus_fingerprint(
+    source_fingerprint: str,
+    config: CurriculumConfig,
+) -> str:
+    """Fingerprint only the inputs that affect extraction, splitting, and segmentation."""
+    return sha256_payload(
+        {
+            "source_fingerprint": source_fingerprint,
+            "seed": config.seed,
+            "validation_fraction": config.validation_fraction,
+            "test_fraction": config.test_fraction,
+            "min_document_chars": config.min_document_chars,
+            "segment_min_chars": config.segment_min_chars,
+            "segment_chunk_chars": config.segment_chunk_chars,
+            "max_documents": config.max_documents,
+            "max_segments": config.max_segments,
+            "max_segments_per_document": config.max_segments_per_document,
+        }
+    )
+
+
+def _prepared_cache_dir(config: CurriculumConfig, cache_fingerprint: str) -> Path:
+    output_dir = Path(config.output_dir)
+    return output_dir.parent / ".lantra_prepared_cache" / cache_fingerprint
+
+
+def _source_document_payload(document: SourceDocument) -> Dict[str, Any]:
+    return {
+        "document_id": document.document_id,
+        "source_path": document.source_path,
+        "source_type": document.source_type,
+        "source_sha256": document.source_sha256,
+        "normalized_text_sha256": document.normalized_text_sha256,
+        "text": document.text,
+        "title": document.title,
+        "extractor": document.extractor,
+        "logical_index": document.logical_index,
+        "metadata": dict(document.metadata),
+        "split": document.split,
+    }
+
+
+def _source_segment_payload(segment: SourceSegment) -> Dict[str, Any]:
+    return {
+        "segment_id": segment.segment_id,
+        "document_id": segment.document_id,
+        "split": segment.split,
+        "segment_index": segment.segment_index,
+        "text": segment.text,
+        "normalized_text_sha256": segment.normalized_text_sha256,
+        "title": segment.title,
+        "source_path": segment.source_path,
+    }
+
+
+def _source_document_from_payload(value: Mapping[str, Any]) -> SourceDocument:
+    metadata = value.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise CurriculumError("Prepared corpus document metadata must be a mapping.")
+    split_value = value.get("split")
+    return SourceDocument(
+        document_id=str(value["document_id"]),
+        source_path=str(value["source_path"]),
+        source_type=str(value["source_type"]),
+        source_sha256=str(value["source_sha256"]),
+        normalized_text_sha256=str(value["normalized_text_sha256"]),
+        text=str(value["text"]),
+        title=(None if value.get("title") is None else str(value.get("title"))),
+        extractor=str(value["extractor"]),
+        logical_index=int(value["logical_index"]),
+        metadata=dict(metadata),
+        split=(None if split_value is None else str(split_value)),
+    )
+
+
+def _source_segment_from_payload(value: Mapping[str, Any]) -> SourceSegment:
+    return SourceSegment(
+        segment_id=str(value["segment_id"]),
+        document_id=str(value["document_id"]),
+        split=str(value["split"]),
+        segment_index=int(value["segment_index"]),
+        text=str(value["text"]),
+        normalized_text_sha256=str(value["normalized_text_sha256"]),
+        title=(None if value.get("title") is None else str(value.get("title"))),
+        source_path=(
+            None if value.get("source_path") is None else str(value.get("source_path"))
+        ),
+    )
+
+
+def _write_gzip_jsonl(path: Path, items: Iterable[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8", newline="\n") as handle:
+        for item in items:
+            handle.write(
+                json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+            )
+            handle.write("\n")
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _save_prepared_corpus(
+    cache_dir: Path,
+    *,
+    cache_fingerprint: str,
+    source_fingerprint: str,
+    documents: Sequence[SourceDocument],
+    segments: Sequence[SourceSegment],
+) -> None:
+    """Persist extraction/split/segmentation output for restart-safe reuse."""
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = cache_dir.parent / (
+        f".{cache_dir.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=False)
+
+    try:
+        documents_path = staging / "documents.jsonl.gz"
+        segments_path = staging / "segments.jsonl.gz"
+        _write_gzip_jsonl(
+            documents_path,
+            (_source_document_payload(document) for document in documents),
+        )
+        _write_gzip_jsonl(
+            segments_path,
+            (_source_segment_payload(segment) for segment in segments),
+        )
+        manifest = {
+            "schema": _PREPARED_CACHE_SCHEMA,
+            "cache_fingerprint": cache_fingerprint,
+            "source_fingerprint": source_fingerprint,
+            "documents": len(documents),
+            "segments": len(segments),
+            "documents_sha256": _sha256_file(documents_path),
+            "segments_sha256": _sha256_file(segments_path),
+        }
+        manifest_path = staging / "manifest.json"
+        with manifest_path.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(manifest, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+        os.replace(staging, cache_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _load_prepared_corpus(
+    cache_dir: Path,
+    *,
+    cache_fingerprint: str,
+    source_fingerprint: str,
+) -> Optional[Tuple[List[SourceDocument], List[SourceSegment]]]:
+    manifest_path = cache_dir / "manifest.json"
+    documents_path = cache_dir / "documents.jsonl.gz"
+    segments_path = cache_dir / "segments.jsonl.gz"
+    if not (manifest_path.is_file() and documents_path.is_file() and segments_path.is_file()):
+        return None
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, Mapping):
+            return None
+        if manifest.get("schema") != _PREPARED_CACHE_SCHEMA:
+            return None
+        if manifest.get("cache_fingerprint") != cache_fingerprint:
+            return None
+        if manifest.get("source_fingerprint") != source_fingerprint:
+            return None
+        if _sha256_file(documents_path) != str(manifest.get("documents_sha256", "")):
+            return None
+        if _sha256_file(segments_path) != str(manifest.get("segments_sha256", "")):
+            return None
+
+        documents: List[SourceDocument] = []
+        with gzip.open(documents_path, "rt", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                raw = json.loads(line)
+                if not isinstance(raw, Mapping):
+                    raise CurriculumError(
+                        f"Prepared document cache line {line_number} is not a mapping."
+                    )
+                documents.append(_source_document_from_payload(raw))
+
+        segments: List[SourceSegment] = []
+        with gzip.open(segments_path, "rt", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                raw = json.loads(line)
+                if not isinstance(raw, Mapping):
+                    raise CurriculumError(
+                        f"Prepared segment cache line {line_number} is not a mapping."
+                    )
+                segments.append(_source_segment_from_payload(raw))
+
+        if len(documents) != int(manifest.get("documents", -1)):
+            return None
+        if len(segments) != int(manifest.get("segments", -1)):
+            return None
+        return documents, segments
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, CurriculumError):
+        return None
+
+
 def _apply_cli_overrides(config: CurriculumConfig, args: argparse.Namespace) -> CurriculumConfig:
     overrides: Dict[str, Any] = {}
     if args.source:
@@ -489,6 +713,8 @@ def build(
     dry_run: bool = False,
     progress_interval: float = DEFAULT_PROGRESS_INTERVAL,
     progress_every_files: int = DEFAULT_PROGRESS_EVERY_FILES,
+    resume: bool = True,
+    checkpoint_every: int = 25,
 ) -> CurriculumBuildResult | Dict[str, Any]:
     """Build LANTRA curriculum artifacts with explicit long-running progress.
 
@@ -721,10 +947,7 @@ def build(
             ),
         )
 
-        with _ProgressStage(
-            "Prepare curriculum agent adapters",
-            heartbeat_seconds=progress_interval,
-        ):
+        with _ProgressStage("Prepare curriculum agent adapters", heartbeat_seconds=progress_interval):
             knowledge = KnowledgeAdapter(knowledge_agent, config)
             reasoning = (
                 ReasoningAdapter(reasoning_agent, config)
@@ -736,10 +959,7 @@ def build(
                 perception = PerceptionAdapter(perception_agent, config)
                 perception_state = perception.prepare()
 
-        with _ProgressStage(
-            "Finalize build fingerprint",
-            heartbeat_seconds=progress_interval,
-        ):
+        with _ProgressStage("Finalize build fingerprint", heartbeat_seconds=progress_interval):
             runtime_inventory = list(runtime_inventory) + _external_runtime_inventory(
                 knowledge_agent
             )
@@ -784,10 +1004,7 @@ def build(
                 heartbeat_seconds=progress_interval,
                 detail=str(output_dir),
             ):
-                reusable = _existing_build_is_reusable(
-                    output_dir,
-                    final_fingerprint,
-                )
+                reusable = _existing_build_is_reusable(output_dir, final_fingerprint)
             if reusable:
                 _emit_progress(
                     "CACHE",
@@ -795,85 +1012,129 @@ def build(
                     output_dir=output_dir,
                 )
                 return _load_existing_result(output_dir)
+            _emit_progress("CACHE", "No reusable curriculum build matched", output_dir=output_dir)
+        else:
+            _emit_progress("CACHE", "Reusable-build check disabled", reason="reuse_if_unchanged=false")
+
+        # Extraction/split/segmentation is deterministic and expensive. Persist
+        # this prepared corpus independently from phase-level curriculum state so
+        # a later Phase 2A/2B/2C failure does not require re-reading 1,000+ files.
+        prepared_fingerprint = _prepared_corpus_fingerprint(
+            source_fingerprint,
+            config,
+        )
+        prepared_cache_dir = _prepared_cache_dir(
+            config,
+            prepared_fingerprint,
+        )
+        prepared = (
+            _load_prepared_corpus(
+                prepared_cache_dir,
+                cache_fingerprint=prepared_fingerprint,
+                source_fingerprint=source_fingerprint,
+            )
+            if resume
+            else None
+        )
+
+        if prepared is not None:
+            documents, segments = prepared
+            split_counts = source_adapter.segment_counts_by_split(segments)
             _emit_progress(
                 "CACHE",
-                "No reusable curriculum build matched",
-                output_dir=output_dir,
+                "Prepared corpus restored",
+                cache=prepared_cache_dir,
+                documents=f"{len(documents):,}",
+                segments=f"{len(segments):,}",
+                train=split_counts.get("train", 0),
+                validation=split_counts.get("validation", 0),
+                test=split_counts.get("test", 0),
             )
         else:
+            with _ProgressStage(
+                "Extract canonical documents",
+                heartbeat_seconds=progress_interval,
+                detail=f"{len(files):,} source files",
+            ):
+                extracted_documents = source_adapter.extract_documents(
+                    extraction_files,
+                    inventory=source_inventory,
+                )
+
+            _emit_progress(
+                "INFO",
+                "Canonical extraction complete",
+                documents=f"{len(extracted_documents):,}",
+            )
+
+            with _ProgressStage(
+                "Assign document splits",
+                heartbeat_seconds=progress_interval,
+            ):
+                documents = source_adapter.assign_document_splits(extracted_documents)
+
+            document_split_counts: Dict[str, int] = {}
+            for document in documents:
+                split = str(getattr(document, "split", "unknown"))
+                document_split_counts[split] = document_split_counts.get(split, 0) + 1
+            _emit_progress(
+                "INFO",
+                "Document splits assigned",
+                train=document_split_counts.get("train", 0),
+                validation=document_split_counts.get("validation", 0),
+                test=document_split_counts.get("test", 0),
+            )
+
+            segmentation_documents = _ProgressSequence(
+                documents,
+                operation="Segment source documents",
+                every=progress_every_files,
+                describe=_describe_document,
+                measure=_safe_document_chars,
+                large_threshold=LARGE_DOCUMENT_CHARS,
+                measure_name="characters",
+                measure_format=lambda value: f"{value:,}",
+            )
+            with _ProgressStage(
+                "Segment canonical documents",
+                heartbeat_seconds=progress_interval,
+                detail=(
+                    f"documents={len(documents):,}, "
+                    f"chunk_chars={config.segment_chunk_chars:,}, "
+                    f"max_segments={config.max_segments if config.max_segments > 0 else 'unlimited'}"
+                ),
+            ):
+                segments = source_adapter.segment_documents(segmentation_documents)
+
+            split_counts = source_adapter.segment_counts_by_split(segments)
+            _emit_progress(
+                "INFO",
+                "Segmentation complete",
+                segments=f"{len(segments):,}",
+                train=split_counts.get("train", 0),
+                validation=split_counts.get("validation", 0),
+                test=split_counts.get("test", 0),
+            )
+
+            with _ProgressStage(
+                "Persist prepared corpus cache",
+                heartbeat_seconds=progress_interval,
+                detail=str(prepared_cache_dir),
+            ):
+                _save_prepared_corpus(
+                    prepared_cache_dir,
+                    cache_fingerprint=prepared_fingerprint,
+                    source_fingerprint=source_fingerprint,
+                    documents=documents,
+                    segments=segments,
+                )
             _emit_progress(
                 "CACHE",
-                "Reusable-build check disabled",
-                reason="reuse_if_unchanged=false",
+                "Prepared corpus cache saved",
+                cache=prepared_cache_dir,
+                documents=f"{len(documents):,}",
+                segments=f"{len(segments):,}",
             )
-
-        # Parse/chunk only after the cache decision. Agent construction is cheaper
-        # than re-extracting a large PDF/EPUB library and also exposes external
-        # ontology/checkpoint state needed for a correct cache fingerprint.
-        with _ProgressStage(
-            "Extract canonical documents",
-            heartbeat_seconds=progress_interval,
-            detail=f"{len(files):,} source files",
-        ):
-            extracted_documents = source_adapter.extract_documents(
-                extraction_files,
-                inventory=source_inventory,
-            )
-
-        _emit_progress(
-            "INFO",
-            "Canonical extraction complete",
-            documents=f"{len(extracted_documents):,}",
-        )
-
-        with _ProgressStage(
-            "Assign document splits",
-            heartbeat_seconds=progress_interval,
-        ):
-            documents = source_adapter.assign_document_splits(extracted_documents)
-
-        document_split_counts: Dict[str, int] = {}
-        for document in documents:
-            split = str(getattr(document, "split", "unknown"))
-            document_split_counts[split] = document_split_counts.get(split, 0) + 1
-        _emit_progress(
-            "INFO",
-            "Document splits assigned",
-            train=document_split_counts.get("train", 0),
-            validation=document_split_counts.get("validation", 0),
-            test=document_split_counts.get("test", 0),
-        )
-
-        segmentation_documents = _ProgressSequence(
-            documents,
-            operation="Segment source documents",
-            every=progress_every_files,
-            describe=_describe_document,
-            measure=_safe_document_chars,
-            large_threshold=LARGE_DOCUMENT_CHARS,
-            measure_name="characters",
-            measure_format=lambda value: f"{value:,}",
-        )
-        with _ProgressStage(
-            "Segment canonical documents",
-            heartbeat_seconds=progress_interval,
-            detail=(
-                f"documents={len(documents):,}, "
-                f"chunk_chars={config.segment_chunk_chars:,}, "
-                f"max_segments={config.max_segments if config.max_segments > 0 else 'unlimited'}"
-            ),
-        ):
-            segments = source_adapter.segment_documents(segmentation_documents)
-
-        split_counts = source_adapter.segment_counts_by_split(segments)
-        _emit_progress(
-            "INFO",
-            "Segmentation complete",
-            segments=f"{len(segments):,}",
-            train=split_counts.get("train", 0),
-            validation=split_counts.get("validation", 0),
-            test=split_counts.get("test", 0),
-        )
 
         assert knowledge is not None
         builder = LantraCurriculumBuilder(
@@ -882,6 +1143,8 @@ def build(
             reasoning=reasoning,
             perception=perception,
             runtime_metadata=runtime_metadata,
+            resume=resume,
+            checkpoint_every=checkpoint_every,
         )
         with _ProgressStage(
             "Construct agent-enriched curriculum",
@@ -967,6 +1230,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "0 disables item-count progress (default: 10)."
         ),
     )
+    parser.add_argument("--no-resume", action="store_true", help=(
+        "Ignore resumable curriculum work state "
+        "and rebuild intermediate phases."
+        ),
+    )
+    parser.add_argument("--checkpoint-every", type=int, default=25, help=(
+            "Persist resumable curriculum state "
+            "after every N processed phase items "
+            "(default: 25)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -977,18 +1251,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise CurriculumError("--progress-interval must be >= 0.")
         if args.progress_every_files < 0:
             raise CurriculumError("--progress-every-files must be >= 0.")
+        if args.checkpoint_every <= 0:
+            raise CurriculumError("--checkpoint-every must be > 0.")
 
-        _emit_progress(
-            "INFO",
-            "Loading curriculum configuration",
-            config=args.config,
-        )
+        _emit_progress("INFO", "Loading curriculum configuration", config=args.config)
         config = _apply_cli_overrides(_load_config(Path(args.config)), args)
-        result = build(
-            config,
-            dry_run=bool(args.dry_run),
+        result = build(config, dry_run=bool(args.dry_run),
             progress_interval=float(args.progress_interval),
             progress_every_files=int(args.progress_every_files),
+            resume=not bool(args.no_resume or args.force),
+            checkpoint_every=int(args.checkpoint_every),
         )
         if isinstance(result, CurriculumBuildResult):
             summary = {
