@@ -53,6 +53,8 @@ _PHASE_FILE_NAMES = {
 class LantraCurriculumBuilder:
     """Construct phases 2A-2C and optional Perception-assisted 2B/2D metadata."""
 
+    WORK_STATE_SCHEMA = "slai.lantra.curriculum-work.v1"
+
     def __init__(
         self,
         config: CurriculumConfig,
@@ -61,12 +63,206 @@ class LantraCurriculumBuilder:
         reasoning: Optional[ReasoningAdapter],
         perception: Optional[Any],
         runtime_metadata: Optional[Mapping[str, Any]] = None,
+        resume: bool = True,
+        checkpoint_every: int = 25,
     ) -> None:
         self.config = config
         self.knowledge = knowledge
         self.reasoning = reasoning
         self.perception = perception
         self.runtime_metadata = dict(runtime_metadata or {})
+
+        if isinstance(checkpoint_every, bool) or int(checkpoint_every) <= 0:
+            raise CurriculumError("checkpoint_every must be a positive integer.")
+
+        self.resume = bool(resume)
+        self.checkpoint_every = int(checkpoint_every)
+
+        self._active_build_fingerprint = ""
+        self._work_state: Dict[str, Any] = {}
+        self._work_state_path: Optional[Path] = None
+
+    def _new_work_state(self, build_fingerprint: str) -> Dict[str, Any]:
+        return {
+            "schema": self.WORK_STATE_SCHEMA,
+            "build_fingerprint": build_fingerprint,
+            "completed": {
+                "2a": False,
+                "2b": False,
+                "2c": False,
+            },
+            "cursors": {
+                "2a": 0,
+                "2b": 0,
+                "2c": 0,
+            },
+        }
+
+    def _work_path(self, build_fingerprint: str) -> Path:
+        output_dir = Path(self.config.output_dir)
+
+        return (
+            output_dir.parent
+            / ".lantra_curriculum_work"
+            / f"{build_fingerprint}.json"
+        )
+
+    def _load_work_state(self, build_fingerprint: str) -> Dict[str, Any]:
+        self._active_build_fingerprint = build_fingerprint
+        self._work_state_path = self._work_path(build_fingerprint)
+        if not self.resume:
+            try:
+                self._work_state_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return self._new_work_state(build_fingerprint)
+
+        path = self._work_state_path
+        if not path.is_file():
+            return self._new_work_state(build_fingerprint)
+
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return self._new_work_state(build_fingerprint)
+
+        if not isinstance(payload, Mapping):
+            return self._new_work_state(build_fingerprint)
+
+        if payload.get("schema") != self.WORK_STATE_SCHEMA:
+            return self._new_work_state(build_fingerprint)
+
+        if payload.get("build_fingerprint") != build_fingerprint:
+            return self._new_work_state(build_fingerprint)
+
+        return dict(payload)
+
+    def _save_work_state(self, records: Mapping[Tuple[str, str], Sequence[Mapping[str, Any]]]) -> None:
+        if not self.resume:
+            return
+
+        if self._work_state_path is None:
+            raise CurriculumError("Curriculum work-state path has not been initialized.")
+
+        path = self._work_state_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        flattened_records: List[Dict[str, Any]] = []
+
+        for key in sorted(records):
+            for record in records[key]:
+                flattened_records.append(dict(record))
+
+        payload = dict(self._work_state)
+        payload["records"] = flattened_records
+
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+
+        os.close(fd)
+
+        temporary_path = Path(temporary_name)
+        try:
+            self._write_json(temporary_path, payload)
+            os.replace(temporary_path, path)
+
+        except Exception:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            raise
+
+    def _checkpoint_phase(
+        self,
+        phase: str,
+        cursor: int,
+        records: Mapping[Tuple[str, str], Sequence[Mapping[str, Any]]],
+        *,
+        completed: bool = False,
+    ) -> None:
+        if phase not in {"2a", "2b", "2c"}:
+            raise CurriculumError(f"Unsupported resumable curriculum phase: {phase!r}")
+
+        cursors = self._work_state.setdefault( "cursors", {})
+        completed_phases = (self._work_state.setdefault("completed", {}))
+        cursors[phase] = max(0, int(cursor))
+
+        if completed:
+            completed_phases[phase] = True
+
+        self._save_work_state(records)
+
+    def _phase_cursor(self, phase: str) -> int:
+        cursors = self._work_state.get("cursors", {})
+        if not isinstance(cursors, Mapping):
+            return 0
+
+        try:
+            return max(0, int(cursors.get(phase, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _phase_completed(self, phase: str) -> bool:
+        completed = self._work_state.get("completed", {})
+        return bool(isinstance(completed, Mapping) and completed.get(phase, False))
+
+    def _checkpoint_due(self, completed_items: int) -> bool:
+        return (completed_items > 0 and completed_items % self.checkpoint_every == 0)
+
+    def _restore_records(
+        self,
+        gate: TrainingQualityGate,
+        records: MutableMapping[Tuple[str, str], List[Dict[str, Any]]],
+    ) -> int:
+        raw_records = self._work_state.pop("records", [])
+        if not raw_records:
+            return 0
+
+        if (
+            not isinstance(raw_records, Sequence)
+            or isinstance(raw_records, (str, bytes, bytearray))):
+            raise CurriculumError("Invalid records section in curriculum work state.")
+
+        restored = 0
+
+        for raw_record in raw_records:
+            if not isinstance(raw_record, Mapping):
+                raise CurriculumError("Invalid curriculum record in resumable state.")
+
+            record = dict(raw_record)
+            decision = gate.evaluate(record)
+            if not decision.accepted:
+                raise CurriculumError(
+                    "Previously checkpointed curriculum record "
+                    f"failed restoration: {decision.reason}"
+                )
+
+            metadata = record.get("metadata", {})
+            if not isinstance(metadata, Mapping):
+                raise CurriculumError("Checkpointed curriculum record metadata is invalid.")
+
+            phase = str(metadata.get("curriculum_phase", ""))
+            task = str(record.get("task", ""))
+            records[(phase, task)].append(record)
+
+            restored += 1
+
+        return restored
+
+    def _clear_work_state(self) -> None:
+        path = self._work_state_path
+        if path is None:
+            return
+
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def build(
         self,
@@ -93,28 +289,62 @@ class LantraCurriculumBuilder:
         gate = TrainingQualityGate(self.config, document_splits)
         records: Dict[Tuple[str, str], List[Dict[str, Any]]] = collections.defaultdict(list)
 
+        self._work_state = (self._load_work_state(build_fingerprint))
+        self._restore_records(gate, records)
         indexed = self.knowledge.index_segments(segments)
-        facts_by_segment, facts_by_document, origin_by_fact = self._collect_knowledge_facts(segments)
+        needs_knowledge_facts = (
+            not self._phase_completed("2a")
+            or (self.reasoning is not None and not self._phase_completed("2c"))
+        )
 
-        self._build_phase_2a(
-            segments,
-            facts_by_segment=facts_by_segment,
-            gate=gate,
-            records=records,
-        )
-        self._build_phase_2b(
-            segments,
-            gate=gate,
-            records=records,
-        )
-        if self.reasoning is not None:
-            self._build_phase_2c(
-                documents,
-                facts_by_document=facts_by_document,
-                origin_by_fact=origin_by_fact,
+        if needs_knowledge_facts:
+            (
+                facts_by_segment,
+                facts_by_document,
+                origin_by_fact,
+            ) = self._collect_knowledge_facts(segments)
+        else:
+            facts_by_segment = {}
+            facts_by_document = {}
+            origin_by_fact = {}
+
+        if not self._phase_completed("2a"):
+            self._build_phase_2a(
+                segments,
+                facts_by_segment=facts_by_segment,
                 gate=gate,
                 records=records,
+                start_index=self._phase_cursor(
+                    "2a"
+                ),
             )
+
+
+        if not self._phase_completed("2b"):
+            self._build_phase_2b(
+                segments,
+                gate=gate,
+                records=records,
+                start_index=self._phase_cursor(
+                    "2b"
+                ),
+            )
+
+
+        if self.reasoning is not None:
+            if not self._phase_completed("2c"):
+                self._build_phase_2c(
+                    documents,
+                    facts_by_document=facts_by_document,
+                    origin_by_fact=origin_by_fact,
+                    gate=gate,
+                    records=records,
+                    start_index=self._phase_cursor(
+                        "2c"
+                    ),
+                )
+        else:
+            self._checkpoint_phase("2c", len(documents), records, completed=True)
 
         records, coverage = self._apply_heldout_coverage(records)
         manifest = self._write_artifacts(
@@ -129,6 +359,7 @@ class LantraCurriculumBuilder:
             knowledge_indexed_segments=indexed,
             coverage=coverage,
         )
+        self._clear_work_state()
         return CurriculumBuildResult(
             output_dir=str(output_dir),
             manifest_path=str(output_dir / "manifest.json"),
@@ -146,8 +377,8 @@ class LantraCurriculumBuilder:
         facts_by_segment: Mapping[str, Sequence[KnowledgeFact]],
         gate: TrainingQualityGate,
         records: MutableMapping[Tuple[str, str], List[Dict[str, Any]]],
+        start_index: int = 0,
     ) -> None:
-        per_document = collections.Counter()
         ordered_segments = sorted(
             segments,
             key=lambda item: (
@@ -155,9 +386,26 @@ class LantraCurriculumBuilder:
                 item.segment_id,
             ),
         )
-        for segment in ordered_segments:
-            if per_document[segment.document_id] >= self.config.max_phase_2a_examples_per_document:
+        per_document = collections.Counter()
+        for record in records.get(("2a", "generation"), ()):
+            metadata = record.get("metadata", {})
+            if not isinstance(metadata, Mapping):
                 continue
+
+            document_id = metadata.get("group_id")
+            if document_id:
+                per_document[str(document_id)] += 1
+
+        start_index = min(max(0, int(start_index)), len(ordered_segments))
+        for segment_index in range(start_index, len(ordered_segments)):
+            segment = ordered_segments[segment_index]
+
+            if per_document[segment.document_id] >= self.config.max_phase_2a_examples_per_document:
+                completed_segments = segment_index + 1
+                if self._checkpoint_due(completed_segments):
+                    self._checkpoint_phase("2a", completed_segments, records)
+                continue
+
             facts = facts_by_segment.get(segment.segment_id, ())
             for fact in facts:
                 if per_document[segment.document_id] >= self.config.max_phase_2a_examples_per_document:
@@ -213,6 +461,13 @@ class LantraCurriculumBuilder:
                 if self._accept(record, gate, records):
                     per_document[segment.document_id] += 1
 
+            completed_segments = segment_index + 1
+            if self._checkpoint_due(completed_segments):
+                self._checkpoint_phase("2a", completed_segments, records)
+
+        self._checkpoint_phase("2a", len(ordered_segments), records, completed=True)
+
+
     # ------------------------------------------------------------------
     # Phase 2B: retrieval representation learning + hard negatives
     # ------------------------------------------------------------------
@@ -222,6 +477,7 @@ class LantraCurriculumBuilder:
         *,
         gate: TrainingQualityGate,
         records: MutableMapping[Tuple[str, str], List[Dict[str, Any]]],
+        start_index: int = 0,
     ) -> None:
         by_document: Dict[str, List[SourceSegment]] = collections.defaultdict(list)
         for segment in segments:
@@ -236,10 +492,7 @@ class LantraCurriculumBuilder:
 
         candidate_pairs.sort(
             key=lambda pair: (
-                stable_unit_interval(
-                    pair[0].segment_id + ":" + pair[1].segment_id,
-                    self.config.seed + 307,
-                ),
+                stable_unit_interval(pair[0].segment_id + ":" + pair[1].segment_id, self.config.seed + 307),
                 pair[0].segment_id,
                 pair[1].segment_id,
             )
@@ -247,14 +500,20 @@ class LantraCurriculumBuilder:
         if self.config.max_retrieval_pairs > 0:
             candidate_pairs = candidate_pairs[: self.config.max_retrieval_pairs]
 
-        for anchor, positive in candidate_pairs:
+        start_index = min(max(0, int(start_index)), len(candidate_pairs))
+        for pair_index in range(start_index, len(candidate_pairs)):
+            anchor, positive = (candidate_pairs[pair_index])
             triplet = self.knowledge.retrieval_triplet(
                 anchor,
                 positive,
                 perception=self.perception,
             )
             if triplet is None:
+                completed_pairs = (pair_index + 1)
+                if self._checkpoint_due(completed_pairs):
+                    self._checkpoint_phase("2b", completed_pairs, records)
                 continue
+
             source_ids = tuple(sorted({
                 triplet.anchor.document_id,
                 triplet.positive.document_id,
@@ -306,6 +565,12 @@ class LantraCurriculumBuilder:
             )
             self._accept(reranking_record, gate, records)
 
+            completed_pairs = pair_index + 1
+            if self._checkpoint_due(completed_pairs):
+                self._checkpoint_phase("2b", completed_pairs, records)
+
+        self._checkpoint_phase("2b", len(candidate_pairs), records, completed=True)
+
     # ------------------------------------------------------------------
     # Phase 2C: validated factual + reasoning curriculum
     # ------------------------------------------------------------------
@@ -317,12 +582,20 @@ class LantraCurriculumBuilder:
         origin_by_fact: Mapping[Tuple[str, Tuple[str, str, str]], SourceSegment],
         gate: TrainingQualityGate,
         records: MutableMapping[Tuple[str, str], List[Dict[str, Any]]],
+        start_index: int = 0,
     ) -> None:
         assert self.reasoning is not None
-        for document in sorted(documents, key=lambda item: item.document_id):
+        ordered_documents = sorted(documents, key=lambda item: item.document_id)
+        start_index = min(max(0, int(start_index)), len(ordered_documents))
+        for document_index in range(start_index, len(ordered_documents)):
+            document = ordered_documents[document_index]
             facts = tuple(facts_by_document.get(document.document_id, ()))
             if not facts:
+                completed_documents = document_index + 1
+                if self._checkpoint_due(completed_documents):
+                    self._checkpoint_phase("2c", completed_documents, records)
                 continue
+
             validations = self.reasoning.validate_fact_set(facts)
             accepted = [
                 fact
@@ -331,6 +604,9 @@ class LantraCurriculumBuilder:
                 and validations[fact.tuple].accepted_gold
             ]
             if not accepted:
+                completed_documents = document_index + 1
+                if self._checkpoint_due(completed_documents):
+                    self._checkpoint_phase("2c", completed_documents, records)
                 continue
 
             accepted = list(unique_facts(accepted))
@@ -454,6 +730,13 @@ class LantraCurriculumBuilder:
                     )
                     if self._accept(record, gate, records):
                         created += 1
+
+            completed_documents = (document_index + 1)
+            if self._checkpoint_due(completed_documents):
+                self._checkpoint_phase("2c", completed_documents, records)
+
+        self._checkpoint_phase("2c", len(ordered_documents), records, completed=True)
+
 
     # ------------------------------------------------------------------
     # Knowledge preparation
@@ -752,11 +1035,7 @@ class LantraCurriculumBuilder:
             shutil.rmtree(staging, ignore_errors=True)
             raise
 
-    def _try_reuse(
-        self,
-        output_dir: Path,
-        build_fingerprint: str,
-    ) -> Optional[CurriculumBuildResult]:
+    def _try_reuse(self, output_dir: Path, build_fingerprint: str) -> Optional[CurriculumBuildResult]:
         if not self.config.reuse_if_unchanged:
             return None
         manifest_path = output_dir / "manifest.json"
