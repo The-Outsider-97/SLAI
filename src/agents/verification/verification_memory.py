@@ -14,13 +14,15 @@ from datetime import datetime
 from threading import RLock
 from typing import Callable, Generic, Iterable, TypeVar
 
-
-from src.tuning.utils.tuning_helpers import utc_iso, utc_now # type: ignore
 from .utils.verification_errors import MalformedSpecificationError
 from .utils.verification_helpers import normalize_tags, result_fingerprint
 from .verification_result import VerificationResult
 from .verification_types import MemorySettings, VerificationMethod, VerificationStatus
-from logs.logger import get_logger, configure_logging, PrettyPrinter
+from src.tuning.utils.tuning_helpers import utc_iso, utc_now # pyright: ignore[reportMissingImports]
+from logs.logger import get_logger # pyright: ignore[reportMissingImports]
+
+
+logger = get_logger("Verification Memory")
 
 
 TState = TypeVar("TState")
@@ -74,6 +76,10 @@ class VerificationMemory(Generic[TState]):
         self._records: "OrderedDict[str, VerificationRecord[TState]]" = OrderedDict()
         self._sequence = 0
         self._evictions = 0
+        logger.info(
+            "VerificationMemory initialized | capacity=%d | persistent=False",
+            self._settings.max_entries,
+        )
 
     def __len__(self) -> int:
         with self._lock:
@@ -127,6 +133,13 @@ class VerificationMemory(Generic[TState]):
                 self._records.popitem(last=False)
                 self._evictions += 1
             self._records[resolved_id] = record
+            logger.debug(
+                "Verification result recorded | record_id=%s | status=%s | method=%s | backend=%s",
+                resolved_id,
+                result.status.value,
+                result.provenance.method.value,
+                result.provenance.backend,
+            )
             return record
 
     def get(self, record_id: str) -> VerificationRecord[TState] | None:
@@ -192,7 +205,9 @@ class VerificationMemory(Generic[TState]):
 
     def clear(self) -> None:
         with self._lock:
+            removed = len(self._records)
             self._records.clear()
+        logger.debug("VerificationMemory cleared | removed=%d", removed)
 
     def statistics(self) -> dict[str, object]:
         """Return a snapshot of bounded-memory operational counts."""

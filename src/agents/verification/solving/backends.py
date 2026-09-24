@@ -10,6 +10,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from logs.logger import get_logger
+
 from .solver import (
     BOOL_SORT,
     NamedConstraint,
@@ -28,6 +30,9 @@ from ..utils.verification_errors import (
     SolverUnavailableError,
     VerificationError,
 )
+
+
+logger = get_logger("Verification Solver Backends")
 
 
 _SUPPORTED_OPERATORS = frozenset(TermOp)
@@ -83,6 +88,13 @@ class Z3Backend:
             raise SolverBackendError("Z3 backend received an invalid SolverRequest")
         z3 = self._load()
         started = time.monotonic()
+        logger.debug(
+            "Starting solver check | backend=%s | constraints=%d | assumptions=%d | quantified=%s",
+            self.name,
+            len(request.constraints),
+            len(request.assumptions),
+            request.quantified,
+        )
         try:
             solver = z3.Solver()
             if request.timeout_seconds is not None:
@@ -219,6 +231,7 @@ class Z3Backend:
                         if native is not None:
                             value = model.eval(native, model_completion=True)
                             model_payload[item.name or ""] = str(value)
+                logger.debug("Solver completed | backend=%s | status=sat | elapsed=%.6f", self.name, elapsed)
                 return SolverResponse(
                     status=SolverStatus.SAT,
                     backend=self.name,
@@ -234,6 +247,7 @@ class Z3Backend:
                         if raw in tracked_names:
                             names.append(tracked_names[raw])
                     core = tuple(names)
+                logger.debug("Solver completed | backend=%s | status=unsat | elapsed=%.6f", self.name, elapsed)
                 return SolverResponse(
                     status=SolverStatus.UNSAT,
                     backend=self.name,
@@ -241,6 +255,12 @@ class Z3Backend:
                     elapsed_seconds=elapsed,
                 )
             reason = str(solver.reason_unknown() or "solver returned unknown")
+            logger.warning(
+                "Solver returned UNKNOWN | backend=%s | elapsed=%.6f | reason=%s",
+                self.name,
+                elapsed,
+                reason,
+            )
             return SolverResponse(
                 status=SolverStatus.UNKNOWN,
                 backend=self.name,
@@ -283,6 +303,7 @@ class BackendRegistry:
                     context={"backend": normalized},
                 )
             self._factories[normalized] = factory
+        logger.debug("Solver backend registered | backend=%s | replace=%s", normalized, replace)
 
     def names(self) -> tuple[str, ...]:
         with self._lock:
@@ -313,10 +334,12 @@ class BackendRegistry:
                 context={"backend": normalized},
             )
         if not backend.available:
+            logger.warning("Solver backend unavailable | backend=%s", normalized)
             raise SolverUnavailableError(
                 "requested solver backend is unavailable",
                 context={"backend": normalized},
             )
+        logger.debug("Solver backend created | backend=%s", normalized)
         return backend
 
     def select(self, preferred: tuple[str, ...]) -> SolverBackend:
@@ -325,7 +348,9 @@ class BackendRegistry:
             normalized = str(name).strip().lower()
             attempts.append(normalized)
             try:
-                return self.create(normalized)
+                backend = self.create(normalized)
+                logger.info("Selected verification solver backend | backend=%s", normalized)
+                return backend
             except SolverUnavailableError:
                 continue
         raise SolverUnavailableError(

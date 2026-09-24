@@ -33,7 +33,7 @@ from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .verification.verification_proof import *
 from .verification.verification_result import *
-from .verification.verification_invariants import *
+from .verification.verification_types import *
 from .verification.utils.verification_errors import *
 from .verification.utils.verification_helpers import *
 from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
@@ -66,10 +66,10 @@ class VerificationAgent(BaseAgent):
 
         self.shared_memory = shared_memory if shared_memory is not None else self.shared_memory
         self.agent_factory = agent_factory
-        self._alignment_lock = threading.RLock()
+        self._verification_lock = threading.RLock()
 
         # Agent-level configuration comes from the same central contract used by
-        # the other SLAI agents. No alignment subsystem config is read here.
+        # the other SLAI agents. No verification subsystem config is read here.
         self.config = load_global_config()
         self.global_config = self.config
         self.agent_config: Dict[str, Any] = dict(get_config_section(self.AGENT_KEY, config=self.config) or {})
@@ -92,7 +92,7 @@ class VerificationAgent(BaseAgent):
             warn_unknown_global_keys=False,
         )
 
-        self._publish_alignment_event(
+        self._publish_verification_event(
             "initialized",
             {
                 "agent_id": self.agent_id,
@@ -108,5 +108,5 @@ class VerificationAgent(BaseAgent):
             self.risk_threshold,
         )
 
-    def _publish_alignment_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+    def _publish_verification_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
         pass

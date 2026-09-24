@@ -6,7 +6,7 @@ import math
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, cast
 
 from .utils.verification_errors import MalformedSpecificationError
 
@@ -61,10 +61,7 @@ def _positive_int(value: object, name: str, *, allow_none: bool = False) -> int 
             context={"field": name, "value": repr(value)},
         )
     if value <= 0:
-        raise MalformedSpecificationError(
-            f"{name} must be greater than zero",
-            context={"field": name, "value": value},
-        )
+        raise MalformedSpecificationError(f"{name} must be greater than zero", context={"field": name, "value": value})
     return value
 
 
@@ -202,6 +199,7 @@ class VerificationSettings:
                     f"configuration section {name!r} must be a mapping"
                 )
 
+            solver_raw = cast(Mapping[str, object], solver_raw)
         preferred = solver_raw.get("preferred_backends", ("z3",))
         if isinstance(preferred, str):
             preferred_backends: Sequence[object] = (preferred,)

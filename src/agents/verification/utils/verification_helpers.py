@@ -1,112 +1,311 @@
-"""Small deterministic helpers shared by Verification subsystem modules.
+"""Level-0 helper utilities for the SLAI Verification subsystem.
 
-The module deliberately reuses SLAI's tuning helper primitives for timestamps
-and stable fingerprints instead of reimplementing generic serialization or
-hashing.  Functions here add only Verification-specific semantics.
+The helpers are intentionally dependency-light and verification-specific.  They
+may be imported by every Verification layer, but they never import ``formal``,
+``model``, ``solving`` or level-2 subsystem modules.
+
+Generic validation and deterministic fingerprinting are reused from SLAI's
+existing Base/tuning utilities rather than reimplemented here.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, TypedDict
+import math
 
-from src.tuning.utils.tuning_helpers import stable_fingerprint # type: ignore
-from ..solving.solver import Term, TermOp, collect_free_symbols
-from .verification_errors import MalformedSpecificationError
-from ..verification_result import VerificationResult
+from collections.abc import Callable, Iterable, Mapping
+from typing import Hashable, Protocol, TypeVar, runtime_checkable
+
+from ...base.utils.base_errors import (
+    ensure_callable as base_ensure_callable,
+    ensure_mapping as base_ensure_mapping,
+    ensure_non_empty_string as base_ensure_non_empty_string,
+)
+from src.tuning.utils.tuning_helpers import stable_fingerprint # pyright: ignore[reportMissingImports]
+
+from .verification_errors import MalformedSpecificationError, VerificationError
 
 
-class TermStatistics(TypedDict):
-    """Structural statistics for a backend-neutral verification term."""
+T = TypeVar("T")
+THashable = TypeVar("THashable", bound=Hashable)
+MetadataValue = str | int | float | bool | None
 
-    node_count: int
-    max_depth: int
-    quantifier_count: int
-    free_symbol_count: int
+
+@runtime_checkable
+class SupportsVerificationDict(Protocol):
+    """Protocol for formal artifacts exposing deterministic dictionary data."""
+
+    def to_dict(self) -> Mapping[str, object]:
+        ...
+
+
+def require_non_empty_text(
+    value: object,
+    field: str,
+    *,
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> str:
+    """Return a stripped non-empty string using SLAI Base validation semantics."""
+
+    return base_ensure_non_empty_string(
+        value,
+        field,
+        error_cls=error_cls,
+        strip=True,
+    )
+
+
+def require_callable(
+    value: object,
+    field: str,
+    *,
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> Callable[..., object]:
+    """Require a callable without duplicating SLAI Base validation logic."""
+
+    return base_ensure_callable(value, field, error_cls=error_cls)
+
+
+def require_positive_int(
+    value: object,
+    field: str,
+    *,
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> int:
+    """Require a positive integer, explicitly rejecting ``bool``."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise error_cls(
+            f"{field} must be a positive integer",
+            context={"field": field, "value": value},
+        )
+    return value
+
+
+def require_non_negative_int(
+    value: object,
+    field: str,
+    *,
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> int:
+    """Require a non-negative integer, explicitly rejecting ``bool``."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise error_cls(
+            f"{field} must be a non-negative integer",
+            context={"field": field, "value": value},
+        )
+    return value
+
+
+def require_positive_float(
+    value: object,
+    field: str,
+    *,
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> float:
+    """Require a finite positive numeric value, explicitly rejecting ``bool``."""
+
+    if isinstance(value, bool):
+        raise error_cls(
+            f"{field} must be a finite positive number",
+            context={"field": field, "value": value},
+        )
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise error_cls(
+            f"{field} must be a finite positive number",
+            context={"field": field, "value": value},
+            cause=exc,
+        ) from exc
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise error_cls(
+            f"{field} must be a finite positive number",
+            context={"field": field, "value": value},
+        )
+    return parsed
+
+
+def ensure_hashable(
+    value: T,
+    field: str,
+    *,
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> T:
+    """Require a hashable formal state/key and return the original value."""
+
+    try:
+        hash(value)
+    except (TypeError, ValueError) as exc:
+        raise error_cls(
+            f"{field} must be hashable",
+            context={"field": field, "type": type(value).__name__},
+            cause=exc,
+        ) from exc
+    return value
+
+
+def normalize_unique_hashables(
+    values: Iterable[THashable],
+    field: str,
+    *,
+    require_non_empty: bool = False,
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> tuple[THashable, ...]:
+    """Materialize an ordered hashable sequence and reject duplicate members."""
+
+    try:
+        materialized = tuple(values)
+    except TypeError as exc:
+        raise error_cls(
+            f"{field} must be iterable",
+            context={"field": field},
+            cause=exc,
+        ) from exc
+
+    if require_non_empty and not materialized:
+        raise error_cls(f"{field} must not be empty", context={"field": field})
+
+    seen: set[THashable] = set()
+    for index, value in enumerate(materialized):
+        ensure_hashable(value, f"{field}[{index}]", error_cls=error_cls)
+        if value in seen:
+            raise error_cls(
+                f"{field} must contain unique values",
+                context={"field": field, "duplicate_index": index, "value": safe_repr(value)},
+            )
+        seen.add(value)
+    return materialized
+
+
+def normalize_string_values(
+    values: Iterable[object] | str | None,
+    field: str,
+    *,
+    sort: bool = True,
+    unique: bool = True,
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> tuple[str, ...]:
+    """Normalize non-empty strings with optional deterministic de-duplication."""
+
+    if values is None:
+        return ()
+    iterable: Iterable[object] = (values,) if isinstance(values, str) else values
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(iterable):
+        text = require_non_empty_text(raw, f"{field}[{index}]", error_cls=error_cls)
+        if unique and text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    if sort:
+        normalized.sort()
+    return tuple(normalized)
 
 
 def normalize_tags(tags: Iterable[str] | str | None) -> tuple[str, ...]:
-    """Return unique, sorted, non-empty tags.
+    """Return unique, sorted, non-empty tags with deterministic ordering."""
 
-    Sorting gives memory queries and serialized records deterministic tag order.
+    return normalize_string_values(tags, "verification tags", sort=True, unique=True)
+
+
+def normalize_metadata(
+    metadata: Mapping[object, object] | None,
+    *,
+    field: str = "metadata",
+    error_cls: type[VerificationError] = MalformedSpecificationError,
+) -> dict[str, MetadataValue]:
+    """Normalize bounded scalar metadata used by formal structural artifacts.
+
+    Metadata is descriptive only; arbitrary executable or nested objects are not
+    accepted in formal transition artifacts.
     """
 
-    if tags is None:
-        return ()
-    values = (tags,) if isinstance(tags, str) else tags
-    normalized: set[str] = set()
-    for raw in values:
-        value = str(raw).strip()
-        if not value:
-            raise MalformedSpecificationError("verification tags must be non-empty strings")
-        normalized.add(value)
-    return tuple(sorted(normalized))
+    if metadata is None:
+        return {}
+    mapping = base_ensure_mapping(metadata, field, error_cls=error_cls)
+    normalized: dict[str, MetadataValue] = {}
+    for raw_key, value in mapping.items():
+        key = require_non_empty_text(raw_key, f"{field} key", error_cls=error_cls)
+        if key in normalized:
+            raise error_cls(
+                f"{field} keys must be unique after normalization",
+                context={"field": field, "key": key},
+            )
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise error_cls(
+                f"{field} values must be scalar (str/int/float/bool/null)",
+                context={"field": field, "key": key, "type": type(value).__name__},
+            )
+        if isinstance(value, float) and not math.isfinite(value):
+            raise error_cls(
+                f"{field} floating-point values must be finite",
+                context={"field": field, "key": key, "value": value},
+            )
+        normalized[key] = value
+    return normalized
 
 
-def term_statistics(term: Term) -> TermStatistics:
-    """Return bounded structural facts about a validated solver-neutral term."""
+def safe_repr(value: object, *, max_length: int = 240) -> str:
+    """Return a bounded diagnostic repr that does not mask verification errors."""
 
-    if not isinstance(term, Term):
-        raise MalformedSpecificationError("term_statistics requires a Term")
-
-    node_count = 0
-    max_depth = 0
-    quantifier_count = 0
-
-    def visit(node: Term, depth: int) -> None:
-        nonlocal node_count, max_depth, quantifier_count
-        node_count += 1
-        max_depth = max(max_depth, depth)
-        if node.op in {TermOp.FORALL, TermOp.EXISTS}:
-            quantifier_count += 1
-        for variable in node.bound_variables:
-            visit(variable, depth + 1)
-        for child in node.args:
-            visit(child, depth + 1)
-
-    visit(term, 1)
-    return {
-        "node_count": node_count,
-        "max_depth": max_depth,
-        "quantifier_count": quantifier_count,
-        "free_symbol_count": len(collect_free_symbols(term)),
-    }
+    max_length = require_positive_int(max_length, "max_length")
+    try:
+        rendered = repr(value)
+    except Exception:
+        rendered = f"<{type(value).__name__}:unrepresentable>"
+    if len(rendered) <= max_length:
+        return rendered
+    if max_length <= 3:
+        return rendered[:max_length]
+    return f"{rendered[: max_length - 3]}..."
 
 
-def _term_payload(term: Term) -> dict[str, object]:
-    return {
-        "op": term.op.value,
-        "sort": term.sort.kind.value,
-        "name": term.name,
-        "value": term.value,
-        "bound_variables": [_term_payload(item) for item in term.bound_variables],
-        "args": [_term_payload(item) for item in term.args],
-    }
+def artifact_fingerprint(payload: Mapping[str, object]) -> str:
+    """Fingerprint deterministic verification metadata.
 
-
-def term_fingerprint(term: Term) -> str:
-    """Return a deterministic fingerprint for a solver-neutral formal term."""
-
-    if not isinstance(term, Term):
-        raise MalformedSpecificationError("term_fingerprint requires a Term")
-    return stable_fingerprint(_term_payload(term))
-
-
-def result_fingerprint(result: VerificationResult[object]) -> str:
-    """Return a deterministic fingerprint of formal result evidence.
-
-    Runtime memory metadata such as insertion time is intentionally excluded;
-    only :meth:`VerificationResult.to_dict` evidence participates.
+    Canonical JSON normalization and hashing are delegated to SLAI's existing
+    tuning helper. Verification only defines when a fingerprint is semantically
+    useful.
     """
 
-    if not isinstance(result, VerificationResult):
-        raise MalformedSpecificationError("result_fingerprint requires VerificationResult")
-    return stable_fingerprint(result.to_dict())
+    if not isinstance(payload, Mapping):
+        raise MalformedSpecificationError(
+            "artifact_fingerprint requires a mapping payload"
+        )
+    return stable_fingerprint(dict(payload))
+
+
+def result_fingerprint(result: SupportsVerificationDict) -> str:
+    """Fingerprint the formal evidence exposed by ``result.to_dict()``."""
+
+    if not isinstance(result, SupportsVerificationDict):
+        raise MalformedSpecificationError(
+            "result_fingerprint requires an object implementing to_dict()"
+        )
+    payload = result.to_dict()
+    if not isinstance(payload, Mapping):
+        raise MalformedSpecificationError(
+            "verification result to_dict() must return a mapping"
+        )
+    return artifact_fingerprint(payload)
 
 
 __all__ = [
-    "TermStatistics",
+    "MetadataValue",
+    "SupportsVerificationDict",
+    "artifact_fingerprint",
+    "ensure_hashable",
+    "normalize_metadata",
+    "normalize_string_values",
     "normalize_tags",
+    "normalize_unique_hashables",
+    "require_callable",
+    "require_non_empty_text",
+    "require_non_negative_int",
+    "require_positive_float",
+    "require_positive_int",
     "result_fingerprint",
-    "term_fingerprint",
-    "term_statistics",
+    "safe_repr",
 ]

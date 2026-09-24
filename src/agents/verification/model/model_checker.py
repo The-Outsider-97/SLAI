@@ -7,22 +7,27 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Generic, Hashable, TypeVar
 
+from logs.logger import get_logger
+
 from .transition_system import Transition, TransitionSystem
 from ..formal.specifications import Invariant, StatePredicate
-from ..verification_result import (
+from ..utils.verification_result import (
     TraceKind,
     TraceStep,
     VerificationProvenance,
     VerificationResult,
     VerificationTrace,
 )
-from ..verification_types import (
+from ..utils.verification_types import (
     ResourceBounds,
     VerificationMethod,
     VerificationScope,
     VerificationStatus,
 )
 from ..utils.verification_errors import MalformedSpecificationError
+
+
+logger = get_logger("Verification Model Checker")
 
 
 TState = TypeVar("TState", bound=Hashable)
@@ -45,6 +50,13 @@ class ModelChecker:
 
     def __init__(self, default_bounds: ResourceBounds | None = None) -> None:
         self.default_bounds = default_bounds or ResourceBounds()
+        logger.debug(
+            "ModelChecker initialized | max_states=%d | max_transitions=%d | max_depth=%s | timeout=%s",
+            self.default_bounds.max_states,
+            self.default_bounds.max_transitions,
+            self.default_bounds.max_depth,
+            self.default_bounds.timeout_seconds,
+        )
 
     @staticmethod
     def _expired(started: float, bounds: ResourceBounds) -> bool:
@@ -221,6 +233,21 @@ class ModelChecker:
             raise MalformedSpecificationError("reachability requires a TransitionSystem and StatePredicate")
         active_bounds = bounds or self.default_bounds
         outcome = self._search(system, target, active_bounds)
+        logger.debug(
+            "Reachability search completed | property=%s | found=%s | cutoff=%s | states=%d | transitions=%d | depth=%d",
+            target.name,
+            outcome.found is not None,
+            outcome.cutoff,
+            outcome.explored_states,
+            outcome.explored_transitions,
+            outcome.depth_reached,
+        )
+        if outcome.cutoff is not None:
+            logger.warning(
+                "Reachability search constrained | property=%s | cutoff=%s",
+                target.name,
+                outcome.cutoff,
+            )
         if outcome.found is not None:
             return VerificationResult(
                 status=VerificationStatus.SATISFIABLE,
@@ -264,6 +291,21 @@ class ModelChecker:
         )
         active_bounds = bounds or self.default_bounds
         outcome = self._search(system, negated, active_bounds)
+        logger.debug(
+            "Invariant search completed | property=%s | violated=%s | cutoff=%s | states=%d | transitions=%d | depth=%d",
+            invariant.name,
+            outcome.found is not None,
+            outcome.cutoff,
+            outcome.explored_states,
+            outcome.explored_transitions,
+            outcome.depth_reached,
+        )
+        if outcome.cutoff is not None:
+            logger.warning(
+                "Invariant search constrained | property=%s | cutoff=%s",
+                invariant.name,
+                outcome.cutoff,
+            )
         if outcome.found is not None:
             return VerificationResult(
                 status=VerificationStatus.REFUTED,

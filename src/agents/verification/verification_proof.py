@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping
 
-from src.tuning.utils.tuning_helpers import stable_fingerprint # type: ignore
+from src.tuning.utils.tuning_helpers import stable_fingerprint # pyright: ignore[reportMissingImports]
 from .utils.verification_errors import MalformedSpecificationError
 
 
