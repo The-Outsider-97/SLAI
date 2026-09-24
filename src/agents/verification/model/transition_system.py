@@ -9,20 +9,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Generic, Hashable, Mapping, Sequence, TypeVar
-
-from logs.logger import get_logger
+from typing import Generic, Hashable, Mapping, Sequence, TypeVar, cast
 
 from ..utils.verification_errors import InvalidTransitionModelError
-from ..utils.verification_helpers import (
-    MetadataValue,
-    ensure_hashable,
-    normalize_metadata,
-    normalize_string_values,
-    normalize_unique_hashables,
-    require_non_empty_text,
-    safe_repr,
-)
+from ..utils.verification_helpers import *
+from logs.logger import get_logger # pyright: ignore[reportMissingImports]
 
 
 logger = get_logger("Verification Transition System")
@@ -41,28 +32,16 @@ class Transition(Generic[TState]):
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        ensure_hashable(
-            self.source,
-            "transition source",
-            error_cls=InvalidTransitionModelError,
-        )
-        ensure_hashable(
-            self.target,
-            "transition target",
-            error_cls=InvalidTransitionModelError,
-        )
+        ensure_hashable(self.source, "transition source", error_cls=InvalidTransitionModelError)
+        ensure_hashable(self.target, "transition target", error_cls=InvalidTransitionModelError)
         if self.label is not None:
             object.__setattr__(
                 self,
                 "label",
-                require_non_empty_text(
-                    self.label,
-                    "transition label",
-                    error_cls=InvalidTransitionModelError,
-                ),
+                require_non_empty_text(self.label, "transition label", error_cls=InvalidTransitionModelError),
             )
         normalized = normalize_metadata(
-            self.metadata,
+            cast(Mapping[object, object], self.metadata),
             field="transition metadata",
             error_cls=InvalidTransitionModelError,
         )

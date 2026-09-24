@@ -40,6 +40,7 @@ _EXPORTS = {
     "ReaderAgent": (".reader_agent", "ReaderAgent"), # done for 2.1.0 needs to be updated and expanded for 2.3.0
     "ReasoningAgent": (".reasoning_agent", "ReasoningAgent"),
     "SafetyAgent": (".safety_agent", "SafetyAgent"),
+    "VerificationAgent": (".verification_agent", "VerificationAgent"),
     # For later: add more agents like social agent, emotional agent, gamer agent, simulation agent, etc.
 }
 

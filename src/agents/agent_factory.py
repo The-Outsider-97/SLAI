@@ -223,6 +223,7 @@ class AgentFactory:
         "reader": {"module_path": "src.agents.reader_agent", "class_name": "ReaderAgent"},
         "reasoning": {"module_path": "src.agents.reasoning_agent", "class_name": "ReasoningAgent"},
         "safety": {"module_path": "src.agents.safety_agent", "class_name": "SafetyAgent"},
+        "verification": {"module_path": "src.agents.verification_agent", "class_name": "VerificationAgent"},
     }
 
     DEFAULT_ALIASES: Dict[str, str] = {
@@ -239,6 +240,7 @@ class AgentFactory:
         "observability_agent": "observability",
         "reasoning_agent": "reasoning",
         "evaluation_agent": "evaluation",
+        "verification_agent": "verification"
     }
 
     DEFAULT_DEPENDENCY_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -257,6 +259,11 @@ class AgentFactory:
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
         "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
         "perception": {"torch_required": True, "notes": "Perception encoder/decoder stack is torch-based."},
+        "verification": {"torch_required": False, "notes": (
+            "Formal verification/model-checking orchestration is torch-free; "
+            "SAT/SMT backends remain optional dependencies of the "
+            "Verification subsystem."
+        )},
     }
 
     DEFAULT_QOS_PROFILES: Dict[str, Dict[str, Any]] = {
