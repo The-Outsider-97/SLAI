@@ -1,43 +1,33 @@
 {
-  "schema": "slai.lantra.supervised-seed.v2",
-  "records_per_task": 120,
-  "total_records": 840,
-  "split_policy": {
-    "train": 96,
-    "validation": 12,
-    "test": 12
-  },
-  "deduplication_audit": {
-    "exact_content_duplicates": 0,
-    "cross_split_conflicts": 0,
-    "unique_ids": 840,
-    "unique_normalized_content_records": 840
-  },
+  "schema": "slai.lantra.supervised.v3",
+  "purpose": "supervised multitask specialization",
+  "source_policy": "curated original examples authored for LANTRA; no external dataset copied",
+  "total_records": 1440,
   "task_split_counts": {
+    "dialogue": {
+      "train": 360,
+      "validation": 42,
+      "test": 42
+    },
     "generation": {
-      "train": 96,
+      "train": 120,
       "validation": 12,
       "test": 12
     },
     "classification": {
-      "train": 96,
-      "validation": 12,
-      "test": 12
+      "train": 384,
+      "test": 48,
+      "validation": 48
     },
     "translation": {
-      "train": 96,
-      "validation": 12,
-      "test": 12
+      "train": 64,
+      "validation": 8,
+      "test": 8
     },
     "summarization": {
-      "train": 96,
-      "validation": 12,
-      "test": 12
-    },
-    "dialogue": {
-      "train": 96,
-      "validation": 12,
-      "test": 12
+      "train": 48,
+      "test": 12,
+      "validation": 12
     },
     "embedding": {
       "train": 96,
@@ -45,13 +35,25 @@
       "test": 12
     },
     "reranking": {
-      "train": 96,
-      "validation": 12,
-      "test": 12
+      "train": 84,
+      "validation": 8,
+      "test": 8
     }
   },
-  "limitations": [
-    "Synthetic seed corpus for LANTRA supervised pipeline completion and initial fine-tuning.",
-    "Expand with licensed, independently curated real-world task data before serious evaluation or deployment."
+  "integrity": {
+    "unique_ids": 1440,
+    "id_duplicates": 0,
+    "unique_normalized_records": 1440,
+    "exact_content_duplicates": 0,
+    "source_group_cross_split_leaks": 0
+  },
+  "classification_taxonomy": "user_request_intent_v1",
+  "notes": [
+    "All variants from the same source group stay in one split to reduce template/source leakage.",
+    "Every task has train, validation, and test coverage above the trainer default minimum sample count.",
+    "Dialogue is broad and conversational rather than a technical glossary.",
+    "Generation focuses on instruction following and transformation.",
+    "Classification uses one coherent label space.",
+    "This is a corrected starter corpus, not a claim of deployment-scale coverage."
   ]
 }
