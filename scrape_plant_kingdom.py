@@ -8,6 +8,7 @@ SQLite/JSONL sidecars. Run --help; see PLANT_COLLECTOR_README.md.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 import time
@@ -635,14 +636,24 @@ def find_slai_root(explicit=None):
 
 
 def create_agents(root, mode):
+    global LOG
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
+    if importlib.util.find_spec('yaml') is None:
+        venv_python = root/'venv'/'Scripts'/'python.exe' if os.name == 'nt' else root/'venv'/'bin'/'python'
+        if venv_python.is_file() and venv_python.absolute() != Path(sys.executable).absolute():
+            LOG.warning('Python %s cannot import PyYAML; restarting with %s', sys.executable, venv_python)
+            os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+        raise RuntimeError(
+            f'PyYAML is unavailable to the interpreter running this scraper: {sys.executable}. '
+            f'Check its environment with: {sys.executable} -m pip show PyYAML. '
+            f'Expected virtual environment Python: {venv_python}'
+        )
     # Direct project imports, intentionally no optional-import exception fallback.
     from src.agents.agent_factory import AgentFactory
     from src.agents.collaborative.shared_memory import SharedMemory
     from logs.logger import configure_logging, get_logger
     configure_logging()
-    global LOG
     LOG = get_logger('Plant Collector')
     memory = SharedMemory()
     factory = None
@@ -823,7 +834,7 @@ def collect(db, api, args, pipeline):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--output-dir', type=Path, default=Path('plant_kingdom'))
+    p.add_argument('--output-dir', type=Path, help='Legacy option: ignored; output is always beside this script in plants/')
     p.add_argument('--slai-root', type=Path)
     p.add_argument('--agents', choices=('team', 'knowledge', 'off'), default='team')
     p.add_argument('--max-articles', type=int, default=3000)
@@ -881,10 +892,14 @@ def main(argv=None):
     if args.self_test:
         self_test()
         return 0
-    args.output_dir = args.output_dir.expanduser().resolve()
+    requested_output_dir = args.output_dir
+    args.output_dir = Path(__file__).resolve().parent/'plants'
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s',
                         handlers=[logging.StreamHandler(), logging.FileHandler(args.output_dir/'collector.log', encoding='utf-8')])
+    if requested_output_dir is not None and requested_output_dir.expanduser().resolve() != args.output_dir:
+        LOG.warning('Ignoring --output-dir %s; content is saved beside this script.', requested_output_dir)
+    LOG.info('OUTPUT | All collected documents will be saved in %s', args.output_dir)
     pipeline, db = None, None
     previous_cwd = Path.cwd()
     code = 0
