@@ -261,7 +261,9 @@ class AgentFactory:
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
         "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
         "perception": {"torch_required": True, "notes": "Perception encoder/decoder stack is torch-based."},
-        "simulation": {"torch_required": False, "notes": ""},
+        "simulation": {"torch_required": False, "notes": (
+                       "Simulation orchestration and numerical execution are torch-free by default;"
+                       "externally supplied learned world models may carry their own optional dependencies.")},
         "verification": {"torch_required": False, "notes": (
             "Formal verification/model-checking orchestration is torch-free; "
             "SAT/SMT backends remain optional dependencies of the "
