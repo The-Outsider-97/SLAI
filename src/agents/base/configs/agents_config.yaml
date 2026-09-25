@@ -125,6 +125,7 @@ agent_factory:
       observability_agent: observability
       reasoning_agent: reasoning
       evaluation_agent: evaluation
+      simulation_agent: simulation
       verification_agent: verification
     out_of_process_fallback_agents:
       - adaptive
@@ -186,9 +187,13 @@ agent_factory:
       perception:
         torch_required: true
         notes: "Perception encoder/decoder stack is torch-based."
+      simulation:
+        torch_required: false
+        notes: "Simulation orchestration and numerical execution are torch-free by default; externally supplied learned world models may carry their own optional dependencies."
       verification:
         torch_required: false
         notes: "Formal verification/model-checking orchestration is torch-free; SAT/SMT backends remain optional dependencies of the Verification subsystem."
+
     agent_specs:
       adaptive:
         module_path: src.agents.adaptive_agent
@@ -276,6 +281,18 @@ agent_factory:
         module_path: src.agents.safety_agent
         class_name: SafetyAgent
         capabilities: [safety, risk_assessment, policy_enforcement]
+      simulation:
+        module_path: src.agents.simulation_agent
+        class_name: SimulationAgent
+        capabilities:
+          - simulation
+          - deterministic_rollout
+          - stochastic_rollout
+          - monte_carlo
+          - scenario_simulation
+          - counterfactual_rollout
+          - sensitivity_analysis
+          - synthetic_environment_simulation
       verification:
         module_path: src.agents.verification_agent
         class_name: VerificationAgent
@@ -1419,6 +1436,33 @@ safety_agent:
   safety_policies: []
   formal_specs: {}
   fault_tree_config: {}
+
+
+simulation_agent:
+  enabled: true
+  default_operation: rollout
+
+  # Cross-agent publication policy only; numerical settings remain subsystem-owned.
+  publish_lifecycle_events: true
+  publish_results: true
+  publish_errors: true
+  shared_memory_ttl_seconds: 86400
+  event_channel: "simulation.events"
+  result_key_prefix: "simulation_agent.result"
+  summary_key_prefix: "simulation_agent.summary"
+  error_key_prefix: "simulation_agent.error"
+  latest_result_key: "simulation_agent.latest"
+
+  # SimulationMemory retention is Agent orchestration policy, not numerical policy.
+  max_recent_runs: 256
+  store_request_payloads: true
+  retain_full_results_in_sim_memory: false
+
+  # Full trajectories remain outside SharedMemory by default.
+  include_trajectory_in_shared_memory: false
+  max_shared_trajectory_steps: 64
+  max_shared_list_items: 128
+  max_shared_string_length: 4096
 
 
 verification_agent:
