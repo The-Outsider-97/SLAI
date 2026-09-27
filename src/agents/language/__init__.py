@@ -1,79 +1,75 @@
-from .dialogue_context import *
-from .grammar_processor import *
-from .language_memory import *
-from .nlg_engine import *
-from .nlp_engine import *
-from .nlu_engine import *
-from .orthography_processor import *
+"""SLAI language subsystem public API.
 
-__all__ = [
-    # Memory
-    "MemoryKind",
-    "MemoryScope",
-    "MemoryRole",
-    "MemoryQuery",
-    "MemoryRecord",
-    "MemoryMatch",
-    "MemorySnapshot",
-    "LanguageMemoryStats",
-    "LanguageMemoryConfig",
+The package surface is lazy by design. Importing one language submodule must not
+initialize every NLP/NLG/dialogue component or acquire optional native runtimes.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Dict, Tuple
+
+_EXPORTS: Dict[str, Tuple[str, str]] = {}
+
+
+def _register(module_name: str, *names: str) -> None:
+    for name in names:
+        _EXPORTS[name] = (module_name, name)
+
+
+_register(
+    ".language_memory",
+    "MemoryKind", "MemoryScope", "MemoryRole", "MemoryQuery", "MemoryRecord",
+    "MemoryMatch", "MemorySnapshot", "LanguageMemoryStats", "LanguageMemoryConfig",
     "LanguageMemory",
-    # Dialoge context
-    "DialogueRole",
-    "ConversationPhase",
-    "DialogueContextConfig",
-    "DialogueMessage",
-    "DialogueTurn",
-    "SlotValue",
-    "IntentTrace",
-    "UnresolvedIssueRecord",
-    "DialogueContextStats",
-    "DialogueContextSnapshot",
-    "DialogueContext",
-    # Grammar Processor
-    "GrammarSeverity",
-    "InputToken",
-    "DiagnosticGrammarIssue",
-    "GrammarIssue",
-    "SentenceGrammarAnalysis",
-    "GrammarAnalysisResult",
-    "GrammarProcessorStats",
+)
+_register(
+    ".dialogue_context",
+    "DialogueRole", "ConversationPhase", "DialogueContextConfig", "DialogueMessage",
+    "DialogueTurn", "SlotValue", "IntentTrace", "UnresolvedIssueRecord",
+    "DialogueContextStats", "DialogueContextSnapshot", "DialogueContext",
+)
+_register(
+    ".grammar_processor",
+    "GrammarSeverity", "InputToken", "DiagnosticGrammarIssue", "GrammarIssue",
+    "SentenceGrammarAnalysis", "GrammarAnalysisResult", "GrammarProcessorStats",
     "GrammarProcessor",
-    # Orthography Processor
-    "OrthographyToken",
-    "OrthographyEdit",
-    "OrthographyProcessingResult",
-    "OrthographyProcessorStats",
-    "OrthographyProcessor",
-    # NLG Engine
-    "NLGTemplate",
-    "NLGTemplateSet",
-    "NLGContextPacket",
-    "NLGRenderAttempt",
-    "NLGGenerationResult",
-    "NLGEngineStats",
-    "NLGEngine",
-    # NLP Engine
-    "Entity",
-    "Token",
-    "SentenceAnalysis",
-    "NLPAnalysisResult",
-    "NLPEngineStats",
+)
+_register(
+    ".orthography_processor",
+    "OrthographyToken", "OrthographyEdit", "OrthographyProcessingResult",
+    "OrthographyProcessorStats", "OrthographyProcessor",
+)
+_register(
+    ".nlg_engine",
+    "NLGTemplate", "NLGTemplateSet", "NLGContextPacket", "NLGRenderAttempt",
+    "NLGGenerationResult", "NLGEngineStats", "NLGEngine",
+)
+_register(
+    ".nlp_engine",
+    "Entity", "Token", "SentenceAnalysis", "NLPAnalysisResult", "NLPEngineStats",
     "NLPEngine",
-    # NLU Engine
-    "IntentMatchSource",
-    "EntitySource",
-    "NLUSeverity",
-    "NLUIssue",
-    "NLUInputToken",
-    "WordlistEntry",
-    "IntentPattern",
-    "EntityPattern",
-    "IntentCandidate",
-    "EntityMention",
-    "NLUAnalysisResult",
-    "NLUStats",
-    "Wordlist",
-    "NLUEngine",
+)
+_register(
+    ".nlu_engine",
+    "IntentMatchSource", "EntitySource", "NLUSeverity", "NLUIssue", "NLUInputToken",
+    "WordlistEntry", "IntentPattern", "EntityPattern", "IntentCandidate",
+    "EntityMention", "NLUAnalysisResult", "NLUStats", "Wordlist", "NLUEngine",
     "EnhancedNLU",
-]
+)
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    target = _EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute = target
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))
