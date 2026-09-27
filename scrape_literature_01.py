@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Continuously collect romance, horror and drama text for LANTRA.
 
-Python 3.10+. Run beside SLAI's src/ directory.
+Python 3.10+. Run beside SLAI's src/ directory. Ctrl+C saves and stops.
 Run: py -m scrape_literature_01
-Repair mixed/broken agent dependencies: py -m scrape_literature_01 --repair-environment
-The repair creates a private runtime; your SLAI venv and corpus are preserved.
-Ctrl+C saves and stops.
+Uses the launching Python and installed SLAI modules without changing environments.
 Default: Planning + Reasoning + Quality + Knowledge via AgentFactory.
 Output: literature/{romance,horror,drama}.txt beside this module.
 """
@@ -18,8 +16,6 @@ from email.utils import parsedate_to_datetime
 import hashlib
 from html import unescape
 from html.parser import HTMLParser
-import subprocess
-import uuid
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -39,7 +35,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.robotparser import RobotFileParser
 
 LOG = logging.getLogger('literature_collector')
-VERSION = '2.0.0'
+VERSION = '2.1.0'
 GENRES = ('romance', 'horror', 'drama')
 SOURCES = ('gutenberg', 'wikisource', 'wikipedia')
 WIKI = 'https://en.wikipedia.org/w/api.php'
@@ -741,14 +737,15 @@ class Team:
         write_metadata(folder, db.execute('SELECT * FROM documents WHERE id=?', (row['id'],)).fetchone())
         LOG.info('QUALITY | %s | %s | text already exported', row['title'][:70], result['verdict'])
 
-    def close(self):
+    def close(self, *, close_memory=True):
+        """Close shared memory only at final process shutdown, never on renewal."""
         factory, memory = self.factory, self.memory
         self.factory = self.memory = None
         try:
             if factory is not None:
                 factory.shutdown()
         finally:
-            if memory is not None:
+            if close_memory and memory is not None:
                 memory.close()
 
 
@@ -777,125 +774,8 @@ def progress(db, folder, steps):
                    'text_files': {g: str(folder/(g+'.txt')) for g in GENRES}}, stream, indent=2)
 
 
-# Dependencies for the four-agent collector, not SLAI's unrelated UI/server stack.
-# SLAI's own agent configuration loaders remain authoritative for agent settings.
-AGENT_DEPENDENCIES = (
-    'PyYAML', 'numpy', 'scipy', 'scikit-learn', 'pandas', 'psutil',
-    'requests', 'networkx', 'cryptography', 'pydantic', 'jsonschema',
-    'cachetools', 'tenacity', 'beautifulsoup4', 'nltk', 'tqdm', 'joblib',
-    'pgmpy', 'ruptures', 'rdflib', 'diskcache',
-)
-PROBE_MODULES = (
-    'yaml', 'numpy', 'scipy.linalg', 'sklearn.tree', 'pandas', 'torch',
-    'src.agents.planning_agent', 'src.agents.reasoning_agent',
-    'src.agents.quality_agent', 'src.agents.knowledge_agent',
-)
-
-
-def runtime_python(directory):
-    return directory/('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-
-
-def run_visible(command, **kwargs):
-    """Inherit terminal output and Ctrl+C; never invoke a shell."""
-    result = subprocess.run([str(part) for part in command], **kwargs)
-    if result.returncode:
-        raise RuntimeError(f'Runtime setup failed (exit {result.returncode}); see output above')
-
-
-def probe_environment(executable, root, report):
-    """Test actual imports in separate processes, including native extensions.
-
-    A failed import cannot leave partially initialized SLAI modules in the collector.
-    Preserve every diagnostic instead of reporting only the first broken wheel.
-    """
-    failures = []
-    print(f'RUNTIME | {executable}', flush=True)
-    with report.open('w', encoding='utf-8') as stream:
-        for module in PROBE_MODULES:
-            print(f'CHECK | {module}', flush=True)
-            code = ('import sys, importlib; '
-                    f'sys.path.insert(0, {str(root)!r}); '
-                    f'importlib.import_module({module!r}); '
-                    'print(sys.executable); print(sys.version)')
-            result = subprocess.run([str(executable), '-c', code], cwd=root,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                encoding='utf-8', errors='replace', timeout=180)
-            stream.write(f'\n=== {module} | exit={result.returncode} ===\n{result.stdout}')
-            stream.flush()
-            if result.returncode:
-                failures.append(module)
-    return failures
-
-
-def prepare_runtime(root, args, argv, folder):
-    """Select a consistent interpreter or explicitly build a fresh private venv.
-
-    Never install into, delete, or upgrade the user's existing SLAI environment.
-    Only publish a replacement runtime after all four real agent checks pass.
-    """
-    home = Path(__file__).resolve().parent/'.literature_runtime'
-    marker = home/'active.json'
-    script = Path(__file__).resolve()
-    command_name = f'py -m {script.stem}'
-    report = folder/'_state'/'environment_check.log'
-    executable = Path(sys.executable).absolute()
-    selected = executable
-    if marker.is_file() and not args.repair_environment:
-        saved = json.loads(marker.read_text(encoding='utf-8'))
-        candidate = home/saved['directory']
-        if candidate.resolve().parent != home.resolve():
-            raise RuntimeError('Invalid collector runtime location')
-        selected = runtime_python(candidate).absolute()
-        if not selected.is_file():
-            raise RuntimeError(f'Collector runtime is missing. Run: {command_name} --repair-environment')
-    elif sys.prefix == sys.base_prefix and not args.repair_environment:
-        for name in ('venv', '.venv'):
-            candidate = runtime_python(root/name)
-            if candidate.is_file():
-                selected = candidate.absolute()
-                break
-    forwarded = [arg for arg in argv if arg not in
-                 {'--repair-environment', '--runtime-ready', '--check-environment'}]
-    if args.repair_environment:
-        home.mkdir(exist_ok=True)
-        # Unique target also preserves any earlier working collector runtime.
-        target = home/('py'+str(sys.version_info.major)+str(sys.version_info.minor)+'-'+uuid.uuid4().hex[:12])
-        print(f'SETUP | Building isolated agent environment: {target}', flush=True)
-        run_visible([executable, '-m', 'venv', target])
-        selected = runtime_python(target).absolute()
-        run_visible([selected, '-m', 'pip', 'install', '--upgrade', 'pip'])
-        run_visible([selected, '-m', 'pip', 'install', '--only-binary=:all:',
-                     '--index-url', 'https://download.pytorch.org/whl/cpu', 'torch'])
-        run_visible([selected, '-m', 'pip', 'install', '--only-binary=:all:', *AGENT_DEPENDENCIES])
-        failures = probe_environment(selected, root, report)
-        if failures:
-            raise RuntimeError(f'New runtime failed imports: {", ".join(failures)}. Details: {report}')
-        run_visible([selected, script, '--runtime-ready', '--slai-root', root, '--check-agents'], cwd=root)
-        with atomic_writer(marker) as stream:
-            json.dump({'directory': target.name, 'created_at': now()}, stream)
-        print('SETUP | All four agents verified; starting collection.', flush=True)
-    elif not args.runtime_ready:
-        failures = probe_environment(selected, root, report)
-        if failures:
-            raise RuntimeError(
-                f'Agent environment is unusable: {", ".join(failures)}. '
-                f'Details: {report}\n'
-                f'Create a clean collector environment: {command_name} --repair-environment')
-    if args.check_environment:
-        print(f'Environment checks passed: {selected}', flush=True)
-        return True
-    if selected != executable:
-        os.execv(str(selected), [str(selected), str(script), *forwarded, '--runtime-ready'])
-    return False
-
-
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--repair-environment', action='store_true',
-        help='Build a separate compatible agent venv, verify all four agents, then collect')
-    parser.add_argument('--check-environment', action='store_true', help='Check agent imports and exit')
-    parser.add_argument('--runtime-ready', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--agents', choices=('team','off'), default='team')
     parser.add_argument('--slai-root', type=Path)
     parser.add_argument('--sources', default=','.join(SOURCES))
@@ -927,13 +807,10 @@ def parse_args(argv=None):
         parser.error('--contact must be printable ASCII')
     if args.check_agents and (args.agents == 'off' or args.export_only):
         parser.error('--check-agents requires --agents team and cannot use --export-only')
-    if (args.repair_environment or args.check_environment) and (args.agents == 'off' or args.export_only or args.self_test):
-        parser.error('Environment setup/check requires team mode')
     return args
 
 
 def main(argv=None):
-    argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     if args.self_test:
         self_test()
@@ -941,20 +818,12 @@ def main(argv=None):
     folder = Path(__file__).resolve().parent/'literature'
     folder.mkdir(parents=True, exist_ok=True)
     (folder/'_state').mkdir(exist_ok=True)
+    root = find_slai_root(args.slai_root) if args.agents == 'team' and not args.export_only else None
     logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s',
         handlers=[logging.StreamHandler(), RotatingFileHandler(folder/'_state'/'collector.log',
                     maxBytes=5_000_000, backupCount=3, encoding='utf-8')])
     LOG.info('OUTPUT | %s | runs until Ctrl+C', folder)
-    try:
-        root = find_slai_root(args.slai_root) if args.agents == 'team' and not args.export_only else None
-        if root and prepare_runtime(root, args, argv, folder):
-            return 0
-    except KeyboardInterrupt:
-        LOG.info('Runtime setup/check cancelled; existing text preserved')
-        return 130
-    except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        LOG.error('STARTUP | %s', exc)
-        return 2
+    LOG.info('PYTHON | %s | %s', sys.executable, sys.version.split()[0])
     original = Path.cwd()
     team = db = lock = None
     lock_acquired = False
@@ -976,17 +845,22 @@ def main(argv=None):
             return 0
         if root:
             os.chdir(root)
-        if not args.check_agents:
-            seed(db, args)
         team = Team(root, args.agents == 'team')
         if args.check_agents:
             agent_check(team)
-            LOG.info('All four agent checks passed')
+            shared_memory = team.memory
+            team.close(close_memory=False)
+            team = Team(root)
+            if team.memory is not shared_memory:
+                raise RuntimeError('Unexpected SharedMemory identity after renewal')
+            agent_check(team)
+            LOG.info('All four agent checks and agent renewal passed')
             return 0
+        seed(db, args)
         client = Client(args)
         while not STOP.is_set():
             if team.enabled and (team.rounds >= 100 or team.indexed_words >= 100_000):
-                team.close()
+                team.close(close_memory=False)
                 team = Team(root)
                 LOG.info('AGENTS | renewed rolling in-memory index; all text remains on disk')
             rows = candidates(db, args)
@@ -1053,7 +927,7 @@ def main(argv=None):
         return 0
     except KeyboardInterrupt:
         LOG.info('STOP | saving committed text; rerun to resume')
-        return 130 if args.check_agents else 0
+        return 0
     except Exception:
         LOG.exception('Collector stopped; committed text remains available')
         return 1
