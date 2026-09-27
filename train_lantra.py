@@ -37,10 +37,7 @@ Default invocation
     py -m train_lantra
 
 No subcommand is required. Interval recovery checkpoints are saved every 1000
-optimizer steps by default (configurable with ``--checkpoint-every-steps``). The
-trainer also auto-resumes the most recent LANTRA checkpoint, records a persistent
-continual-training state, skips already-consumed ``data/library`` files, and uses
-the freshest ``analyze_lantra_library.py`` JSON/YAML recommendation when available.
+optimizer steps by default (configurable with ``--checkpoint-every-steps``).
 By default the trainer discovers supervised data from:
     data/processed/lantra/
     data/raw/lantra/
@@ -94,29 +91,32 @@ import argparse
 import collections
 import dataclasses
 import hashlib
-import importlib
 import json
 import math
 import os
 import platform
-import posixpath
 import random
 import re
 import sys
 import time
 import traceback
-import unicodedata
-import zipfile
-import xml.etree.ElementTree as ET
 
-from html.parser import HTMLParser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from src.agents.language.modules.language_tokenizer import LanguageTokenizer
-from src.agents.language.modules.language_transformer import LanguageTransformer
+from src.training.lantra_corpus import (
+    DEFAULT_RAW_TEXT_CANDIDATES,
+    RAW_TEXT_EXTENSIONS,
+    ExtractedRawDocument as _ExtractedRawDocument,
+    discover_raw_text_files,
+    extract_raw_documents,
+    normalize_document_text as _normalize_document_text,
+    normalized_text_hash as _normalized_text_hash,
+    segment_raw_document,
+    sha256_file,
+)
 from src.training.lantra_phase_scheduler import *
 from logs.logger import PrettyPrinter, configure_logging, get_logger
 
@@ -150,35 +150,11 @@ DEFAULT_DATA_CANDIDATES: Tuple[str, ...] = (
 )
 DEFAULT_OUTPUT_DIR = "src/agents/language/checkpoints/lantra"
 DEFAULT_REPORT_DIR = "src/agents/language/artifacts/training/lantra"
-DEFAULT_CONTINUAL_STATE = "src/agents/language/checkpoints/lantra/lantra_continual_state.json"
-DEFAULT_LIBRARY_ANALYSIS_CANDIDATES: Tuple[str, ...] = (
-    "lantra_library_analysis.json",
-    "lantra_recommended_config.yaml",
-    "data/processed/lantra/lantra_library_analysis.json",
-    "data/processed/lantra/lantra_recommended_config.yaml",
-    "src/agents/language/artifacts/training/lantra/lantra_library_analysis.json",
-    "src/agents/language/artifacts/training/lantra/lantra_recommended_config.yaml",
-    "data/lantra_library_analysis.json",
-)
-DEFAULT_RAW_TEXT_CANDIDATES: Tuple[str, ...] = (
-    "data/library",
-    "data/raw/lantra_corpus",
-    "data/raw/language_corpus",
-    "data/raw/language",
-    "data/lantra_corpus",
-    "data/language_corpus",
-)
 DEFAULT_GLOVE_CANDIDATES: Tuple[str, ...] = (
     "data/embeddings/glove.6B.200d.json",
     "data/embeddings/glove.6B.100d.json",
     "data/embeddings/glove.6B.300d.json",
 )
-RAW_TEXT_EXTENSIONS = frozenset({
-    ".txt", ".text", ".md", ".markdown",
-    ".html", ".htm", ".xhtml",
-    ".docx", ".epub", ".pdf",
-    ".json", ".jsonl",
-})
 
 # JSON files that describe a corpus rather than contain supervised examples.
 # These are deliberately excluded during supervised dataset discovery, while
@@ -217,6 +193,47 @@ OBJECTIVE_CONTRACT: Dict[str, Any] = {
 
 class LantraTrainingError(RuntimeError):
     """Raised for an actionable LANTRA training/configuration failure."""
+
+
+# These are loaded only when model training begins. Importing train_lantra for
+# corpus utilities must not acquire the native PyTorch runtime.
+LanguageTokenizer: Any = None
+LanguageTransformer: Any = None
+
+
+def load_language_training_runtime() -> None:
+    """Load SLAI's model runtime exactly once and preserve the real root cause."""
+
+    global LanguageTokenizer, LanguageTransformer
+    if LanguageTokenizer is not None and LanguageTransformer is not None:
+        return
+    try:
+        from src.agents.language.modules.language_tokenizer import (
+            LanguageTokenizer as _LanguageTokenizer,
+        )
+        from src.agents.language.modules.language_transformer import (
+            LanguageTransformer as _LanguageTransformer,
+        )
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 126:
+            raise LantraTrainingError(
+                "PyTorch could not load its Windows native runtime (WinError 126). "
+                "This is an environment/runtime failure, not a LANTRA data failure. "
+                "Repair the active virtual environment's official PyTorch installation "
+                "and Microsoft Visual C++ runtime, then verify `python -c \"import "
+                "torch; print(torch.__version__)\"` before starting training. "
+                f"Original error: {exc}"
+            ) from exc
+        raise LantraTrainingError(
+            f"Unable to load SLAI language training runtime: {type(exc).__name__}: {exc}"
+        ) from exc
+    except Exception as exc:
+        raise LantraTrainingError(
+            f"Unable to load SLAI language training runtime: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    LanguageTokenizer = _LanguageTokenizer
+    LanguageTransformer = _LanguageTransformer
 
 
 @dataclass(frozen=True)
@@ -326,12 +343,6 @@ class TrainerConfig:
     raw_corruption_probability: float
     raw_min_chars: int
     raw_chunk_chars: int
-    library_analysis_path: Optional[str]
-    recommended_model_overrides: Dict[str, Any]
-    recommended_profile: Dict[str, Any]
-    continual_state_path: str
-    auto_resume: bool
-    incremental_library: bool
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -407,14 +418,6 @@ def sha256_payload(value: Any) -> str:
     return hashlib.sha256(stable_json_bytes(value)).hexdigest()
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def atomic_json_write(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -424,232 +427,6 @@ def atomic_json_write(path: Path, payload: Mapping[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
-
-
-
-def load_json_mapping(path: Path) -> Dict[str, Any]:
-    try:
-        with path.open("r", encoding="utf-8-sig") as handle:
-            payload = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise LantraTrainingError(f"Failed to read JSON file {path}: {exc}") from exc
-    if not isinstance(payload, Mapping):
-        raise LantraTrainingError(f"JSON file {path} must contain a top-level object.")
-    return dict(payload)
-
-
-def resolve_library_analysis_path(explicit: Optional[str]) -> Optional[Path]:
-    if explicit:
-        path = Path(explicit)
-        if not path.is_file():
-            raise LantraTrainingError(f"LANTRA library analysis file does not exist: {path}")
-        return path
-    candidates = [Path(value) for value in DEFAULT_LIBRARY_ANALYSIS_CANDIDATES if Path(value).is_file()]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item.stat().st_mtime_ns)
-
-
-def load_recommended_model_config(explicit: Optional[str]) -> Tuple[Optional[str], Dict[str, Any], Dict[str, Any]]:
-    path = resolve_library_analysis_path(explicit)
-    if path is None:
-        LOGGER.warning(
-            "No analyze_lantra_library JSON report was found. LANTRA will use language_config.yaml architecture defaults. "
-            "Run analyze_lantra_library.py or pass --library-analysis PATH to make the recommendation authoritative."
-        )
-        return None, {}, {}
-
-    if path.suffix.lower() in {".yaml", ".yml"}:
-        try:
-            yaml = importlib.import_module("yaml")
-        except ImportError as exc:
-            raise LantraTrainingError(
-                f"Reading analyzer YAML output requires PyYAML: {path}. Install the project requirements or use the JSON analysis report."
-            ) from exc
-        try:
-            payload = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
-        except Exception as exc:
-            raise LantraTrainingError(f"Failed to read analyzer YAML {path}: {exc}") from exc
-        if not isinstance(payload, Mapping):
-            raise LantraTrainingError(f"Analyzer YAML {path} must contain a top-level object.")
-        profile: Mapping[str, Any] = {}
-        config: Mapping[str, Any] = payload
-    else:
-        payload = load_json_mapping(path)
-        recommendation = payload.get("recommendation")
-        if not isinstance(recommendation, Mapping):
-            raise LantraTrainingError(f"Library analysis {path} has no valid 'recommendation' object.")
-        raw_profile = recommendation.get("profile")
-        raw_config = recommendation.get("config")
-        if not isinstance(raw_profile, Mapping) or not isinstance(raw_config, Mapping):
-            raise LantraTrainingError(f"Library analysis {path} is missing recommendation.profile/config.")
-        profile = raw_profile
-        config = raw_config
-
-    transformer = config.get("language_transformer")
-    if not isinstance(transformer, Mapping):
-        raise LantraTrainingError(f"Library analysis {path} is missing recommendation.config.language_transformer.")
-    base = transformer.get("base_overrides")
-    if not isinstance(base, Mapping):
-        raise LantraTrainingError(f"Library analysis {path} is missing language_transformer.base_overrides.")
-
-    allowed = {
-        "src_vocab_size", "tgt_vocab_size", "d_model", "nhead",
-        "num_encoder_layers", "num_decoder_layers", "dim_feedforward",
-        "dropout", "activation", "layer_norm_eps", "batch_first", "norm_first",
-        "max_position_embeddings", "pad_token_id", "bos_token_id", "eos_token_id",
-        "tie_embeddings", "tie_output_projection",
-    }
-    overrides = {str(key): value for key, value in base.items() if str(key) in allowed}
-    if not overrides:
-        raise LantraTrainingError(f"Library analysis {path} produced no usable transformer base overrides.")
-
-    LOGGER.info(
-        "Using analyze_lantra_library recommendation from %s: profile=%s estimated_parameters=%s d_model=%s layers=%s/%s",
-        path,
-        profile.get("name"),
-        profile.get("estimated_parameters"),
-        overrides.get("d_model"),
-        overrides.get("num_encoder_layers"),
-        overrides.get("num_decoder_layers"),
-    )
-    return str(path), overrides, dict(profile)
-
-
-def load_continual_state(path: Path) -> Dict[str, Any]:
-    if not path.is_file():
-        return {
-            "schema": "slai.lantra.continual-state.v1",
-            "processed_source_hashes": [],
-            "file_cache": {},
-            "last_checkpoint": None,
-            "last_dataset_fingerprint": None,
-            "last_run_id": None,
-        }
-    payload = load_json_mapping(path)
-    if payload.get("schema") != "slai.lantra.continual-state.v1":
-        raise LantraTrainingError(
-            f"Unsupported continual-training state schema in {path}: {payload.get('schema')!r}"
-        )
-    payload.setdefault("processed_source_hashes", [])
-    payload.setdefault("file_cache", {})
-    return payload
-
-
-def save_continual_state(path: Path, state: Mapping[str, Any]) -> None:
-    payload = dict(state)
-    payload["schema"] = "slai.lantra.continual-state.v1"
-    payload["updated_at"] = utc_now()
-    atomic_json_write(path, payload)
-
-
-def discover_resume_checkpoint(output_dir: Path, state: Mapping[str, Any]) -> Optional[Path]:
-    configured = state.get("last_checkpoint")
-    if isinstance(configured, str) and configured.strip():
-        candidate = Path(configured)
-        if candidate.is_file():
-            return candidate
-
-    # Prefer a completed top-level final checkpoint over phase-local best/latest
-    # checkpoints even when a raw-pretraining file happens to have a newer mtime.
-    final_pattern = re.compile(r"^lantra_\d{8}T\d{6}Z\.pt$")
-    finals = [
-        path for path in output_dir.glob("lantra_*.pt")
-        if path.is_file() and final_pattern.match(path.name)
-    ]
-    if finals:
-        return max(finals, key=lambda item: item.stat().st_mtime_ns)
-
-    for candidate in (
-        output_dir / "lantra_latest.pt",
-        output_dir / "lantra_best.pt",
-        output_dir / "lantra_raw_pretrain_latest.pt",
-        output_dir / "lantra_raw_pretrain_best.pt",
-        output_dir / "lantra_interrupted.pt",
-    ):
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def inventory_raw_files(
-    files: Sequence[Path],
-    state: Mapping[str, Any],
-) -> Tuple[List[Path], Dict[str, Dict[str, Any]], set[str]]:
-    """Hash only changed files and return files not yet consumed by continual training."""
-    processed = {str(value) for value in state.get("processed_source_hashes", []) if value}
-    raw_cache = state.get("file_cache", {})
-    cache = dict(raw_cache) if isinstance(raw_cache, Mapping) else {}
-    refreshed: Dict[str, Dict[str, Any]] = {}
-    new_files: List[Path] = []
-
-    for path in files:
-        try:
-            stat = path.stat()
-        except OSError as exc:
-            LOGGER.warning("Could not stat raw corpus file %s: %s", path, exc)
-            continue
-        key = str(path.resolve())
-        previous = cache.get(key)
-        digest: Optional[str] = None
-        if isinstance(previous, Mapping):
-            if (
-                int(previous.get("size", -1)) == int(stat.st_size)
-                and int(previous.get("mtime_ns", -1)) == int(stat.st_mtime_ns)
-                and isinstance(previous.get("sha256"), str)
-            ):
-                digest = str(previous["sha256"])
-        if digest is None:
-            try:
-                digest = sha256_file(path)
-            except OSError as exc:
-                LOGGER.warning("Could not hash raw corpus file %s: %s", path, exc)
-                continue
-
-        refreshed[key] = {
-            "size": int(stat.st_size),
-            "mtime_ns": int(stat.st_mtime_ns),
-            "sha256": digest,
-        }
-        if digest not in processed:
-            new_files.append(path)
-
-    return new_files, refreshed, processed
-
-
-def successful_corpus_source_hashes(corpus: "RawCorpus") -> set[str]:
-    return {
-        document.source_sha256
-        for document in corpus.documents
-        if int(document.segment_count) > 0
-    }
-
-
-def validate_recommended_architecture(
-    model: LanguageTransformer,
-    config: "TrainerConfig",
-) -> None:
-    if not config.recommended_model_overrides:
-        return
-    architecture_keys = (
-        "src_vocab_size", "tgt_vocab_size", "d_model", "nhead",
-        "num_encoder_layers", "num_decoder_layers", "dim_feedforward",
-        "max_position_embeddings", "batch_first", "norm_first",
-    )
-    mismatches: Dict[str, Dict[str, Any]] = {}
-    for key in architecture_keys:
-        if key not in config.recommended_model_overrides or not hasattr(model.config, key):
-            continue
-        recommended = config.recommended_model_overrides[key]
-        actual = getattr(model.config, key)
-        if actual != recommended:
-            mismatches[key] = {"checkpoint": actual, "recommended": recommended}
-    if mismatches:
-        raise LantraTrainingError(
-            "The resume checkpoint architecture does not match analyze_lantra_library's recommended profile. "
-            f"Mismatches: {mismatches}. Architecture cannot be resized safely during continual training; "
-            "start a fresh model with --no-auto-resume or regenerate a recommendation compatible with the checkpoint."
-        )
 
 
 def require_text(value: Any, field_name: str, *, max_chars: int = 500_000) -> str:
@@ -1210,19 +987,7 @@ def resolve_device(requested: str) -> str:
 
 def initialize_model(config: TrainerConfig, tokenizer: LanguageTokenizer, device: str) -> LanguageTransformer:
     vocab_size = len(tokenizer.vocab)
-    recommended = dict(config.recommended_model_overrides)
-    for vocab_key in ("src_vocab_size", "tgt_vocab_size"):
-        if vocab_key in recommended and int(recommended[vocab_key]) != vocab_size:
-            raise LantraTrainingError(
-                f"analyze_lantra_library recommends {vocab_key}={recommended[vocab_key]}, "
-                f"but the active LanguageTokenizer has vocab_size={vocab_size}. "
-                "Regenerate the library analysis with the active tokenizer before training."
-            )
-
-    # Fresh models use the analyzer's architecture recommendation. Resume models
-    # retain checkpoint architecture; compatibility is verified immediately after load.
-    overrides: Dict[str, Any] = {} if config.init_from else recommended
-    overrides.update({
+    overrides = {
         "src_vocab_size": vocab_size,
         "tgt_vocab_size": vocab_size,
         "pad_token_id": int(tokenizer.pad_token_id),
@@ -1233,7 +998,7 @@ def initialize_model(config: TrainerConfig, tokenizer: LanguageTokenizer, device
         "clip_grad": config.clip_grad,
         "label_smoothing": config.label_smoothing,
         "batch_first": True,
-    })
+    }
 
     if config.init_from:
         checkpoint = Path(config.init_from)
@@ -1274,7 +1039,6 @@ def initialize_model(config: TrainerConfig, tokenizer: LanguageTokenizer, device
             "Tokenizer/model vocabulary mismatch: "
             f"tokenizer={vocab_size}, src={model.config.src_vocab_size}, tgt={model.config.tgt_vocab_size}."
         )
-    validate_recommended_architecture(model, config)
     return model
 
 
@@ -1336,8 +1100,6 @@ class RawCorpus:
     duplicate_segments: int = 0
     extraction_failures: Tuple[RawExtractionFailure, ...] = ()
     manifest_path: Optional[str] = None
-    segments_before_cap: int = 0
-    segment_cap_applied: bool = False
 
     @property
     def segments(self) -> Tuple[str, ...]:
@@ -1360,8 +1122,6 @@ class RawCorpus:
             },
             "files": list(self.files),
             "fingerprint_sha256": self.fingerprint,
-            "segments_before_cap": self.segments_before_cap,
-            "segment_cap_applied": self.segment_cap_applied,
             "deduplication": {
                 "duplicate_files_exact": self.duplicate_files_exact,
                 "duplicate_documents_exact": self.duplicate_documents_exact,
@@ -1372,17 +1132,6 @@ class RawCorpus:
             "provenance_manifest": self.manifest_path,
         }
 
-
-@dataclass(frozen=True)
-class _ExtractedRawDocument:
-    source_path: str
-    source_type: str
-    source_sha256: str
-    text: str
-    title: Optional[str]
-    extractor: str
-    logical_index: int = 0
-    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1441,464 +1190,6 @@ def empty_raw_corpus() -> RawCorpus:
         fingerprint=sha256_payload({"files": [], "documents": [], "segments": []}),
     )
 
-
-def discover_raw_text_files(configured_paths: Sequence[str]) -> List[Path]:
-    # Explicit --raw-text paths override the automatic raw corpus roots.
-    # With no explicit paths, data/library remains the default corpus.
-    if configured_paths:
-        candidates: List[Path] = [
-            Path(value) for value in configured_paths
-        ]
-    else:
-        candidates = [Path("data/library")]
-
-        env_path = os.getenv("SLAI_LANTRA_RAW_TEXT", "").strip()
-        if env_path:
-            candidates.append(Path(env_path))
-        else:
-            candidates.extend(
-                Path(value)
-                for value in DEFAULT_RAW_TEXT_CANDIDATES
-                if value != "data/library"
-            )
-
-    files: List[Path] = []
-    seen: set[str] = set()
-
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-
-        discovered = (
-            [candidate]
-            if candidate.is_file()
-            else sorted(candidate.rglob("*"))
-        )
-
-        for item in discovered:
-            if (
-                not item.is_file()
-                or item.suffix.lower() not in RAW_TEXT_EXTENSIONS
-            ):
-                continue
-
-            if (
-                item.name.startswith("slai_corpus_")
-                and item.name.endswith(".manifest.json")
-            ):
-                continue
-
-            key = str(item.resolve())
-
-            if key not in seen:
-                seen.add(key)
-                files.append(item)
-
-    return sorted(files, key=lambda item: str(item))
-
-
-def _decode_document_bytes(payload: bytes) -> str:
-    """Decode ordinary text files without introducing a charset dependency."""
-    if not payload:
-        return ""
-    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "cp1252"):
-        try:
-            return payload.decode(encoding)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return payload.decode("utf-8", errors="replace")
-
-
-def _normalize_document_text(text: str) -> str:
-    text = unicodedata.normalize("NFKC", str(text)).replace("\x00", " ")
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
-    compact: List[str] = []
-    blank = False
-    for line in lines:
-        if line:
-            compact.append(line)
-            blank = False
-        elif compact and not blank:
-            compact.append("")
-            blank = True
-    return "\n".join(compact).strip()
-
-
-def _normalized_text_hash(text: str) -> str:
-    canonical = " ".join(_normalize_document_text(text).split())
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _clean_markdown_text(text: str) -> str:
-    # Preserve the actual prose/code while removing high-frequency presentation
-    # syntax that otherwise becomes corpus noise.
-    text = re.sub(r"(?ms)^---\s*$.*?^---\s*$", " ", text, count=1)
-    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
-    text = re.sub(r"(?m)^\s*>\s?", "", text)
-    text = re.sub(r"(?m)^\s*[-*_]{3,}\s*$", "", text)
-    text = text.replace("```", "").replace("~~~", "")
-    return _normalize_document_text(text)
-
-
-class _VisibleHTMLTextExtractor(HTMLParser):
-    _SKIP_TAGS = frozenset({"script", "style", "noscript", "svg", "canvas", "template"})
-    _BLOCK_TAGS = frozenset({
-        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
-        "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
-        "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table",
-        "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
-    })
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: List[str] = []
-        self.title_parts: List[str] = []
-        self._skip_depth = 0
-        self._in_title = False
-
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        tag = tag.lower()
-        if tag in self._SKIP_TAGS:
-            self._skip_depth += 1
-            return
-        if self._skip_depth:
-            return
-        if tag == "title":
-            self._in_title = True
-        if tag in self._BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_startendtag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        if not self._skip_depth and tag.lower() in self._BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        tag = tag.lower()
-        if tag in self._SKIP_TAGS:
-            if self._skip_depth:
-                self._skip_depth -= 1
-            return
-        if self._skip_depth:
-            return
-        if tag == "title":
-            self._in_title = False
-        if tag in self._BLOCK_TAGS:
-            self.parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth:
-            return
-        value = data.strip()
-        if not value:
-            return
-        if self._in_title:
-            self.title_parts.append(value)
-        self.parts.append(value)
-        self.parts.append(" ")
-
-    def result(self) -> Tuple[str, Optional[str]]:
-        text = _normalize_document_text("".join(self.parts))
-        title = " ".join(self.title_parts).strip() or None
-        return text, title
-
-
-def _extract_html_text(payload: str) -> Tuple[str, Optional[str]]:
-    parser = _VisibleHTMLTextExtractor()
-    parser.feed(payload)
-    parser.close()
-    return parser.result()
-
-
-def _extract_docx(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
-    with zipfile.ZipFile(path) as archive:
-        try:
-            root = ET.fromstring(archive.read("word/document.xml"))
-        except KeyError as exc:
-            raise LantraTrainingError(f"DOCX is missing word/document.xml: {path}") from exc
-        paragraphs: List[str] = []
-        for paragraph in root.iter():
-            if not paragraph.tag.endswith("}p"):
-                continue
-            text_nodes = [node.text or "" for node in paragraph.iter() if node.tag.endswith("}t")]
-            paragraph_text = "".join(text_nodes).strip()
-            if paragraph_text:
-                paragraphs.append(paragraph_text)
-
-        title: Optional[str] = None
-        try:
-            core_root = ET.fromstring(archive.read("docProps/core.xml"))
-            for node in core_root.iter():
-                if node.tag.endswith("}title") and (node.text or "").strip():
-                    title = (node.text or "").strip()
-                    break
-        except (KeyError, ET.ParseError):
-            pass
-
-    return _normalize_document_text("\n\n".join(paragraphs)), title, {"paragraphs": len(paragraphs)}
-
-
-def _safe_epub_member(base_dir: str, href: str) -> str:
-    member = posixpath.normpath(posixpath.join(base_dir, href.split("#", 1)[0]))
-    if member.startswith("../") or member.startswith("/"):
-        raise LantraTrainingError(f"Unsafe EPUB member path: {href!r}")
-    return member
-
-
-def _extract_epub(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
-    with zipfile.ZipFile(path) as archive:
-        names = set(archive.namelist())
-        opf_path: Optional[str] = None
-        if "META-INF/container.xml" in names:
-            container_root = ET.fromstring(archive.read("META-INF/container.xml"))
-            rootfile = container_root.find(".//{*}rootfile")
-            if rootfile is not None:
-                opf_path = rootfile.attrib.get("full-path")
-
-        ordered_members: List[str] = []
-        title: Optional[str] = None
-        if opf_path and opf_path in names:
-            package_root = ET.fromstring(archive.read(opf_path))
-            base_dir = posixpath.dirname(opf_path)
-            manifest: Dict[str, Tuple[str, str, str]] = {}
-            for item in package_root.findall(".//{*}manifest/{*}item"):
-                item_id = item.attrib.get("id", "")
-                href = item.attrib.get("href", "")
-                media_type = item.attrib.get("media-type", "")
-                properties = item.attrib.get("properties", "")
-                if item_id and href:
-                    manifest[item_id] = (href, media_type, properties)
-            for itemref in package_root.findall(".//{*}spine/{*}itemref"):
-                item_id = itemref.attrib.get("idref", "")
-                if item_id not in manifest:
-                    continue
-                href, media_type, properties = manifest[item_id]
-                if "nav" in properties.split():
-                    continue
-                if media_type in {"application/xhtml+xml", "text/html"} or href.lower().endswith((".xhtml", ".html", ".htm")):
-                    member = _safe_epub_member(base_dir, href)
-                    if member in names:
-                        ordered_members.append(member)
-            title_node = package_root.find(".//{http://purl.org/dc/elements/1.1/}title")
-            if title_node is not None and (title_node.text or "").strip():
-                title = (title_node.text or "").strip()
-
-        if not ordered_members:
-            ordered_members = sorted(
-                name for name in names if name.lower().endswith((".xhtml", ".html", ".htm"))
-            )
-
-        chapters: List[str] = []
-        seen_members: set[str] = set()
-        for member in ordered_members:
-            if member in seen_members:
-                continue
-            seen_members.add(member)
-            text, chapter_title = _extract_html_text(_decode_document_bytes(archive.read(member)))
-            if text:
-                if chapter_title and not title:
-                    title = chapter_title
-                chapters.append(text)
-
-    return _normalize_document_text("\n\n".join(chapters)), title, {"chapters": len(chapters)}
-
-
-def _extract_pdf(path: Path) -> Tuple[str, Optional[str], Dict[str, Any]]:
-    try:
-        pypdf = importlib.import_module("pypdf")
-    except ImportError as exc:
-        raise LantraTrainingError(
-            "PDF corpus ingestion requires pypdf. SLAI's root requirements.txt already declares pypdf; "
-            "install the project requirements in the active virtual environment."
-        ) from exc
-
-    try:
-        reader = pypdf.PdfReader(str(path), strict=False)
-    except Exception as exc:
-        raise LantraTrainingError(f"Unable to open PDF {path}: {exc}") from exc
-
-    if getattr(reader, "is_encrypted", False):
-        try:
-            decrypted = reader.decrypt("")
-        except Exception as exc:
-            raise LantraTrainingError(f"Encrypted PDF cannot be decrypted without a password: {path}") from exc
-        if not decrypted:
-            raise LantraTrainingError(f"Encrypted PDF requires a password and cannot be used for training: {path}")
-
-    pages: List[str] = []
-    failed_pages = 0
-    for page_number, page in enumerate(reader.pages, 1):
-        try:
-            try:
-                text = page.extract_text(extraction_mode="layout") or ""
-            except TypeError:
-                text = page.extract_text() or ""
-        except Exception as exc:
-            failed_pages += 1
-            LOGGER.warning("PDF text extraction failed for %s page %d: %s", path, page_number, exc)
-            continue
-        if text.strip():
-            # Repair common line-end hyphenation before paragraph normalization.
-            text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
-            pages.append(text)
-
-    title: Optional[str] = None
-    metadata = getattr(reader, "metadata", None)
-    if metadata is not None:
-        candidate = getattr(metadata, "title", None)
-        if candidate is None and isinstance(metadata, Mapping):
-            candidate = metadata.get("/Title")
-        if candidate:
-            title = str(candidate).strip() or None
-
-    return _normalize_document_text("\n\n".join(pages)), title, {
-        "pages": len(getattr(reader, "pages", [])),
-        "pages_with_text": len(pages),
-        "failed_pages": failed_pages,
-    }
-
-
-def _json_text_candidates(value: Any) -> Iterator[Tuple[str, Optional[str], Dict[str, Any]]]:
-    """Yield logical text documents from JSON without mistaking task labels for prose."""
-    preferred = ("text", "content", "document", "body", "passage", "article", "paragraph")
-    if isinstance(value, Mapping):
-        emitted = False
-        title = value.get("title") if isinstance(value.get("title"), str) else None
-        for key in preferred:
-            item = value.get(key)
-            if isinstance(item, str) and item.strip():
-                emitted = True
-                yield item, title, {"json_field": key}
-        if not emitted:
-            for key in ("records", "examples", "data", "documents", "items"):
-                nested = value.get(key)
-                if nested is not None:
-                    yield from _json_text_candidates(nested)
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for item in value:
-            yield from _json_text_candidates(item)
-    elif isinstance(value, str) and value.strip():
-        yield value, None, {"json_field": None}
-
-
-def extract_raw_documents(path: Path, *, source_sha256: Optional[str] = None) -> Iterator[_ExtractedRawDocument]:
-    suffix = path.suffix.lower()
-    source_hash = source_sha256 or sha256_file(path)
-    source_type = suffix.lstrip(".") or "unknown"
-
-    if suffix in {".txt", ".text"}:
-        if path.name.startswith("slai_corpus_") and (path.with_suffix(".manifest.json").exists() or path.with_suffix(".ready").exists()):
-            from src.slai_worm.storage.manifest import read_documents
-            # Validate the entire committed shard before emitting any book.
-            documents = read_documents(path)
-            for logical_index, (body, entry) in enumerate(documents):
-                yield _ExtractedRawDocument(
-                    str(path), source_type, entry["sha256"],
-                    _normalize_document_text(body), entry["title"],
-                    "slai-worm-manifest-v1", logical_index,
-                    {**entry["metadata"], "gutenberg_id": entry["ebook_id"], "shard_sha256": source_hash},
-                )
-            return
-        text = _normalize_document_text(_decode_document_bytes(path.read_bytes()))
-        if text:
-            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, None, "stdlib-text", 0)
-        return
-
-    if suffix in {".md", ".markdown"}:
-        text = _clean_markdown_text(_decode_document_bytes(path.read_bytes()))
-        if text:
-            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, None, "stdlib-markdown", 0)
-        return
-
-    if suffix in {".html", ".htm", ".xhtml"}:
-        text, title = _extract_html_text(_decode_document_bytes(path.read_bytes()))
-        if text:
-            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "stdlib-html.parser", 0)
-        return
-
-    if suffix == ".docx":
-        text, title, metadata = _extract_docx(path)
-        if text:
-            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "stdlib-zipfile+xml", 0, metadata)
-        return
-
-    if suffix == ".epub":
-        text, title, metadata = _extract_epub(path)
-        if text:
-            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "stdlib-epub-zip+xml+html", 0, metadata)
-        return
-
-    if suffix == ".pdf":
-        text, title, metadata = _extract_pdf(path)
-        if text:
-            yield _ExtractedRawDocument(str(path), source_type, source_hash, text, title, "pypdf", 0, metadata)
-        return
-
-    if suffix == ".jsonl":
-        with path.open("r", encoding="utf-8") as handle:
-            logical_index = 0
-            for line_number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise LantraTrainingError(
-                        f"Invalid raw-text JSONL in {path}:{line_number}: {exc.msg}."
-                    ) from exc
-                for text, title, metadata in _json_text_candidates(payload):
-                    metadata = {**metadata, "jsonl_line": line_number}
-                    yield _ExtractedRawDocument(
-                        str(path), source_type, source_hash, _normalize_document_text(text), title,
-                        "stdlib-json", logical_index, metadata,
-                    )
-                    logical_index += 1
-        return
-
-    if suffix == ".json":
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except json.JSONDecodeError as exc:
-            raise LantraTrainingError(f"Invalid raw-text JSON in {path}: {exc.msg}.") from exc
-        for logical_index, (text, title, metadata) in enumerate(_json_text_candidates(payload)):
-            yield _ExtractedRawDocument(
-                str(path), source_type, source_hash, _normalize_document_text(text), title,
-                "stdlib-json", logical_index, metadata,
-            )
-        return
-
-    raise LantraTrainingError(f"Unsupported raw corpus document type: {path}")
-
-
-def segment_raw_document(text: str, *, min_chars: int, chunk_chars: int) -> Iterator[str]:
-    normalized = " ".join(_normalize_document_text(text).split())
-    if len(normalized) < min_chars:
-        return
-    if len(normalized) <= chunk_chars:
-        yield normalized
-        return
-
-    words = normalized.split(" ")
-    current: List[str] = []
-    current_chars = 0
-    for word in words:
-        addition = len(word) + (1 if current else 0)
-        if current and current_chars + addition > chunk_chars:
-            chunk = " ".join(current).strip()
-            if len(chunk) >= min_chars:
-                yield chunk
-            current = [word]
-            current_chars = len(word)
-        else:
-            current.append(word)
-            current_chars += addition
-    if current:
-        chunk = " ".join(current).strip()
-        if len(chunk) >= min_chars:
-            yield chunk
 
 
 def _assign_document_splits(
@@ -2055,8 +1346,6 @@ def load_raw_corpus(files: Sequence[Path], config: TrainerConfig) -> RawCorpus:
             item.normalized_sha256,
         ),
     )
-    segments_before_cap = len(retained)
-    segment_cap_applied = config.raw_max_segments > 0 and segments_before_cap > config.raw_max_segments
     if config.raw_max_segments > 0:
         retained = retained[: config.raw_max_segments]
 
@@ -2115,8 +1404,6 @@ def load_raw_corpus(files: Sequence[Path], config: TrainerConfig) -> RawCorpus:
         duplicate_documents_normalized=duplicate_documents_normalized,
         duplicate_segments=duplicate_segments,
         extraction_failures=tuple(failures),
-        segments_before_cap=segments_before_cap,
-        segment_cap_applied=segment_cap_applied,
     )
 
 
@@ -2824,8 +2111,6 @@ def raw_text_pretrain(
         "history": history,
         "interval_checkpoints": interval_checkpoints,
         "checkpoint_every_steps": config.checkpoint_every_steps,
-        "segments_per_epoch_used": per_epoch_count,
-        "full_train_split_covered_each_epoch": per_epoch_count >= len(train_segments),
         "best_objective": best_validation,
         "heldout_test_loss": test_loss,
         "test_evaluation_deferred": not evaluate_test_split,
@@ -3959,30 +3244,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--raw-max-length", type=int, default=256)
 
     parser.add_argument(
-        "--library-analysis",
-        default=None,
-        help=(
-            "Path to analyze_lantra_library.py JSON analysis or generated YAML recommendation. By default the trainer "
-            "auto-discovers the freshest analyzer output and uses language_transformer.base_overrides."
-        ),
-    )
-    parser.add_argument(
-        "--continual-state",
-        default=DEFAULT_CONTINUAL_STATE,
-        help="Persistent state file used to resume the last checkpoint and skip already-consumed library files.",
-    )
-    parser.add_argument(
-        "--no-auto-resume",
-        action="store_true",
-        help="Do not automatically resume from the last LANTRA checkpoint recorded/discovered by continual training.",
-    )
-    parser.add_argument(
-        "--no-incremental-library",
-        action="store_true",
-        help="Re-read all data/library documents instead of training only files not yet recorded in continual state.",
-    )
-
-    parser.add_argument(
         "--init-from",
         default=None,
         help=(
@@ -3994,9 +3255,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def config_from_args(args: argparse.Namespace) -> TrainerConfig:
-    analysis_path, recommended_overrides, recommended_profile = load_recommended_model_config(
-        str(args.library_analysis) if args.library_analysis else None
-    )
     config = TrainerConfig(
         data_paths=tuple(args.data),
         raw_text_paths=tuple(args.raw_text),
@@ -4052,12 +3310,6 @@ def config_from_args(args: argparse.Namespace) -> TrainerConfig:
         raw_corruption_probability=float(args.raw_corruption_probability),
         raw_min_chars=int(args.raw_min_chars),
         raw_chunk_chars=int(args.raw_chunk_chars),
-        library_analysis_path=analysis_path,
-        recommended_model_overrides=recommended_overrides,
-        recommended_profile=recommended_profile,
-        continual_state_path=str(args.continual_state),
-        auto_resume=not bool(args.no_auto_resume),
-        incremental_library=not bool(args.no_incremental_library),
     )
     validate_config(config)
     return config
@@ -4209,25 +3461,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         args = parse_args(argv)
         config = config_from_args(args)
-
-        state_path = Path(config.continual_state_path)
-        state_was_new = not state_path.is_file()
-        continual_state = load_continual_state(state_path)
-        auto_resumed = False
-        if config.init_from is None and config.auto_resume:
-            resume_checkpoint = discover_resume_checkpoint(Path(config.output_dir), continual_state)
-            if resume_checkpoint is not None:
-                config = dataclasses.replace(config, init_from=str(resume_checkpoint))
-                auto_resumed = True
-                LOGGER.info("Continual LANTRA resume checkpoint selected: %s", resume_checkpoint)
-                PRINTER.status("LANTRA RESUME", f"Continuing from {resume_checkpoint}", "success")
-
-        if config.init_from and config.retrain_tokenizer:
-            raise LantraTrainingError(
-                "Tokenizer retraining is incompatible with checkpoint continuation because token IDs may change. "
-                "Disable --retrain-tokenizer or start fresh with --no-auto-resume and no --init-from."
-            )
-
+        load_language_training_runtime()
         seed_runtime(config.seed)
 
         # --------------------------------------------------------------
@@ -4235,56 +3469,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         needs_raw_corpus = config.raw_pretrain_epochs > 0 or config.retrain_tokenizer
         if needs_raw_corpus:
-            discovered_raw_files = discover_raw_text_files(config.raw_text_paths)
-            raw_files = discovered_raw_files
-            if config.incremental_library:
-                raw_files, refreshed_cache, processed_hashes = inventory_raw_files(
-                    discovered_raw_files, continual_state
-                )
-                continual_state["file_cache"] = refreshed_cache
-
-                # Migration rule: when this upgraded trainer finds an existing checkpoint but no
-                # prior continual-state ledger, treat the library already present on disk as the
-                # checkpoint's baseline. This prevents an accidental full-corpus replay on the
-                # first continual run. Only files added/changed after this baseline are trained.
-                if state_was_new and auto_resumed:
-                    checkpoint_mtime_ns = Path(str(config.init_from)).stat().st_mtime_ns
-                    baseline_hashes = {
-                        str(item.get("sha256"))
-                        for item in refreshed_cache.values()
-                        if (
-                            isinstance(item, Mapping)
-                            and item.get("sha256")
-                            and int(item.get("mtime_ns", 0)) <= checkpoint_mtime_ns
-                        )
-                    }
-                    processed_hashes.update(baseline_hashes)
-                    continual_state["processed_source_hashes"] = sorted(processed_hashes)
-                    continual_state["migration_baseline_created_at"] = utc_now()
-                    continual_state["migration_baseline_checkpoint"] = config.init_from
-                    save_continual_state(state_path, continual_state)
-                    raw_files = [
-                        path for path in raw_files
-                        if refreshed_cache.get(str(path.resolve()), {}).get("sha256") not in baseline_hashes
-                    ]
-                    LOGGER.info(
-                        "Created continual-training baseline from %d files at/before checkpoint mtime; %d newer/changed files remain for this run.",
-                        len(baseline_hashes), len(raw_files),
-                    )
-                    PRINTER.status(
-                        "LANTRA CONTINUAL",
-                        f"Baseline recorded for {len(baseline_hashes)} historical library files; {len(raw_files)} newer/changed files selected.",
-                        "success",
-                    )
-                else:
-                    LOGGER.info(
-                        "Continual raw discovery: discovered=%d new_or_changed=%d already_processed=%d",
-                        len(discovered_raw_files), len(raw_files), len(processed_hashes),
-                    )
-
+            raw_files = discover_raw_text_files(config.raw_text_paths)
             raw_corpus = load_raw_corpus(raw_files, config) if raw_files else empty_raw_corpus()
             raw_corpus = write_raw_corpus_manifest(raw_corpus, Path(config.report_dir), run_id)
-            LOGGER.info("LANTRA raw/document corpus files selected this run: %s", list(raw_corpus.files))
+            LOGGER.info("LANTRA raw/document corpus files: %s", list(raw_corpus.files))
             if raw_corpus.segments:
                 PRINTER.pretty("LANTRA RAW CORPUS", raw_corpus.to_dict(), "success")
             else:
@@ -4409,9 +3597,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "vocab_size": len(tokenizer.vocab),
                 "tokenizer_trained": bool(tokenizer.is_trained),
                 "model_stats": model.stats().to_dict(),
-                "recommended_profile": config.recommended_profile or None,
-                "library_analysis": config.library_analysis_path,
-                "resume_checkpoint": config.init_from,
                 "supported_tasks": list(SUPPORTED_TASKS),
             },
             "success",
@@ -4662,43 +3847,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "final_evaluation": final_evaluation,
             "final_checkpoint": final_checkpoint,
             "model_stats": model.stats().to_dict(),
-            "continual_training": {
-                "state_path": str(state_path),
-                "auto_resumed": auto_resumed,
-                "resume_checkpoint": config.init_from,
-                "incremental_library": config.incremental_library,
-            },
         }
-
-        # Commit continual state only after a successful training sequence. A source
-        # file is marked consumed only when its complete retained training split was
-        # actually visited and the raw loading cap did not truncate the corpus.
-        if config.incremental_library:
-            processed_hashes = {
-                str(value) for value in continual_state.get("processed_source_hashes", []) if value
-            }
-            full_raw_coverage = (
-                raw_result.get("status") == "completed"
-                and bool(raw_result.get("full_train_split_covered_each_epoch"))
-                and not bool(raw_corpus.segment_cap_applied)
-            )
-            if full_raw_coverage:
-                processed_hashes.update(successful_corpus_source_hashes(raw_corpus))
-            elif raw_corpus.files:
-                LOGGER.warning(
-                    "New raw files were not marked fully consumed because the run did not cover every retained train segment "
-                    "or raw_max_segments truncated the corpus. They remain eligible for the next continual run."
-                )
-            continual_state.update({
-                "processed_source_hashes": sorted(processed_hashes),
-                "last_checkpoint": str(final_checkpoint),
-                "last_dataset_fingerprint": dataset.fingerprint if dataset is not None else None,
-                "last_raw_corpus_fingerprint": raw_corpus.fingerprint,
-                "last_run_id": run_id,
-                "library_analysis_path": config.library_analysis_path,
-                "recommended_profile": config.recommended_profile,
-            })
-            save_continual_state(state_path, continual_state)
 
         elapsed = time.perf_counter() - started_clock
         report_coverage: Dict[str, Any] = {
