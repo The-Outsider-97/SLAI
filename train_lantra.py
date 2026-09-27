@@ -37,7 +37,10 @@ Default invocation
     py -m train_lantra
 
 No subcommand is required. Interval recovery checkpoints are saved every 1000
-optimizer steps by default (configurable with ``--checkpoint-every-steps``).
+optimizer steps by default (configurable with ``--checkpoint-every-steps``). The
+trainer also auto-resumes the most recent LANTRA checkpoint, records a persistent
+continual-training state, skips already-consumed ``data/library`` files, and uses
+the freshest ``analyze_lantra_library.py`` JSON/YAML recommendation when available.
 By default the trainer discovers supervised data from:
     data/processed/lantra/
     data/raw/lantra/
@@ -147,6 +150,16 @@ DEFAULT_DATA_CANDIDATES: Tuple[str, ...] = (
 )
 DEFAULT_OUTPUT_DIR = "src/agents/language/checkpoints/lantra"
 DEFAULT_REPORT_DIR = "src/agents/language/artifacts/training/lantra"
+DEFAULT_CONTINUAL_STATE = "src/agents/language/checkpoints/lantra/lantra_continual_state.json"
+DEFAULT_LIBRARY_ANALYSIS_CANDIDATES: Tuple[str, ...] = (
+    "lantra_library_analysis.json",
+    "lantra_recommended_config.yaml",
+    "data/processed/lantra/lantra_library_analysis.json",
+    "data/processed/lantra/lantra_recommended_config.yaml",
+    "src/agents/language/artifacts/training/lantra/lantra_library_analysis.json",
+    "src/agents/language/artifacts/training/lantra/lantra_recommended_config.yaml",
+    "data/lantra_library_analysis.json",
+)
 DEFAULT_RAW_TEXT_CANDIDATES: Tuple[str, ...] = (
     "data/library",
     "data/raw/lantra_corpus",
@@ -313,6 +326,12 @@ class TrainerConfig:
     raw_corruption_probability: float
     raw_min_chars: int
     raw_chunk_chars: int
+    library_analysis_path: Optional[str]
+    recommended_model_overrides: Dict[str, Any]
+    recommended_profile: Dict[str, Any]
+    continual_state_path: str
+    auto_resume: bool
+    incremental_library: bool
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -405,6 +424,232 @@ def atomic_json_write(path: Path, payload: Mapping[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+
+def load_json_mapping(path: Path) -> Dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LantraTrainingError(f"Failed to read JSON file {path}: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise LantraTrainingError(f"JSON file {path} must contain a top-level object.")
+    return dict(payload)
+
+
+def resolve_library_analysis_path(explicit: Optional[str]) -> Optional[Path]:
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise LantraTrainingError(f"LANTRA library analysis file does not exist: {path}")
+        return path
+    candidates = [Path(value) for value in DEFAULT_LIBRARY_ANALYSIS_CANDIDATES if Path(value).is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.stat().st_mtime_ns)
+
+
+def load_recommended_model_config(explicit: Optional[str]) -> Tuple[Optional[str], Dict[str, Any], Dict[str, Any]]:
+    path = resolve_library_analysis_path(explicit)
+    if path is None:
+        LOGGER.warning(
+            "No analyze_lantra_library JSON report was found. LANTRA will use language_config.yaml architecture defaults. "
+            "Run analyze_lantra_library.py or pass --library-analysis PATH to make the recommendation authoritative."
+        )
+        return None, {}, {}
+
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        try:
+            yaml = importlib.import_module("yaml")
+        except ImportError as exc:
+            raise LantraTrainingError(
+                f"Reading analyzer YAML output requires PyYAML: {path}. Install the project requirements or use the JSON analysis report."
+            ) from exc
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            raise LantraTrainingError(f"Failed to read analyzer YAML {path}: {exc}") from exc
+        if not isinstance(payload, Mapping):
+            raise LantraTrainingError(f"Analyzer YAML {path} must contain a top-level object.")
+        profile: Mapping[str, Any] = {}
+        config: Mapping[str, Any] = payload
+    else:
+        payload = load_json_mapping(path)
+        recommendation = payload.get("recommendation")
+        if not isinstance(recommendation, Mapping):
+            raise LantraTrainingError(f"Library analysis {path} has no valid 'recommendation' object.")
+        raw_profile = recommendation.get("profile")
+        raw_config = recommendation.get("config")
+        if not isinstance(raw_profile, Mapping) or not isinstance(raw_config, Mapping):
+            raise LantraTrainingError(f"Library analysis {path} is missing recommendation.profile/config.")
+        profile = raw_profile
+        config = raw_config
+
+    transformer = config.get("language_transformer")
+    if not isinstance(transformer, Mapping):
+        raise LantraTrainingError(f"Library analysis {path} is missing recommendation.config.language_transformer.")
+    base = transformer.get("base_overrides")
+    if not isinstance(base, Mapping):
+        raise LantraTrainingError(f"Library analysis {path} is missing language_transformer.base_overrides.")
+
+    allowed = {
+        "src_vocab_size", "tgt_vocab_size", "d_model", "nhead",
+        "num_encoder_layers", "num_decoder_layers", "dim_feedforward",
+        "dropout", "activation", "layer_norm_eps", "batch_first", "norm_first",
+        "max_position_embeddings", "pad_token_id", "bos_token_id", "eos_token_id",
+        "tie_embeddings", "tie_output_projection",
+    }
+    overrides = {str(key): value for key, value in base.items() if str(key) in allowed}
+    if not overrides:
+        raise LantraTrainingError(f"Library analysis {path} produced no usable transformer base overrides.")
+
+    LOGGER.info(
+        "Using analyze_lantra_library recommendation from %s: profile=%s estimated_parameters=%s d_model=%s layers=%s/%s",
+        path,
+        profile.get("name"),
+        profile.get("estimated_parameters"),
+        overrides.get("d_model"),
+        overrides.get("num_encoder_layers"),
+        overrides.get("num_decoder_layers"),
+    )
+    return str(path), overrides, dict(profile)
+
+
+def load_continual_state(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {
+            "schema": "slai.lantra.continual-state.v1",
+            "processed_source_hashes": [],
+            "file_cache": {},
+            "last_checkpoint": None,
+            "last_dataset_fingerprint": None,
+            "last_run_id": None,
+        }
+    payload = load_json_mapping(path)
+    if payload.get("schema") != "slai.lantra.continual-state.v1":
+        raise LantraTrainingError(
+            f"Unsupported continual-training state schema in {path}: {payload.get('schema')!r}"
+        )
+    payload.setdefault("processed_source_hashes", [])
+    payload.setdefault("file_cache", {})
+    return payload
+
+
+def save_continual_state(path: Path, state: Mapping[str, Any]) -> None:
+    payload = dict(state)
+    payload["schema"] = "slai.lantra.continual-state.v1"
+    payload["updated_at"] = utc_now()
+    atomic_json_write(path, payload)
+
+
+def discover_resume_checkpoint(output_dir: Path, state: Mapping[str, Any]) -> Optional[Path]:
+    configured = state.get("last_checkpoint")
+    if isinstance(configured, str) and configured.strip():
+        candidate = Path(configured)
+        if candidate.is_file():
+            return candidate
+
+    # Prefer a completed top-level final checkpoint over phase-local best/latest
+    # checkpoints even when a raw-pretraining file happens to have a newer mtime.
+    final_pattern = re.compile(r"^lantra_\d{8}T\d{6}Z\.pt$")
+    finals = [
+        path for path in output_dir.glob("lantra_*.pt")
+        if path.is_file() and final_pattern.match(path.name)
+    ]
+    if finals:
+        return max(finals, key=lambda item: item.stat().st_mtime_ns)
+
+    for candidate in (
+        output_dir / "lantra_latest.pt",
+        output_dir / "lantra_best.pt",
+        output_dir / "lantra_raw_pretrain_latest.pt",
+        output_dir / "lantra_raw_pretrain_best.pt",
+        output_dir / "lantra_interrupted.pt",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def inventory_raw_files(
+    files: Sequence[Path],
+    state: Mapping[str, Any],
+) -> Tuple[List[Path], Dict[str, Dict[str, Any]], set[str]]:
+    """Hash only changed files and return files not yet consumed by continual training."""
+    processed = {str(value) for value in state.get("processed_source_hashes", []) if value}
+    raw_cache = state.get("file_cache", {})
+    cache = dict(raw_cache) if isinstance(raw_cache, Mapping) else {}
+    refreshed: Dict[str, Dict[str, Any]] = {}
+    new_files: List[Path] = []
+
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            LOGGER.warning("Could not stat raw corpus file %s: %s", path, exc)
+            continue
+        key = str(path.resolve())
+        previous = cache.get(key)
+        digest: Optional[str] = None
+        if isinstance(previous, Mapping):
+            if (
+                int(previous.get("size", -1)) == int(stat.st_size)
+                and int(previous.get("mtime_ns", -1)) == int(stat.st_mtime_ns)
+                and isinstance(previous.get("sha256"), str)
+            ):
+                digest = str(previous["sha256"])
+        if digest is None:
+            try:
+                digest = sha256_file(path)
+            except OSError as exc:
+                LOGGER.warning("Could not hash raw corpus file %s: %s", path, exc)
+                continue
+
+        refreshed[key] = {
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+            "sha256": digest,
+        }
+        if digest not in processed:
+            new_files.append(path)
+
+    return new_files, refreshed, processed
+
+
+def successful_corpus_source_hashes(corpus: "RawCorpus") -> set[str]:
+    return {
+        document.source_sha256
+        for document in corpus.documents
+        if int(document.segment_count) > 0
+    }
+
+
+def validate_recommended_architecture(
+    model: LanguageTransformer,
+    config: "TrainerConfig",
+) -> None:
+    if not config.recommended_model_overrides:
+        return
+    architecture_keys = (
+        "src_vocab_size", "tgt_vocab_size", "d_model", "nhead",
+        "num_encoder_layers", "num_decoder_layers", "dim_feedforward",
+        "max_position_embeddings", "batch_first", "norm_first",
+    )
+    mismatches: Dict[str, Dict[str, Any]] = {}
+    for key in architecture_keys:
+        if key not in config.recommended_model_overrides or not hasattr(model.config, key):
+            continue
+        recommended = config.recommended_model_overrides[key]
+        actual = getattr(model.config, key)
+        if actual != recommended:
+            mismatches[key] = {"checkpoint": actual, "recommended": recommended}
+    if mismatches:
+        raise LantraTrainingError(
+            "The resume checkpoint architecture does not match analyze_lantra_library's recommended profile. "
+            f"Mismatches: {mismatches}. Architecture cannot be resized safely during continual training; "
+            "start a fresh model with --no-auto-resume or regenerate a recommendation compatible with the checkpoint."
+        )
 
 
 def require_text(value: Any, field_name: str, *, max_chars: int = 500_000) -> str:
@@ -965,7 +1210,19 @@ def resolve_device(requested: str) -> str:
 
 def initialize_model(config: TrainerConfig, tokenizer: LanguageTokenizer, device: str) -> LanguageTransformer:
     vocab_size = len(tokenizer.vocab)
-    overrides = {
+    recommended = dict(config.recommended_model_overrides)
+    for vocab_key in ("src_vocab_size", "tgt_vocab_size"):
+        if vocab_key in recommended and int(recommended[vocab_key]) != vocab_size:
+            raise LantraTrainingError(
+                f"analyze_lantra_library recommends {vocab_key}={recommended[vocab_key]}, "
+                f"but the active LanguageTokenizer has vocab_size={vocab_size}. "
+                "Regenerate the library analysis with the active tokenizer before training."
+            )
+
+    # Fresh models use the analyzer's architecture recommendation. Resume models
+    # retain checkpoint architecture; compatibility is verified immediately after load.
+    overrides: Dict[str, Any] = {} if config.init_from else recommended
+    overrides.update({
         "src_vocab_size": vocab_size,
         "tgt_vocab_size": vocab_size,
         "pad_token_id": int(tokenizer.pad_token_id),
@@ -976,7 +1233,7 @@ def initialize_model(config: TrainerConfig, tokenizer: LanguageTokenizer, device
         "clip_grad": config.clip_grad,
         "label_smoothing": config.label_smoothing,
         "batch_first": True,
-    }
+    })
 
     if config.init_from:
         checkpoint = Path(config.init_from)
@@ -1017,6 +1274,7 @@ def initialize_model(config: TrainerConfig, tokenizer: LanguageTokenizer, device
             "Tokenizer/model vocabulary mismatch: "
             f"tokenizer={vocab_size}, src={model.config.src_vocab_size}, tgt={model.config.tgt_vocab_size}."
         )
+    validate_recommended_architecture(model, config)
     return model
 
 
@@ -1078,6 +1336,8 @@ class RawCorpus:
     duplicate_segments: int = 0
     extraction_failures: Tuple[RawExtractionFailure, ...] = ()
     manifest_path: Optional[str] = None
+    segments_before_cap: int = 0
+    segment_cap_applied: bool = False
 
     @property
     def segments(self) -> Tuple[str, ...]:
@@ -1100,6 +1360,8 @@ class RawCorpus:
             },
             "files": list(self.files),
             "fingerprint_sha256": self.fingerprint,
+            "segments_before_cap": self.segments_before_cap,
+            "segment_cap_applied": self.segment_cap_applied,
             "deduplication": {
                 "duplicate_files_exact": self.duplicate_files_exact,
                 "duplicate_documents_exact": self.duplicate_documents_exact,
@@ -1793,6 +2055,8 @@ def load_raw_corpus(files: Sequence[Path], config: TrainerConfig) -> RawCorpus:
             item.normalized_sha256,
         ),
     )
+    segments_before_cap = len(retained)
+    segment_cap_applied = config.raw_max_segments > 0 and segments_before_cap > config.raw_max_segments
     if config.raw_max_segments > 0:
         retained = retained[: config.raw_max_segments]
 
@@ -1851,6 +2115,8 @@ def load_raw_corpus(files: Sequence[Path], config: TrainerConfig) -> RawCorpus:
         duplicate_documents_normalized=duplicate_documents_normalized,
         duplicate_segments=duplicate_segments,
         extraction_failures=tuple(failures),
+        segments_before_cap=segments_before_cap,
+        segment_cap_applied=segment_cap_applied,
     )
 
 
@@ -2558,6 +2824,8 @@ def raw_text_pretrain(
         "history": history,
         "interval_checkpoints": interval_checkpoints,
         "checkpoint_every_steps": config.checkpoint_every_steps,
+        "segments_per_epoch_used": per_epoch_count,
+        "full_train_split_covered_each_epoch": per_epoch_count >= len(train_segments),
         "best_objective": best_validation,
         "heldout_test_loss": test_loss,
         "test_evaluation_deferred": not evaluate_test_split,
@@ -3691,6 +3959,30 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--raw-max-length", type=int, default=256)
 
     parser.add_argument(
+        "--library-analysis",
+        default=None,
+        help=(
+            "Path to analyze_lantra_library.py JSON analysis or generated YAML recommendation. By default the trainer "
+            "auto-discovers the freshest analyzer output and uses language_transformer.base_overrides."
+        ),
+    )
+    parser.add_argument(
+        "--continual-state",
+        default=DEFAULT_CONTINUAL_STATE,
+        help="Persistent state file used to resume the last checkpoint and skip already-consumed library files.",
+    )
+    parser.add_argument(
+        "--no-auto-resume",
+        action="store_true",
+        help="Do not automatically resume from the last LANTRA checkpoint recorded/discovered by continual training.",
+    )
+    parser.add_argument(
+        "--no-incremental-library",
+        action="store_true",
+        help="Re-read all data/library documents instead of training only files not yet recorded in continual state.",
+    )
+
+    parser.add_argument(
         "--init-from",
         default=None,
         help=(
@@ -3702,6 +3994,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def config_from_args(args: argparse.Namespace) -> TrainerConfig:
+    analysis_path, recommended_overrides, recommended_profile = load_recommended_model_config(
+        str(args.library_analysis) if args.library_analysis else None
+    )
     config = TrainerConfig(
         data_paths=tuple(args.data),
         raw_text_paths=tuple(args.raw_text),
@@ -3757,6 +4052,12 @@ def config_from_args(args: argparse.Namespace) -> TrainerConfig:
         raw_corruption_probability=float(args.raw_corruption_probability),
         raw_min_chars=int(args.raw_min_chars),
         raw_chunk_chars=int(args.raw_chunk_chars),
+        library_analysis_path=analysis_path,
+        recommended_model_overrides=recommended_overrides,
+        recommended_profile=recommended_profile,
+        continual_state_path=str(args.continual_state),
+        auto_resume=not bool(args.no_auto_resume),
+        incremental_library=not bool(args.no_incremental_library),
     )
     validate_config(config)
     return config
@@ -3908,6 +4209,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         args = parse_args(argv)
         config = config_from_args(args)
+
+        state_path = Path(config.continual_state_path)
+        state_was_new = not state_path.is_file()
+        continual_state = load_continual_state(state_path)
+        auto_resumed = False
+        if config.init_from is None and config.auto_resume:
+            resume_checkpoint = discover_resume_checkpoint(Path(config.output_dir), continual_state)
+            if resume_checkpoint is not None:
+                config = dataclasses.replace(config, init_from=str(resume_checkpoint))
+                auto_resumed = True
+                LOGGER.info("Continual LANTRA resume checkpoint selected: %s", resume_checkpoint)
+                PRINTER.status("LANTRA RESUME", f"Continuing from {resume_checkpoint}", "success")
+
+        if config.init_from and config.retrain_tokenizer:
+            raise LantraTrainingError(
+                "Tokenizer retraining is incompatible with checkpoint continuation because token IDs may change. "
+                "Disable --retrain-tokenizer or start fresh with --no-auto-resume and no --init-from."
+            )
+
         seed_runtime(config.seed)
 
         # --------------------------------------------------------------
@@ -3915,10 +4235,56 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         needs_raw_corpus = config.raw_pretrain_epochs > 0 or config.retrain_tokenizer
         if needs_raw_corpus:
-            raw_files = discover_raw_text_files(config.raw_text_paths)
+            discovered_raw_files = discover_raw_text_files(config.raw_text_paths)
+            raw_files = discovered_raw_files
+            if config.incremental_library:
+                raw_files, refreshed_cache, processed_hashes = inventory_raw_files(
+                    discovered_raw_files, continual_state
+                )
+                continual_state["file_cache"] = refreshed_cache
+
+                # Migration rule: when this upgraded trainer finds an existing checkpoint but no
+                # prior continual-state ledger, treat the library already present on disk as the
+                # checkpoint's baseline. This prevents an accidental full-corpus replay on the
+                # first continual run. Only files added/changed after this baseline are trained.
+                if state_was_new and auto_resumed:
+                    checkpoint_mtime_ns = Path(str(config.init_from)).stat().st_mtime_ns
+                    baseline_hashes = {
+                        str(item.get("sha256"))
+                        for item in refreshed_cache.values()
+                        if (
+                            isinstance(item, Mapping)
+                            and item.get("sha256")
+                            and int(item.get("mtime_ns", 0)) <= checkpoint_mtime_ns
+                        )
+                    }
+                    processed_hashes.update(baseline_hashes)
+                    continual_state["processed_source_hashes"] = sorted(processed_hashes)
+                    continual_state["migration_baseline_created_at"] = utc_now()
+                    continual_state["migration_baseline_checkpoint"] = config.init_from
+                    save_continual_state(state_path, continual_state)
+                    raw_files = [
+                        path for path in raw_files
+                        if refreshed_cache.get(str(path.resolve()), {}).get("sha256") not in baseline_hashes
+                    ]
+                    LOGGER.info(
+                        "Created continual-training baseline from %d files at/before checkpoint mtime; %d newer/changed files remain for this run.",
+                        len(baseline_hashes), len(raw_files),
+                    )
+                    PRINTER.status(
+                        "LANTRA CONTINUAL",
+                        f"Baseline recorded for {len(baseline_hashes)} historical library files; {len(raw_files)} newer/changed files selected.",
+                        "success",
+                    )
+                else:
+                    LOGGER.info(
+                        "Continual raw discovery: discovered=%d new_or_changed=%d already_processed=%d",
+                        len(discovered_raw_files), len(raw_files), len(processed_hashes),
+                    )
+
             raw_corpus = load_raw_corpus(raw_files, config) if raw_files else empty_raw_corpus()
             raw_corpus = write_raw_corpus_manifest(raw_corpus, Path(config.report_dir), run_id)
-            LOGGER.info("LANTRA raw/document corpus files: %s", list(raw_corpus.files))
+            LOGGER.info("LANTRA raw/document corpus files selected this run: %s", list(raw_corpus.files))
             if raw_corpus.segments:
                 PRINTER.pretty("LANTRA RAW CORPUS", raw_corpus.to_dict(), "success")
             else:
@@ -4043,6 +4409,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "vocab_size": len(tokenizer.vocab),
                 "tokenizer_trained": bool(tokenizer.is_trained),
                 "model_stats": model.stats().to_dict(),
+                "recommended_profile": config.recommended_profile or None,
+                "library_analysis": config.library_analysis_path,
+                "resume_checkpoint": config.init_from,
                 "supported_tasks": list(SUPPORTED_TASKS),
             },
             "success",
@@ -4293,7 +4662,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "final_evaluation": final_evaluation,
             "final_checkpoint": final_checkpoint,
             "model_stats": model.stats().to_dict(),
+            "continual_training": {
+                "state_path": str(state_path),
+                "auto_resumed": auto_resumed,
+                "resume_checkpoint": config.init_from,
+                "incremental_library": config.incremental_library,
+            },
         }
+
+        # Commit continual state only after a successful training sequence. A source
+        # file is marked consumed only when its complete retained training split was
+        # actually visited and the raw loading cap did not truncate the corpus.
+        if config.incremental_library:
+            processed_hashes = {
+                str(value) for value in continual_state.get("processed_source_hashes", []) if value
+            }
+            full_raw_coverage = (
+                raw_result.get("status") == "completed"
+                and bool(raw_result.get("full_train_split_covered_each_epoch"))
+                and not bool(raw_corpus.segment_cap_applied)
+            )
+            if full_raw_coverage:
+                processed_hashes.update(successful_corpus_source_hashes(raw_corpus))
+            elif raw_corpus.files:
+                LOGGER.warning(
+                    "New raw files were not marked fully consumed because the run did not cover every retained train segment "
+                    "or raw_max_segments truncated the corpus. They remain eligible for the next continual run."
+                )
+            continual_state.update({
+                "processed_source_hashes": sorted(processed_hashes),
+                "last_checkpoint": str(final_checkpoint),
+                "last_dataset_fingerprint": dataset.fingerprint if dataset is not None else None,
+                "last_raw_corpus_fingerprint": raw_corpus.fingerprint,
+                "last_run_id": run_id,
+                "library_analysis_path": config.library_analysis_path,
+                "recommended_profile": config.recommended_profile,
+            })
+            save_continual_state(state_path, continual_state)
 
         elapsed = time.perf_counter() - started_clock
         report_coverage: Dict[str, Any] = {

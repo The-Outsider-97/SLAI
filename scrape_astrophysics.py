@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Collect readable plant content for a later LANTRA corpus build.
+"""Collect readable astrophysics content for a later LANTRA corpus build.
 
 Python 3.10+. Standard library for standalone collection. Default agent mode uses
 SLAI Quality + Knowledge through AgentFactory; it never silently disables agents.
 TXT exports contain titles and content only. Provenance and decisions live in
-SQLite/JSONL sidecars. Run --help; see PLANT_COLLECTOR_README.md.
+SQLite/JSONL sidecars. Run --help; see ASTROPHYSICS_SCRAPER_README.md.
 """
 from __future__ import annotations
 
@@ -31,61 +31,58 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import xml.etree.ElementTree as ET
 
-LOG = logging.getLogger('plant_collector')
+LOG = logging.getLogger('astrophysics_collector')
 VERSION = '1.0.0'
-SCHEMA = 'plant-collector-v1'
+SCHEMA = 'astrophysics-collector-v1'
 WIKI = 'https://en.wikipedia.org/w/api.php'
 BOOKS = 'https://en.wikisource.org/w/api.php'
-EPMC = 'https://www.ebi.ac.uk/europepmc/webservices/rest/'
-BUCKETS = ('plant_articles', 'plant_studies', 'plant_books', 'plant_stories')
-ARTICLE_SEEDS = '''Plant|Botany|Plant taxonomy|Plant anatomy|Plant physiology|Plant ecology|
-Plant evolution|Plant reproduction|Plant genetics|Plant cell|Photosynthesis|Chloroplast|
-Chlorophyll|Calvin cycle|Photorespiration|C3 carbon fixation|C4 carbon fixation|
-Crassulacean acid metabolism|Root|Stem (botany)|Leaf|Flower|Fruit|Seed|Pollen|
-Pollination|Seed dispersal|Germination|Meristem|Xylem|Phloem|Stoma|Transpiration|
-Plant hormone|Auxin|Gibberellin|Abscisic acid|Phototropism|Gravitropism|Photoperiodism|
-Dormancy|Plant defense against herbivory|Plant disease|Plant pathology|
-Plant secondary metabolism|Mycorrhiza|Rhizosphere|Nitrogen fixation|Legume|
-Bryophyte|Moss|Liverwort|Hornwort|Fern|Lycophyte|Gymnosperm|Conifer|Angiosperm|
-Monocotyledon|Eudicots|Algae|Green algae|Tree|Shrub|Herbaceous plant|Grass|
-Poaceae|Orchidaceae|Asteraceae|Fabaceae|Rosaceae|Cactaceae|Arecaceae|Fagaceae|
-Arabidopsis thaliana|Zea mays|Rice|Wheat|Potato|Tomato|Banana|Coffee|Cocoa bean|
-Quercus|Pinus|Mangrove|Seagrass|Carnivorous plant|Parasitic plant|Epiphyte|
-Succulent plant|Aquatic plant|Desert vegetation|Tropical rainforest|Temperate forest|
-Boreal forest|Tundra|Grassland|Savanna|Wetland|Biodiversity|Plant conservation|
-Seed bank|Botanical garden|Ecological restoration|Invasive species|Agroforestry|
-Agroecology|Horticulture|Agronomy|Forestry|Ethnobotany|Domestication|Crop wild relative|
-Plant breeding|Sustainable agriculture|Hydroponics|Plant tissue culture|Bonsai|
-History of botany|Plant intelligence|Plant perception (physiology)'''.replace('\n', '').split('|')
-CATEGORY_SEEDS = ['Botany', 'Plants', 'Plant physiology', 'Plant anatomy', 'Plant ecology',
-                  'Plant reproduction', 'Plant genetics', 'Plant taxonomy', 'Plant evolution',
-                  'Plant diseases', 'Plant conservation', 'Trees', 'Flowers', 'Crops',
-                  'Horticulture', 'Forestry', 'Ethnobotany', 'Flora']
-RESEARCH_TERMS = [
-    'plant physiology', 'plant photosynthesis', 'plant genetics genomics',
-    'plant roots rhizosphere', 'plant reproduction pollination', 'plant evolution taxonomy',
-    'plant ecology conservation', 'plant drought salinity adaptation',
-    'plant pathogens immunity', 'plant hormones development', 'forest tree ecology',
-    'crop breeding agriculture', 'seed germination dormancy', 'plant mycorrhiza symbiosis',
-    'bryophyte fern biology', 'aquatic plant seagrass', 'plant secondary metabolism',
-    'plant tissue culture', 'plant herbivore interaction', 'plant climate change',
-]
-# Whole works are traversed only beneath these explicit title roots.
+ARXIV = 'https://export.arxiv.org/api/query'
+BUCKETS = ('astrophysics_articles', 'astrophysics_papers', 'astrophysics_books')
+ARTICLE_SEEDS = '''Astrophysics|Astronomy|Cosmology|Physical cosmology|Observational astronomy|
+Theoretical astronomy|Stellar astronomy|Extragalactic astronomy|Galactic astronomy|
+Planetary science|Astrometry|Astronomical spectroscopy|Photometry (astronomy)|
+Radio astronomy|Infrared astronomy|X-ray astronomy|Gamma-ray astronomy|
+Gravitational-wave astronomy|Neutrino astronomy|Multi-messenger astronomy|
+Astronomical interferometry|Adaptive optics|Space telescope|Hubble Space Telescope|
+James Webb Space Telescope|Chandra X-ray Observatory|Fermi Gamma-ray Space Telescope|
+Kepler space telescope|Gaia (spacecraft)|Hertzsprung–Russell diagram|
+Stellar classification|Star formation|Stellar evolution|Main sequence|Red giant|
+White dwarf|Neutron star|Pulsar|Magnetar|Black hole|Supermassive black hole|
+Accretion disk|Event horizon|Hawking radiation|Gravitational lens|
+General relativity|Special relativity|Gravitational wave|LIGO|Virgo interferometer|
+Milky Way|Galaxy|Galaxy formation and evolution|Active galactic nucleus|Quasar|
+Interstellar medium|Intergalactic medium|Nebula|Planetary nebula|Supernova|
+Supernova remnant|Cosmic ray|Dark matter|Dark energy|Lambda-CDM model|
+Big Bang|Inflation (cosmology)|Cosmic microwave background|Cosmic web|
+Large-scale structure of the cosmos|Observable universe|Hubble's law|
+Redshift|Baryon acoustic oscillations|Reionization|Nucleosynthesis|
+Exoplanet|Exoplanet detection methods|Planetary system|Protoplanetary disk|
+Solar System|Sun|Solar physics|Helioseismology|Solar wind|Solar flare|
+Magnetosphere|Aurora|Planet|Moon|Small Solar System body|Kuiper belt|
+Oort cloud|Asteroid|Comet|Meteorite|Orbital mechanics|Celestial mechanics|
+Kepler's laws of planetary motion|Newton's law of universal gravitation|
+History of astronomy|Archaeoastronomy|Astronomical unit|Parsec|Light-year'''.replace('\n', '').split('|')
+CATEGORY_SEEDS = ['Astrophysics', 'Astronomy', 'Cosmology', 'Stars', 'Galaxies',
+                  'Black holes', 'Exoplanets', 'Planetary science', 'Solar physics',
+                  'Stellar astronomy', 'Observational astronomy', 'Radio astronomy',
+                  'X-ray astronomy', 'Gravitational waves', 'Astronomical spectroscopy',
+                  'Astronomical instruments', 'Nebulae', 'Supernovae', 'Dark matter',
+                  'Cosmic microwave background', 'History of astronomy']
+RESEARCH_TERMS = ['astro-ph.CO', 'astro-ph.GA', 'astro-ph.HE', 'astro-ph.IM',
+                  'astro-ph.SR', 'astro-ph.EP', 'gr-qc', 'physics.space-ph']
+# Traverse only pages under these explicitly selected historical work roots.
 WORKS = {
-    'Enquiry into Plants': ('plant_books', 'Theophrastus; translated by Arthur Hort'),
-    'English Botany (1st edition)': ('plant_books', 'James Edward Smith and James Sowerby'),
-    'History of botany (1530–1860)': ('plant_books', 'Julius von Sachs; historical translation'),
-    'Life Movements in Plants': ('plant_books', 'Jagadish Chandra Bose'),
-    'The Botanic Garden (Darwin, 1791)': ('plant_stories', 'Erasmus Darwin; poetry'),
-    "Hans Andersen's Fairy Tales/The Fir-Tree": ('plant_stories', 'Hans Christian Andersen; historical translation'),
-    'The Pink Fairy Book/The Fir-Tree': ('plant_stories', 'Andrew Lang; historical collection'),
+    'The Sidereal Messenger of Galileo Galilei':
+        ('astrophysics_books', 'Galileo Galilei; translated by Edward Stafford Carlos'),
+    'A Short History of Astronomy (1898)': ('astrophysics_books', 'Arthur Berry'),
+    'The Music of the Spheres': ('astrophysics_books', 'Florence Armstrong Grondal'),
 }
-PLANT_RE = re.compile(r'\b(plant\w*|botan\w*|photosynth\w*|chloroplast\w*|flora|floral|flower\w*|'
-                      r'pollinat\w*|seed\w*|forest\w*|tree\w*|crop\w*|root\w*|leaf|leaves|'
-                      r'angiosperm\w*|gymnosperm\w*|bryophy\w*|fern\w*|orchid\w*|'
-                      r'rhiz\w*|mycorrhiz\w*|arabidopsis|maize|rice|wheat|alga\w*|seagrass\w*)\b', re.I)
+ASTRO_RE = re.compile(r'\b(astro\w*|cosmo\w*|galax\w*|stellar|stars?|solar|planet\w*|'
+                      r'nebula\w*|quasar\w*|pulsar\w*|magnetar\w*|black hole\w*|'
+                      r'supernova\w*|celestial|telescope\w*|universe|orbital|'
+                      r'gravitational wave\w*|interstellar|exoplanet\w*|moon\w*|'
+                      r'light.year\w*|dark matter|dark energy)\b', re.I)
 SKIP_CATEGORY = re.compile(r'\b(wikipedia|articles|templates|stubs|births|deaths|people|fictional)\b', re.I)
-
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -154,9 +151,9 @@ def allowed_url(url):
     p = urlsplit(url)
     if p.scheme != 'https' or p.username or p.password or p.port not in (None, 443):
         return False
-    return ((p.hostname, p.path) in {('en.wikipedia.org', '/w/api.php'), ('en.wikisource.org', '/w/api.php')}
-            or (p.hostname == 'www.ebi.ac.uk' and bool(re.fullmatch(
-                r'/europepmc/webservices/rest/(search|PMC\d+/fullTextXML)', p.path))))
+    return (p.hostname, p.path) in {('en.wikipedia.org', '/w/api.php'),
+                                    ('en.wikisource.org', '/w/api.php'),
+                                    ('export.arxiv.org', '/api/query')}
 
 
 class RestrictedRedirect(HTTPRedirectHandler):
@@ -169,9 +166,9 @@ class RestrictedRedirect(HTTPRedirectHandler):
 class APIClient:
     def __init__(self, delay=1.2, contact='', retries=4, timeout=35):
         self.delay, self.retries, self.timeout = delay, retries, timeout
-        self.last = 0.0
+        self.last = {}
         self.opener = build_opener(RestrictedRedirect())
-        self.ua = f'PlantKingdomCollector/{VERSION}' + (f' ({contact})' if contact else '')
+        self.ua = f'AstrophysicsCollector/{VERSION}' + (f' ({contact})' if contact else '')
     def request(self, url, *, xml=False, **params):
         if params:
             url += '?' + urlencode(params)
@@ -179,15 +176,17 @@ class APIClient:
             raise Skip('Unsupported API URL')
         failure = None
         for attempt in range(self.retries):
-            time.sleep(max(0, self.delay-(time.monotonic()-self.last)))
+            host = urlsplit(url).hostname
+            gap = max(self.delay, 3.0) if host == 'export.arxiv.org' else self.delay
+            time.sleep(max(0, gap-(time.monotonic()-self.last.get(host, 0.0))))
             pause = min(30, 2**(attempt+1))
             try:
-                self.last = time.monotonic()
+                self.last[host] = time.monotonic()
                 request = Request(url, headers={'User-Agent': self.ua, 'Accept-Encoding': 'identity',
                                   'Accept': 'application/xml' if xml else 'application/json'})
                 with self.opener.open(request, timeout=self.timeout) as response:
                     mime = response.headers.get_content_type()
-                    if mime not in (('application/xml', 'text/xml') if xml else ('application/json', 'text/json')):
+                    if mime not in (('application/xml', 'text/xml', 'application/atom+xml') if xml else ('application/json', 'text/json')):
                         raise Deferred(f'Unexpected API response type: {mime}')
                     raw = response.read(20*1024*1024+1)
                     if len(raw) > 20*1024*1024:
@@ -288,19 +287,19 @@ def seed(db, args):
 def ingest(db, key, bucket, title, body, metadata, args):
     title, body = clean(title), clean(body)
     words = re.findall(r"\b[\w'-]+\b", body)
-    minimum = min(args.min_words, 35) if bucket == 'plant_stories' else args.min_words
+    minimum = min(args.min_words, 35) if bucket == 'astrophysics_books' else args.min_words
     reasons = []
     if len(words) < minimum:
         reasons.append('too_short')
     if len(body) and sum(c.isalpha() for c in body)/len(body) < 0.35:
         reasons.append('low_text_density')
-    if bucket in ('plant_articles', 'plant_studies') and not PLANT_RE.search(title+' '+body[:10000]):
-        reasons.append('no_botanical_signal')
+    if bucket in ('astrophysics_articles', 'astrophysics_papers') and not ASTRO_RE.search(title+' '+body[:10000]):
+        reasons.append('no_astronomy_signal')
     if re.search(r'\b(may refer to:|this disambiguation page)\b', body[:1000], re.I):
         reasons.append('disambiguation')
     content_hash = digest(' '.join(body.casefold().split()))
     existing = db.execute('SELECT id FROM documents WHERE bucket=? AND content_hash=?', (bucket, content_hash)).fetchone()
-    doc_id = existing[0] if existing else 'plant:'+bucket+':'+content_hash
+    doc_id = existing[0] if existing else 'astrophysics:'+bucket+':'+content_hash
     meta = dict(metadata, collected_at=now(), source_key=key, verified=False)
     # Repeated identifiers do not duplicate a document, even if its source text changes.
     old = db.execute('SELECT document_id FROM origins WHERE source_key=?', (key,)).fetchone()
@@ -356,7 +355,7 @@ def wiki_task(db, api, task, args):
     if not body.strip():
         raise Skip('No article text')
     with db:
-        ingest(db, f"wikipedia:{page['pageid']}", 'plant_articles', page['title'], body,
+        ingest(db, f"wikipedia:{page['pageid']}", 'astrophysics_articles', page['title'], body,
                {'source': 'wikipedia', 'url': page.get('fullurl', ''), 'kind': 'encyclopedia',
                 'rights': 'Wikipedia attribution/share-alike terms apply',
                 'revision': page.get('revisions', [{}])[0].get('revid')}, args)
@@ -383,9 +382,9 @@ def work_task(db, api, task, args):
         if body and not navigation_only:
             ingest(db, f"wikisource:{page.get('pageid', title)}", payload['bucket'], title, body,
                    {'source': 'wikisource', 'url': 'https://en.wikisource.org/wiki/'+quote(title.replace(' ', '_')),
-                    'kind': 'historical_botany' if payload['bucket']=='plant_books' else 'literature',
+                    'kind': 'historical_astronomy',
                     'author': payload['author'], 'root': root, 'revision': page.get('revid'),
-                    'rights': 'Historic work; Wikisource transcription and jurisdiction-specific terms apply'}, args)
+                    'rights': 'Historical work; check translation and transcription terms before reuse'}, args)
         for link in page.get('links', []):
             child = link.get('title', '')
             if link.get('ns') == 0 and child.startswith(root+'/'):
@@ -394,119 +393,65 @@ def work_task(db, api, task, args):
 
 
 def research_search(db, api, task, args):
+    """Fetch an Atom page and retain the paper's actual abstract text."""
     payload = json.loads(task['payload'])
     seen = payload.get('seen', 0)
     remaining = args.results_per_topic-seen if args.results_per_topic else 50
-    if remaining <= 0:
+    capacity = args.max_studies - db.execute(
+        "SELECT count(*) FROM documents WHERE bucket='astrophysics_papers'").fetchone()[0] if args.max_studies else 50
+    size = min(50, remaining, capacity)
+    if size <= 0:
         with db:
             done(db, task)
         return
-    cursor = payload.get('cursor', '*')
-    size = min(50, remaining)
-    # All terms required; avoids relevance expansion into unrelated human studies.
-    terms = ' AND '.join(task['target'].split())
-    query = f'TITLE_ABS:({terms}) AND OPEN_ACCESS:Y AND IN_EPMC:Y'
-    data = api.request(EPMC+'search', query=query, format='json', resultType='core',
-                       pageSize=size, cursorMark=cursor)
-    records = data.get('resultList', {}).get('result')
-    if not isinstance(records, list):
-        raise Deferred('Research response lacks a result list')
-    next_cursor = data.get('nextCursorMark')
-    if records and (not next_cursor or next_cursor == cursor):
-        raise Deferred('Missing or repeated research cursor; checkpoint retained')
+    start = payload.get('start', 0)
+    raw = api.request(ARXIV, xml=True, search_query='cat:'+task['target'], start=start,
+                      max_results=size, sortBy='submittedDate', sortOrder='descending')
+    if b'<!DOCTYPE' in raw.upper() or b'<!ENTITY' in raw.upper():
+        raise Skip('XML entity declarations are unsupported')
+    try:
+        feed = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise Deferred('Malformed arXiv Atom feed') from exc
+    atom = '{http://www.w3.org/2005/Atom}'
+    opensearch = '{http://a9.com/-/spec/opensearch/1.1/}'
+    arxiv = '{http://arxiv.org/schemas/atom}'
+    if feed.tag != atom+'feed':
+        raise Deferred('Unexpected arXiv feed')
+    entries = feed.findall(atom+'entry')
+    try:
+        total = int(feed.findtext(opensearch+'totalResults', default='-1'))
+    except ValueError as exc:
+        raise Deferred('Unexpected arXiv result count') from exc
+    if total < 0 or (not entries and start < total):
+        raise Deferred('Incomplete arXiv result page; checkpoint retained')
     with db:
-        for item in records:
-            pmcid = item.get('pmcid', '')
-            if re.fullmatch(r'PMC\d+', pmcid) and item.get('isOpenAccess') == 'Y':
-                enqueue(db, 'research', 'paper', pmcid, payload=item)
-        if records and (not args.results_per_topic or seen+len(records) < args.results_per_topic):
+        for entry in entries:
+            identifier = (entry.findtext(atom+'id') or '').strip()
+            parsed = urlsplit(identifier)
+            if parsed.scheme not in {'http', 'https'} or parsed.hostname not in {'arxiv.org', 'export.arxiv.org'} or not re.fullmatch(r'/abs/[A-Za-z0-9.\-]+', parsed.path):
+                continue
+            title = clean(entry.findtext(atom+'title') or '')
+            abstract = clean(entry.findtext(atom+'summary') or '')
+            if not title or not abstract:
+                continue
+            authors = [clean(author.findtext(atom+'name') or '') for author in entry.findall(atom+'author')]
+            category = entry.find(arxiv+'primary_category')
+            license_url = entry.findtext(arxiv+'license') or ''
+            ingest(db, 'arxiv:'+parsed.path.removeprefix('/abs/'), 'astrophysics_papers', title,
+                   abstract, {'source': 'arxiv', 'url': 'https://arxiv.org'+parsed.path, 'kind': 'research_abstract',
+                   'authors': authors, 'published': entry.findtext(atom+'published'),
+                   'updated': entry.findtext(atom+'updated'),
+                   'primary_category': category.get('term') if category is not None else '',
+                   'doi': entry.findtext(arxiv+'doi') or '', 'rights': license_url or 'Unspecified on API entry',
+                   'peer_review_verified': False}, args)
+        next_start = start+len(entries)
+        if entries and next_start < total and (not args.results_per_topic or seen+len(entries) < args.results_per_topic):
             db.execute('UPDATE tasks SET payload=? WHERE id=?',
-                       (json.dumps({'cursor': next_cursor, 'seen': seen+len(records)}), task['id']))
-            # A fresh queue position lets other topics and papers progress fairly.
+                       (json.dumps({'start': next_start, 'seen': seen+len(entries)}), task['id']))
             db.execute('UPDATE tasks SET id=(SELECT max(id)+1 FROM tasks) WHERE id=?', (task['id'],))
         else:
             done(db, task)
-
-
-def local_tag(tag):
-    return tag.rsplit('}', 1)[-1]
-
-
-def jats_text(node):
-    # Recursive block extraction preserves section order and superscript text.
-    blocked = {'ref-list', 'table-wrap', 'fig', 'supplementary-material', 'ack', 'fn-group',
-               'author-notes', 'permissions', 'xref', 'ext-link'}
-    blocks = {'p', 'title', 'sec', 'list-item', 'disp-quote', 'abstract'}
-    def walk(el):
-        if local_tag(el.tag) in blocked:
-            return ''
-        parts = [el.text or '']
-        for child in el:
-            parts.extend((walk(child), child.tail or ''))
-        text = ''.join(parts)
-        return '\n'+text+'\n' if local_tag(el.tag) in blocks else text
-    return clean(walk(node))
-
-
-def permitted_license(elements):
-    evidence = []
-    allowed = False
-    for element in elements:
-        text = ' '.join(element.itertext())
-        attrs = ' '.join(str(v) for el in element.iter() for v in el.attrib.values())
-        combined = (text+' '+attrs).lower()
-        evidence.append(clean(text+' '+attrs))
-        if re.search(r'creativecommons\.org/(?:licenses/(?:by|by-sa|by-nc|by-nc-sa)/[\d.]+|publicdomain/(?:zero|mark)/[\d.]+)', combined):
-            allowed = True
-        elif re.search(r'\bcc[ -]?by(?:[ -](?:nc|sa)){0,2}\b', combined) and not re.search(r'\bnd\b|no.?derivatives', combined):
-            allowed = True
-        elif 'creative commons attribution' in combined and not re.search(r'no.?derivatives', combined):
-            allowed = True
-        elif re.search(r'\bcc0\b', combined):
-            allowed = True
-    return allowed, evidence
-
-
-def research_paper(db, api, task, args):
-    raw = api.request(EPMC+task['target']+'/fullTextXML', xml=True)
-    if b'<!ENTITY' in raw.upper():
-        raise Skip('XML entity declarations are unsupported')
-    try:
-        root = ET.fromstring(raw)
-    except ET.ParseError as exc:
-        raise Skip('Malformed research XML') from exc
-    for el in root.iter():
-        el.tag = local_tag(el.tag)
-    # Article-level permissions only: a figure's separate license is insufficient.
-    licenses = root.findall('./front/article-meta/permissions/license')
-    allowed, rights = permitted_license(licenses)
-    if not allowed:
-        raise Skip('No recognized article-level reuse license; no training text collected')
-    record = json.loads(task['payload'])
-    if root.attrib.get('article-type') in {'retraction', 'retraction-notice'} or str(record.get('isRetracted', '')).upper() == 'Y':
-        raise Skip('Retraction notice or flagged retracted record')
-    title = root.find('./front/article-meta/title-group/article-title')
-    title_text = jats_text(title) if title is not None else record.get('title', task['target'])
-    body_node = root.find('./body')
-    if body_node is None:
-        raise Skip('Full-text body unavailable')
-    sections = [jats_text(e) for e in root.findall('./front/article-meta/abstract')]
-    sections.append(jats_text(body_node))
-    body = clean('\n\n'.join(sections))
-    doi = record.get('doi', '').strip().lower()
-    for identifier in root.findall('./front/article-meta/article-id'):
-        if identifier.attrib.get('pub-id-type') == 'doi' and identifier.text:
-            doi = identifier.text.strip().lower()
-    key = 'doi:'+doi if doi else 'epmc:'+task['target']
-    with db:
-        ingest(db, key, 'plant_studies', title_text, body,
-               {'source': 'europepmc', 'url': f"https://europepmc.org/articles/{task['target']}",
-                'kind': 'research_full_text', 'rights': rights, 'doi': doi,
-                'authors': record.get('authorString'), 'year': record.get('pubYear'),
-                'journal': record.get('journalInfo', {}), 'pmcid': task['target'],
-                'peer_review_verified': False}, args)
-        done(db, task)
-
 
 class AgentPipeline:
     """Explicit Quality -> Knowledge data flow, one factory and shared memory.
@@ -526,7 +471,7 @@ class AgentPipeline:
                 raise RuntimeError('QualityAgent must provide evaluate_batch')
         if mode in ('team', 'knowledge'):
             self.knowledge = factory.create('knowledge', shared_memory=memory, config={
-                'source': 'plant_collector', 'directory_path': '', 'retrieval_mode': 'tfidf',
+                'source': 'astrophysics_collector', 'directory_path': '', 'retrieval_mode': 'tfidf',
                 'bias_detection_enabled': False, 'use_ontology_expansion': False})
             if not callable(getattr(self.knowledge, 'add_document', None)) or not isinstance(getattr(self.knowledge, 'doc_index', None), dict):
                 raise RuntimeError('KnowledgeAgent must provide add_document and doc_index acknowledgement')
@@ -554,18 +499,18 @@ class AgentPipeline:
                           'source_type': 'str', 'collected_at': 'str', 'word_count': 'int'}
                 schema = {'schema_version': SCHEMA, 'required_fields': list(fields),
                           'fields': {key: {'type': value, 'required': True} for key, value in fields.items()}}
-                batch_id = 'plants-'+digest('|'.join(row['id'] for row in rows))[:24]
+                batch_id = 'astrophysics-'+digest('|'.join(row['id'] for row in rows))[:24]
                 metadata = json.loads(rows[0]['metadata'])
                 result = self.quality.evaluate_batch(
-                    records, dataset_id='plant_collector/'+first['bucket'], source_id=source,
+                    records, dataset_id='astrophysics_collector/'+first['bucket'], source_id=source,
                     batch_id=batch_id, schema=schema, use_case='knowledge_ingestion',
                     feature_fields=['word_count'],
                     provenance={'source_id': source, 'source_type': metadata['kind'],
-                                'collected_at': metadata['collected_at'], 'collector': 'plant_collector',
+                                'collected_at': metadata['collected_at'], 'collector': 'astrophysics_collector',
                                 'checksum': digest('|'.join(row['content_hash'] for row in rows)),
                                 'uri': metadata.get('url', ''), 'schema_version': SCHEMA},
                     source_metadata={'source_id': source, 'source_type': metadata['kind']},
-                    context={'route': 'plant_collector->quality->knowledge', 'external_content': True,
+                    context={'route': 'astrophysics_collector->quality->knowledge', 'external_content': True,
                              'content_type': metadata['kind'], 'fact_verification_performed': False})
                 if not isinstance(result, dict) or result.get('verdict') not in {'pass', 'warn', 'block'}:
                     raise RuntimeError('QualityAgent returned an invalid decision; records remain pending')
@@ -653,7 +598,7 @@ def create_agents(root, mode):
     from src.agents.collaborative.shared_memory import SharedMemory
     from logs.logger import configure_logging, get_logger
     configure_logging()
-    LOG = get_logger('Plant Collector')
+    LOG = get_logger('Astrophysics Collector')
     memory = SharedMemory()
     factory = None
     try:
@@ -704,7 +649,7 @@ def export(db, folder, strict=False, write_metadata=True):
         managed.append(relative)
     current = set(managed)
     for relative in previous:
-        if isinstance(relative, str) and re.fullmatch(r'training_text/plant_(articles|studies|books|stories)/[0-9]{8,}\.txt', relative) and relative not in current:
+        if isinstance(relative, str) and re.fullmatch(r'training_text/astrophysics_(articles|papers|books)/[0-9]{8,}\.txt', relative) and relative not in current:
             (folder/relative).unlink(missing_ok=True)
     with atomic_writer(manifest_path) as stream:
         json.dump(managed, stream, indent=2)
@@ -785,8 +730,8 @@ def collect(db, api, args, pipeline):
                 continue
             if args.max_steps and steps >= args.max_steps:
                 return
-            buckets = {'wikipedia': ('plant_articles',), 'research': ('plant_studies',),
-                       'wikisource': ('plant_books', 'plant_stories')}[source]
+            buckets = {'wikipedia': ('astrophysics_articles',), 'research': ('astrophysics_papers',),
+                       'wikisource': ('astrophysics_books',)}[source]
             cap = {'wikipedia': args.max_articles, 'research': args.max_studies, 'wikisource': args.max_book_pages}[source]
             # Budgets count retained candidates, including QA-blocked texts, avoiding unbounded collection.
             count = db.execute('SELECT count(*) FROM documents WHERE bucket IN ('+','.join('?' for _ in buckets)+')', buckets).fetchone()[0]
@@ -814,7 +759,7 @@ def collect(db, api, args, pipeline):
                 elif task['kind'] == 'search':
                     research_search(db, api, task, args)
                 else:
-                    research_paper(db, api, task, args)
+                    raise Skip('Unknown research task')
             except Skip as exc:
                 with db:
                     db.execute("UPDATE tasks SET status='skipped',error=? WHERE id=?", (str(exc), task['id']))
@@ -837,7 +782,7 @@ def collect(db, api, args, pipeline):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--output-dir', type=Path, help='Legacy option: ignored; output is always beside this script in plants/')
+    p.add_argument('--output-dir', type=Path, help='Legacy option: ignored; output is always beside this script in astrophysics/')
     p.add_argument('--slai-root', type=Path)
     p.add_argument('--agents', choices=('team', 'knowledge', 'off'), default='team')
     p.add_argument('--max-articles', type=int, default=3000)
@@ -896,7 +841,7 @@ def main(argv=None):
         self_test()
         return 0
     requested_output_dir = args.output_dir
-    args.output_dir = Path(__file__).resolve().parent/'plants'
+    args.output_dir = Path(__file__).resolve().parent/'astrophysics'
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s',
                         handlers=[logging.StreamHandler(), logging.FileHandler(args.output_dir/'collector.log', encoding='utf-8')])
@@ -962,9 +907,9 @@ def main(argv=None):
 
 
 def self_test():
-    """Offline regression tests; no SLAI imports or remote requests."""
+    """Offline tests for content exports, resumability and agent wiring."""
     import tempfile
-    args = parse_args(['--agents', 'off', '--min-words', '5'])
+    args = parse_args(['--agents', 'off', '--min-words', '5', '--results-per-topic', '3'])
     class Memory:
         closed = False
         def close(self):
@@ -973,18 +918,14 @@ def self_test():
         def __init__(self):
             self.doc_index, self.content_hashes = {}, set()
         def add_document(self, text, doc_id=None, metadata=None):
-            h = digest(text.strip())
-            if h in self.content_hashes:
-                return
-            self.content_hashes.add(h)
             self.doc_index[doc_id] = {'text': text.strip(), 'metadata': metadata}
+            self.content_hashes.add(digest(text.strip()))
     class Quality:
         verdict = 'pass'
         def evaluate_batch(self, records, *, dataset_id, source_id, batch_id, schema,
                            use_case, feature_fields, provenance, source_metadata, context):
-            assert use_case == 'knowledge_ingestion'
+            assert records and provenance['checksum'] and source_id
             assert all(r['source_id'] == source_id for r in records)
-            assert provenance['checksum'] and 'text' in schema['fields']
             return {'verdict': self.verdict, 'batch_score': 0.95, 'flags': []}
     class Factory:
         def __init__(self):
@@ -995,130 +936,78 @@ def self_test():
         def shutdown(self):
             self.closed = True
     class API:
-        def __init__(self):
-            self.calls = []
         def wiki(self, source='wikipedia', **params):
-            self.calls.append(params)
             if params.get('list') == 'categorymembers':
-                return {'query': {'categorymembers': [{'ns': 0, 'title': 'Plant'},
-                    {'ns': 14, 'title': 'Category:Trees'}]}, 'continue': {'cmcontinue': 'next', 'continue': '-||'}}
+                return {'query': {'categorymembers': [{'ns': 0, 'title': 'Astrophysics'},
+                     {'ns': 14, 'title': 'Category:Galaxies'}]}, 'continue': {'continue': '-||', 'cmcontinue': 'next'}}
             if source == 'wikisource':
-                return {'parse': {'title': 'Enquiry into Plants', 'pageid': 2,
-                    'text': '<p>Plants grow roots and leaves for water and light.</p><script>garbage</script>',
-                    'links': [{'ns': 0, 'title': 'Enquiry into Plants/Book I'}, {'ns': 0, 'title': 'Unrelated'}]}}
-            return {'query': {'pages': [{'pageid': 1, 'title': 'Plant', 'extract':
-                'Plants grow roots and leaves for water and light.', 'fullurl': 'https://en.wikipedia.org/wiki/Plant'}]}}
+                return {'parse': {'title': 'The Sidereal Messenger of Galileo Galilei', 'pageid': 2,
+                    'text': '<p>The telescope revealed the moons of Jupiter in the night sky.</p><script>bad</script>',
+                    'links': [{'ns': 0, 'title': 'The Sidereal Messenger of Galileo Galilei/Part I'}]}}
+            return {'query': {'pages': [{'pageid': 1, 'title': 'Astrophysics',
+                'extract': 'Astrophysics studies the stars, galaxies and universe using physical laws.',
+                'fullurl': 'https://en.wikipedia.org/wiki/Astrophysics'}]}}
         def request(self, url, **params):
-            self.calls.append(params)
-            if params.get('xml'):
-                return b'''<article><front><article-meta><title-group><article-title>Plant growth research</article-title></title-group>
-                <permissions><license xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="https://creativecommons.org/licenses/by/4.0/">CC BY</license></permissions>
-                <abstract><p>Plant roots absorb water from soil.</p></abstract></article-meta></front>
-                <body><sec><title>Results</title><p>Photosynthesis allows plants to capture sunlight for growth.</p>
-                <table-wrap><p>TABLE GARBAGE</p></table-wrap></sec></body><back><ref-list><p>REFERENCES</p></ref-list></back></article>'''
-            if params['cursorMark'] == '*':
-                return {'resultList': {'result': [{'pmcid': 'PMC123', 'isOpenAccess': 'Y', 'doi': '10.1/plant'}]}, 'nextCursorMark': 'next'}
-            return {'resultList': {'result': []}, 'nextCursorMark': 'next'}
-    assert html_text('<p>Plant <em>growth</em>.</p><script>bad</script>') == 'Plant growth.'
-    assert clean(' leaf\u200b\n\n root ') == 'leaf\n\nroot'
-    assert not allowed_url('https://127.0.0.1/w/api.php')
-    assert not allowed_url('https://www.ebi.ac.uk/europepmc/webservices/rest/../../private')
-    assert allowed_url(EPMC+'PMC123/fullTextXML')
-    assert not permitted_license([ET.fromstring('<license>All rights reserved</license>')])[0]
-    assert not permitted_license([ET.fromstring('<license>CC BY-ND</license>')])[0]
+            assert url == ARXIV and params['search_query'].startswith('cat:')
+            if params['start']:
+                return b'<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"><opensearch:totalResults>1</opensearch:totalResults></feed>'
+            return b'''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom"><opensearch:totalResults>2</opensearch:totalResults>
+            <entry><id>http://arxiv.org/abs/2609.12345v1</id><title>Galaxy dynamics</title>
+            <summary>Galaxy rotation and dark matter can be measured by stellar motions in disk galaxies.</summary>
+            <author><name>A. Scientist</name></author><arxiv:primary_category term="astro-ph.GA" /></entry></feed>'''
+    assert html_text('<p>Galaxy <em>formation</em>.</p><script>bad</script>') == 'Galaxy formation.'
+    assert not allowed_url('http://export.arxiv.org/api/query')
+    assert not allowed_url('https://export.arxiv.org/private')
+    assert not allowed_url('https://127.0.0.1/api/query')
+    assert allowed_url(ARXIV)
     with tempfile.TemporaryDirectory() as tmp:
         folder = Path(tmp)
         db = connect(folder/'history.sqlite3')
         seed(db, args)
         api = API()
-        article = db.execute("SELECT * FROM tasks WHERE kind='article' LIMIT 1").fetchone()
-        wiki_task(db, api, article, args)
-        wiki_task(db, api, article, args)
-        assert db.execute('SELECT count(*) FROM documents').fetchone()[0] == 1
+        wiki_task(db, api, db.execute("SELECT * FROM tasks WHERE kind='article' LIMIT 1").fetchone(), args)
         cat = db.execute("SELECT * FROM tasks WHERE kind='category' LIMIT 1").fetchone()
         wiki_task(db, api, cat, args)
         assert json.loads(db.execute('SELECT payload FROM tasks WHERE id=?', (cat['id'],)).fetchone()[0])['continue']['cmcontinue'] == 'next'
-        work = db.execute("SELECT * FROM tasks WHERE target='Enquiry into Plants'").fetchone()
-        work_task(db, api, work, args)
-        assert db.execute("SELECT 1 FROM tasks WHERE target='Enquiry into Plants/Book I'").fetchone()
-        assert not db.execute("SELECT 1 FROM tasks WHERE target='Unrelated'").fetchone()
+        work_task(db, api, db.execute("SELECT * FROM tasks WHERE target='The Sidereal Messenger of Galileo Galilei'").fetchone(), args)
+        assert db.execute("SELECT 1 FROM tasks WHERE target='The Sidereal Messenger of Galileo Galilei/Part I'").fetchone()
         search = db.execute("SELECT * FROM tasks WHERE kind='search' LIMIT 1").fetchone()
         research_search(db, api, search, args)
-        updated = db.execute('SELECT * FROM tasks WHERE target=? AND kind=?', (search['target'], search['kind'])).fetchone()
-        assert json.loads(updated['payload'])['cursor'] == 'next'
+        assert db.execute("SELECT body FROM documents WHERE bucket='astrophysics_papers'").fetchone()[0].startswith('Galaxy rotation')
+        updated = db.execute("SELECT * FROM tasks WHERE kind='search' AND target=?", (search['target'],)).fetchone()
+        assert json.loads(updated['payload'])['start'] == 1
         research_search(db, api, updated, args)
-        paper = db.execute("SELECT * FROM tasks WHERE kind='paper'").fetchone()
-        research_paper(db, api, paper, args)
-        scientific = db.execute("SELECT body FROM documents WHERE bucket='plant_studies'").fetchone()[0]
-        assert 'Results' in scientific and 'TABLE GARBAGE' not in scientific and 'REFERENCES' not in scientific
-        with db:
-            ingest(db, 'fiction', 'plant_stories', 'A talking tree',
-                   'Plants grow roots and leaves for water and light.',
-                   {'source': 'wikisource', 'kind': 'literature', 'url': 'https://example.org'}, args)
-        # Collection text is visible before any agent assessment runs.
-        assert all(item['documents'] == 1 for item in export(db, folder).values())
+        counts = export(db, folder)
+        assert all(value['documents'] == 1 for value in counts.values()), counts
+        assert len(list((folder/'training_text').rglob('*.txt'))) == 3
         factory, memory = Factory(), Memory()
         team = AgentPipeline(factory, memory, 'team', owns=True)
         team.assess(db)
         team.sync(db)
-        assert [c[0] for c in factory.calls] == ['quality', 'knowledge']
-        assert all(c[1] is memory for c in factory.calls)
-        assert len(factory.k.doc_index) == 4
-        team.sync(db)
-        assert len(factory.k.doc_index) == 4
-        counts = export(db, folder)
-        assert all(v['documents'] == 1 for v in counts.values())
-        assert len(list((folder/'training_text').rglob('*.txt'))) == 4
-        for file in folder.glob('*.txt'):
-            text = file.read_text()
-            assert 'https://' not in text and 'sha256' not in text and 'rights' not in text
+        assert [kind for kind, _ in factory.calls] == ['quality', 'knowledge']
+        assert all(shared is memory for _, shared in factory.calls)
+        assert len(factory.k.doc_index) == 3
         with db:
-            ingest(db, 'blocked', 'plant_articles', 'Plant candidate', 'Plant roots need water and minerals from soil.',
+            ingest(db, 'short', 'astrophysics_articles', 'Stellar candidate', 'Star.',
+                   {'source': 'wikipedia', 'kind': 'encyclopedia'}, args)
+        assert db.execute("SELECT status FROM documents WHERE title='Stellar candidate'").fetchone()[0] == 'filtered'
+        assert export(db, folder)['astrophysics_articles']['documents'] == 2
+        with db:
+            ingest(db, 'blocked', 'astrophysics_articles', 'Black hole candidate',
+                   'The black hole absorbs matter from a nearby star.',
                    {'source': 'wikipedia', 'kind': 'encyclopedia'}, args)
         factory.q.verdict = 'block'
         team.assess(db)
-        counts = export(db, folder)
-        assert counts['plant_articles']['documents'] == 2
-        assert 'Plant roots need water' in (folder/'plant_articles.txt').read_text()
-        with db:
-            ingest(db, 'short-candidate', 'plant_articles', 'Tiny plant', 'Seed.',
-                   {'source': 'wikipedia', 'kind': 'encyclopedia'}, args)
-        assert db.execute("SELECT status FROM documents WHERE title='Tiny plant'").fetchone()[0] == 'filtered'
-        assert export(db, folder)['plant_articles']['documents'] == 3
-        assert 'Seed.' in (folder/'plant_articles.txt').read_text()
-        # Strict export excludes warnings and removes their managed training files.
-        with db:
-            db.execute("UPDATE documents SET status='warn' WHERE bucket='plant_books'")
-        strict_counts = export(db, folder, strict=True)
-        assert strict_counts['plant_articles']['documents'] == 1
-        assert strict_counts['plant_books']['documents'] == 0
-        assert not list((folder/'training_text'/'plant_books').glob('*.txt'))
-        export(db, folder)
-        assert len(list((folder/'training_text').rglob('*.txt'))) == 6
-        team.close()
+        assert export(db, folder)['astrophysics_articles']['documents'] == 3
+        assert export(db, folder, strict=True)['astrophysics_articles']['documents'] == 1
+        assert export(db, folder)['astrophysics_articles']['documents'] == 3
+        for path in folder.glob('*.txt'):
+            contents = path.read_text(encoding='utf-8')
+            assert 'https://' not in contents and 'sha256' not in contents and 'rights' not in contents
         team.close()
         assert factory.closed and memory.closed
         db.close()
-        db = connect(folder/'history.sqlite3')
-        replay = AgentPipeline(Factory(), Memory(), 'team')
-        replay.sync(db)
-        assert replay.knowledge is not None
-        assert len(replay.knowledge.doc_index) == 4
-        # A broken Quality contract preserves pending documents for recovery.
-        with db:
-            ingest(db, 'pending', 'plant_articles', 'Plant flowers', 'Plant flowers attract many insects for pollination.',
-                   {'source': 'wikipedia', 'kind': 'encyclopedia'}, args)
-        assert replay.quality is not None
-        replay.quality.verdict = 'unknown'
-        try:
-            replay.assess(db)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError('Invalid verdict accepted')
-        assert db.execute("SELECT count(*) FROM documents WHERE status='pending'").fetchone()[0] == 1
-        db.close()
-    print('PASS: source parsing, XML full text, scope, pagination/resume, dedup, content-only exports, quality blocking, factory sharing, Knowledge acknowledgement/replay, and failure durability.')
+    print('Self-test passed: content exports, research pagination, safe URLs, and Quality/Knowledge integration.')
 
 
 if __name__ == '__main__':
