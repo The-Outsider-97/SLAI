@@ -3,10 +3,10 @@ import yaml
 import time
 import logging
 from typing import Dict, Any, Optional
-from deepmerge import Merger  # For safe hierarchical merging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+from dependencies.deepmerge import merge_mappings
 from logs.logger import get_logger
 
 class ConfigLoader:
@@ -35,12 +35,6 @@ class ConfigLoader:
     }
 
     def __init__(self, config_path: Optional[str] = None):
-        self.merger = Merger(
-            [(dict, ["merge"])],
-            ["override"],
-            ["override"]
-        )
-        
         self.logger = get_logger("ConfigLoader")
         self.config_path = self._resolve_config_path(config_path)
         self.observer = Observer()
@@ -66,13 +60,13 @@ class ConfigLoader:
         try:
             with open(self.config_path, 'r') as f:
                 user_config = yaml.safe_load(f) or {}
-            return self.merger.merge(self._DEFAULT_CONFIG.copy(), user_config)
+            return merge_mappings(self._DEFAULT_CONFIG, user_config)
         except FileNotFoundError:
             self.logger.warning("No config found, using defaults")
-            return self._DEFAULT_CONFIG.copy()
+            return merge_mappings(self._DEFAULT_CONFIG, {})
         except yaml.YAMLError as e:
             self.logger.error(f"YAML Error: {str(e)}")
-            return self._DEFAULT_CONFIG.copy()
+            return merge_mappings(self._DEFAULT_CONFIG, {})
 
     def _setup_file_watcher(self):
         """Robust file watcher with error handling"""
