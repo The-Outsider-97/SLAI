@@ -1026,6 +1026,32 @@ class PlanningConfigError(PlanningError):
         return d
 
 
+
+# ===========================================================================
+# GradientBoostingModelError – ML model persistence / training failures
+# ===========================================================================
+
+class GradientBoostingModelError(PlanningError):
+    """
+    Raised when the gradient-boosted planning-success model fails to train,
+    load, save, or produce a valid prediction.
+
+    Typical causes
+    --------------
+    * Planning database schema mismatch (missing ``tasks`` / ``world_states``)
+    * Training set does not contain both success and failure classes
+    * Model artifact fails SHA-256 integrity verification
+    * Feature contract drift between the trained model and BaseHeuristics
+    """
+
+    _default_recovery_hints = [
+        "retrain_model_with_more_data",
+        "fallback_to_heuristic_success_rate",
+        "verify_planning_db_schema",
+        "inspect_model_artifact_integrity",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Smoke test
 # ---------------------------------------------------------------------------

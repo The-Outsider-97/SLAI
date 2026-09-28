@@ -27,6 +27,8 @@ from typing import List, Any, Dict, Tuple, Optional
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
+from ..utils.planning_errors import *
+from ..utils.planning_helpers import clamp, require_type
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Case-Based Reasoning Heuristic")
@@ -39,8 +41,8 @@ class DotDict(dict):
 class CaseBasedReasoningHeuristic(BaseHeuristics):
     def __init__(self):
         self.config = load_global_config()
-        self.heuristics_config = get_config_section('global_heuristic')
-        self.cbr_config = get_config_section('case_based_reasoning_heuristic')
+        self.heuristics_config = get_config_section('global_heuristic') or {}
+        self.cbr_config = get_config_section('case_based_reasoning_heuristic') or {}
 
         self.similarity_threshold = self.cbr_config.get('similarity_threshold', 0.7)
         self.max_cases = self.cbr_config.get('max_cases', 1000)
@@ -49,10 +51,11 @@ class CaseBasedReasoningHeuristic(BaseHeuristics):
         self.adaptation_rules = self.cbr_config.get('adaptation_rules', {})
 
         # Paths
-        self.planning_db_path = self.heuristics_config.get('planning_db_path')
-        self.heuristic_model_path = self.heuristics_config.get('heuristic_model_path')
+        base_dir = os.getcwd()
+        self.planning_db_path = self.heuristics_config.get('planning_db_path') or os.path.join(base_dir, 'planning_db')
+        self.heuristic_model_path = self.heuristics_config.get('heuristic_model_path') or os.path.join(base_dir, 'heuristic_model')
         os.makedirs(self.heuristic_model_path, exist_ok=True)
-        self.case_base_path = os.path.join(self.heuristic_model_path, 'cbr_case_base.json')
+        self.case_base_path = os.path.join(str(self.heuristic_model_path), 'cbr_case_base.json')
 
         self.feature_config = self.cbr_config.get('feature_config', {})
         self.feature_names = self._get_feature_names()
@@ -124,9 +127,10 @@ class CaseBasedReasoningHeuristic(BaseHeuristics):
             idx += 1
 
         if self.feature_config.get("use_temporal"):
-            features[idx] = self._time_since_creation(task)
+            temporal = self.extract_temporal_features(task)
+            features[idx] = clamp(float(temporal.get("time_since_creation", 0.0)), 0.0, 1.0)
             idx += 1
-            features[idx] = self._deadline_proximity(task)
+            features[idx] = clamp(float(temporal.get("deadline_proximity", 0.0)), 0.0, 1.0)
             idx += 1
 
         if self.feature_config.get("use_contextual"):
@@ -145,6 +149,7 @@ class CaseBasedReasoningHeuristic(BaseHeuristics):
         if not self.trained or len(self.case_base) < self.min_similar_cases:
             return []
         scaled = self.scaler.transform(query_features.reshape(1, -1))
+        assert self.nn_model is not None
         distances, indices = self.nn_model.kneighbors(scaled)
         similar = []
         for i, d in zip(indices[0], distances[0]):
@@ -219,7 +224,10 @@ class CaseBasedReasoningHeuristic(BaseHeuristics):
 
     def analyze_similar_cases(self, similar_cases, candidate_methods) -> Dict[str, float]:
         """Score methods based on success in similar cases"""
-        method_stats = {method: {'success': 0, 'total': 0} for method in candidate_methods}
+        method_stats = {
+            method: {'success': 0, 'total': 0, 'latest_timestamp': None}
+            for method in candidate_methods
+        }
         
         for case in similar_cases:
             method = case['method_used']
@@ -227,6 +235,15 @@ class CaseBasedReasoningHeuristic(BaseHeuristics):
                 continue
                 
             method_stats[method]['total'] += 1
+            timestamp = case.get('timestamp')
+            if (
+                timestamp is not None
+                and (
+                    method_stats[method]['latest_timestamp'] is None
+                    or timestamp > method_stats[method]['latest_timestamp']
+                )
+            ):
+                method_stats[method]['latest_timestamp'] = timestamp
             if case['outcome'] == 'success':
                 method_stats[method]['success'] += 1
                 
@@ -235,7 +252,7 @@ class CaseBasedReasoningHeuristic(BaseHeuristics):
         for method, stats in method_stats.items():
             if stats['total'] > 0:
                 base_score = stats['success'] / stats['total']
-                age_seconds = datetime.now().timestamp() - case['timestamp']
+                age_seconds = datetime.now().timestamp() - stats['latest_timestamp']
                 age_years = age_seconds / 31536000  # Seconds in a year
                 recency_weight = min(1.0, max(0.0, 0.5 - 0.5 * age_years))
                 method_scores[method] = base_score * recency_weight
@@ -348,6 +365,73 @@ class CaseBasedReasoningHeuristic(BaseHeuristics):
             stats['cases_by_method'][case['method_used']] += 1
             
         return stats
+
+    def _time_since_creation(self, task: Any) -> float:
+        """
+        Return the normalised age of ``task`` since its creation in ``[0, 1]``.
+
+        Delegates to ``BaseHeuristics.extract_temporal_features``, which already
+        handles ISO‑8601 strings, POSIX timestamps, timezone normalisation, and
+        configuration‑driven normalisation via ``base_heuristics.max_age_hours``.
+
+        A value of ``0.0`` means the task was just created (or has no creation
+        time); ``1.0`` means the task is at or beyond the configured maximum age.
+
+        Raises
+        ------
+        PlanningConfigError
+            If ``creation_time`` is present but cannot be parsed, or an
+            unexpected type/value is encountered while computing the feature.
+        """
+        require_type(task, (dict, object), "task")
+
+        try:
+            temporal = self.extract_temporal_features(task)
+            return clamp(float(temporal.get("time_since_creation", 0.0)), 0.0, 1.0)
+        except PlanningError:
+            # Preserve structured planning errors unchanged.
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute time since creation: {exc}",
+                config_key="creation_time",
+                config_section="case_based_reasoning_heuristic",
+                expected_type="ISO-8601 datetime or POSIX timestamp",
+                context={"error": repr(exc)},
+            ) from exc
+
+    def _deadline_proximity(self, task: Any) -> float:
+        """
+        Return the normalised deadline proximity of ``task`` in ``[0, 1]``.
+
+        ``0.0`` means the deadline is far away or not set; ``1.0`` means the
+        deadline has already passed (or is imminent relative to the configured
+        horizon). Delegates to ``BaseHeuristics.extract_temporal_features`` so
+        that deadline horizon configuration
+        (``base_heuristics.deadline_horizon_seconds``) stays consistent across
+        every heuristic in the planner.
+
+        Raises
+        ------
+        PlanningConfigError
+            If ``deadline`` is present but cannot be parsed, or an unexpected
+            type/value is encountered while computing the feature.
+        """
+        require_type(task, (dict, object), "task")
+
+        try:
+            temporal = self.extract_temporal_features(task)
+            return clamp(float(temporal.get("deadline_proximity", 0.0)), 0.0, 1.0)
+        except PlanningError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute deadline proximity: {exc}",
+                config_key="deadline",
+                config_section="case_based_reasoning_heuristic",
+                expected_type="ISO-8601 datetime or POSIX timestamp",
+                context={"error": repr(exc)},
+            ) from exc
 
 if __name__ == "__main__":
     print("\n=== Running Case-Based Reasoning Heuristic Test ===\n")

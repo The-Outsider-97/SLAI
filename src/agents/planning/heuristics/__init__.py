@@ -5,6 +5,7 @@ from .gradient_boosting_heuristic import GradientBoostingHeuristic
 from .reinforcement_learning_heuristic import ReinforcementLearningHeuristic
 from .uncertainty_aware_heuristic import UncertaintyAwareHeuristic
 from .case_based_reasoning_heuristic import CaseBasedReasoningHeuristic
+from .feasibility_constraint_heuristic import FeasibilityConstraintHeuristic
 
 __all__ = [
     "DecisionTreeHeuristic",
@@ -12,4 +13,5 @@ __all__ = [
     "ReinforcementLearningHeuristic",
     "UncertaintyAwareHeuristic",
     "CaseBasedReasoningHeuristic",
+    "FeasibilityConstraintHeuristic",
 ]

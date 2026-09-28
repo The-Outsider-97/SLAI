@@ -152,6 +152,7 @@ heuristic_selector:
     - GB
     - DT
     - UA
+    - FC
     - CBR
 
   fallback_heuristic: "DT"
@@ -200,6 +201,7 @@ heuristic_selector:
     RL: "reinforcement_learning"
     UA: "uncertainty_aware"
     CBR: "case_based_reasoning"
+    FC: "feasibility_constraint"
 
 
 base_heuristics:
@@ -298,6 +300,17 @@ case_based_reasoning_heuristic:
   feature_weights: {}
   adaptation_rules: {}
   feature_config: {}
+
+feasibility_constraint_heuristic:
+  # Leave empty to use built-in DEFAULT_WEIGHTS / DEFAULT_BIAS.
+  # Override only when you have a reason to deviate:
+  # weights: {precondition_satisfaction: 2.4, ...}
+  # bias: -2.2
+  hard_constraints: ["precondition_satisfaction", "resource_feasibility"]
+  hard_constraint_floor: 0.05
+  veto_probability: 0.02
+  resource_safety_buffer: 0.0
+  temporal_time_buffer: 0.0
 
 
 planning_memory:

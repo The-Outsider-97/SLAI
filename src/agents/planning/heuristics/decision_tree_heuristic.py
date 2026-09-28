@@ -27,6 +27,8 @@ from typing import List, Any, Dict, Tuple, Optional
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
+from ..utils.planning_errors import *
+from ..utils.planning_helpers import clamp, require_type
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Decision Tree Heuristic")
@@ -52,6 +54,10 @@ class DecisionTreeHeuristic(BaseHeuristics):
 
         # Paths – ensure strings, provide fallback
         self.planning_db_path = self.heuristics_config.get('planning_db_path')
+        if self.planning_db_path is None:
+            self.planning_db_path = os.path.join('..', '..', 'data', 'planning_db.json')
+        self.planning_db_path = str(self.planning_db_path)
+
         self.heuristic_model_path = self.heuristics_config.get('heuristic_model_path')
         if self.heuristic_model_path is None:
             self.heuristic_model_path = "src/agents/planning/models/"   # default
@@ -134,6 +140,7 @@ class DecisionTreeHeuristic(BaseHeuristics):
         original_method = task.get("selected_method")
         task["selected_method"] = method_id
         try:
+            assert self.model is not None
             features = self.extract_features(task, world_state, method_stats)
             scaled = self.scaler.transform(features.reshape(1, -1))
             probabilities = self.model.predict_proba(scaled)[0]
@@ -199,9 +206,10 @@ class DecisionTreeHeuristic(BaseHeuristics):
 
         # Temporal features
         if self.feature_config.get("use_temporal_features"):
-            features[idx] = self._time_since_creation(task)
+            temporal = self.extract_temporal_features(task)
+            features[idx] = clamp(float(temporal.get("time_since_creation", 0.0)), 0.0, 1.0)
             idx += 1
-            features[idx] = self._deadline_proximity(task)
+            features[idx] = clamp(float(temporal.get("deadline_proximity", 0.0)), 0.0, 1.0)
             idx += 1
 
         # Priority weighting
@@ -279,7 +287,10 @@ class DecisionTreeHeuristic(BaseHeuristics):
 
     def load_planning_db(self, path: Optional[str] = None):
         if path is None:
-            path = os.path.join(os.path.dirname(__file__), '..', self.planning_db_path)
+            planning_db_path = self.planning_db_path
+            if not isinstance(planning_db_path, str):
+                raise ValueError("planning_db_path must be a string")
+            path = os.path.join(os.path.dirname(__file__), '..', planning_db_path)
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         tasks = data["tasks"]
@@ -343,7 +354,10 @@ class DecisionTreeHeuristic(BaseHeuristics):
                 best_model = clf
     
         # best_model is guaranteed to be a DecisionTreeClassifier (never None)
-        logger.info(f"Pruned tree selected with ccp_alpha={best_model.ccp_alpha}")
+        logger.info(
+            "Pruned tree selected with ccp_alpha=%s",
+            best_model.get_params().get("ccp_alpha"),
+        )
         return best_model
 
     def report_feature_importance(self):
@@ -356,6 +370,118 @@ class DecisionTreeHeuristic(BaseHeuristics):
             key=lambda x: x[1],
             reverse=True
         )
+
+    def _calculate_method_failure_rate(
+        self,
+        task: Any,
+        method_stats: Dict[Any, Dict[str, Any]],
+        method_id: Any,
+    ) -> float:
+        """
+        Return the normalised failure rate for ``method_id`` on ``task``.
+
+        Delegates to ``BaseHeuristics._resolve_method_stats``, which already
+        handles tuple keys like ``(task_name, method_id)``, string keys like
+        ``"task_name:method_id"``, and plain ``method_id`` keys.  It also
+        understands explicit ``success`` / ``total`` / ``failure`` fields and
+        list‑based outcome histories.
+
+        The result is clamped to ``[0.0, 1.0]`` so it is safe to use directly
+        as a heuristic feature.
+
+        Raises
+        ------
+        PlanningConfigError
+            If ``method_stats`` is not a mapping, ``method_id`` is missing, or
+            an unexpected type/value is encountered while computing the rate.
+        """
+        require_type(method_stats, dict, "method_stats")
+
+        if method_id is None or method_id == "":
+            raise PlanningConfigError(
+                "method_id must be provided and non-empty.",
+                config_key="method_id",
+                config_section="decision_tree_heuristic",
+                expected_type="non-empty string or numeric identifier",
+            )
+
+        try:
+            stats = self._resolve_method_stats(task, method_stats, method_id)
+            failure_rate = float(stats.get("failure_rate", 0.0))
+            return clamp(failure_rate, 0.0, 1.0)
+        except PlanningError:
+            # Preserve structured planning errors unchanged.
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute method failure rate for '{method_id}': {exc}",
+                config_key="method_stats",
+                config_section="decision_tree_heuristic",
+                expected_type="mapping with success/total or failure keys",
+                context={"method_id": method_id, "error": repr(exc)},
+            ) from exc
+
+    def _time_since_creation(self, task: Any) -> float:
+        """
+        Return the normalised age of ``task`` since its creation in ``[0, 1]``.
+
+        Delegates to ``BaseHeuristics.extract_temporal_features``, which already
+        handles ISO‑8601 strings, POSIX timestamps, timezone normalisation, and
+        configuration‑driven normalisation (``base_heuristics.max_age_hours``).
+
+        A value of ``0.0`` means the task was just created (or has no creation
+        time); ``1.0`` means the task is at or beyond the configured maximum age.
+
+        Raises
+        ------
+        PlanningConfigError
+            If ``creation_time`` is present but cannot be parsed, or an
+            unexpected type/value is encountered while computing the feature.
+        """
+        try:
+            temporal = self.extract_temporal_features(task)
+            return clamp(float(temporal.get("time_since_creation", 0.0)), 0.0, 1.0)
+        except PlanningError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute time since creation: {exc}",
+                config_key="creation_time",
+                config_section="decision_tree_heuristic",
+                expected_type="ISO-8601 datetime or POSIX timestamp",
+                context={"error": repr(exc)},
+            ) from exc
+
+    def _deadline_proximity(self, task: Any) -> float:
+        """
+        Return the normalised deadline proximity of ``task`` in ``[0, 1]``.
+
+        ``0.0`` means the deadline is far away or not set; ``1.0`` means the
+        deadline has already passed (or is imminent relative to the configured
+        horizon).  Delegates to ``BaseHeuristics.extract_temporal_features`` so
+        deadline horizon configuration
+        (``base_heuristics.deadline_horizon_seconds``) stays consistent across
+        every heuristic in the planner.
+
+        Raises
+        ------
+        PlanningConfigError
+            If ``deadline`` is present but cannot be parsed, or an unexpected
+            type/value is encountered while computing the feature.
+        """
+        try:
+            temporal = self.extract_temporal_features(task)
+            return clamp(float(temporal.get("deadline_proximity", 0.0)), 0.0, 1.0)
+        except PlanningError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute deadline proximity: {exc}",
+                config_key="deadline",
+                config_section="decision_tree_heuristic",
+                expected_type="ISO-8601 datetime or POSIX timestamp",
+                context={"error": repr(exc)},
+            ) from exc
 
 if __name__ == "__main__":
     print("\n=== Running Decision Tree Heuristic Test ===\n")
@@ -389,7 +515,7 @@ if __name__ == "__main__":
     }
     id = 2457467
 
-    prob = planner01.predict_success_prob(task=task, world_state=state, method_stats=stats, method_id=id)
+    prob = planner01.predict_success_prob(task=task, world_state=state, method_stats=stats, method_id=id) # type: ignore
     features = planner01.extract_features(task=task, world_state=state, method_stats=stats)
     printer.pretty("Success probability:", prob, "Success")
     printer.pretty("Extracted Features:", features, "Success")
@@ -420,6 +546,6 @@ if __name__ == "__main__":
         state = {"position": "start", "cpu_available": 70, "memory_available": 2048}
         methods = ["A*", "RRT", "D*"]
         
-        best_method, confidence = planner01.select_best_method(task, state, methods, stats)
+        best_method, confidence = planner01.select_best_method(task, state, methods, stats) # type: ignore
         printer.pretty(f"Recommended method: {best_method} (confidence: {confidence:.2f})", "", "Success")
     print("\n=== Successfully Ran Decision Tree Heuristic ===\n")

@@ -26,6 +26,8 @@ from typing import List, Any, Dict, Tuple, Optional
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
+from ..utils.planning_errors import *
+from ..utils.planning_helpers import clamp, require_type
 from ...learning.modules.policy_network import PolicyNetwork
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
@@ -38,6 +40,7 @@ class DotDict(dict):
 
 class ReinforcementLearningHeuristic(BaseHeuristics):
     def __init__(self):
+        super().__init__()
         self.config = load_global_config()
         self.heuristics_config = get_config_section('global_heuristic')
         self.rl_config = get_config_section('reinforcement_learning_heuristic')
@@ -52,7 +55,7 @@ class ReinforcementLearningHeuristic(BaseHeuristics):
 
         # Paths
         self.planning_db_path = self.heuristics_config.get('planning_db_path')
-        self.heuristic_model_path = self.heuristics_config.get('heuristic_model_path')
+        self.heuristic_model_path = self.heuristics_config.get('heuristic_model_path') or '.'
         os.makedirs(self.heuristic_model_path, exist_ok=True)
         self.model_path = os.path.join(self.heuristic_model_path, 'rl_heuristic_model.pkl')
 
@@ -160,6 +163,7 @@ class ReinforcementLearningHeuristic(BaseHeuristics):
                 prob = 1.0 / len(candidate_methods)
             else:
                 state_tensor = torch.tensor(state_features.reshape(1, -1), dtype=torch.float32)
+                assert self.policy_net is not None
                 probs = self.policy_net.forward(state_tensor).squeeze(0)
                 dist = torch.distributions.Categorical(probs)
                 idx = dist.sample().item()
@@ -202,9 +206,10 @@ class ReinforcementLearningHeuristic(BaseHeuristics):
             idx += 1
 
         if self.feature_config.get("use_temporal_features"):
-            features[idx] = self._time_since_creation(task)
+            temporal = self.extract_temporal_features(task)
+            features[idx] = clamp(float(temporal.get("time_since_creation", 0.0)), 0.0, 1.0)
             idx += 1
-            features[idx] = self._deadline_proximity(task)
+            features[idx] = clamp(float(temporal.get("deadline_proximity", 0.0)), 0.0, 1.0)
             idx += 1
 
         return features
@@ -254,7 +259,8 @@ class ReinforcementLearningHeuristic(BaseHeuristics):
                 discounted = discounted - discounted.mean()  # single element, std would be 0
     
             # Compute policy loss
-            loss = 0.0
+            assert self.policy_net is not None
+            loss = torch.zeros((), dtype=torch.float32)
             for (state, action_idx, _), adv in zip(self.episode_cache, discounted):
                 state_tensor = torch.tensor(state.reshape(1, -1), dtype=torch.float32)
                 probs = self.policy_net(state_tensor).squeeze(0)  # shape (action_size,)
@@ -264,6 +270,7 @@ class ReinforcementLearningHeuristic(BaseHeuristics):
                 loss -= log_prob * adv
     
             # Backward pass and optimizer step
+            assert self.optimizer is not None
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -290,17 +297,139 @@ class ReinforcementLearningHeuristic(BaseHeuristics):
             joblib.dump(data, self.model_path)
             logger.info("RL model saved")
 
-    def load_planning_db(self, path: str = None):
+    def load_planning_db(self, path: str | None = None):
         """Load task, world state, and method statistics from the planning database."""
         if path is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            path = os.path.join(base_dir, self.planning_db_path)
+            planning_db_path = self.planning_db_path
+            if planning_db_path is None:
+                raise ValueError("planning_db_path is not configured")
+            path = os.path.join(base_dir, planning_db_path)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         tasks = data["tasks"]
         method_stats = {tuple(k.split(":")): v for k, v in data["method_stats"].items()}
         world_states = data["world_states"]
         return tasks, method_stats, world_states
+
+    def _calculate_method_failure_rate(
+        self,
+        task: Any,
+        method_stats: Dict[Any, Dict[str, Any]],
+        method_id: Any,
+    ) -> float:
+        """
+        Return the normalised failure rate for ``method_id`` on ``task``.
+
+        Delegates to ``BaseHeuristics._resolve_method_stats``, which already
+        resolves tuple keys like ``(task_name, method_id)``, string keys like
+        ``"task_name:method_id"``, and plain ``method_id`` keys.  It also
+        understands explicit ``success`` / ``total`` / ``failure`` fields and
+        list‑based outcome histories.
+
+        The result is clamped to ``[0.0, 1.0]``.
+
+        .. note::
+            ``ReinforcementLearningHeuristic.extract_state_features`` is
+            deliberately method‑agnostic — it feeds the policy network only
+            with state features, not with per‑method reliability.  This method
+            is provided so that callers can still query method reliability from
+            the shared base class when they need it (e.g. for diagnostics or
+            reward shaping), and so the public API stays consistent with the
+            other heuristics.
+
+        Raises
+        ------
+        PlanningConfigError
+            If ``method_stats`` is not a mapping, ``method_id`` is missing, or
+            an unexpected type/value is encountered while computing the rate.
+        """
+        require_type(method_stats, dict, "method_stats")
+
+        if method_id is None or method_id == "":
+            raise PlanningConfigError(
+                "method_id must be provided and non-empty.",
+                config_key="method_id",
+                config_section="reinforcement_learning_heuristic",
+                expected_type="non-empty string or numeric identifier",
+            )
+
+        try:
+            stats = self._resolve_method_stats(task, method_stats, method_id)
+            failure_rate = float(stats.get("failure_rate", 0.0))
+            return clamp(failure_rate, 0.0, 1.0)
+        except PlanningError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute method failure rate for '{method_id}': {exc}",
+                config_key="method_stats",
+                config_section="reinforcement_learning_heuristic",
+                expected_type="mapping with success/total or failure keys",
+                context={"method_id": method_id, "error": repr(exc)},
+            ) from exc
+
+    def _time_since_creation(self, task: Any) -> float:
+        """
+        Return the normalised age of ``task`` since its creation in ``[0, 1]``.
+
+        Delegates to ``BaseHeuristics.extract_temporal_features``, which already
+        handles ISO‑8601 strings, POSIX timestamps, timezone normalisation, and
+        configuration‑driven normalisation (``base_heuristics.max_age_hours``).
+
+        ``0.0`` means the task was just created (or has no creation time);
+        ``1.0`` means the task is at or beyond the configured maximum age.
+
+        Raises
+        ------
+        PlanningConfigError
+            If ``creation_time`` is present but cannot be parsed, or an
+            unexpected type/value is encountered while computing the feature.
+        """
+        try:
+            temporal = self.extract_temporal_features(task)
+            return clamp(float(temporal.get("time_since_creation", 0.0)), 0.0, 1.0)
+        except PlanningError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute time since creation: {exc}",
+                config_key="creation_time",
+                config_section="reinforcement_learning_heuristic",
+                expected_type="ISO-8601 datetime or POSIX timestamp",
+                context={"error": repr(exc)},
+            ) from exc
+
+    def _deadline_proximity(self, task: Any) -> float:
+        """
+        Return the normalised deadline proximity of ``task`` in ``[0, 1]``.
+
+        ``0.0`` means the deadline is far away or not set; ``1.0`` means the
+        deadline has already passed (or is imminent relative to the configured
+        horizon).  Delegates to ``BaseHeuristics.extract_temporal_features`` so
+        that the deadline horizon configuration
+        (``base_heuristics.deadline_horizon_seconds``) stays consistent across
+        every heuristic in the planner.
+
+        Raises
+        ------
+        PlanningConfigError
+            If ``deadline`` is present but cannot be parsed, or an unexpected
+            type/value is encountered while computing the feature.
+        """
+        try:
+            temporal = self.extract_temporal_features(task)
+            return clamp(float(temporal.get("deadline_proximity", 0.0)), 0.0, 1.0)
+        except PlanningError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute deadline proximity: {exc}",
+                config_key="deadline",
+                config_section="reinforcement_learning_heuristic",
+                expected_type="ISO-8601 datetime or POSIX timestamp",
+                context={"error": repr(exc)},
+            ) from exc
 
 
 if __name__ == "__main__":
