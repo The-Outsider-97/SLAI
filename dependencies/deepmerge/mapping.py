@@ -88,15 +88,21 @@ def _assert_acyclic_mapping(root: Mapping[str, Any]) -> None:
 
 
 def _merge_mappings(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
-    result = deepcopy(dict(base))
+    result: dict[str, Any] = {}
+
+    for key, base_value in base.items():
+        if key not in override:
+            result[key] = deepcopy(base_value)
+            continue
+
+        override_value = override[key]
+        if isinstance(base_value, Mapping) and isinstance(override_value, Mapping):
+            result[key] = _merge_mappings(base_value, override_value)
+        else:
+            result[key] = deepcopy(override_value)
 
     for key, override_value in override.items():
-        if key in result:
-            base_value = result[key]
-            if isinstance(base_value, Mapping) and isinstance(override_value, Mapping):
-                result[key] = _merge_mappings(base_value, override_value)
-                continue
-
-        result[key] = deepcopy(override_value)
+        if key not in base:
+            result[key] = deepcopy(override_value)
 
     return result
