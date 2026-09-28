@@ -347,7 +347,7 @@ quality_memory:
     storage_dir: quality/storage/quality_memory
     state_filename: quality_memory_state.json
     journal_filename: quality_memory_journal.jsonl
-    fsync_on_write: false
+    fsync_on_write: true
   journaling:
     enabled: true
   retention:
