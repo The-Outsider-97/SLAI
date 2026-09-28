@@ -644,6 +644,19 @@ def _architecture_mismatches(
             continue
         recommended = recommended_overrides[key]
         actual = actual_config[key]
+
+        # Positional capacity is a minimum requirement, not an exact-shape
+        # requirement. A model that supports more positions than recommended
+        # remains compatible with the analyzer recommendation.
+        if key == "max_position_embeddings":
+            try:
+                if int(actual) < int(recommended):
+                    mismatches[key] = {"checkpoint": actual, "recommended": recommended}
+            except (TypeError, ValueError):
+                if actual != recommended:
+                    mismatches[key] = {"checkpoint": actual, "recommended": recommended}
+            continue
+
         if actual != recommended:
             mismatches[key] = {"checkpoint": actual, "recommended": recommended}
     return mismatches
@@ -2327,7 +2340,11 @@ def load_glove_asset(
     if isinstance(payload, Mapping):
         for key in ("vectors", "embeddings", "data"):
             nested = payload.get(key)
-            if isinstance(nested, (Mapping, list, tuple)):
+            if isinstance(nested, Mapping) or (
+                isinstance(nested, (list, tuple))
+                and nested
+                and isinstance(nested[0], (Mapping, list, tuple))
+            ):
                 container = nested
                 break
 
