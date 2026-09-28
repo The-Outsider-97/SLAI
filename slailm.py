@@ -42,7 +42,7 @@ from src.agents.language.utils.config_loader import get_config_section as get_la
 from src.agents.language.utils.language_helpers import compact_text, json_safe, stable_hash
 
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 LOGGER = get_logger("SLAI-LM")
 
@@ -599,15 +599,34 @@ class SLAILM:
     # ------------------------------------------------------------------
     @staticmethod
     def _is_simple_social(text: str) -> bool:
-        normalized = re.sub(r"[^a-z0-9 ]+", " ", text.lower()).strip()
-        if len(normalized) > 80:
+        """Return True for short social turns that do not need retrieval/reasoning.
+
+        Keep this deliberately conservative: it is a routing optimization only,
+        never a response generator. LANTRA still produces the reply.
+        """
+        normalized = re.sub(r"[^a-z0-9' ]+", " ", text.lower()).strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        if not normalized or len(normalized) > 100:
             return False
-        tokens = set(normalized.split())
-        social = {
-            "hi", "hello", "hey", "thanks", "thank", "you", "bye", "goodbye",
-            "morning", "afternoon", "evening", "yo", "sup",
+
+        exact = {
+            "hi", "hello", "hey", "yo", "sup", "good morning", "good afternoon",
+            "good evening", "good night", "thanks", "thank you", "thanks a lot",
+            "bye", "goodbye", "see you", "how are you", "hello how are you",
+            "hi how are you", "hey how are you", "how's it going", "hows it going",
+            "what's up", "whats up", "nice to meet you",
         }
-        return bool(tokens) and tokens.issubset(social)
+        if normalized in exact:
+            return True
+
+        tokens = set(normalized.split())
+        social_tokens = {
+            "hi", "hello", "hey", "yo", "sup", "good", "morning", "afternoon",
+            "evening", "night", "thanks", "thank", "you", "bye", "goodbye",
+            "see", "how", "are", "is", "it", "going", "whats", "what's", "hows",
+            "how's", "nice", "to", "meet", "me", "doing", "today",
+        }
+        return len(tokens) <= 6 and tokens.issubset(social_tokens)
 
     @classmethod
     def _needs_knowledge(cls, text: str) -> bool:
@@ -652,7 +671,7 @@ class SLAILM:
                 available=False,
                 decision="unavailable",
                 blocked=False,
-                review=True,
+                review=False,
                 sanitized_text=text,
                 risk_score=None,
                 error=self._agent_init_failures.get("safety", "SafetyAgent unavailable"),
@@ -703,7 +722,7 @@ class SLAILM:
                 available=False,
                 decision="error",
                 blocked=False,
-                review=True,
+                review=False,
                 sanitized_text=text,
                 risk_score=None,
                 error=f"{type(exc).__name__}: {exc}",
@@ -1270,22 +1289,25 @@ class SLAILM:
         return support
 
     def _support_text(self, support: SupportBundle) -> str:
-        sections: List[str] = [
-            "SLAI support context for LANTRA. Use only relevant evidence. "
-            "Human-validated corrections have priority over automated support. "
-            "Do not claim certainty when evidence is insufficient, and do not mention internal agent names unless asked."
-        ]
+        """Build bounded evidence text only when real support exists.
+
+        Do not inject generic orchestration prose or optional-agent failures into
+        LANTRA. Small models are especially sensitive to prompt contamination;
+        a simple greeting must remain a plain dialogue turn.
+        """
+        sections: List[str] = []
 
         safety = support.safety
-        if safety and (safety.get("blocked") or safety.get("review")):
+        if safety and safety.get("available") and (safety.get("blocked") or safety.get("review")):
             sections.append(
-                "Safety constraint: the request/output requires a safe, non-harmful response. "
-                f"Decision={safety.get('decision')}; blockers={safety.get('blockers')}; warnings={safety.get('warnings')}"
+                "Safety constraint: answer safely and directly. "
+                f"Decision={safety.get('decision')}; blockers={safety.get('blockers')}; "
+                f"warnings={safety.get('warnings')}"
             )
 
         if support.validated_feedback:
             sections.append(
-                "Human-validated prior feedback:\n"
+                "Human-validated prior feedback (highest-priority support):\n"
                 + "\n".join(f"- {item}" for item in support.validated_feedback)
             )
         if support.knowledge:
@@ -1296,13 +1318,15 @@ class SLAILM:
             sections.append("Browser evidence:\n" + support.browser)
         if support.reader:
             sections.append("Reader document context:\n" + support.reader)
-        if support.failures:
-            unavailable = ", ".join(sorted(support.failures))
-            sections.append(
-                f"Some optional evidence sources were unavailable ({unavailable}). Do not invent their missing evidence."
-            )
 
-        return compact_text("\n\n".join(sections), max_length=self.settings.max_support_chars)
+        if not sections:
+            return ""
+
+        preamble = (
+            "SLAI support context for LANTRA. Use only relevant evidence; "
+            "human-validated corrections take priority. Do not mention internal agents unless asked."
+        )
+        return compact_text(preamble + "\n\n" + "\n\n".join(sections), max_length=self.settings.max_support_chars)
 
     def _lantra_history(
         self,
@@ -1377,8 +1401,14 @@ class SLAILM:
             if alignment.available:
                 used_agents.append("alignment")
             if alignment.available and alignment.requires_review:
-                reason = alignment.correction_action or alignment.status or "review_required"
-                defects.append(f"AlignmentAgent requested review: {reason}")
+                # AlignmentAgent is advisory in the current v2.3 architecture.
+                # A human-review recommendation is evidence, not a mechanically
+                # correctable LANTRA defect; regenerating the same model from it
+                # only creates loops and does not satisfy the requested review.
+                evaluations["alignment_review"] = {
+                    "required": True,
+                    "reason": alignment.correction_action or alignment.status or "review_required",
+                }
 
         return sanitized, evaluations, defects, used_agents
 
@@ -1419,7 +1449,9 @@ class SLAILM:
             reader_path=reader_path,
         )
 
-        alignment_required = self._needs_alignment(safe_input) or bool(input_safety.review)
+        alignment_required = self._needs_alignment(safe_input) or bool(
+            input_safety.available and input_safety.review
+        )
         history = self._lantra_history(prior_history, safe_input, support)
 
         original_lantra_response = ""
