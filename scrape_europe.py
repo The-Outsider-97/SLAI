@@ -88,7 +88,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 LOG = logging.getLogger("europe_collector")
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 SCHEMA = "europe-collector-v1"
 WIKI = "https://en.wikipedia.org/w/api.php"
 STOP = threading.Event()
@@ -923,6 +923,11 @@ class Team:
         self.Resources = None
         self.rounds = 0
         self.indexed_documents = set()
+        # Planning is advisory for this collector. A planner-internal failure must
+        # never block source collection, so failed planning attempts are cooled down
+        # while the deterministic fair queue continues to make progress.
+        self.planning_failures = 0
+        self.planning_retry_after = 0.0
 
         if not self.enabled:
             return
@@ -1017,39 +1022,68 @@ class Team:
             self.reasoning.forget_by_subject(subject)
 
     def order(self, rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+        """Advisory PlanningAgent ordering with a non-blocking deterministic fallback.
+
+        ``ready_candidates`` has already produced a fair, domain-balanced ordering.
+        PlanningAgent may improve that order, but it is not allowed to become a
+        single point of failure for scraping. This matters because SLAI planning
+        contains optional heuristic training and safety validation that can reject
+        a plan for reasons unrelated to whether a Wikipedia fetch is safe to run.
+        """
         if not self.enabled or len(rows) < 2:
             return rows
+
+        now_mono = time.monotonic()
+        if now_mono < self.planning_retry_after:
+            return rows
+
         self.rounds += 1
-        deadline = time.time() + 86400
-        tasks = []
-        for row in rows:
-            duration = 15 if row["kind"] == "article" else 25
-            tasks.append(self.Task(
-                name=f"collect_{row['id']}",
-                id=f"collect_{row['id']}",
-                task_type=self.TaskType.PRIMITIVE,
-                preconditions=[],
-                effects=[],
-                resource_requirements=self.Resources(gpu=0, ram=0.05),
-                duration=duration,
+        try:
+            deadline = time.time() + 86400
+            tasks = []
+            for row in rows:
+                duration = 15 if row["kind"] == "article" else 25
+                tasks.append(self.Task(
+                    name=f"collect_{row['id']}",
+                    id=f"collect_{row['id']}",
+                    task_type=self.TaskType.PRIMITIVE,
+                    preconditions=[],
+                    effects=[],
+                    resource_requirements=self.Resources(gpu=0, ram=0.05),
+                    duration=duration,
+                    deadline=deadline,
+                    dependencies=[],
+                ))
+            goal = self.Task(
+                name=f"europe_collection_round_{self.rounds}",
+                task_type=self.TaskType.ABSTRACT,
+                methods=[tasks],
+                resource_requirements=self.Resources(gpu=0, ram=0),
+                duration=25 * len(tasks),
                 deadline=deadline,
-                dependencies=[],
-            ))
-        goal = self.Task(
-            name=f"europe_collection_round_{self.rounds}",
-            task_type=self.TaskType.ABSTRACT,
-            methods=[tasks],
-            resource_requirements=self.Resources(gpu=0, ram=0),
-            duration=25 * len(tasks),
-            deadline=deadline,
-        )
-        plan = self.planning.generate_plan(goal)
-        if not plan:
-            raise RuntimeError("PlanningAgent could not schedule collection work")
-        mapping = {f"collect_{row['id']}": row for row in rows}
-        ids = [task.id for task in plan]
-        if len(ids) != len(mapping) or set(ids) != set(mapping):
-            raise RuntimeError("PlanningAgent returned an incomplete or unrecognized plan")
+            )
+            plan = self.planning.generate_plan(goal)
+            mapping = {f"collect_{row['id']}": row for row in rows}
+            ids = [task.id for task in plan] if plan else []
+            if len(ids) != len(mapping) or set(ids) != set(mapping):
+                raise RuntimeError(
+                    "PlanningAgent returned no plan or an incomplete/unrecognized plan"
+                )
+        except Exception as exc:
+            self.planning_failures += 1
+            # Avoid hammering a broken planner every collection round. The first
+            # retry is after 5 minutes, growing exponentially to at most 1 hour.
+            cooldown = min(3600.0, 300.0 * (2 ** min(self.planning_failures - 1, 4)))
+            self.planning_retry_after = time.monotonic() + cooldown
+            LOG.warning(
+                "PLANNING | advisory plan unavailable (%s); using fair collector order | "
+                "retry_in=%.0fs",
+                exc, cooldown,
+            )
+            return rows
+
+        self.planning_failures = 0
+        self.planning_retry_after = 0.0
         LOG.info("PLANNING | scheduled=%d | domains=%s", len(ids), [mapping[x]["domain"] for x in ids])
         return [mapping[x] for x in ids]
 
@@ -1343,12 +1377,16 @@ def collect(db, api: APIClient, args, team: Team, folder: Path) -> None:
 
         rows = ready_candidates(db, args)
         if rows:
+            # Team.order is deliberately fail-open. This outer guard is intentional
+            # defense-in-depth: no future PlanningAgent/API change may stall scraping.
+            fair_rows = rows
             try:
                 rows = team.order(rows)
             except Exception:
-                LOG.exception("PLANNING | scheduling failed; preserving queue and retrying")
-                pause(60)
-                continue
+                LOG.exception(
+                    "PLANNING | unexpected advisory-ordering failure; continuing with fair collector order"
+                )
+                rows = fair_rows
 
             for task in rows:
                 if STOP.is_set() or (args.max_steps and steps >= args.max_steps):
@@ -1591,7 +1629,39 @@ def self_test() -> None:
             assert db.execute("SELECT count(*) FROM documents").fetchone()[0] == 1
         finally:
             db.close()
-    print("PASS: Europe collector resume, dedupe, discovery, and content-only export checks passed.")
+
+    # PlanningAgent is advisory: an internal plan rejection must preserve the
+    # deterministic collection order and enter cooldown rather than raise/stall.
+    class DummyTask:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+    class DummyTaskType:
+        PRIMITIVE = "primitive"
+        ABSTRACT = "abstract"
+    class DummyResources:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+    class RejectingPlanning:
+        def generate_plan(self, goal):
+            return None
+
+    advisory = object.__new__(Team)
+    advisory.enabled = True
+    advisory.rounds = 0
+    advisory.planning_failures = 0
+    advisory.planning_retry_after = 0.0
+    advisory.Task = DummyTask
+    advisory.TaskType = DummyTaskType
+    advisory.Resources = DummyResources
+    advisory.planning = RejectingPlanning()
+    sample_rows = [
+        {"id": 1, "kind": "article", "domain": "history"},
+        {"id": 2, "kind": "search", "domain": "economy"},
+    ]
+    assert advisory.order(sample_rows) == sample_rows
+    assert advisory.planning_failures == 1 and advisory.planning_retry_after > time.monotonic()
+
+    print("PASS: Europe collector resume, dedupe, discovery, content-only export, and planning fallback checks passed.")
 
 
 def check_agents(team: Team) -> None:
