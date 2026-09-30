@@ -302,6 +302,7 @@ agent_factory:
           - model_checking
           - invariant_verification
 
+
 base_agent:
     defer_initialization: true
     memory_profile: low
@@ -340,20 +341,16 @@ adaptive_agent:
   num_actions: 2
   num_handlers: 3
   max_episode_steps: 100
-
   base_learning_interval: 10
   skill_max_steps: 10
   skill_batch_size: 32
   manager_batch_size: 32
   tuning_window: 100
   performance_window: 50
-
   max_task_history: 200
   max_route_history: 200
   max_feedback_history: 200
-
   random_seed: 42
-
   explore_skills: true
   explore_actions: true
   learn_after_task: true
@@ -365,7 +362,6 @@ adaptive_agent:
   sync_tuner_to_skills: true
   use_global_rl_engine: true
   share_meta_registry: true
-
   recovery_reward_threshold: -10.0
   success_reward_threshold: 0.0
   correction_bonus: 1.0
@@ -388,6 +384,11 @@ adaptive_agent:
   skills: {}
   handlers: {}
   env: {}
+  # Learning Agent integration
+  learning_signal_inbox_key: "learning:signals:inbox"
+  learning_guidance_prefix: "learning:guidance"
+  consume_learning_guidance: true
+  learning_guidance_min_evidence: 3
 
 
 alignment_agent:
@@ -642,6 +643,16 @@ learning_agent:
         max_network_size: 256
         max_task_pool: 50
         max_history: 500
+    # Cross-agent learning
+    signal_inbox_key: "learning:signals:inbox"
+    guidance_prefix: "learning:guidance"
+    signal_query_limit: 100
+    # Only validated supervision above this confidence may train
+    # StrategySelector.
+    policy_supervision_min_confidence: 0.80
+    # Minimum same-context observations before historical outcomes may produce
+    # adaptive guidance.
+    context_min_evidence: 3
 
 
 network_agent:
