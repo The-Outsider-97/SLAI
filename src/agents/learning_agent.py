@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base_agent import BaseAgent
 from .learning.learning_factory import LearningFactory
