@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
-from src.utils.configuration import DEFAULT_CACHE_TTL_SECONDS, bind_config
+from src.utils.configuration import DEFAULT_CACHE_TTL_SECONDS, bind_config # type: ignore
 
 
 DEFAULT_CONFIG_PATH = (Path(__file__).resolve().parent.parent
