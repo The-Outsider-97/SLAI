@@ -26,7 +26,7 @@ import torch # type: ignore
 
 from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple, cast
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.learning_error import *
@@ -38,6 +38,7 @@ from .maml_rl import MAMLAgent
 from .rsi import RSIAgent
 from .rl_agent import RLAgent
 from .learning_memory import LearningMemory, Transition
+from .learning_signal import LearningSignal
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Learning Factory")
@@ -124,10 +125,26 @@ class LearningFactory:
         self._mutation_q_values = {agent: 1.0 for agent in self.param_bounds}
 
         self.learning_memory = LearningMemory()
+        self.signal_config = get_config_section("learning_signals") or {}
+        
+        self.signal_history_limit = coerce_int(self.signal_config.get("history_limit", 2000),
+            default=2000,
+            minimum=1,
+        )
+        self.context_min_evidence = coerce_int(self.signal_config.get("context_min_evidence", 3),
+            default=3,
+            minimum=1,
+        )
+        self.signal_history: Deque[Dict[str, Any]] = deque(maxlen=self.signal_history_limit)
+        self._seen_signal_ids: set[str] = set()
+        self._seen_signal_order: Deque[str] = deque()
+        self.memory_restore_path: Optional[str] = None
+        self.memory_restore_error: Optional[str] = None
+        self._restore_learning_memory()
+        self._restore_signal_index()
         self.model_id = "Learning_Factory"
         self.memory: Deque[Dict[str, Any]] = deque(maxlen=10000)
         self.training_steps = 0
-
         self.permanent_agents: List[str] = ["dqn", "maml", "rsi", "rl"]
         self.temporary_agents: Dict[str, Dict[str, Any]] = {}
         self.task_registry: Dict[str, int] = defaultdict(int)
@@ -407,6 +424,289 @@ class LearningFactory:
                 agent.epsilon_decay = float(params["epsilon_decay"])
 
     # ------------------------------------------------------------------
+    # System-wide learning signals
+    # ------------------------------------------------------------------
+    
+    def _restore_learning_memory(self) -> None:
+        """Restore the most recent valid LearningMemory checkpoint when present."""
+        restore_on_init = coerce_bool(self.signal_config.get("restore_memory_on_init", True), default=True)
+        if not restore_on_init:
+            return
+    
+        try:
+            self.memory_restore_path = (self.learning_memory.load_latest_checkpoint())
+        except CheckpointError as exc:
+            # Do not silently pretend recovery succeeded.
+            self.memory_restore_error = str(exc)
+            logger.error("LearningMemory recovery failed: %s", exc)
+    
+    def _restore_signal_index(self) -> None:
+        stored = self.learning_memory.get("learning_signal_history", [])
+    
+        if not isinstance(stored, list):
+            return
+    
+        for record in stored[-self.signal_history_limit:]:
+            if not isinstance(record, dict):
+                continue
+    
+            signal_id = str(record.get("signal_id", "")).strip()
+            if not signal_id:
+                continue
+    
+            self.signal_history.append(dict(record))
+            self._remember_signal_id(signal_id)
+    
+    def _remember_signal_id(self, signal_id: str) -> None:
+        if signal_id in self._seen_signal_ids:
+            return
+    
+        while len(self._seen_signal_order) >= self.signal_history_limit:
+            expired = self._seen_signal_order.popleft()
+            self._seen_signal_ids.discard(expired)
+    
+        self._seen_signal_order.append(signal_id)
+        self._seen_signal_ids.add(signal_id)
+    
+    def record_learning_signal(self, signal: LearningSignal) -> Dict[str, Any]:
+        """Persist one validated LearningSignal without redefining its semantics."""
+        if not isinstance(signal, LearningSignal):
+            raise TypeError("record_learning_signal expects LearningSignal.")
+    
+        if signal.signal_id in self._seen_signal_ids:
+            return {
+                "status": "duplicate",
+                "signal_id": signal.signal_id,
+            }
+    
+        record = signal.to_dict()
+    
+        tags = [
+            "learning_signal",
+            f"source:{signal.source_agent}",
+            f"kind:{signal.kind}",
+            f"metric:{signal.metric}",
+            f"context:{signal.context_key}",
+        ]
+    
+        if signal.strategy:
+            tags.append(f"strategy:{signal.strategy}")
+    
+        # Priority controls retrieval frequency only. It is not converted into
+        # behavioral reward.
+        priority = max(float(signal.confidence), 1e-6)
+        memory_index = self.learning_memory.add(record, priority=priority, tag=tags)
+    
+        self.signal_history.append(record)
+        self._remember_signal_id(signal.signal_id)
+        self.learning_memory.set("learning_signal_history", list(self.signal_history))
+    
+        # Only direct reward observations update the existing learner-performance
+        # tracker. Other metrics retain their own semantics.
+        if (
+            signal.metric == "reward"
+            and signal.value is not None
+            and signal.strategy
+        ):
+            self.record_performance(signal.strategy, float(signal.value))
+    
+        return {
+            "status": "recorded",
+            "signal_id": signal.signal_id,
+            "memory_index": memory_index,
+            "context_key": signal.context_key,
+        }
+    
+    def query_learning_signals(
+        self,
+        *,
+        context_key: Optional[str] = None,
+        source_agent: Optional[str] = None,
+        kind: Optional[str] = None,
+        metric: Optional[str] = None,
+        strategy: Optional[str] = None,
+        validated_only: bool = False,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve bounded learning evidence from newest to oldest."""
+    
+        requested = max(1, int(limit))
+        matches: List[Dict[str, Any]] = []
+    
+        for record in reversed(self.signal_history):
+            if context_key is not None:
+                if record.get("context_key") != context_key:
+                    continue
+    
+            if source_agent is not None:
+                if record.get("source_agent") != source_agent:
+                    continue
+    
+            if kind is not None:
+                if record.get("kind") != kind:
+                    continue
+    
+            if metric is not None:
+                if record.get("metric") != metric:
+                    continue
+    
+            if strategy is not None:
+                if record.get("strategy") != strategy:
+                    continue
+    
+            if validated_only and not bool(record.get("validated", False)):
+                continue
+    
+            matches.append(dict(record))
+    
+            if len(matches) >= requested:
+                break
+    
+        return matches
+    
+    def contextual_strategy_summary(
+        self,
+        context_key: str,
+        *,
+        metric: str = "reward",
+        direction: str = "higher_better",
+        allowed_strategies: Optional[Iterable[str]] = None,
+        minimum_evidence: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Summarize observed strategy performance for one equivalent context.
+    
+        No synthetic reward is constructed. Only directly observed values for the
+        requested metric are compared.
+        """
+    
+        allowed = (
+            None
+            if allowed_strategies is None
+            else {str(value) for value in allowed_strategies}
+        )
+    
+        required = (
+            self.context_min_evidence
+            if minimum_evidence is None
+            else max(1, int(minimum_evidence))
+        )
+    
+        observations: Dict[str, List[float]] = defaultdict(list)
+        for record in self.signal_history:
+            if record.get("context_key") != context_key:
+                continue
+    
+            if record.get("metric") != metric:
+                continue
+    
+            if record.get("direction") != direction:
+                continue
+    
+            strategy = record.get("strategy")
+            value = record.get("value")
+            if not isinstance(strategy, str):
+                continue
+    
+            if allowed is not None and strategy not in allowed:
+                continue
+    
+            if not isinstance(value, (int, float)):
+                continue
+    
+            if not np.isfinite(value):
+                continue
+    
+            observations[strategy].append(float(value))
+    
+        summaries: Dict[str, Dict[str, Any]] = {}
+        for strategy, values in observations.items():
+            summaries[strategy] = {
+                "count": len(values),
+                "mean": float(np.mean(values)),
+                "std": float(np.std(values)),
+                "minimum": float(np.min(values)),
+                "maximum": float(np.max(values)),
+            }
+    
+        eligible = {
+            strategy: data
+            for strategy, data in summaries.items()
+            if int(data["count"]) >= required
+        }
+    
+        preferred_strategy: Optional[str] = None
+        if eligible:
+            if direction == "lower_better":
+                preferred_strategy = min(eligible, key=lambda name: eligible[name]["mean"])
+            else:
+                preferred_strategy = max(eligible, key=lambda name: eligible[name]["mean"])
+    
+        return {
+            "context_key": context_key,
+            "metric": metric,
+            "direction": direction,
+            "minimum_evidence": required,
+            "strategies": summaries,
+            "eligible_strategies": sorted(eligible),
+            "preferred_strategy": preferred_strategy,
+        }
+    
+    def snapshot_learning_state(self) -> Dict[str, Any]:
+        """Return orchestration-level learned state for BaseAgent checkpointing."""
+        return {
+            "signal_history": list(self.signal_history),
+            "performance_tracker": {name: list(values) for name, values in self.performance_tracker.items()},
+            "selection_history": list(self.selection_history),
+            "training_steps": int(self.training_steps),
+            "memory_restore_path": self.memory_restore_path,
+            "memory_restore_error": self.memory_restore_error,
+        }
+    
+    def restore_learning_state(self, state: Mapping[str, Any]) -> None:
+        """Restore bounded orchestration learning state."""
+        if not isinstance(state, Mapping):
+            raise TypeError("LearningFactory state must be a mapping.")
+    
+        self.signal_history.clear()
+        self._seen_signal_ids.clear()
+        self._seen_signal_order.clear()
+        for record in state.get("signal_history", []):
+            if not isinstance(record, Mapping):
+                continue
+    
+            record_dict = dict(record)
+            signal_id = str(record_dict.get("signal_id", "")).strip()
+            if not signal_id:
+                continue
+    
+            self.signal_history.append(record_dict)
+            self._remember_signal_id(signal_id)
+        stored_performance = state.get("performance_tracker", {})
+        if isinstance(stored_performance, Mapping):
+            for strategy, values in stored_performance.items():
+                if not isinstance(values, (list, tuple)):
+                    continue
+                self.performance_tracker[str(strategy)] = deque(
+                    (
+                        float(value)
+                        for value in values
+                        if isinstance(value, (int, float))
+                        and np.isfinite(value)
+                    ),
+                    maxlen=100,
+                )
+        self.selection_history = deque(
+            [
+                dict(value)
+                for value in state.get("selection_history", [])
+                if isinstance(value, Mapping)
+            ],
+            maxlen=500,
+        )
+        self.training_steps = int(state.get("training_steps", self.training_steps))
+        self.learning_memory.set("learning_signal_history", list(self.signal_history))
+
+    # ------------------------------------------------------------------
     # Core selection and monitoring
     # ------------------------------------------------------------------
     @property
@@ -482,11 +782,11 @@ class LearningFactory:
 
     def select_agent(self, task_metadata: Optional[Dict[str, Any]]) -> Any:
         task = self._normalise_task_metadata(task_metadata)
-        recent_performance = self._recent_performance_scores()
-        checkpoint_scores = {name: self._get_checkpoint_quality(name) for name in self.permanent_agents}
-        heuristic_scores = self._heuristic_agent_scores(task)
+        recent_performance: Dict[str, float] = self._recent_performance_scores()
+        checkpoint_scores: Dict[str, float] = {name: self._get_checkpoint_quality(name) for name in self.permanent_agents}
+        heuristic_scores: Dict[str, float] = self._heuristic_agent_scores(task)
 
-        combined_scores = {}
+        combined_scores: Dict[str, float] = {}
         for agent_name in self.permanent_agents:
             combined_scores[agent_name] = (
                 0.45 * heuristic_scores.get(agent_name, 0.0)
@@ -494,7 +794,7 @@ class LearningFactory:
                 + 0.20 * checkpoint_scores.get(agent_name, 0.0)
             )
 
-        selected_name = max(combined_scores, key=combined_scores.get)
+        selected_name = max(combined_scores.items(), key=lambda item: float(item[1]))[0]
         selection_record = {
             "timestamp": time.time(),
             "task": task,
@@ -983,14 +1283,14 @@ class LearningFactory:
     def _agent_replay_size(self, agent: Any) -> int:
         if hasattr(agent, "replay_size") and callable(agent.replay_size):
             try:
-                return int(agent.replay_size())
+                return int(cast(Any, agent.replay_size)())
             except Exception:
                 pass
         memory = getattr(agent, "memory", None)
         if memory is None:
             return 0
         if hasattr(memory, "size") and callable(memory.size):
-            return int(memory.size())
+            return int(cast(Any, memory.size)())
         try:
             return int(len(memory))
         except Exception:

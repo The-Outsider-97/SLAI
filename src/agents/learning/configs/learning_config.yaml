@@ -227,6 +227,11 @@ learning_env:
   render_size: 400
   auto_reset_on_step: false
 
+learning_signals:
+  history_limit: 2000
+  context_min_evidence: 3
+  restore_memory_on_init: true
+
 multi_task_learner:
   initial_weights: null                # Optional per-task starting weights, e.g. {policy: 0.5, value: 0.5}
   rebalance_strategy: "softmax"        # none|uniform|softmax|inverse_softmax|proportional|inverse_proportional|dwa|uncertainty

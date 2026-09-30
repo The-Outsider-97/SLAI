@@ -521,6 +521,46 @@ class LearningMemory:
             if value > 0:
                 self.priority_stats.update(float(value))
 
+    def checkpoint_candidates(self) -> List[Path]:
+        """Return LearningMemory checkpoints newest first."""
+        checkpoint_dir = Path(self.memory_config.get("checkpoint_dir", "src/agents/learning/checkpoints/memory"))
+        if not checkpoint_dir.exists():
+            return []
+    
+        return sorted(
+            checkpoint_dir.glob("memory_*.pt"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    
+    
+    def load_latest_checkpoint(self) -> Optional[str]:
+        """Restore the newest valid checkpoint.
+    
+        If checkpoints exist but every candidate is corrupt/incompatible, fail
+        explicitly instead of silently restarting from an empty memory.
+        """
+        candidates = self.checkpoint_candidates()
+        if not candidates:
+            return None
+    
+        failures: List[str] = []
+        for candidate in candidates:
+            try:
+                self.load_checkpoint(candidate)
+                logger.info("Recovered LearningMemory from %s", candidate)
+                return str(candidate)
+            except Exception as exc:
+                failures.append(f"{candidate.name}: {type(exc).__name__}: {exc}")
+                logger.warning("Rejected LearningMemory checkpoint %s: %s", candidate, exc)
+    
+        raise CheckpointError(
+            str(candidates[0].parent),
+            operation="load",
+            message=(
+                "LearningMemory checkpoints exist but none could be restored. "
+                + " | ".join(failures[-5:])))
+
     def save_checkpoint(self, path: Optional[Union[str, Path]] = None) -> str:
         with self.lock:
             checkpoint_dir = Path(self.memory_config.get("checkpoint_dir", "src/agents/learning/checkpoints/memory"))

@@ -15,7 +15,8 @@ Responsibilities
 - Track performance, novelty, uncertainty, and concept drift
 - Delegate recovery to RecoverySystem when error thresholds are crossed
 - Persist episode traces, metrics, and strategy history to SharedMemory
-- Never directly manage src/agents/learning/modules/ (avoids re-init)
+- Never directly instantiate DQN, MAML, RSI, or RL learner agents;
+  concrete learners are owned and coordinated by LearningFactory
 
 Academic References
 -------------------
@@ -32,8 +33,9 @@ import numpy as np # type: ignore
 import torch # type: ignore
 import torch.nn as nn # type: ignore
 
-from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
+from builtins import dict
+from collections import Counter, defaultdict, deque
+from datetime import datetime, timedelta
 from threading import RLock
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -41,6 +43,7 @@ from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base_agent import BaseAgent
 from .learning.learning_factory import LearningFactory
+from .learning.learning_signal import LearningSignal
 from .learning.slaienv import SLAIEnv
 from .learning.strategy_selector import StrategySelector
 from .learning.utils.learning_error import *
@@ -78,12 +81,20 @@ class LearningAgent(BaseAgent):
     """
 
     DEFAULT_TASK_IDS: Sequence[str] = ("dqn", "maml", "rsi", "rl")
+    CHECKPOINTING_SUPPORTED = True
+    CHECKPOINT_SCHEMA = "slai.learning-agent.state.v1"
 
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
     def __init__(self, shared_memory, agent_factory, config: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
-        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
+        checkpoint_manager = kwargs.pop("checkpoint_manager", None)
+        super().__init__(
+            shared_memory=shared_memory,
+            agent_factory=agent_factory,
+            config=config,
+            checkpoint_manager=checkpoint_manager,
+        )
         self._lock = RLock()
 
         self.shared_memory = shared_memory
@@ -93,13 +104,22 @@ class LearningAgent(BaseAgent):
         if isinstance(config, dict):
             self.learning_config.update(config)
         self._validate_config()
-
+        
+        self.signal_inbox_key = str(self.learning_config.get("signal_inbox_key", "learning:signals:inbox"))
+        self.guidance_prefix = str(self.learning_config.get("guidance_prefix", "learning:guidance"))
+        self.policy_supervision_min_confidence = coerce_float(
+            self.learning_config.get("policy_supervision_min_confidence", 0.80),
+            default=0.80,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        
+        self.context_min_evidence = coerce_int(self.learning_config.get("context_min_evidence", 3), default=3, minimum=1)
+        self.signal_query_limit = coerce_int(self.learning_config.get("signal_query_limit", 100), default=100, minimum=1)
         self.task_ids: List[str] = list(self.learning_config.get("task_ids", self.DEFAULT_TASK_IDS))
         validate_non_empty_sequence(self.task_ids, "task_ids")
 
-        self.strategy_index: Dict[str, int] = {
-            name: idx for idx, name in enumerate(self.task_ids)
-        }
+        self.strategy_index: Dict[str, int] = {name: idx for idx, name in enumerate(self.task_ids)}
 
         self.batch_size = coerce_int(self.learning_config.get("batch_size", 32), default=32, minimum=1)
         self.max_episode_steps = coerce_int(self.learning_config.get("max_episode_steps", 128), default=128, minimum=1)
@@ -112,11 +132,7 @@ class LearningAgent(BaseAgent):
         self.data_change_threshold = coerce_float(self.learning_config.get("data_change_threshold", 0.15), default=0.15)
         self.novelty_threshold = coerce_float(self.learning_config.get("novelty_threshold", 0.3), default=0.3)
         self.uncertainty_threshold = coerce_float(self.learning_config.get("uncertainty_threshold", 0.25), default=0.25)
-        self.retraining_interval = timedelta(
-            hours=coerce_int(
-                self.learning_config.get("retraining_interval_hours", 24), default=24, minimum=0
-            )
-        )
+        self.retraining_interval = timedelta(hours=coerce_int(self.learning_config.get("retraining_interval_hours", 24), default=24, minimum=0))
         self.heuristic_perf_weight = coerce_float(self.learning_config.get("heuristic_perf_weight", 0.45), default=0.45)
         self.heuristic_exploration_bonus = coerce_float(self.learning_config.get("heuristic_exploration_bonus", 0.20), default=0.20)
         self.heuristic_rsi_bonus = coerce_float(self.learning_config.get("heuristic_rsi_bonus", 0.15), default=0.15)
@@ -125,32 +141,23 @@ class LearningAgent(BaseAgent):
         self.trace_history_limit = coerce_int(self.learning_config.get("trace_history_limit", 500), default=500, minimum=1)
 
         # strategy_weights — one weight per task_id (padded/trimmed if mismatch)
-        raw_weights: List[float] = list(self.learning_config.get("strategy_weights", [0.25] * len(self.task_ids))
-        )
-        self.strategy_weights = np.array(_pad_or_trim(raw_weights, len(self.task_ids), fill=0.25), dtype=np.float32
-        )
+        raw_weights: List[float] = list(self.learning_config.get("strategy_weights", [0.25] * len(self.task_ids)))
+        self.strategy_weights = np.array(_pad_or_trim(raw_weights, len(self.task_ids), fill=0.25), dtype=np.float32)
 
         # ---- Ring buffers -------------------------------------------------
         self.embedding_buffer: Deque[Tuple[torch.Tensor, int]] = deque(
-            maxlen=coerce_int(self.learning_config.get("embedding_buffer_size", 512), default=512, minimum=1)
-        )
+            maxlen=coerce_int(self.learning_config.get("embedding_buffer_size", 512), default=512, minimum=1))
         self.performance_history: Deque[float] = deque(
-            maxlen=coerce_int(self.learning_config.get("performance_history_size", 1000), default=1000, minimum=1)
-        )
+            maxlen=coerce_int(self.learning_config.get("performance_history_size", 1000), default=1000, minimum=1))
         self.state_recency: Deque[np.ndarray] = deque(
-            maxlen=coerce_int(self.learning_config.get("state_recency_size", 1000), default=1000, minimum=1)
-        )
+            maxlen=coerce_int(self.learning_config.get("state_recency_size", 1000), default=1000, minimum=1))
         self.architecture_history: Deque[Dict[str, Any]] = deque(
-            maxlen=coerce_int(self.learning_config.get("architecture_history_size", 10), default=10, minimum=1)
-        )
+            maxlen=coerce_int(self.learning_config.get("architecture_history_size", 10), default=10, minimum=1))
         self.error_history: Deque[Dict[str, Any]] = deque(
-            maxlen=coerce_int(self.learning_config.get("error_history_size", 100), default=100, minimum=1)
-        )
+            maxlen=coerce_int(self.learning_config.get("error_history_size", 100), default=100, minimum=1))
 
         # ---- Online reward stats (per-strategy) ---------------------------
-        self._reward_stats: Dict[str, RunningStats] = {
-            task_id: RunningStats() for task_id in self.task_ids
-        }
+        self._reward_stats: Dict[str, RunningStats] = {task_id: RunningStats() for task_id in self.task_ids}
         self._global_reward_stats = RunningStats()
 
         # ---- Performance metrics dict (passed to LearningFactory) ---------
@@ -190,24 +197,17 @@ class LearningAgent(BaseAgent):
 
         self.state_processor = StateProcessor(env=self.env)
         self.learning_calculations = LearningCalculations()
-        self.learning_factory = LearningFactory(
-            env=self.env,
-            performance_metrics=self.performance_metrics,
-        )
+        self.learning_factory = LearningFactory(env=self.env, performance_metrics=self.performance_metrics)
         self.agents: Dict[str, Any] = self.learning_factory.agents
-
         self.multi_task_learner = MultiTaskLearner(task_ids=self.task_ids)
         self.strategy_selector = StrategySelector()
         self._initialize_strategy_selector()
-
         self.recovery_system = RecoverySystem(learning_agent=self)
 
         # ---- Runtime counters --------------------------------------------
         self.observation_count: int = 0
         self.training_iterations: int = 0
-        self.last_training_time: datetime = (
-            utc_now() - self.retraining_interval
-        )
+        self.last_training_time: datetime = (utc_now() - self.retraining_interval)
 
         self._init_shared_memory_keys()
         logger.info(
@@ -240,6 +240,137 @@ class LearningAgent(BaseAgent):
             raw = self.learning_config.get(prob_key)
             if raw is not None:
                 validate_in_range(raw, f"learning_agent.{prob_key}", 0.0, 1.0)
+
+    
+    # ------------------------------------------------------------------
+    # Cross-agent learning signals
+    # ------------------------------------------------------------------
+    def _ingest_learning_signal(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        signal = LearningSignal.from_mapping(payload)
+        record_result = self.learning_factory.record_learning_signal(signal)
+        if record_result.get("status") == "duplicate":
+            return record_result
+    
+        # Direct strategy rewards may affect future heuristic selection.
+        # Do not collapse unrelated metrics into reward.
+        if (
+            signal.strategy in self._reward_stats
+            and signal.metric == "reward"
+            and signal.value is not None
+        ):
+            reward = float(signal.value)
+            self._reward_stats[signal.strategy].update(reward)
+            self._global_reward_stats.update(reward)
+            self.performance_history.append(reward)
+    
+        selector_update = None
+        supervision_allowed = signal.can_supervise_strategy(
+            allowed_strategies=set(self.task_ids),
+            minimum_confidence=self.policy_supervision_min_confidence,
+        )
+        if supervision_allowed:
+            state = signal.context["state"]
+            state_array = self._prepare_state_array(state)
+            embedding = self.strategy_selector.generate_task_embedding(state_array)
+            strategy_name = signal.strategy
+            if strategy_name is not None:
+                self.strategy_selector.observe(embedding, strategy_name)
+            selector_update = self.strategy_selector.train_from_embeddings()
+        guidance = self._refresh_adaptive_guidance(signal)
+
+        return {
+            **record_result,
+            "policy_supervision_applied": bool(supervision_allowed),
+            "selector_update": selector_update,
+            "adaptive_guidance": guidance,
+        }
+    
+    
+    def _drain_signal_inbox(self) -> Dict[str, Any]:
+        """Atomically claim and ingest cross-agent signals."""
+    
+        while True:
+            current = self.shared_memory.get(self.signal_inbox_key)
+            if not current:
+                return {
+                    "processed": 0,
+                    "duplicates": 0,
+                    "errors": [],
+                }
+    
+            if not isinstance(current, list):
+                raise InvalidConfigError(
+                    "Learning signal inbox must contain a list.",
+                    config_key=self.signal_inbox_key,
+                    received_value=type(current).__name__,
+                )
+    
+            if hasattr(self.shared_memory, "compare_and_swap"):
+                claimed = self.shared_memory.compare_and_swap(self.signal_inbox_key, current, [])
+                if not claimed:
+                    continue
+            else:
+                self.shared_memory.set(self.signal_inbox_key, [])
+    
+            break
+    
+        processed = 0
+        duplicates = 0
+        errors: List[Dict[str, Any]] = []
+        for raw_signal in current:
+            if not isinstance(raw_signal, Mapping):
+                errors.append(
+                    {
+                        "error": "signal_not_mapping",
+                        "type": type(raw_signal).__name__,
+                    }
+                )
+                continue
+    
+            try:
+                result = self._ingest_learning_signal(raw_signal)
+                if result.get("status") == "duplicate":
+                    duplicates += 1
+                else:
+                    processed += 1
+    
+            except Exception as exc:
+                errors.append(
+                    {
+                        "signal_id": raw_signal.get("signal_id"),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+    
+        return {
+            "processed": processed,
+            "duplicates": duplicates,
+            "errors": errors,
+        }
+    
+    
+    def _query_learning(self, task_data: Mapping[str, Any]) -> Dict[str, Any]:
+        signals = self.learning_factory.query_learning_signals(
+            context_key=task_data.get("context_key"),
+            source_agent=task_data.get("source_agent"),
+            kind=task_data.get("kind"),
+            metric=task_data.get("metric"),
+            strategy=task_data.get("strategy"),
+            validated_only=bool(task_data.get("validated_only", False)),
+            limit=coerce_int(
+                task_data.get("limit", self.signal_query_limit),
+                default=self.signal_query_limit,
+                minimum=1,
+            ),
+        )
+    
+        return {
+            "status": "ok",
+            "mode": "query",
+            "count": len(signals),
+            "signals": signals,
+        }
 
     # ------------------------------------------------------------------
     # Shared memory
@@ -316,9 +447,7 @@ class LearningAgent(BaseAgent):
         raise RuntimeError(f"Unsupported env.step() output length: {len(result)}")
 
     @staticmethod
-    def _align_vectors(
-        a: np.ndarray, b: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def _align_vectors(a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Zero-pad both arrays to the longer dimension."""
         max_dim = max(len(a), len(b))
         if len(a) < max_dim:
@@ -334,10 +463,7 @@ class LearningAgent(BaseAgent):
             return np.zeros(1, dtype=np.float32)
         array = processed.detach().cpu().numpy().astype(np.float32).reshape(-1)
         if not np.all(np.isfinite(array)):
-            raise NaNException(
-                "State contains non-finite values after processing",
-                location="state_processor",
-            )
+            raise NaNException("State contains non-finite values after processing", location="state_processor")
         return array
 
     # ------------------------------------------------------------------
@@ -385,8 +511,7 @@ class LearningAgent(BaseAgent):
         Score components (all additive):
         1. Prior weight from config (normalised).
         2. Mean historical reward for that strategy (weighted).
-        3. Exploration bonuses for MAML/RSI when uncertainty or novelty is
-           above threshold.
+        3. Exploration bonuses for MAML/RSI when uncertainty or novelty is above threshold.
         4. RSI bonus when overall performance trend is declining.
         5. Preferred-strategy boost from task metadata.
         """
@@ -458,14 +583,12 @@ class LearningAgent(BaseAgent):
         metadata = task_metadata or {}
         state_array = self._prepare_state_array(state)
         embedding = self.strategy_selector.generate_task_embedding(state_array)
-
         novelty = self._compute_novelty(state_array)
         uncertainty = self._estimate_uncertainty(embedding)
         policy_pick_raw = self.strategy_selector.select_strategy(embedding, return_details=False)
         policy_pick: str = str(policy_pick_raw)  # safe coercion
         heuristic_scores = self._strategy_scores(uncertainty, novelty, metadata)
         heuristic_pick: str = max(heuristic_scores, key=heuristic_scores.__getitem__)
-
         factory_agent = self.learning_factory.select_agent(
             {
                 "novelty": novelty,
@@ -520,11 +643,8 @@ class LearningAgent(BaseAgent):
                 try:
                     return int(raw) # type: ignore
                 except (TypeError, ValueError):
-                    raise InvalidActionError(
-                        f"Agent method {method_name} returned non-integer: {raw!r}",
-                        action=raw, # type: ignore
-                    )
-    
+                    raise InvalidActionError(action=raw, reason=f"Agent method {method_name} returned non-integer: {raw!r}")
+
         get_action = getattr(agent, "get_action", None)
         if callable(get_action):
             result = get_action(state)
@@ -532,15 +652,12 @@ class LearningAgent(BaseAgent):
             try:
                 return int(raw_act) # type: ignore
             except (TypeError, ValueError):
-                raise InvalidActionError(
-                    f"Agent get_action returned non-integer: {raw_act!r}",
-                    action=raw_act, # type: ignore
-                )
-    
+                raise InvalidActionError(action=raw_act, reason=f"Agent get_action returned non-integer: {raw_act!r}")
         raise InvalidActionError(
-            f"Agent of type '{type(agent).__name__}' exposes no compatible action API "
-            "(expected act / select_action / get_action)",
-            action=None, # type: ignore
+            reason=(
+                f"Agent of type '{type(agent).__name__}' exposes no compatible "
+                "action API (expected act / select_action / get_action)"
+            ),
         )
 
     def _agent_learn_step(self, strategy: str, agent: Any,
@@ -597,8 +714,7 @@ class LearningAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Episode runner
     # ------------------------------------------------------------------
-    def _run_episode(self, strategy: str, agent: Any, max_steps: int,
-                     seed: Optional[int], train: bool = True) -> Dict[str, Any]:
+    def _run_episode(self, strategy: str, agent: Any, max_steps: int, seed: Optional[int], train: bool = True) -> Dict[str, Any]:
         """Execute one full episode and return a structured report.
 
         During training:
@@ -610,7 +726,6 @@ class LearningAgent(BaseAgent):
         """
         reset_output = self.env.reset(seed=seed)
         state = self._extract_state(reset_output)
-
         episode_id = make_learning_id(f"ep_{strategy}")
         total_reward = 0.0
         losses: List[float] = []
@@ -619,28 +734,23 @@ class LearningAgent(BaseAgent):
 
         for step_idx in range(max_steps):
             state_arr = self._prepare_state_array(state)
-            action = self._agent_action(agent, state_arr, explore=train)
-            if action < 0:
-                raise InvalidActionError(
-                    f"Agent returned invalid action {action!r}", action=action # type: ignore
-                )
+            action_id = self._agent_action(agent, state_arr, explore=train)
+            if action_id < 0:
+                raise InvalidActionError(action=action_id, reason=f"Agent returned invalid action {action_id!r}")
 
-            next_state, reward, done, info = self._safe_step(self.env, action)
-
+            next_state, reward, done, info = self._safe_step(self.env, action_id)
             if not np.isfinite(reward):
-                raise NaNException(
-                    f"Non-finite reward at step {step_idx}: {reward}",
-                    location=f"env.step/{strategy}",
-                )
+                raise NaNException(f"Non-finite reward at step {step_idx}: {reward}", location=f"env.step/{strategy}")
 
             next_arr = self._prepare_state_array(next_state)
-
             if train:
-                loss = self._agent_learn_step(
-                    strategy, agent, (state_arr, action, reward, next_arr, done)
-                )
-                if loss is not None:
-                    losses.append(loss)
+                self.multi_task_learner.rebalance()
+                # StrategySelector is supervised only by validated external/evaluation
+                # evidence. Do not train it to reproduce its own previous decision.
+                selector_update = self.strategy_selector.train_from_embeddings()
+                if selector_update:
+                    self.performance_metrics["strategy_loss"][strategy] = float(selector_update["loss"])
+                    self.performance_metrics["strategy_accuracy"][strategy] = float(selector_update["accuracy"])
 
             total_reward += reward
             self.observation_count += 1
@@ -715,9 +825,7 @@ class LearningAgent(BaseAgent):
         self.shared_memory.set(self.sm_keys["metrics"], metrics)
 
         # --- Strategy history (bounded ring) ---
-        strategy_history: List[Dict[str, Any]] = list(
-            self.shared_memory.get(self.sm_keys["strategies"]) or []
-        )
+        strategy_history: List[Dict[str, Any]] = list(self.shared_memory.get(self.sm_keys["strategies"]) or [])
         strategy_history.append(
             {
                 "strategy": episode_result["strategy"],
@@ -726,33 +834,83 @@ class LearningAgent(BaseAgent):
                 "timestamp": time.time(),
             }
         )
-        self.shared_memory.set(
-            self.sm_keys["strategies"], strategy_history[-self.trace_history_limit:]
-        )
+        self.shared_memory.set(self.sm_keys["strategies"], strategy_history[-self.trace_history_limit:])
 
         # --- Episode log ---
-        episodes: List[Dict[str, Any]] = list(
-            self.shared_memory.get(self.sm_keys["episodes"]) or []
-        )
+        episodes: List[Dict[str, Any]] = list(self.shared_memory.get(self.sm_keys["episodes"]) or [])
         episodes.append(episode_result)
-        self.shared_memory.set(
-            self.sm_keys["episodes"], episodes[-self.trace_history_limit:]
-        )
+        self.shared_memory.set(self.sm_keys["episodes"], episodes[-self.trace_history_limit:])
 
         # --- Decision trace ---
-        traces: List[Dict[str, Any]] = list(
-            self.shared_memory.get(self.sm_keys["decision_trace"]) or []
-        )
+        traces: List[Dict[str, Any]] = list(self.shared_memory.get(self.sm_keys["decision_trace"]) or [])
         traces.append(dict(trace))
-        self.shared_memory.set(
-            self.sm_keys["decision_trace"], traces[-self.trace_history_limit:]
-        )
+        self.shared_memory.set(self.sm_keys["decision_trace"], traces[-self.trace_history_limit:])
 
     # ------------------------------------------------------------------
     # Retraining gate
     # ------------------------------------------------------------------
     def _should_retrain(self) -> bool:
         return utc_now() - self.last_training_time >= self.retraining_interval
+
+    # ------------------------------------------------------------------
+    # Adaptive guidance
+    # ------------------------------------------------------------------
+    def _refresh_adaptive_guidance(self, signal: LearningSignal) -> Optional[Dict[str, Any]]:
+        """Publish evidence-backed skill guidance for AdaptiveAgent.
+    
+        Learning determines what historical evidence says.
+        Adaptive remains responsible for changing runtime behavior.
+        """
+        source = signal.source_agent.strip().lower()
+        if source not in {
+            "adaptive",
+            "adaptiveagent",
+            "adaptive_agent",
+        }:
+            return None
+    
+        if signal.metric != "reward":
+            return None
+    
+        if not signal.strategy:
+            return None
+    
+        if not signal.strategy.startswith("skill:"):
+            return None
+    
+        summary = (
+            self.learning_factory.contextual_strategy_summary(
+                signal.context_key,
+                metric="reward",
+                direction="higher_better",
+                minimum_evidence=self.context_min_evidence,
+            )
+        )
+    
+        preferred = summary.get("preferred_strategy")
+        if preferred is None:
+            return None
+    
+        task_type = str(signal.context.get("task_type", "generic"))
+        guidance = {
+            "source": self.name,
+            "context": dict(signal.context),
+            "context_key": signal.context_key,
+            "preferred_strategy": preferred,
+            "metric": "reward",
+            "direction": "higher_better",
+            "minimum_evidence": self.context_min_evidence,
+            "strategy_statistics": summary["strategies"],
+            "generated_at": utc_now().isoformat(),
+        }
+    
+        key = (
+            f"{self.guidance_prefix}:adaptive:"
+            f"{task_type}"
+        )
+    
+        self.shared_memory.set(key, guidance)
+        return {"key": key, **guidance}
 
     # ------------------------------------------------------------------
     # Core modes
@@ -808,10 +966,7 @@ class LearningAgent(BaseAgent):
 
         # Trigger recovery if error accumulation exceeds threshold
         if len(self.error_history) >= self.recovery_trigger_threshold:
-            logger.warning(
-                "Error threshold reached (%d errors) — triggering recovery",
-                len(self.error_history),
-            )
+            logger.warning("Error threshold reached (%d errors) — triggering recovery", len(self.error_history))
             result["recovery"] = self.recovery_system.execute_recovery()
 
         logger.info(
@@ -864,9 +1019,7 @@ class LearningAgent(BaseAgent):
             "avg_reward": reward_summary["mean"],
             "avg_steps": float(np.mean(steps_list)) if steps_list else 0.0,
             "reward_summary": reward_summary,
-            "strategy_distribution": {
-                k: strategies_used.count(k) for k in sorted(set(strategies_used))
-            },
+            "strategy_distribution": {k: strategies_used.count(k) for k in sorted(set(strategies_used))},
             "traces": traces,
         }
 
@@ -874,12 +1027,189 @@ class LearningAgent(BaseAgent):
         existing["last_evaluation"] = result
         self.shared_memory.set(self.sm_keys["metrics"], existing)
 
-        logger.info(
-            "Evaluation complete | episodes=%d | avg_reward=%.4f",
-            episodes,
-            reward_summary["mean"],
-        )
+        logger.info("Evaluation complete | episodes=%d | avg_reward=%.4f", episodes, reward_summary["mean"])
         return result
+
+    # ------------------------------------------------------------------
+    # Checkpoint support
+    # ------------------------------------------------------------------
+    def checkpoint_components(self) -> Mapping[str, Any]:
+        policy_net = self.strategy_selector.policy_net
+        state_embedder = self.strategy_selector.state_embedder
+        optimizer = self.strategy_selector.optimizer
+    
+        if policy_net is None:
+            raise LearningError("Strategy policy network is unavailable for checkpointing.")
+        if state_embedder is None:
+            raise LearningError("Strategy state embedder is unavailable for checkpointing.")
+        if optimizer is None:
+            raise LearningError("Strategy optimizer is unavailable for checkpointing.")
+    
+        model_state = {
+            "policy": policy_net.state_dict(),
+            "state_embedder": state_embedder.state_dict(),
+        }
+    
+        return {
+            "model": model_state,
+            "optimizer": optimizer,
+            "agent_state": self._export_checkpoint_state(),
+        }
+
+    def checkpoint_codec_ids(self) -> Mapping[str, str]:
+        return {
+            "model": "torch",
+            "optimizer": "torch",
+            "agent_state": "agent-state",
+        }
+
+    def checkpoint_step(self) -> Optional[int]:
+        return int(self.training_iterations)
+
+    def checkpoint_metrics(self) -> Mapping[str, Any]:
+        snapshot = self._global_reward_stats.snapshot()
+    
+        return {
+            "mean_reward": float(snapshot.mean),
+            "reward_samples": int(snapshot.count),
+            "performance_trend": float(
+                self._performance_trend()
+            ),
+        }
+
+    def _export_checkpoint_state(self) -> Mapping[str, Any]:
+        return {
+            "schema": self.CHECKPOINT_SCHEMA,
+            "task_ids": list(self.task_ids),
+            "observation_count": int(self.observation_count),
+            "training_iterations": int(self.training_iterations),
+            "last_training_time": self.last_training_time.isoformat(),
+            "performance_history": list(self.performance_history),
+            "multi_task_weights": self.multi_task_learner.get_weights(),
+            "factory_state": self.learning_factory.snapshot_learning_state(),
+            "selector_state": self.strategy_selector.snapshot(include_buffer=False)
+        }
+
+    def _import_checkpoint_state(self, state: Mapping[str, Any]) -> None:
+        if state.get("schema") != self.CHECKPOINT_SCHEMA:
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message=("LearningAgent checkpoint schema is incompatible."),
+            )
+    
+        checkpoint_task_ids = list(state.get("task_ids", []))
+        if checkpoint_task_ids != self.task_ids:
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message=(
+                    "Checkpoint task_ids do not match "
+                    "the active LearningAgent."
+                ),
+            )
+    
+        self.observation_count = int(state.get("observation_count", 0))
+        self.training_iterations = int(state.get("training_iterations", 0))
+        last_training = state.get("last_training_time")
+        if isinstance(last_training, str):
+            self.last_training_time = (datetime.fromisoformat(last_training))
+        self.performance_history.clear()
+        self._global_reward_stats = RunningStats()
+    
+        for value in state.get("performance_history", []):
+            reward = float(value)
+            if not np.isfinite(reward):
+                continue
+    
+            self.performance_history.append(reward)
+            self._global_reward_stats.update(reward)
+    
+        weights = state.get("multi_task_weights", {})
+        if isinstance(weights, Mapping):
+            self.multi_task_learner.set_weights(weights, strict=True)
+        factory_state = state.get("factory_state", {})
+        if isinstance(factory_state, Mapping):
+            self.learning_factory.restore_learning_state(factory_state)
+        selector_state = state.get("selector_state", {})
+        if isinstance(selector_state, Mapping):
+            self.strategy_selector.restore(selector_state, restore_buffer=False)
+    
+    def _apply_checkpoint_components(self, components: Mapping[str, Any]) -> None:
+        required = {"model", "optimizer", "agent_state"}
+        missing = required - set(components)
+    
+        if missing:
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message=(
+                    "LearningAgent checkpoint is missing: "
+                    f"{sorted(missing)}"
+                ),
+            )
+    
+        model_state = components["model"]
+        optimizer_state = components["optimizer"]
+        agent_state = components["agent_state"]
+    
+        if not isinstance(model_state, Mapping):
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message="Decoded model state is invalid.",
+            )
+    
+        policy_state = model_state.get("policy")
+        embedder_state = model_state.get("state_embedder")
+    
+        if not isinstance(policy_state, Mapping):
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message="Policy state is missing.",
+            )
+    
+        if not isinstance(embedder_state, Mapping):
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message="Embedder state is missing.",
+            )
+    
+        if self.strategy_selector.policy_net is None:
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message="Policy network is not initialized.",
+            )
+    
+        if self.strategy_selector.state_embedder is None:
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message="State embedder is not initialized.",
+            )
+    
+        if self.strategy_selector.optimizer is None:
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message="Strategy optimizer is not initialized.",
+            )
+    
+        self.strategy_selector.policy_net.load_state_dict(policy_state, strict=True)
+        self.strategy_selector.state_embedder.load_state_dict(embedder_state, strict=True)
+        self.strategy_selector.optimizer.load_state_dict(optimizer_state)
+    
+        if not isinstance(agent_state, Mapping):
+            raise CheckpointError(
+                "LearningAgent",
+                operation="restore",
+                message="Agent state is invalid.",
+            )
+    
+        self._import_checkpoint_state(agent_state)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -919,19 +1249,51 @@ class LearningAgent(BaseAgent):
         if mode == "evaluate":
             return self._evaluate(task_data)
 
-        if mode == "train":
-            return self._train_cycles(task_data)
+        if mode == "observe":
+            payload = task_data.get("signal", task_data)
+            if not isinstance(payload, Mapping):
+                raise InvalidConfigError(
+                    "observe mode requires a signal mapping.",
+                    config_key="signal",
+                    received_value=type(payload).__name__,
+                )
+        
+            return {
+                "status": "ok",
+                "mode": "observe",
+                "learning": self._ingest_learning_signal(payload),
+            }
+        
+        if mode == "ingest_pending":
+            return {
+                "status": "ok",
+                "mode": "ingest_pending",
+                **self._drain_signal_inbox(),
+            }
+        
+        if mode == "query":
+            return self._query_learning(task_data)
 
+        if mode == "train":
+            inbox_result = self._drain_signal_inbox()
+            result = self._train_cycles(task_data)
+            result["signal_ingestion"] = inbox_result
+            return result
+        
         if mode == "auto":
+            inbox_result = self._drain_signal_inbox()
             if self._should_retrain():
                 logger.info("Auto mode: retraining interval elapsed — training")
-                return self._train_cycles(task_data)
-            logger.info("Auto mode: interval not elapsed — evaluating")
-            return self._evaluate(task_data)
+                result = self._train_cycles(task_data)
+            else:
+                logger.info("Auto mode: interval not elapsed — evaluating")
+                result = self._evaluate(task_data)
+        
+            result["signal_ingestion"] = inbox_result
+            return result
 
         raise InvalidConfigError(
-            f"Unsupported perform_task mode: {mode!r}. "
-            "Expected one of: 'train', 'evaluate', 'auto', 'health'.",
+            f"Unsupported perform_task mode: {mode!r}. Expected one of: 'train', 'evaluate', 'auto', 'health'.",
             config_key="mode",
             received_value=mode,
         )
@@ -1019,6 +1381,12 @@ class LearningAgent(BaseAgent):
                 "max": global_snap.maximum,
             },
             "strategy_health": strategy_health,
+            "learning_signals": {
+                "stored": len(self.learning_factory.signal_history),
+                "memory_restore_path": self.learning_factory.memory_restore_path,
+                "memory_restore_error": self.learning_factory.memory_restore_error,
+            },
+            "strategy_selector": self.strategy_selector.diagnostics(),
         }
 
 
