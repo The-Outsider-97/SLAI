@@ -105,7 +105,6 @@ class ProvenanceAgent(BaseAgent):
             self.publish_shared_memory,
             self.max_query_depth,
             self.local_memory_max_checkpoints,
-            self.publish_state_updates
         )
 
     # ------------------------------------------------------------------
