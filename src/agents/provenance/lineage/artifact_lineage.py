@@ -1,3 +1,13 @@
+"""
+Sources:
+- Buneman et al. (2001) — direct foundation for ancestry.
+- Muniswamy-Reddy et al. (2006), PASS — artifact/file-level ancestry maintained by infrastructure.
+- Di Cosmo (2020) — content-addressed persistent artifact identity.
+
+This combination supports: identity + ancestry + transformation history
+without evaluating artifact quality.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

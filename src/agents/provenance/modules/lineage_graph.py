@@ -1,3 +1,26 @@
+"""
+Lineage Graph is a read-only view of the artifact lineage graph, which can be queried for provenance information.
+it is a graph retrieval interface.
+
+sources:
+- Moreau et al. (2011), Open Provenance Model — provenance as interoperable causal graph.
+- W3C PROV-DM — entity/activity/agent graph semantics.
+- OPQL (2013) — provenance querying at graph level.
+- Green et al. (2007) — formal compositional derivation provenance.
+
+This module should own things such as:
+
+ancestors(artifact)
+descendants(artifact)
+direct_parents(artifact)
+derivation_path(source, output)
+activities_between(a, b)
+agents_involved(artifact)
+subgraph(artifact, depth=n)
+
+It should not calculate graph-derived “trust scores”; that would cross into Quality.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

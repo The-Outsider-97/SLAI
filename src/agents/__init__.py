@@ -35,6 +35,7 @@ _EXPORTS = {
     "PerceptionAgent": (".perception_agent", "PerceptionAgent"), # done for 2.1.0. Maybe split into multiple agents for 2.3.0 (e.g., vision agent, audio agent, encoder agent, etc.)
     "PlanningAgent": (".planning_agent", "PlanningAgent"),
     "PrivacyAgent": (".privacy_agent", "PrivacyAgent"),
+    "ProvenanceAgent": (".provenance_agent", "ProvenanceAgent"),
     "QNNAgent": (".qnn_agent", "QNNAgent"),
     "QualityAgent": (".quality_agent", "QualityAgent"),
     "ReaderAgent": (".reader_agent", "ReaderAgent"), # done for 2.1.0 needs to be updated and expanded for 2.3.0

@@ -1,3 +1,12 @@
+"""
+Source Registry must identify the source; it should never rank it.
+
+sources:
+- Wilkinson et al. (2016), FAIR Principles.
+- Di Cosmo (2020), Archiving and Referencing Source Code with Software Heritage.
+- Buneman et al. (2001) for the fundamental meaning of “where did this originate?”
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

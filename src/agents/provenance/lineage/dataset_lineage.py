@@ -1,3 +1,26 @@
+"""
+sources:
+- Gebru et al. (2021), Datasheets for Datasets.
+- Longpre et al. (2024), A large-scale audit of dataset licensing and attribution in AI.
+- Buneman et al. (2001) remains the foundational lineage source.
+
+The SLAI training data reconstructs:
+
+raw-source
+   ↓
+scraped-document
+   ↓
+normalized-document
+   ↓
+deduplicated-corpus
+   ↓
+training-split
+   ↓
+LANTRA curriculum
+
+This is extremely useful given the current training pipelines.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

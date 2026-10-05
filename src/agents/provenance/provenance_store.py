@@ -1,3 +1,23 @@
+"""
+
+
+source:
+- Muniswamy-Reddy et al. (2006), Provenance-Aware Storage Systems.
+- W3C PROV-DM for the persisted logical representation.
+- OPQL (2013), Querying scientific workflow provenance at the graph level.
+
+The store is storage-backend-independent:
+Provenance API
+      │
+      ▼
+canonical graph/data model
+      │
+      ▼
+storage implementation
+
+rather than exposing SQLite/JSON/file-system details throughout SLAI.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

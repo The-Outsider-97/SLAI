@@ -1,3 +1,25 @@
+"""
+sources:
+- W3C PROV-DM — the Activity concept is the natural foundation.
+- Green et al. (2007), Provenance Semirings — compositional derivations.
+- Torres-Arias et al. (2019), in-toto — transformations chained through software production.
+
+The transformation is a first-class identity:
+
+transformation-941
+    type: parse
+    agent: ReaderAgent
+    used:
+        webpage-artifact-17
+    generated:
+        document-artifact-22
+    parameters:
+        parser-version-X
+instead of storing only a human-readable "description".
+
+That greatly improves reconstructability.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

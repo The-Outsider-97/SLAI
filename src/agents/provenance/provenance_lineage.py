@@ -1,3 +1,12 @@
+"""
+Provenance Lineage coordinates artifact, dataset, dependency, model, and transformation lineage.
+
+sources:
+- Buneman, Khanna & Tan (2001) — foundational distinction between source origin and causal contribution.
+- Green, Karvounarakis & Tannen (2007), Provenance Semirings.
+- Moreau et al. (2011), Open Provenance Model.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime

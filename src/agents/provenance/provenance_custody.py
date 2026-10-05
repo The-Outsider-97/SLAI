@@ -1,3 +1,13 @@
+"""
+Provenance Custody manages the ownership and control of artifacts.
+
+sources:
+- Turner (2006), Selective and intelligent imaging using digital evidence bags.
+- Torres-Arias et al. (2019), in-toto: Providing farm-to-table guarantees for bits and bytes.
+
+It borrows the chain representation principles, but not turn SLAI provenance into a forensic or security subsystem.
+"""
+
 from __future__ import annotations
 
 from typing import Mapping, Optional

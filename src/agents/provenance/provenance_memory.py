@@ -1,3 +1,24 @@
+"""
+
+
+sources:
+- Sandve et al. (2013), Ten Simple Rules for Reproducible Computational Research.
+- Chirigati et al. (2016/2017), ReproZip: Computational Reproducibility With Ease.
+- Vartak et al. (2016), ModelDB: A System for Machine Learning Model Management.
+
+For SLAI, ProvenanceMemory should be concerned with:
+
+checkpoint A
+   │
+   ├── agent/model version
+   ├── configuration identity
+   ├── source artifacts
+   ├── dataset version
+   ├── code/version identity
+   └── parent checkpoint
+not general conversational or semantic memory.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

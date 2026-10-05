@@ -47,9 +47,7 @@ logger = get_logger("Agent Factory")
 printer = PrettyPrinter()
 
 
-_AGENTS_CONFIG = bind_config(
-    Path(__file__).resolve().parent / "base" / "configs" / "agents_config.yaml"
-)
+_AGENTS_CONFIG = bind_config(Path(__file__).resolve().parent / "base" / "configs" / "agents_config.yaml")
 
 
 @dataclass(slots=True)
@@ -218,6 +216,7 @@ class AgentFactory:
         "perception": {"module_path": "src.agents.perception_agent", "class_name": "PerceptionAgent"},
         "planning": {"module_path": "src.agents.planning_agent", "class_name": "PlanningAgent"},
         "privacy": {"module_path": "src.agents.privacy_agent", "class_name": "PrivacyAgent"},
+        "provenance": {"module_path": "src.agents.provenance_agent", "class_name": "ProvenanceAgent"},
         "qnn": {"module_path": "src.agents.qnn_agent", "class_name": "QNNAgent"},
         "quality": {"module_path": "src.agents.quality_agent", "class_name": "QualityAgent"},
         "reader": {"module_path": "src.agents.reader_agent", "class_name": "ReaderAgent"},
@@ -261,6 +260,7 @@ class AgentFactory:
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
         "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
         "perception": {"torch_required": True, "notes": "Perception encoder/decoder stack is torch-based."},
+        "provenance": {"torch_required": False, "notes": "Provenance tracking is torch-free; optional learned models may require torch."},
         "simulation": {"torch_required": False, "notes": (
                        "Simulation orchestration and numerical execution are torch-free by default;"
                        "externally supplied learned world models may carry their own optional dependencies.")},
@@ -478,6 +478,7 @@ class AgentFactory:
             "perception",
             "planning",
             "privacy",
+            "provenance",
             "qnn",
             "quality",
             "reader",

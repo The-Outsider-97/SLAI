@@ -1,3 +1,20 @@
+"""
+sources:
+- ReproZip — dependencies required for computational reconstruction.
+- Torres-Arias et al. (2019), in-toto — dependency and transformation relationships throughout software supply chains.
+- Lamb & Zacchiroli (2021) — correspondence between source, dependencies/build state, and reproducible outputs.
+
+This module is especially relevant for SLAI recording relationships such as:
+
+checkpoint → torch version
+artifact   → model dependency
+module     → package version
+training-run → dataset
+model      → tokenizer
+output     → originating model checkpoint
+It should not become SLAI's dependency installer or security scanner.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

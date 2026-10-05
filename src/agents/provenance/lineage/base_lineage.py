@@ -1,3 +1,14 @@
+"""
+Base Lineage is the foundational module for recording and managing artifact lineage in SLAI.
+It centralize common derivation semantics so every specialized lineage implementation behaves identically.
+
+sources:
+- W3C PROV-DM should define its semantic contract.
+- W3C PROV Constraints (2013) should define validity rules around event ordering and internally consistent
+- Moreau et al. (2011) provides the graph-theoretical provenance foundation.
+
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

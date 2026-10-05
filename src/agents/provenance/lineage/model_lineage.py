@@ -1,3 +1,25 @@
+"""
+sources:
+- Vartak et al. (2016), ModelDB. DOI: 10.1145/2939502.2939516.
+- Souza et al. (2022), Workflow provenance in the lifecycle of scientific machine learning.
+- Souza et al. (2019), Provenance Data in the Machine Learning Lifecycle in Computational Science and Engineering.
+
+This work introduced PROV-ML on top of W3C PROV to represent ML-specific lifecycle provenance.
+
+For SLAI, this module connects:
+
+model checkpoint
+├── parent checkpoint
+├── architecture/version
+├── training dataset identity
+├── training activity
+├── configuration identity
+├── code identity
+└── produced model artifact
+
+but leave accuracy/performance metrics to Evaluation or training infrastructure unless those metrics are merely referenced as immutable metadata.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional

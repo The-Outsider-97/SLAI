@@ -1,5 +1,6 @@
 from __future__ import annotations
-__version__ = "2.2.0"
+
+__version__ = "2.3.0"
 
 """
 Provenance Agent is a system-wide authority for artifact lineage and chain-of-custody.
@@ -23,19 +24,23 @@ final-output-42
  └── model-version
       └── checkpoint
 
-Important distinction
-ObservabilityAgent = what happened operationally?
-ProvenanceAgent    = where did this artifact/information originate?
-
-QualityAgent       = can this data be trusted/used?
-ProvenanceAgent    = how did this data reach this result?
-
-KnowledgeAgent     = what information do we know?
-ProvenanceAgent    = how was that information derived?
+The provenance service answers:
+WHERE did this come from?
+WHAT transformations produced it?
+WHICH artifact/model/checkpoint was involved?
+WHICH activity generated it?
+WHICH agent participated?
+WHAT were its ancestors?
 
 Observability already explicitly owns execution tracing and incident intelligence, not artifact lineage.
 
 This is a powerful addition for academic rigor as well.
+
+Sources:
+- Moreau et al. (2011), The Open Provenance Model core specification (v1.1). - Future Generation Computer Systems, 27(6), 743–756. DOI: 10.1016/j.future.2010.07.005
+- Moreau & Missier (Eds.) (2013), PROV-DM: The PROV Data Model. W3C Recommendation. - THE canonical SLAI provenance vocabulary
+- Miles et al. (2011), PrIMe: A methodology for developing provenance-aware applications. - PrIMe addresses how provenance should be introduced into applications and architectures rather than treating provenance as an isolated feature.
+- Simmhan, Plale & Gannon (2005), A survey of data provenance in e-science.
 """
 
 from typing import Any, Mapping, Optional
@@ -43,7 +48,6 @@ from typing import Any, Mapping, Optional
 from .base_agent import BaseAgent
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .provenance import *
-from .provenance.provenance_types import *
 from .provenance.utils.provenance_errors import *
 from .provenance.utils.provenance_helpers import *
 from .runtime_contracts import RuntimeLifecycle
@@ -74,7 +78,7 @@ class ProvenanceAgent(BaseAgent):
         self.config = load_global_config()
         self.provenance_agent_config = get_config_section("provenance_agent") or {}
 
-        self.runtime_lifecycle = RuntimeLifecycle()
+        self.runtime_lifecycle = RuntimeLifecycle() # type: ignore
         self.provenance_store = ProvenanceStore()
         self.provenance_lineage = ProvenanceLineage()
         self.provenance_custody = ProvenanceCustody()
