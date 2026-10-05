@@ -781,6 +781,32 @@ privacy_agent:
     event_channel: "privacy.events"
 
 
+provenance_agent:
+  enabled: true
+  publish_shared_memory: true
+  publish_state_updates: true
+  fail_on_shared_memory_error: false
+  strict_event_validation: true
+  shared_memory_ttl_seconds: 86400
+
+  # Bounds apply only at the orchestration/query boundary; graph semantics and
+  # persistence remain owned by the Provenance subsystem.
+  max_query_depth: 64
+  max_query_results: 2048
+  max_subgraph_depth: 16
+
+  # Bounded ProvenanceMemory checkpoint-reference index. Durable checkpoint
+  # facts stay authoritative in ProvenanceStore.
+  local_memory_max_checkpoints: 1000
+  event_cache_size: 256
+  record_agent_checkpoints: true
+
+  # SharedMemory carries only lightweight references/state notifications.
+  event_channel: "provenance.events"
+  state_key: "provenance_agent.state"
+  latest_reference_key: "provenance_agent.latest_reference"
+
+
 qnn_agent:
   num_qubits: 4
   num_quantum_layers: 2
