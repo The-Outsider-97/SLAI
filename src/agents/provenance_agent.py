@@ -967,6 +967,15 @@ class ProvenanceAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+    def __exit__(self, exc_type: Optional[Type[BaseException]], exc_value: Optional[BaseException], traceback: Optional[TracebackType]) -> None:
+        self.shutdown()
+
+    def __del__(self) -> None:
+        try:
+            self.shutdown()
+        except Exception as exc:
+            logger.warning("ProvenanceAgent shutdown failed during garbage collection: %s", exc)
+
     def shutdown(self) -> None:
         lifecycle = self._runtime_status.lifecycle
         if lifecycle in {RuntimeLifecycle.STOPPING, RuntimeLifecycle.STOPPED}:
@@ -999,6 +1008,12 @@ class ProvenanceAgent(BaseAgent):
             raise ProvenanceStorageError(
                 "ProvenanceAgent shutdown persistence failed", cause=failure
             ) from failure
+
+    def __repr__(self) -> str:
+        return f"<ProvenanceAgent name={self.name!r} id={self.agent_id!r} state={self.operational_state!r}>"
+
+    def __enter__(self) -> "ProvenanceAgent":
+        return self
 
 
 __all__ = ["ProvenanceAgent"]
