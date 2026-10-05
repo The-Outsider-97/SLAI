@@ -21,7 +21,8 @@ __version__ = "2.3.0"
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
-from typing import Any, Optional
+from types import TracebackType
+from typing import Any, Optional, Type
 
 from .base_agent import BaseAgent
 from .base.utils.base_errors import BaseConfigurationError, BaseStateError
@@ -74,11 +75,7 @@ class ProvenanceAgent(BaseAgent):
         # One store instance is injected into every service so durable facts and
         # indexes share a single authority. No service is recreated per request.
         self.provenance_store = ProvenanceStore()
-        self.local_memory = ProvenanceMemory(store=self.provenance_store, max_checkpoints=self.local_memory_max_checkpoints)
-        # Backward-compatible attribute retained; it is the same object, not a
-        # second memory layer.
-        self.provenance_memory = self.local_memory
-
+        self.provenance_memory = ProvenanceMemory(store=self.provenance_store, max_checkpoints=self.provenance_memory_max_checkpoints)
         self.provenance_lineage = ProvenanceLineage(store=self.provenance_store)
         self.provenance_custody = ProvenanceCustody(store=self.provenance_store)
         self.source_registry = SourceRegistry(store=self.provenance_store)
@@ -104,7 +101,7 @@ class ProvenanceAgent(BaseAgent):
             "ProvenanceAgent initialized | publish_shared_memory=%s | max_query_depth=%s | local_checkpoints=%s",
             self.publish_shared_memory,
             self.max_query_depth,
-            self.local_memory_max_checkpoints,
+            self.provenance_memory_max_checkpoints,
         )
 
     # ------------------------------------------------------------------
@@ -131,8 +128,8 @@ class ProvenanceAgent(BaseAgent):
             maximum=1_000_000,
         )
         self.max_subgraph_depth = coerce_int(self._cfg("max_subgraph_depth", 16), 16, minimum=1, maximum=10_000)
-        self.local_memory_max_checkpoints = coerce_int(
-            self._cfg("local_memory_max_checkpoints", 1000),
+        self.provenance_memory_max_checkpoints = coerce_int(
+            self._cfg("provenance_memory_max_checkpoints", 1000),
             1000,
             minimum=1,
             maximum=1_000_000,
@@ -256,7 +253,7 @@ class ProvenanceAgent(BaseAgent):
     # ------------------------------------------------------------------
     def provenance_state(self) -> dict[str, Any]:
         with self._lock:
-            local = self.local_memory.snapshot(include_checkpoints=False) if hasattr(self, "local_memory") else {}
+            local = self.provenance_memory.snapshot(include_checkpoints=False) if hasattr(self, "provenance_memory") else {}
             return {
                 "schema": "slai.provenance-agent.runtime-state.v1",
                 "agent_id": self.agent_id,
@@ -266,7 +263,7 @@ class ProvenanceAgent(BaseAgent):
                 "last_event_id": self.last_event_id,
                 "last_event_timestamp": self.last_event_timestamp,
                 "last_agent_checkpoint_id": self._last_agent_checkpoint_id,
-                "local_memory_revision": local.get("revision"),
+                "provenance_memory_revision": local.get("revision"),
                 "known_local_checkpoints": local.get("checkpoint_count", 0),
                 "persistence_enabled": local.get("persist", True),
             }
@@ -451,7 +448,7 @@ class ProvenanceAgent(BaseAgent):
             if isinstance(checkpoint, Mapping):
                 # The store already owns the durable fact; local memory adds only
                 # the checkpoint lifecycle/index reference.
-                self.local_memory.save_checkpoint(checkpoint)
+                self.provenance_memory.save_checkpoint(checkpoint)
         except ProvenanceError as exc:
             self._mark_failure("model_lineage", exc)
             raise
@@ -465,7 +462,7 @@ class ProvenanceAgent(BaseAgent):
     def record_checkpoint(self, checkpoint: CheckpointRecord | Mapping[str, Any] | str, **kwargs: Any) -> dict[str, Any]:
         self._ensure_enabled("record_checkpoint")
         try:
-            result = self.local_memory.save_checkpoint(checkpoint, **kwargs)
+            result = self.provenance_memory.save_checkpoint(checkpoint, **kwargs)
         except ProvenanceError as exc:
             self._mark_failure("checkpoint", exc)
             raise
@@ -825,7 +822,7 @@ class ProvenanceAgent(BaseAgent):
                 "last_event_timestamp": self.last_event_timestamp,
                 "last_agent_checkpoint_id": self._last_agent_checkpoint_id,
                 # Reference only: local memory remains independently persisted.
-                "local_memory": self.local_memory.snapshot(include_checkpoints=False),
+                "provenance_memory": self.provenance_memory.snapshot(include_checkpoints=False),
             }
 
     def _import_checkpoint_state(self, state: Mapping[str, Any]) -> None:
@@ -847,11 +844,11 @@ class ProvenanceAgent(BaseAgent):
         if processed_events < 0 or failed_events < 0:
             raise ProvenanceValidationError("ProvenanceAgent checkpoint counters cannot be negative")
 
-        local_reference = state.get("local_memory")
+        local_reference = state.get("provenance_memory")
         if local_reference is not None:
             if not isinstance(local_reference, Mapping):
                 raise ProvenanceValidationError(
-                    "ProvenanceAgent local_memory checkpoint reference must be a mapping"
+                    "ProvenanceAgent provenance_memory checkpoint reference must be a mapping"
                 )
             local_schema = local_reference.get("schema_version")
             if local_schema not in {None, ProvenanceMemory.MANIFEST_SCHEMA}:
@@ -862,7 +859,7 @@ class ProvenanceAgent(BaseAgent):
 
         # Reload the independently persisted local checkpoint-provenance index;
         # never deserialize the durable ProvenanceStore into BaseAgent state.
-        self.local_memory.restore()
+        self.provenance_memory.restore()
         with self._lock:
             self.processed_events = processed_events
             self.failed_events = failed_events
@@ -908,7 +905,7 @@ class ProvenanceAgent(BaseAgent):
             )
         try:
             configuration_id = stable_provenance_id("agent-config", self.agent_config)
-            provenance_record = self.local_memory.save_checkpoint(
+            provenance_record = self.provenance_memory.save_checkpoint(
                 str(checkpoint_id),
                 parent_checkpoint_id=self._last_agent_checkpoint_id,
                 configuration_id=configuration_id,
@@ -955,7 +952,7 @@ class ProvenanceAgent(BaseAgent):
         if checkpoint_id:
             with self._lock:
                 self._last_agent_checkpoint_id = str(checkpoint_id)
-        self.local_memory.restore()
+        self.provenance_memory.restore()
         self.operational_state = "ready"
         self._publish_reference(
             "agent_checkpoint_restored",
@@ -967,8 +964,24 @@ class ProvenanceAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-    def __exit__(self, exc_type: Optional[Type[BaseException]], exc_value: Optional[BaseException], traceback: Optional[TracebackType]) -> None:
-        self.shutdown()
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> None:
+        try:
+            self.shutdown()
+        except Exception as shutdown_exc:
+            if exc_type is not None:
+                logger.error(
+                    "ProvenanceAgent shutdown failed while handling %s: %s",
+                    exc_type.__name__,
+                    shutdown_exc,
+                )
+            else:
+                raise
+        return None
 
     def __del__(self) -> None:
         try:
@@ -986,8 +999,8 @@ class ProvenanceAgent(BaseAgent):
 
         failure: Optional[BaseException] = None
         try:
-            self.local_memory.flush()
-            self.local_memory.close()
+            self.provenance_memory.flush()
+            self.provenance_memory.close()
             self._mark_runtime_recovered("persistence", "provenance_memory.shutdown")
         except Exception as exc:
             failure = exc
