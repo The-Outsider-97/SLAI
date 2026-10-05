@@ -1,175 +1,242 @@
-"""
-Reproducibility asks: “Is enough lineage recorded to reconstruct this artifact?”
+"""Provenance completeness checks for computational reproducibility.
 
-sources:
-- Sandve et al. (2013) — recording exact process/environment information.
-- ReproZip — dependency/environment capture for executable reproducibility.
-- Lamb & Zacchiroli (2021/2022), Reproducible Builds: Increasing the Integrity of Software Supply Chains.
-- Wilkinson et al. (2016), The FAIR Guiding Principles for scientific data management and stewardship.
+This module follows Sandve et al., ReproZip, and reproducible-build principles:
+it asks whether enough identity, configuration, dependency, environment, and
+transformation provenance exists to reconstruct an artifact.  The completeness
+ratio is not a quality/trust/performance score.
 """
-
 from __future__ import annotations
 
-from typing import Any, Optional
+__version__ = "2.3.0"
 
-from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.provenance_errors import *
-from ..utils.provenance_helpers import *
-from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import urlparse
+
+from ..utils.config_loader import get_config_section, load_global_config
+from ..utils.provenance_errors import ProvenanceNotFoundError, ProvenanceReproducibilityError
+from ..utils.provenance_helpers import require_identifier
+from ..provenance_store import ProvenanceStore
+from ..provenance_types import ReproducibilityReport
+from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
+
 
 logger = get_logger("Reproducibility")
 printer = PrettyPrinter()
 
+_REQUIREMENTS = (
+    "source_identity_known",
+    "source_available",
+    "code_version_known",
+    "model_checkpoint_known",
+    "dataset_version_known",
+    "configuration_known",
+    "dependencies_known",
+    "transformations_complete",
+    "environment_known",
+)
+_DEFAULT_REQUIRED = (
+    "source_identity_known",
+    "configuration_known",
+    "dependencies_known",
+    "transformations_complete",
+    "environment_known",
+)
+
 
 class Reproducibility:
-    def __init__(self):
+    """Assess whether recorded provenance is sufficient for reconstruction."""
+
+    def __init__(self, store: Optional[ProvenanceStore] = None) -> None:
         self.config = load_global_config()
-        self.reproducibility_config = get_config_section('reproducibility')
+        self.reproducibility_config = get_config_section(
+            "reproducibility", config=self.config, default={}
+        )
+        self.store = store or ProvenanceStore()
+        configured = self.reproducibility_config.get("required_requirements", _DEFAULT_REQUIRED)
+        if not isinstance(configured, (list, tuple, set, frozenset)):
+            configured = _DEFAULT_REQUIRED
+        self.required_requirements = tuple(str(item) for item in configured if str(item) in _REQUIREMENTS)
+        if not self.required_requirements:
+            self.required_requirements = _DEFAULT_REQUIRED
 
-        logger.info(f"Reproducibility initialized with config: {self.reproducibility_config}")
+    def _provenance(self, artifact_id: str) -> dict[str, Any]:
+        artifact = require_identifier(artifact_id, field_name="artifact_id")
+        try:
+            return self.store.get_provenance(artifact)
+        except ProvenanceNotFoundError:
+            raise
+        except Exception as exc:
+            raise ProvenanceReproducibilityError(
+                "failed to collect provenance for reproducibility assessment",
+                context={"artifact_id": artifact},
+                cause=exc,
+            ) from exc
 
-    def check_reproducibility(self, artifact_id: str) -> bool:
-        """
-        Check the reproducibility of a given artifact.
-
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            bool: True if the artifact is reproducible, False otherwise.
-        """
-        # Implementation for checking reproducibility
-        raise NotImplementedError("Reproducibility check is not implemented yet.")
-
-    def source_available(self, artifact_id: str) -> bool:
-        """
-        Check if the source artifacts for a given artifact are available.
-
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            bool: True if the source artifacts are available, False otherwise.
-        """
-        # Implementation for checking source availability
-        raise NotImplementedError("Source availability check is not implemented yet.")
+    @staticmethod
+    def _metadata(provenance: Mapping[str, Any]) -> dict[str, Any]:
+        entity = provenance.get("entity")
+        if isinstance(entity, Mapping) and isinstance(entity.get("metadata"), Mapping):
+            return dict(entity["metadata"])
+        return {}
 
     def source_identity_known(self, artifact_id: str) -> bool:
-        """
-        Check if the source artifacts for a given artifact have known identities.
+        p = self._provenance(artifact_id)
+        if p.get("sources"):
+            return True
+        entity = p.get("entity") or {}
+        if isinstance(entity, Mapping) and entity.get("source_id"):
+            return self.store.get_source(str(entity["source_id"]), strict=False) is not None
+        return False
 
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            bool: True if the source artifacts have known identities, False otherwise.
-        """
-        # Implementation for checking source identity knowledge
-        raise NotImplementedError("Source identity knowledge check is not implemented yet.")
+    def source_available(self, artifact_id: str) -> bool:
+        p = self._provenance(artifact_id)
+        sources = list(p.get("sources") or [])
+        entity = p.get("entity") or {}
+        if not sources and isinstance(entity, Mapping) and entity.get("source_id"):
+            record = self.store.get_source(str(entity["source_id"]), strict=False)
+            if record:
+                sources.append(record)
+        if not sources:
+            return False
+        for source in sources:
+            metadata = source.get("metadata") or {}
+            if isinstance(metadata, Mapping) and metadata.get("available") is True:
+                continue
+            locator = source.get("locator")
+            if not locator:
+                return False
+            parsed = urlparse(str(locator))
+            if parsed.scheme in {"http", "https", "ftp", "s3", "gs"}:
+                # Provenance does not perform network availability probing.  A remote
+                # source is available only if availability was recorded explicitly.
+                return False
+            path = Path(parsed.path if parsed.scheme == "file" else str(locator)).expanduser()
+            if not path.exists():
+                return False
+        return True
 
     def code_version_known(self, artifact_id: str) -> bool:
-        """
-        Check if the code version for a given artifact is known.
-
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            bool: True if the code version is known, False otherwise.
-        """
-        # Implementation for checking code version knowledge
-        raise NotImplementedError("Code version knowledge check is not implemented yet.")
+        p = self._provenance(artifact_id)
+        metadata = self._metadata(p)
+        if any(metadata.get(key) for key in ("code_version", "code_commit", "source_revision")):
+            return True
+        return any(checkpoint.get("code_version") for checkpoint in p.get("checkpoints") or [])
 
     def model_checkpoint_known(self, artifact_id: str) -> bool:
-        """
-        Check if the model checkpoint for a given artifact is known.
-
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            bool: True if the model checkpoint is known, False otherwise.
-        """
-        # Implementation for checking model checkpoint knowledge
-        raise NotImplementedError("Model checkpoint knowledge check is not implemented yet.")
+        p = self._provenance(artifact_id)
+        if p.get("checkpoints"):
+            return True
+        return any(record.get("checkpoint_id") for record in p.get("lineage") or [])
 
     def dataset_version_known(self, artifact_id: str) -> bool:
-        """
-        Check if the dataset version for a given artifact is known.
+        p = self._provenance(artifact_id)
+        metadata = self._metadata(p)
+        if any(metadata.get(key) for key in ("dataset_version", "data_version")):
+            return True
+        entity = p.get("entity") or {}
+        if isinstance(entity, Mapping) and entity.get("entity_type") == "dataset" and metadata.get("version"):
+            return True
+        for checkpoint in p.get("checkpoints") or []:
+            for dataset_id in checkpoint.get("dataset_ids") or []:
+                dataset = self.store.get_entity(str(dataset_id), strict=False)
+                if dataset and isinstance(dataset.get("metadata"), Mapping):
+                    if dataset["metadata"].get("version") or dataset["metadata"].get("dataset_version"):
+                        return True
+        return False
 
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            bool: True if the dataset version is known, False otherwise.
-        """
-        # Implementation for checking dataset version knowledge
-        raise NotImplementedError("Dataset version knowledge check is not implemented yet.")
-
-    def configuration_known(self):
-        """
-        Check if the configuration for a given artifact is known.
-
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            bool: True if the configuration is known, False otherwise.
-        """
-        # Implementation for checking configuration knowledge
-        raise NotImplementedError("Configuration knowledge check is not implemented yet.")
+    def configuration_known(self, artifact_id: str) -> bool:
+        p = self._provenance(artifact_id)
+        metadata = self._metadata(p)
+        if any(metadata.get(key) is not None for key in ("configuration_id", "configuration_digest", "configuration")):
+            return True
+        if any(checkpoint.get("configuration_id") for checkpoint in p.get("checkpoints") or []):
+            return True
+        # A transformation with explicitly recorded parameters is sufficient for
+        # that transformation's local configuration, but not for arbitrary roots.
+        transformations = p.get("transformations") or []
+        return bool(transformations) and all(bool(item.get("parameters")) for item in transformations)
 
     def dependencies_known(self, artifact_id: str) -> bool:
-        """
-        Check if the dependencies for a given artifact are known.
-
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            bool: True if the dependencies are known, False otherwise.
-        """
-        # Implementation for checking dependencies knowledge
-        raise NotImplementedError("Dependencies knowledge check is not implemented yet.")
+        p = self._provenance(artifact_id)
+        metadata = self._metadata(p)
+        if metadata.get("dependencies_required") is False or metadata.get("dependencies_complete") is True:
+            return True
+        return bool(p.get("dependencies"))
 
     def transformations_complete(self, artifact_id: str) -> bool:
-        """
-        Check if the transformations for a given artifact are complete.
+        p = self._provenance(artifact_id)
+        lineage = p.get("lineage") or []
+        if not lineage:
+            metadata = self._metadata(p)
+            # Source/root entities are not required to have a generating transform.
+            return bool(metadata.get("provenance_root") or metadata.get("root") or p.get("sources"))
+        for record in lineage:
+            transformation_id = record.get("transformation_id")
+            descriptive = record.get("transformation")
+            if not transformation_id and not descriptive:
+                return False
+            if transformation_id and self.store.get_transformation(str(transformation_id), strict=False) is None:
+                # Legacy/descriptive lineage may reference an activity instead of a
+                # TransformationRecord; check the activity table before declaring it missing.
+                activities = self.store.snapshot().get("activities", {})
+                if str(transformation_id) not in activities:
+                    return False
+        return True
 
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
+    def environment_known(self, artifact_id: str) -> bool:
+        p = self._provenance(artifact_id)
+        metadata = self._metadata(p)
+        if any(metadata.get(key) for key in ("environment", "environment_id", "environment_digest", "runtime_environment")):
+            return True
+        return any(bool(checkpoint.get("framework_versions")) for checkpoint in p.get("checkpoints") or [])
 
-        Returns:
-            bool: True if the transformations are complete, False otherwise.
-        """
-        # Implementation for checking transformation completeness
-        raise NotImplementedError("Transformation completeness check is not implemented yet.")
+    def _assessment(self, artifact_id: str) -> dict[str, bool]:
+        return {
+            "source_identity_known": self.source_identity_known(artifact_id),
+            "source_available": self.source_available(artifact_id),
+            "code_version_known": self.code_version_known(artifact_id),
+            "model_checkpoint_known": self.model_checkpoint_known(artifact_id),
+            "dataset_version_known": self.dataset_version_known(artifact_id),
+            "configuration_known": self.configuration_known(artifact_id),
+            "dependencies_known": self.dependencies_known(artifact_id),
+            "transformations_complete": self.transformations_complete(artifact_id),
+            "environment_known": self.environment_known(artifact_id),
+        }
+
+    def reproducibility_report(self, artifact_id: str) -> dict[str, Any]:
+        artifact = require_identifier(artifact_id, field_name="artifact_id")
+        checks = self._assessment(artifact)
+        missing = tuple(name for name in self.required_requirements if not checks[name])
+        satisfied = len(self.required_requirements) - len(missing)
+        completeness = satisfied / len(self.required_requirements) if self.required_requirements else 1.0
+        report = ReproducibilityReport(
+            artifact_id=artifact,
+            **checks,
+            reproducible=not missing,
+            completeness=completeness,
+            required_requirements=self.required_requirements,
+            missing_requirements=missing,
+            evidence={
+                "lineage_records": len(self.store.get_lineage_records(artifact)),
+                "dependencies": len(self.store.get_dependencies(artifact)),
+                "checkpoints": len(self._provenance(artifact).get("checkpoints") or []),
+                "sources": [item.get("source_id") for item in self._provenance(artifact).get("sources") or []],
+            },
+        )
+        return report.to_dict()
+
+    def check_reproducibility(self, artifact_id: str) -> bool:
+        return bool(self.reproducibility_report(artifact_id)["reproducible"])
 
     def reproducibility_score(self, artifact_id: str) -> float:
-        """
-        Calculate a reproducibility score for a given artifact.
+        """Backward-compatible provenance-completeness ratio, not a quality score."""
+        return float(self.reproducibility_report(artifact_id)["completeness"])
 
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            float: The reproducibility score for the artifact.
-        """
-        # Implementation for calculating reproducibility score
-        raise NotImplementedError("Reproducibility score calculation is not implemented yet.")
-
-    def reproducibility_report(self, artifact_id: str) -> dict:
-        """
-        Generate a reproducibility report for a given artifact.
-
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-
-        Returns:
-            dict: The reproducibility report for the artifact.
-        """
-        # Implementation for generating reproducibility report
-        raise NotImplementedError("Reproducibility report generation is not implemented yet.")
-    
 
 __all__ = ["Reproducibility"]
+
+if __name__ == "__main__":
+    configure_logging()
+    printer.status("SMOKE", "Reproducibility module loaded", "success")

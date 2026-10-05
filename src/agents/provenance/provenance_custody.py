@@ -1,67 +1,96 @@
 """
-Provenance Custody manages the ownership and control of artifacts.
+Immutable chain-of-custody events for SLAI artifacts.
 
-sources:
-- Turner (2006), Selective and intelligent imaging using digital evidence bags.
-- Torres-Arias et al. (2019), in-toto: Providing farm-to-table guarantees for bits and bytes.
-
-It borrows the chain representation principles, but not turn SLAI provenance into a forensic or security subsystem.
+The design borrows continuity/event-chain principles from digital evidence bags
+and in-toto while remaining provenance infrastructure, not a forensic or
+security-scanning subsystem.  Custody is append-only: ownership transitions are
+recorded as events and never overwrite prior custodians.
 """
-
 from __future__ import annotations
 
-from typing import Mapping, Optional
-from datetime import datetime
+__version__ = "2.3.0"
 
-from .utils.config_loader import load_global_config, get_config_section
-from .utils.provenance_errors import *
+from collections.abc import Mapping
+from typing import Any, Optional
+
+from .utils.config_loader import get_config_section, load_global_config
+from .utils.provenance_errors import ProvenanceCustodyError
 from .utils.provenance_helpers import *
 from .provenance_store import ProvenanceStore
-from .provenance_memory import ProvenanceMemory
-from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+from .provenance_types import CustodyRecord
+from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Provenance Custody")
 printer = PrettyPrinter()
 
+
 class ProvenanceCustody:
-    def __init__(self):
+    """Maintain append-only custody transitions for artifacts."""
+
+    def __init__(self, store: Optional[ProvenanceStore] = None) -> None:
         self.config = load_global_config()
-        raw_section = self.config.get("provenance_custody")
-        if not isinstance(raw_section, Mapping):
-            raise ProvenanceConfigurationError("provenance_custody configuration must be a mapping")
-        self.custody_config = get_config_section("provenance_custody", config=self.config) or {}
+        self.custody_config = get_config_section("provenance_custody", config=self.config, default={})
+        self.provenance_store = store or ProvenanceStore()
 
-        self.custody_records = {}
-        self.provenance_store = ProvenanceStore()
-        self.provenance_memory = ProvenanceMemory()
+    def current_custodian(self, artifact_id: str) -> Optional[str]:
+        history = self.provenance_store.get_custody_history(artifact_id)
+        return str(history[-1]["new_custodian"]) if history else None
 
-    def record_custody(self, artifact_id: str, owner: str, *, timestamp: Optional[str] = None):
-        """
-        Record the custody of an artifact.
+    def transfer_custody(
+        self,
+        artifact_id: str,
+        new_custodian: str,
+        *,
+        previous_custodian: Optional[str] = None,
+        activity: Optional[str] = None,
+        timestamp: Optional[str] = None,
+        artifact_digest: Optional[str] = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        artifact = require_identifier(artifact_id, field_name="artifact_id")
+        new_owner = require_identifier(new_custodian, field_name="new_custodian")
+        current = self.current_custodian(artifact)
+        if previous_custodian is not None:
+            expected = require_identifier(previous_custodian, field_name="previous_custodian")
+            if current is not None and current != expected:
+                raise ProvenanceCustodyError(
+                    "custody transition does not continue from the recorded custodian",
+                    context={
+                        "artifact_id": artifact,
+                        "recorded_custodian": current,
+                        "supplied_previous_custodian": expected,
+                    },
+                )
+            previous = expected
+        else:
+            previous = current
 
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-            owner (str): The owner of the artifact.
-            timestamp (Optional[str]): The timestamp of the custody record. If not provided, the current time will be used.
+        when = timestamp or get_current_timestamp()
+        event_id = stable_provenance_id("custody", artifact, previous, new_owner, activity, when, artifact_digest)
+        record = CustodyRecord(
+            event_id=event_id,
+            artifact_id=artifact,
+            previous_custodian=previous,
+            new_custodian=new_owner,
+            activity=activity,
+            timestamp=when,
+            artifact_digest=artifact_digest,
+            context=normalize_metadata(context),
+        )
+        return self.provenance_store.save_custody_record(record)
 
-        Returns:
-            dict: A dictionary representing the custody record.
-        """
-        if not timestamp:
-            timestamp = get_current_timestamp(self)
+    def record_custody(self, artifact_id: str, owner: str, *, timestamp: Optional[str] = None) -> dict[str, Any]:
+        """Backward-compatible alias that appends a transition to ``owner``."""
+        return self.transfer_custody(artifact_id, owner, timestamp=timestamp)
 
-        custody_record = {
-            "artifact_id": artifact_id,
-            "owner": owner,
-            "timestamp": timestamp
-        }
+    def chain_of_custody(self, artifact_id: str) -> list[dict[str, Any]]:
+        return self.provenance_store.get_custody_history(artifact_id)
 
-        self.custody_records[artifact_id] = custody_record
-        self.provenance_store.save_custody_record(custody_record)
-        return custody_record
+    history = chain_of_custody
 
 
 __all__ = ["ProvenanceCustody"]
 
 if __name__ == "__main__":
-    pass
+    configure_logging()
+    printer.status("SMOKE", "ProvenanceCustody module loaded", "success")

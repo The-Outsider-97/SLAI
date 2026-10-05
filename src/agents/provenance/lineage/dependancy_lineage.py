@@ -1,57 +1,113 @@
 """
-sources:
-- ReproZip — dependencies required for computational reconstruction.
-- Torres-Arias et al. (2019), in-toto — dependency and transformation relationships throughout software supply chains.
-- Lamb & Zacchiroli (2021) — correspondence between source, dependencies/build state, and reproducible outputs.
+Dependency provenance for artifacts, models, checkpoints, and training runs.
 
-This module is especially relevant for SLAI recording relationships such as:
+ReproZip, in-toto, and reproducible-build literature motivate explicit
+artifact -> dependency identity/version relationships.  This module records
+those relationships only; it does not install, resolve, or vulnerability-scan
+dependencies.
 
-checkpoint → torch version
-artifact   → model dependency
-module     → package version
-training-run → dataset
-model      → tokenizer
-output     → originating model checkpoint
-It should not become SLAI's dependency installer or security scanner.
+The historical filename ``dependancy_lineage.py`` is retained for SLAI import
+compatibility.  The class name remains correctly spelled ``DependencyLineage``.
 """
 
 from __future__ import annotations
 
+__version__ = "2.3.0"
+
+from collections.abc import Mapping
 from typing import Any, Optional
 
-from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.provenance_errors import *
+from ..utils.config_loader import get_config_section, load_global_config
 from ..utils.provenance_helpers import *
+from ..provenance_store import ProvenanceStore
+from ..provenance_types import DependencyRecord, ProvenanceRelation, ProvenanceRelationType
 from .base_lineage import BaseLineage
-from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
+
 
 logger = get_logger("Dependency Lineage")
 printer = PrettyPrinter()
 
 
 class DependencyLineage(BaseLineage):
-    def __init__(self, config: Optional[Any] = None):
-        super().__init__(config=config)
+    LINEAGE_TYPE = "dependency"
+
+    def __init__(
+        self,
+        config: Optional[Mapping[str, Any]] = None,
+        *,
+        store: Optional[ProvenanceStore] = None,
+    ) -> None:
+        super().__init__(config=config, store=store)
         self.config = load_global_config()
-        self.dependency_lineage_config = get_config_section('dependency_lineage')
+        self.dependency_lineage_config = get_config_section(
+            "dependency_lineage", config=self.config, default={}
+        )
 
-        logger.info(f"DependencyLineage initialized with config: {self.dependency_lineage_config}")
+    def record_dependency_lineage(
+        self,
+        artifact_id: str,
+        dependency_id: str,
+        relationship: str,
+        timestamp: Optional[str] = None,
+        *,
+        version: Optional[str] = None,
+        digest: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Record one immutable dependency relationship."""
 
-    def record_dependency_lineage(self, artifact_id: str, dependency_id: str, relationship: str, timestamp: Optional[str] = None):
-        """
-        Record the lineage of a dependency.
+        event_timestamp = timestamp or get_current_timestamp()
+        record = DependencyRecord(
+            record_id=stable_provenance_id(
+                "dependency",
+                artifact_id,
+                dependency_id,
+                relationship,
+                version,
+                digest,
+                event_timestamp,
+            ),
+            artifact_id=artifact_id,
+            dependency_id=dependency_id,
+            relationship=relationship,
+            version=version,
+            digest=digest,
+            timestamp=event_timestamp,
+            metadata=metadata or {},
+        )
+        self.ensure_entity(artifact_id, entity_type="artifact")
+        self.ensure_entity(
+            dependency_id,
+            entity_type="dependency",
+            digest=digest,
+            metadata={"version": version} if version is not None else {},
+        )
+        persisted = self.store.save_dependency_record(record)
+        relation = ProvenanceRelation(
+            relation_id=stable_provenance_id(
+                "relation",
+                ProvenanceRelationType.DEPENDS_ON.value,
+                artifact_id,
+                dependency_id,
+                record.record_id,
+            ),
+            relation_type=ProvenanceRelationType.DEPENDS_ON,
+            subject_id=artifact_id,
+            object_id=dependency_id,
+            timestamp=event_timestamp,
+            metadata={"dependency_record_id": record.record_id, "relationship": relationship},
+        )
+        self.store.save_relation(relation)
+        return persisted
 
-        Args:
-            artifact_id (str): The unique identifier of the artifact.
-            dependency_id (str): The unique identifier of the dependency.
-            relationship (str): Description of the relationship between the artifact and the dependency.
-            timestamp (Optional[str]): The timestamp of when the lineage was recorded. If None, current time is used.
-
-        Returns:
-            None
-        """
-        # Implementation for recording dependency lineage
-        raise NotImplementedError("Dependency lineage recording is not implemented yet.")
+    def dependencies_for(self, artifact_id: str) -> list[dict[str, Any]]:
+        return self.store.get_dependencies(artifact_id)
 
 
 __all__ = ["DependencyLineage"]
+
+
+if __name__ == "__main__":
+    configure_logging()
+    printer.status("PROVENANCE", "dependency lineage loaded", "success")

@@ -1,62 +1,135 @@
 """
-sources:
-- Vartak et al. (2016), ModelDB. DOI: 10.1145/2939502.2939516.
-- Souza et al. (2022), Workflow provenance in the lifecycle of scientific machine learning.
-- Souza et al. (2019), Provenance Data in the Machine Learning Lifecycle in Computational Science and Engineering.
+Model and checkpoint lineage for SLAI.
 
-This work introduced PROV-ML on top of W3C PROV to represent ML-specific lifecycle provenance.
-
-For SLAI, this module connects:
-
-model checkpoint
-├── parent checkpoint
-├── architecture/version
-├── training dataset identity
-├── training activity
-├── configuration identity
-├── code identity
-└── produced model artifact
-
-but leave accuracy/performance metrics to Evaluation or training infrastructure unless those metrics are merely referenced as immutable metadata.
+Academically informed by ModelDB and PROV-ML: a model/checkpoint is treated as
+an immutable provenance entity whose ancestry points to parent models,
+training datasets, configuration/code identities, and the training activity
+that produced it.  Performance evaluation remains outside this module.
 """
-
 from __future__ import annotations
 
-from typing import Any, Optional
+__version__ = "2.3.0"
 
-from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.provenance_errors import *
+from typing import Any, Iterable, Mapping, Optional
+
+from ..utils.config_loader import get_config_section
 from ..utils.provenance_helpers import *
+from ..provenance_types import CheckpointRecord, ModelRecord
 from .base_lineage import BaseLineage
-from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
+from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
+
 
 logger = get_logger("Model Lineage")
 printer = PrettyPrinter()
 
 
 class ModelLineage(BaseLineage):
-    def __init__(self, config: Optional[Any] = None):
-        super().__init__(config=config)
-        self.config = load_global_config()
-        self.model_lineage_config = get_config_section('model_lineage')
+    """Record model/version ancestry and optional checkpoint provenance."""
 
-        logger.info(f"ModelLineage initialized with config: {self.model_lineage_config}")
+    def __init__(self, config: Optional[Any] = None, *, store=None):
+        super().__init__(config=config, store=store)
+        self.model_lineage_config = get_config_section("model_lineage", config=self.config, default={})
 
-    def record_model_lineage(self, model_id: str, parent_model_id: str, transformation: str, timestamp: Optional[str] = None):
-        """
-        Record the lineage of a model.
+    def record_model_lineage(
+        self,
+        model_id: str,
+        parent_model_id: Optional[str] = None,
+        transformation: str = "train",
+        timestamp: Optional[str] = None,
+        *,
+        parent_model_ids: Optional[Iterable[str]] = None,
+        model_version: Optional[str] = None,
+        architecture: Optional[str] = None,
+        checkpoint_id: Optional[str] = None,
+        parent_checkpoint_id: Optional[str] = None,
+        training_run_id: Optional[str] = None,
+        training_dataset_ids: Optional[Iterable[str]] = None,
+        configuration_id: Optional[str] = None,
+        code_version: Optional[str] = None,
+        framework_versions: Optional[Mapping[str, str]] = None,
+        artifact_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        parents = list(normalize_id_sequence(parent_model_ids, field_name="parent_model_ids"))
+        if parent_model_id and parent_model_id not in parents:
+            parents.insert(0, parent_model_id)
+        datasets = normalize_id_sequence(training_dataset_ids, field_name="training_dataset_ids")
+        when = timestamp or get_current_timestamp()
 
-        Args:
-            model_id (str): The unique identifier of the model.
-            parent_model_id (str): The unique identifier of the parent model.
-            transformation (str): Description of the transformation applied to the parent model.
-            timestamp (Optional[str]): The timestamp of when the lineage was recorded. If None, current time is used.
+        self.ensure_entity(
+            model_id,
+            entity_type="model",
+            metadata={"version": model_version, "architecture": architecture},
+        )
+        for parent in parents:
+            self.ensure_entity(parent, entity_type="model")
+        for dataset_id in datasets:
+            self.ensure_entity(dataset_id, entity_type="dataset")
 
-        Returns:
-            None
-        """
-        # Implementation for recording model lineage
-        raise NotImplementedError("Model lineage recording is not implemented yet.")
+        model_metadata = dict(normalize_metadata(metadata))
+        model_metadata.update({
+            key: value
+            for key, value in {
+                "training_run_id": training_run_id,
+                "training_dataset_ids": list(datasets),
+                "configuration_id": configuration_id,
+            }.items()
+            if value not in (None, [], ())
+        })
+        model_record = ModelRecord(
+            model_id=model_id,
+            parent_model_ids=tuple(parents),
+            checkpoint_ids=(checkpoint_id,) if checkpoint_id else (),
+            version=model_version,
+            architecture=architecture,
+            code_version=code_version,
+            created_at=when,
+            metadata=model_metadata,
+        )
+
+        lineage_metadata = dict(normalize_metadata(metadata))
+        lineage_metadata["model"] = model_record.to_dict()
+        if framework_versions:
+            lineage_metadata["framework_versions"] = dict(framework_versions)
+
+        lineage = self.record_lineage(
+            model_id,
+            parents,
+            transformation,
+            timestamp=when,
+            lineage_type="model",
+            agent_id=agent_id,
+            checkpoint_id=checkpoint_id,
+            metadata=lineage_metadata,
+        )
+
+        checkpoint = None
+        if checkpoint_id:
+            checkpoint = CheckpointRecord(
+                checkpoint_id=checkpoint_id,
+                model_id=model_id,
+                parent_checkpoint_id=parent_checkpoint_id,
+                training_run_id=training_run_id,
+                dataset_ids=datasets,
+                configuration_id=configuration_id,
+                code_version=code_version,
+                framework_versions=dict(framework_versions or {}),
+                artifact_id=artifact_id or model_id,
+                created_at=when,
+                metadata=normalize_metadata(metadata),
+            )
+            self.store.save_checkpoint_record(checkpoint)
+
+        return {
+            "lineage": lineage,
+            "model": model_record.to_dict(),
+            "checkpoint": checkpoint.to_dict() if checkpoint else None,
+        }
 
 
 __all__ = ["ModelLineage"]
+
+if __name__ == "__main__":
+    configure_logging()
+    printer.status("SMOKE", "ModelLineage module loaded", "success")
