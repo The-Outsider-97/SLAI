@@ -1,0 +1,325 @@
+{
+  "schema": "slai.provenance.alert-calls.v1",
+  "template_type": "catalog",
+  "scope": "provenance_integrity_and_lifecycle",
+  "alerts": [
+    {
+      "code": "PROVENANCE_IDENTITY_CONFLICT",
+      "category": "identity",
+      "severity": "error",
+      "title": "Conflicting provenance identity",
+      "description": "A stable provenance identifier was reused with incompatible immutable evidence.",
+      "match": {
+        "error_type": "ProvenanceConflictError",
+        "error_code": "PROV-1202"
+      },
+      "evidence_fields": [
+        "artifact_id",
+        "source_id",
+        "checkpoint_id",
+        "event_id",
+        "record_id"
+      ],
+      "recommended_actions": [
+        "Preserve the existing immutable provenance record.",
+        "Reject the conflicting capture attempt.",
+        "Review the producer's stable-ID generation and retry behavior."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_MALFORMED_EVENT",
+      "category": "validation",
+      "severity": "warning",
+      "title": "Malformed provenance event",
+      "description": "A generic provenance event did not satisfy the ProvenanceAgent event contract.",
+      "match": {
+        "error_type": "ProvenanceValidationError",
+        "error_code": "PROV-1200"
+      },
+      "evidence_fields": [
+        "event_id",
+        "event_type"
+      ],
+      "recommended_actions": [
+        "Reject the malformed event without inventing missing provenance.",
+        "Verify the event_type and payload fields against ProvenanceAgent.record_event().",
+        "Retry only after the producer emits an unambiguous provenance payload."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_CYCLIC_LINEAGE_REJECTED",
+      "category": "graph",
+      "severity": "error",
+      "title": "Cyclic lineage rejected",
+      "description": "Artifact, checkpoint, or transformation ancestry would introduce or expose a provenance cycle.",
+      "match": {
+        "error_type": "ProvenanceGraphError",
+        "error_code": "PROV-1201"
+      },
+      "evidence_fields": [
+        "artifact_id",
+        "parent_id",
+        "checkpoint_id",
+        "parent_checkpoint_id",
+        "transformation_id"
+      ],
+      "recommended_actions": [
+        "Reject the cyclic relationship.",
+        "Inspect parent/child direction and stable identities.",
+        "Correct the producer data before retrying."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_UNKNOWN_REFERENCE",
+      "category": "reference",
+      "severity": "warning",
+      "title": "Unknown provenance reference",
+      "description": "A requested artifact, source, checkpoint, parent, or provenance record is not known to the current provenance state.",
+      "match": {
+        "error_type": "ProvenanceNotFoundError",
+        "error_code": "PROV-1203"
+      },
+      "evidence_fields": [
+        "artifact_id",
+        "source_id",
+        "checkpoint_id",
+        "missing_parent_checkpoint_id"
+      ],
+      "recommended_actions": [
+        "Confirm the stable identifier is correct.",
+        "Register or restore the missing provenance fact if it is actually known.",
+        "Do not fabricate an unknown parent or source to complete the graph."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_MISSING_SOURCE_REFERENCE",
+      "category": "reproducibility",
+      "severity": "warning",
+      "title": "Source identity missing from reconstruction evidence",
+      "description": "The reproducibility report indicates that source identity is not known for the target artifact.",
+      "match": {
+        "report_field": "source_identity_known",
+        "equals": false
+      },
+      "evidence_fields": [
+        "artifact_id",
+        "missing_requirements",
+        "evidence"
+      ],
+      "recommended_actions": [
+        "Inspect the artifact's lineage and source_ids.",
+        "Register the source only when its identity is known.",
+        "Re-run the reproducibility report after provenance capture is corrected."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_CHECKPOINT_ANCESTRY_CONFLICT",
+      "category": "checkpoint",
+      "severity": "error",
+      "title": "Checkpoint ancestry conflict",
+      "description": "Checkpoint provenance conflicts with immutable checkpoint identity or would form invalid ancestry.",
+      "match": {
+        "error_types": [
+          "ProvenanceConflictError",
+          "ProvenanceGraphError"
+        ],
+        "error_codes": [
+          "PROV-1202",
+          "PROV-1201"
+        ]
+      },
+      "evidence_fields": [
+        "checkpoint_id",
+        "parent_checkpoint_id",
+        "model_id"
+      ],
+      "recommended_actions": [
+        "Preserve the existing checkpoint provenance fact.",
+        "Verify the parent checkpoint and model association.",
+        "Correct conflicting checkpoint metadata before retrying."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_CHECKPOINT_MISSING",
+      "category": "checkpoint",
+      "severity": "warning",
+      "title": "Checkpoint provenance missing",
+      "description": "A requested checkpoint provenance record is not present in ProvenanceMemory or ProvenanceStore.",
+      "match": {
+        "error_type": "ProvenanceNotFoundError",
+        "error_code": "PROV-1203"
+      },
+      "evidence_fields": [
+        "checkpoint_id",
+        "missing_parent_checkpoint_id"
+      ],
+      "recommended_actions": [
+        "Verify the checkpoint identifier against CheckpointManager output.",
+        "Record provenance about the checkpoint if the physical checkpoint exists and its metadata is known.",
+        "Do not create a synthetic checkpoint provenance record without evidence."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_CUSTODY_CONTINUITY_CONFLICT",
+      "category": "custody",
+      "severity": "error",
+      "title": "Custody continuity conflict",
+      "description": "The supplied previous custodian does not match the currently recorded custodian for the artifact.",
+      "match": {
+        "error_type": "ProvenanceCustodyError",
+        "error_code": "PROV-1500"
+      },
+      "evidence_fields": [
+        "artifact_id",
+        "recorded_custodian",
+        "supplied_previous_custodian"
+      ],
+      "recommended_actions": [
+        "Reject the conflicting custody transition.",
+        "Retrieve the current chain-of-custody.",
+        "Submit a new transition only when the previous custodian is consistent with recorded history."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_PERSISTENCE_FAILURE",
+      "category": "storage",
+      "severity": "error",
+      "title": "Provenance persistence failure",
+      "description": "Durable provenance storage or local ProvenanceMemory persistence failed.",
+      "match": {
+        "error_type": "ProvenanceStorageError",
+        "error_code": "PROV-1400"
+      },
+      "evidence_fields": [
+        "path",
+        "checkpoint_id",
+        "operation"
+      ],
+      "recommended_actions": [
+        "Preserve the original exception and operation context.",
+        "Verify the configured provenance storage or manifest location and writable state.",
+        "Retry only after the persistence condition has been corrected."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_MANIFEST_CORRUPTION",
+      "category": "local_memory",
+      "severity": "critical",
+      "title": "Provenance checkpoint manifest cannot be interpreted",
+      "description": "ProvenanceMemory could not normalize or load its checkpoint manifest because the structure, identities, or schema are inconsistent.",
+      "match": {
+        "error_types": [
+          "ProvenanceStorageError",
+          "ProvenanceConflictError"
+        ],
+        "error_codes": [
+          "PROV-1400",
+          "PROV-1202"
+        ]
+      },
+      "evidence_fields": [
+        "path",
+        "schema",
+        "manifest_key",
+        "record_checkpoint_id"
+      ],
+      "recommended_actions": [
+        "Do not overwrite the manifest automatically.",
+        "Preserve the failed manifest for inspection.",
+        "Restore from a known valid provenance manifest or reconstruct local references from authoritative ProvenanceStore facts."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_UNSUPPORTED_SCHEMA",
+      "category": "schema",
+      "severity": "error",
+      "title": "Unsupported provenance schema version",
+      "description": "A ProvenanceStore, ProvenanceMemory, or ProvenanceAgent checkpoint schema is incompatible with the current implementation.",
+      "match": {
+        "error_types": [
+          "ProvenanceStorageError",
+          "ProvenanceValidationError"
+        ],
+        "error_codes": [
+          "PROV-1400",
+          "PROV-1200"
+        ]
+      },
+      "evidence_fields": [
+        "schema",
+        "schema_version",
+        "expected",
+        "observed"
+      ],
+      "recommended_actions": [
+        "Reject incompatible persisted state rather than coercing it silently.",
+        "Confirm the producing SLAI version and supported schema.",
+        "Perform only an explicitly supported compatibility conversion."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_REPRODUCIBILITY_INCOMPLETE",
+      "category": "reproducibility",
+      "severity": "warning",
+      "title": "Reconstruction evidence is incomplete",
+      "description": "The reproducibility report is structurally valid but one or more required provenance requirements are missing.",
+      "match": {
+        "report_field": "reproducible",
+        "equals": false
+      },
+      "evidence_fields": [
+        "artifact_id",
+        "completeness",
+        "required_requirements",
+        "missing_requirements",
+        "evidence"
+      ],
+      "recommended_actions": [
+        "Inspect missing_requirements rather than treating completeness as a quality score.",
+        "Capture only provenance evidence that is actually known.",
+        "Regenerate the reproducibility report after missing provenance is recorded."
+      ],
+      "shared_memory_reference_only": true
+    },
+    {
+      "code": "PROVENANCE_DERIVATION_RECONSTRUCTION_FAILURE",
+      "category": "lineage",
+      "severity": "error",
+      "title": "Derivation reconstruction failed",
+      "description": "Lineage capture or reconstruction raised a provenance lineage/tracking error rather than returning a valid graph/path result.",
+      "match": {
+        "error_types": [
+          "ProvenanceLineageError",
+          "ProvenanceTrackingError"
+        ],
+        "error_codes": [
+          "PROV-1301",
+          "PROV-1300"
+        ]
+      },
+      "evidence_fields": [
+        "artifact_id",
+        "source_id",
+        "output_id",
+        "record_id"
+      ],
+      "recommended_actions": [
+        "Preserve the lineage error context.",
+        "Inspect referenced entities, relations, and transformation identities.",
+        "Do not convert a reconstruction error into a fabricated derivation path."
+      ],
+      "shared_memory_reference_only": true
+    }
+  ]
+}
