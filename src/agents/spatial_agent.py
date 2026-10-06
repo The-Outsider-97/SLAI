@@ -1535,4 +1535,14 @@ __all__ = ["SpatialAgent"]
 if __name__ == "__main__":
     configure_logging()
     print("\n=== Running Spatial Agent ===\n")
-    printer.status("TEST", "Spatial Agent module import successful", "info")
+    printer.status("TEST", "Spatial Agent initialized", "info")
+    from .agent_factory import AgentFactory
+    from .collaborative.shared_memory import SharedMemory
+
+    shared_memory = SharedMemory()
+    agent_factory = AgentFactory()
+
+    config = {"publish_shared_memory": False}
+
+    agent = SpatialAgent(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
+    printer.status("START", agent, "info")
