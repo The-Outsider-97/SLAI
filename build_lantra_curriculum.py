@@ -651,7 +651,7 @@ def _apply_cli_overrides(config: CurriculumConfig, args: argparse.Namespace) -> 
     return config.with_overrides(**overrides)
 
 
-def _create_agents(config: CurriculumConfig) -> Tuple[Any, Any, Any, Optional[Any], Optional[Any]]:
+def _create_agents(config: CurriculumConfig) -> Tuple[Any, Any, Any, Optional[Any], Optional[Any], Any]:
     from src.agents.agent_factory import AgentFactory
     from src.agents.collaborative.shared_memory import SharedMemory
 
@@ -1138,33 +1138,60 @@ def build(
             )
 
         assert knowledge is not None
-        builder = LantraCurriculumBuilder(
-            config,
-            knowledge=knowledge,
-            reasoning=reasoning,
-            perception=perception,
-            runtime_metadata=runtime_metadata,
-            resume=resume,
-            checkpoint_every=checkpoint_every,
-        )
-        with _ProgressStage(
-            "Construct agent-enriched curriculum",
-            heartbeat_seconds=progress_interval,
-            detail=(
-                f"{len(segments):,} segments; "
-                "knowledge indexing -> ontology facts -> phase 2A -> "
-                "phase 2B retrieval -> phase 2C reasoning -> artifacts"
-            ),
-        ):
-            result = builder.build(
-                documents,
-                segments,
-                source_inventory=source_inventory,
-                source_fingerprint=source_fingerprint,
-                build_fingerprint=final_fingerprint,
+        if result is None:
+            builder = LantraCurriculumBuilder(
+                config,
+                knowledge=knowledge,
+                reasoning=reasoning,
+                perception=perception,
+                runtime_metadata=runtime_metadata,
+                resume=resume,
+                checkpoint_every=checkpoint_every,
             )
+            with _ProgressStage(
+                "Construct agent-enriched curriculum",
+                heartbeat_seconds=progress_interval,
+                detail=(
+                    f"{len(segments):,} segments; "
+                    "knowledge indexing -> ontology facts -> phase 2A -> "
+                    "phase 2B retrieval -> phase 2C reasoning -> artifacts"
+                ),
+            ):
+                result = builder.build(
+                    documents,
+                    segments,
+                    source_inventory=source_inventory,
+                    source_fingerprint=source_fingerprint,
+                    build_fingerprint=final_fingerprint,
+                )
 
         assert result is not None
+
+        pipeline_loaded = _PIPELINE_CONFIG.load(pipeline_config_path)
+        pipeline_config = pipeline_loaded.get("lantra_pipeline", {})
+        if not isinstance(pipeline_config, Mapping):
+            raise CurriculumError("lantra_pipeline configuration must be a mapping.")
+
+        supervised_cfg = pipeline_config.get("supervised_generation", {})
+        supervised_enabled = (
+            isinstance(supervised_cfg, Mapping)
+            and bool(supervised_cfg.get("enabled", True))
+        )
+        supervised_result = None
+        if supervised_enabled:
+            with _ProgressStage(
+                "Build validated teacher supervision",
+                heartbeat_seconds=progress_interval,
+                detail="SLAI validation + provider fallback + seven-task coverage",
+            ):
+                supervised_result = build_supervised_dataset(
+                    documents,
+                    pipeline_config=pipeline_config,
+                    quality_agent=quality_agent,
+                    enable_external_llm=enable_external_llm,
+                    force=not resume,
+                )
+
         artifacts = result.manifest.get("artifacts", [])
         coverage = result.manifest.get("coverage", {})
         _emit_progress(
@@ -1177,7 +1204,31 @@ def build(
                 if isinstance(coverage, Mapping)
                 else "unknown"
             ),
+            supervised_manifest=(
+                supervised_result.manifest_path
+                if supervised_result is not None
+                else "disabled"
+            ),
         )
+        if supervised_result is not None:
+            _emit_progress(
+                "DONE",
+                "Validated teacher supervision complete",
+                providers=",".join(supervised_result.providers) or "SLAI-only",
+                external_accepted=supervised_result.external_calls_accepted,
+                fallback_accepted=supervised_result.deterministic_fallback_accepted,
+                rejected=supervised_result.rejected,
+            )
+            if isinstance(result.manifest, dict):
+                result.manifest["validated_teacher_supervision"] = {
+                    "manifest": supervised_result.manifest_path,
+                    "providers": list(supervised_result.providers),
+                    "coverage": dict(supervised_result.coverage),
+                    "external_accepted": supervised_result.external_calls_accepted,
+                    "fallback_accepted": supervised_result.deterministic_fallback_accepted,
+                    "rejected": supervised_result.rejected,
+                    "resumed_records": supervised_result.resumed_records,
+                }
         return result
     finally:
         if factory is not None or memory is not None:
@@ -1270,6 +1321,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "manifest": result.manifest_path,
                 "records": result.manifest.get("records", {}),
                 "coverage": result.manifest.get("coverage", {}),
+                "validated_teacher_supervision": result.manifest.get("validated_teacher_supervision", {}),
             }
         else:
             summary = {"status": "dry_run", **result}

@@ -1,0 +1,77 @@
+lantra_pipeline:
+  duplicate_similarity_threshold: 0.85
+  duplicate_shingle_size: 5
+  duplicate_minhash_permutations: 64
+  duplicate_lsh_bands: 16
+  minimum_document_words: 50
+
+  cleaner:
+    library_path: data/library
+    bin_path: bin/lantra_duplicates
+    dedup_index_path: data/processed/lantra/state/corpus_dedup.sqlite3
+    historical_corpora:
+      - africa/training_text
+      - american_history/training_text
+      - asian_history/training_text
+      - astrophysics/training_text
+      - europe/training_text
+      - literature/training_text
+      - plants/training_text
+      - plant_kingdom/training_text
+
+  scraper:
+    library_path: data/library
+    state_path: data/processed/lantra/scraper/slai_scraper_state.json
+    manifest_path: data/processed/lantra/scraper/accepted_manifest.jsonl
+    dedup_index_path: data/processed/lantra/state/corpus_dedup.sqlite3
+    target_bytes: 500000000
+    request_timeout_seconds: 30
+    retry_limit: 3
+    retry_backoff_seconds: 2.0
+    requests_per_minute: 40
+    user_agent: SLAI-LANTRA-Corpus/2.3
+    quality_minimum_score: 0.55
+    max_consecutive_failures: 12
+    sources:
+      wikipedia: true
+      wikisource: true
+      gutenberg: true
+
+  supervised_generation:
+    enabled: true
+    output_dir: data/processed/lantra/supervised/generated
+    state_path: data/processed/lantra/supervised/.build_state.json
+    manifest_path: data/processed/lantra/supervised/generated_manifest.json
+    cache_path: data/processed/lantra/supervised/.llm_cache.sqlite3
+    minimum_train_examples_per_task: 8
+    minimum_validation_examples_per_task: 1
+    minimum_test_examples_per_task: 1
+    max_source_characters: 6000
+    max_examples_per_document: 7
+    multi_model_critique: false
+    external_llm_enabled: true
+    provider_retry_limit: 2
+    provider_backoff_seconds: 2.0
+    provider_timeout_seconds: 45
+    providers:
+      - name: openai
+        enabled: true
+        api_key_env: OPENAI_API_KEY
+        model_env: OPENAI_MODEL
+        default_model: gpt-4o-mini
+      - name: gemini
+        enabled: true
+        api_key_env: GEMINI_API_KEY
+        alternate_api_key_env: GOOGLE_API_KEY
+        model_env: GEMINI_MODEL
+        default_model: gemini-2.0-flash
+      - name: openrouter
+        enabled: true
+        api_key_env: OPENROUTER_API_KEY
+        model_env: OPENROUTER_MODEL
+        default_model: openai/gpt-4o-mini
+      - name: groq
+        enabled: true
+        api_key_env: GROQ_API_KEY
+        model_env: GROQ_MODEL
+        default_model: llama-3.3-70b-versatile

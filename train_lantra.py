@@ -118,6 +118,7 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Seque
 from src.agents.language.modules.language_tokenizer import LanguageTokenizer
 from src.agents.language.modules.language_transformer import LanguageTransformer
 from src.training.lantra_phase_scheduler import *
+from src.training.lantra_resume import load_optimizer_resume_state, select_resume_checkpoint, summarize_checkpoint
 from logs.logger import PrettyPrinter, configure_logging, get_logger
 
 
@@ -543,33 +544,51 @@ def save_continual_state(path: Path, state: Mapping[str, Any]) -> None:
     atomic_json_write(path, payload)
 
 
-def discover_resume_checkpoint(output_dir: Path, state: Mapping[str, Any]) -> Optional[Path]:
-    configured = state.get("last_checkpoint")
-    if isinstance(configured, str) and configured.strip():
-        candidate = Path(configured)
-        if candidate.is_file():
-            return candidate
+def _load_checkpoint_payload(path: Path) -> Mapping[str, Any]:
+    runtime = torch_runtime()
+    try:
+        try:
+            payload = runtime.load(path, map_location="cpu", weights_only=True, mmap=True)
+        except TypeError:
+            try:
+                payload = runtime.load(path, map_location="cpu", weights_only=True)
+            except TypeError:
+                payload = runtime.load(path, map_location="cpu")
+    except Exception as exc:
+        raise LantraTrainingError(
+            f"Failed to inspect LANTRA checkpoint {path}: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise LantraTrainingError(f"LANTRA checkpoint {path} does not contain a mapping payload.")
+    return payload
 
-    # Prefer a completed top-level final checkpoint over phase-local best/latest
-    # checkpoints even when a raw-pretraining file happens to have a newer mtime.
-    final_pattern = re.compile(r"^lantra_\d{8}T\d{6}Z\.pt$")
-    finals = [
-        path for path in output_dir.glob("lantra_*.pt")
-        if path.is_file() and final_pattern.match(path.name)
-    ]
-    if finals:
-        return max(finals, key=lambda item: item.stat().st_mtime_ns)
 
-    for candidate in (
-        output_dir / "lantra_latest.pt",
-        output_dir / "lantra_best.pt",
-        output_dir / "lantra_raw_pretrain_latest.pt",
-        output_dir / "lantra_raw_pretrain_best.pt",
-        output_dir / "lantra_interrupted.pt",
-    ):
-        if candidate.is_file():
-            return candidate
-    return None
+def discover_resume_checkpoint(
+    output_dir: Path,
+    state: Mapping[str, Any],
+    config: Optional["TrainerConfig"] = None,
+) -> Optional[Path]:
+    expected = config.recommended_model_overrides if config is not None else {}
+    summary, inspected = select_resume_checkpoint(
+        output_dir,
+        continual_state=state,
+        loader=_load_checkpoint_payload,
+        expected_base_config=expected,
+    )
+    for item in inspected:
+        LOGGER.debug("LANTRA resume candidate: %s", item)
+    if summary is None:
+        return None
+    LOGGER.info(
+        "Metadata-selected LANTRA checkpoint: %s | stage=%s status=%s epoch=%d step=%d optimizer=%s",
+        summary.path,
+        summary.stage or "unknown",
+        summary.status or "unknown",
+        summary.epoch,
+        summary.global_optimizer_step,
+        summary.has_optimizer_state,
+    )
+    return summary.path
 
 
 def inventory_raw_files(
@@ -663,23 +682,9 @@ def _architecture_mismatches(
 
 
 def _checkpoint_base_config(path: Path) -> Dict[str, Any]:
-    """Read only the native LanguageTransformer checkpoint metadata needed for resume selection."""
+    """Read native LanguageTransformer architecture metadata for compatibility checks."""
 
-    runtime = torch_runtime()
-    try:
-        try:
-            checkpoint = runtime.load(path, map_location="cpu", weights_only=True)
-        except TypeError:
-            checkpoint = runtime.load(path, map_location="cpu")
-    except Exception as exc:
-        raise LantraTrainingError(
-            f"Failed to inspect LANTRA resume checkpoint {path}: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    if not isinstance(checkpoint, Mapping):
-        raise LantraTrainingError(
-            f"LANTRA resume checkpoint {path} does not contain a mapping payload."
-        )
+    checkpoint = _load_checkpoint_payload(path)
     base_config = checkpoint.get("base_config")
     if not isinstance(base_config, Mapping):
         raise LantraTrainingError(
@@ -701,6 +706,41 @@ def checkpoint_recommendation_mismatches(
         config.recommended_model_overrides,
     )
 
+
+def _restore_stage_optimizer(
+    checkpoint_path: Optional[Path],
+    optimizer: Any,
+    *,
+    expected_stage: str,
+    dataset_fingerprint: str = "",
+    corpus_fingerprint: str = "",
+) -> Optional[Dict[str, Any]]:
+    if checkpoint_path is None or not checkpoint_path.is_file():
+        return None
+    payload = _load_checkpoint_payload(checkpoint_path)
+    resume = load_optimizer_resume_state(
+        payload,
+        expected_stage=expected_stage,
+        dataset_fingerprint=dataset_fingerprint,
+        corpus_fingerprint=corpus_fingerprint,
+    )
+    if resume is None:
+        return None
+    try:
+        optimizer.load_state_dict(resume["optimizer_state_dict"])
+    except Exception as exc:
+        raise LantraTrainingError(
+            f"Checkpoint {checkpoint_path} has incompatible optimizer state for {expected_stage}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    LOGGER.info(
+        "Restored LANTRA optimizer state from %s for stage=%s epoch=%d step=%d",
+        checkpoint_path,
+        expected_stage,
+        int(resume.get("epoch", 0)),
+        int(resume.get("global_optimizer_step", 0)),
+    )
+    return dict(resume)
 
 def _reset_continual_state_for_fresh_architecture(
     state: Mapping[str, Any],
@@ -2741,6 +2781,7 @@ def raw_text_pretrain(
     run_id: str,
     *,
     evaluate_test_split: bool = True,
+    resume_checkpoint: Optional[Path] = None,
 ) -> Tuple[LanguageTransformer, Dict[str, Any]]:
     if config.raw_pretrain_epochs <= 0 or not corpus.train_segments:
         return model, {"status": "skipped", "reason": "no raw training segments or raw_pretrain_epochs=0"}
@@ -2765,137 +2806,183 @@ def raw_text_pretrain(
     best_validation = float("inf")
     best_path = Path(config.output_dir) / "lantra_raw_pretrain_best.pt"
     latest_path = Path(config.output_dir) / "lantra_raw_pretrain_latest.pt"
+    interrupted_path = Path(config.output_dir) / "lantra_raw_pretrain_interrupted.pt"
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     history: List[Dict[str, Any]] = []
     interval_checkpoints: List[str] = []
     rng = random.Random(config.seed + 202)
+    start_epoch = 1
+    resume_state = _restore_stage_optimizer(
+        resume_checkpoint,
+        optimizer,
+        expected_stage="raw_text_denoising_pretraining",
+        corpus_fingerprint=corpus.fingerprint,
+    )
+    if resume_state is not None:
+        resumed_epoch = int(resume_state.get("epoch", 0))
+        global_step = int(resume_state.get("global_optimizer_step", 0))
+        resume_meta = resume_state.get("metadata", {})
+        resume_phase = str(resume_meta.get("phase", "")) if isinstance(resume_meta, Mapping) else ""
+        start_epoch = max(\n            1,\n            resumed_epoch\n            if resume_phase.endswith(("_interval", "_interrupted"))\n            else resumed_epoch + 1,\n        )
+        record = resume_meta.get("record", {}) if isinstance(resume_meta, Mapping) else {}
+        if isinstance(record, Mapping):
+            prior_metric = record.get("validation_loss")
+            if isinstance(prior_metric, (int, float)) and math.isfinite(float(prior_metric)):
+                best_validation = float(prior_metric)
+        LOGGER.info(
+            "Resuming raw pretraining at epoch=%d global_step=%d corpus=%s",
+            start_epoch, global_step, corpus.fingerprint[:16],
+        )
+    current_epoch = max(0, start_epoch - 1)
 
-    for epoch in range(1, config.raw_pretrain_epochs + 1):
-        order = list(train_segments)
-        rng.shuffle(order)
-        order = order[:per_epoch_count]
-        model.train()
-        epoch_loss = 0.0
-        example_count = 0
-        epoch_steps = 0
-
-        for group_start in range(0, len(order), config.gradient_accumulation):
-            group = order[group_start:group_start + config.gradient_accumulation]
-            if not group:
-                continue
-            optimizer.zero_grad(set_to_none=True)
-            # Segments are filtered to meaningful text before training, so nearly
-            # every item yields >=3 tokens. Backpropagate each graph immediately
-            # instead of retaining an entire accumulation group's graphs in memory.
-            scale = float(len(group))
-            valid_in_group = 0
-            for text in group:
-                loss = raw_reconstruction_loss(model, tokenizer, text, config, device, rng=rng)
-                if loss is None:
+    try:
+        for epoch in range(start_epoch, config.raw_pretrain_epochs + 1):
+            current_epoch = epoch
+            order = list(train_segments)
+            rng.shuffle(order)
+            order = order[:per_epoch_count]
+            model.train()
+            epoch_loss = 0.0
+            example_count = 0
+            epoch_steps = 0
+    
+            for group_start in range(0, len(order), config.gradient_accumulation):
+                group = order[group_start:group_start + config.gradient_accumulation]
+                if not group:
                     continue
-                (loss / scale).backward()
-                value = finite_loss_value(loss)
-                epoch_loss += value
-                example_count += 1
-                valid_in_group += 1
-            if valid_in_group == 0:
                 optimizer.zero_grad(set_to_none=True)
-                continue
-
-            global_step += 1
-            lr = scheduled_learning_rate(
-                global_step,
-                total_steps,
-                peak_lr=config.learning_rate,
-                min_lr=config.min_learning_rate,
-                warmup_steps=warmup,
-            )
-            set_optimizer_lr(optimizer, lr)
-            grad_norm = model.clip_gradients(optimizer)
-            optimizer.step()
-            epoch_steps += 1
-
-            if (
-                config.checkpoint_every_steps > 0
-                and global_step % config.checkpoint_every_steps == 0
-            ):
-                interval_path = Path(config.output_dir) / (
-                    f"lantra_raw_pretrain_{run_id}_step_{global_step:08d}.pt"
+                # Segments are filtered to meaningful text before training, so nearly
+                # every item yields >=3 tokens. Backpropagate each graph immediately
+                # instead of retaining an entire accumulation group's graphs in memory.
+                scale = float(len(group))
+                valid_in_group = 0
+                for text in group:
+                    loss = raw_reconstruction_loss(model, tokenizer, text, config, device, rng=rng)
+                    if loss is None:
+                        continue
+                    (loss / scale).backward()
+                    value = finite_loss_value(loss)
+                    epoch_loss += value
+                    example_count += 1
+                    valid_in_group += 1
+                if valid_in_group == 0:
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+    
+                global_step += 1
+                lr = scheduled_learning_rate(
+                    global_step,
+                    total_steps,
+                    peak_lr=config.learning_rate,
+                    min_lr=config.min_learning_rate,
+                    warmup_steps=warmup,
                 )
-                interval_saved = save_phase_checkpoint(
+                set_optimizer_lr(optimizer, lr)
+                grad_norm = model.clip_gradients(optimizer)
+                optimizer.step()
+                epoch_steps += 1
+    
+                if (
+                    config.checkpoint_every_steps > 0
+                    and global_step % config.checkpoint_every_steps == 0
+                ):
+                    interval_path = Path(config.output_dir) / (
+                        f"lantra_raw_pretrain_{run_id}_step_{global_step:08d}.pt"
+                    )
+                    interval_saved = save_phase_checkpoint(
+                        model,
+                        optimizer,
+                        interval_path,
+                        run_id=run_id,
+                        phase="raw_text_denoising_pretraining_interval",
+                        metadata={
+                            "epoch": epoch,
+                            "global_optimizer_step": global_step,
+                            "total_optimizer_steps": total_steps,
+                            "examples_in_epoch": example_count,
+                            "mean_train_loss_to_step": epoch_loss / max(1, example_count),
+                            "learning_rate": lr,
+                            "corpus_fingerprint": corpus.fingerprint,
+                            "checkpoint_every_steps": config.checkpoint_every_steps,
+                        },
+                    )
+                    interval_checkpoints.append(interval_saved)
+                    LOGGER.info(
+                        "Raw pretrain interval checkpoint saved at optimizer step %d/%d: %s",
+                        global_step,
+                        total_steps,
+                        interval_saved,
+                    )
+    
+                if config.log_every > 0 and global_step % config.log_every == 0:
+                    LOGGER.info(
+                        "Raw pretrain epoch=%d step=%d/%d examples=%d mean_loss=%.6f lr=%.8f grad_norm=%.4f",
+                        epoch,
+                        global_step,
+                        total_steps,
+                        example_count,
+                        epoch_loss / max(1, example_count),
+                        lr,
+                        grad_norm,
+                    )
+    
+            validation_loss = evaluate_raw_pretraining(
+                model,
+                tokenizer,
+                validation_segments,
+                config,
+                device,
+            )
+            record = {
+                "epoch": epoch,
+                "examples": example_count,
+                "optimizer_steps": epoch_steps,
+                "mean_train_loss": epoch_loss / max(1, example_count),
+                "validation_loss": validation_loss,
+                "global_optimizer_step": global_step,
+            }
+            history.append(record)
+            metric = validation_loss if validation_loss is not None else record["mean_train_loss"]
+            if metric < best_validation:
+                best_validation = metric
+                save_phase_checkpoint(
                     model,
                     optimizer,
-                    interval_path,
+                    best_path,
                     run_id=run_id,
-                    phase="raw_text_denoising_pretraining_interval",
-                    metadata={
-                        "epoch": epoch,
-                        "global_optimizer_step": global_step,
-                        "total_optimizer_steps": total_steps,
-                        "examples_in_epoch": example_count,
-                        "mean_train_loss_to_step": epoch_loss / max(1, example_count),
-                        "learning_rate": lr,
-                        "corpus_fingerprint": corpus.fingerprint,
-                        "checkpoint_every_steps": config.checkpoint_every_steps,
-                    },
+                    phase="raw_text_denoising_pretraining_best",
+                    metadata={"corpus": corpus.to_dict(), "record": record},
                 )
-                interval_checkpoints.append(interval_saved)
-                LOGGER.info(
-                    "Raw pretrain interval checkpoint saved at optimizer step %d/%d: %s",
-                    global_step,
-                    total_steps,
-                    interval_saved,
-                )
-
-            if config.log_every > 0 and global_step % config.log_every == 0:
-                LOGGER.info(
-                    "Raw pretrain epoch=%d step=%d/%d examples=%d mean_loss=%.6f lr=%.8f grad_norm=%.4f",
-                    epoch,
-                    global_step,
-                    total_steps,
-                    example_count,
-                    epoch_loss / max(1, example_count),
-                    lr,
-                    grad_norm,
-                )
-
-        validation_loss = evaluate_raw_pretraining(
-            model,
-            tokenizer,
-            validation_segments,
-            config,
-            device,
-        )
-        record = {
-            "epoch": epoch,
-            "examples": example_count,
-            "optimizer_steps": epoch_steps,
-            "mean_train_loss": epoch_loss / max(1, example_count),
-            "validation_loss": validation_loss,
-            "global_optimizer_step": global_step,
-        }
-        history.append(record)
-        metric = validation_loss if validation_loss is not None else record["mean_train_loss"]
-        if metric < best_validation:
-            best_validation = metric
             save_phase_checkpoint(
                 model,
                 optimizer,
-                best_path,
+                latest_path,
                 run_id=run_id,
-                phase="raw_text_denoising_pretraining_best",
+                phase="raw_text_denoising_pretraining_latest",
                 metadata={"corpus": corpus.to_dict(), "record": record},
             )
+            PRINTER.pretty("LANTRA RAW PRETRAIN", record, "success")
+    
+    except KeyboardInterrupt:
+        LOGGER.warning(
+            "Raw pretraining interrupted; saving recoverable checkpoint to %s",
+            interrupted_path,
+        )
         save_phase_checkpoint(
             model,
             optimizer,
-            latest_path,
+            interrupted_path,
             run_id=run_id,
-            phase="raw_text_denoising_pretraining_latest",
-            metadata={"corpus": corpus.to_dict(), "record": record},
+            phase="raw_text_denoising_pretraining_interrupted",
+            metadata={
+                "epoch": current_epoch,
+                "global_optimizer_step": global_step,
+                "total_optimizer_steps": total_steps,
+                "corpus_fingerprint": corpus.fingerprint,
+                "history": history,
+            },
         )
-        PRINTER.pretty("LANTRA RAW PRETRAIN", record, "success")
-
+        raise
     if best_path.is_file():
         model = LanguageTransformer.load_language_model(best_path, device=device, strict=True)
     test_loss = (
@@ -3608,6 +3695,7 @@ def train(
     stage_name: str = "supervised",
     epochs: Optional[int] = None,
     evaluate_test_split: bool = True,
+    resume_checkpoint: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Train one explicit LANTRA objective stage.
 
@@ -3653,6 +3741,32 @@ def train(
     epochs_without_improvement = 0
     history: List[Dict[str, Any]] = []
     interval_checkpoints: List[str] = []
+    start_epoch = 1
+    resume_state = _restore_stage_optimizer(
+        resume_checkpoint,
+        optimizer,
+        expected_stage=stage_name,
+        dataset_fingerprint=dataset.fingerprint,
+    )
+    if resume_state is not None:
+        resumed_epoch = int(resume_state.get("epoch", 0))
+        global_optimizer_step = int(resume_state.get("global_optimizer_step", 0))
+        status = str(resume_state.get("status", "")).casefold()
+        start_epoch = max(1, resumed_epoch if status == "interval" else resumed_epoch + 1)
+        metadata = resume_state.get("metadata", {})
+        validation = metadata.get("validation_metrics", {}) if isinstance(metadata, Mapping) else {}
+        if isinstance(validation, Mapping):
+            value = validation.get("macro_normalized_task_loss")
+            if value is None:
+                value = validation.get("best_validation_objective")
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                best_validation_objective = float(value)
+                best_epoch = resumed_epoch
+                best_global_optimizer_step = global_optimizer_step
+        LOGGER.info(
+            "Resuming LANTRA stage=%s at epoch=%d global_step=%d dataset=%s",
+            stage_name, start_epoch, global_optimizer_step, dataset.fingerprint[:16],
+        )
 
     def save_interval_checkpoint(
         epoch: int,
@@ -3705,7 +3819,7 @@ def train(
     )
 
     try:
-        for epoch in range(1, stage_epochs + 1):
+        for epoch in range(start_epoch, stage_epochs + 1):
             epoch_started = time.perf_counter()
             train_stats, global_optimizer_step = train_epoch(
                 model,
@@ -3913,6 +4027,7 @@ def train_explicit_stage(
     stage_name: str,
     epochs: int,
     evaluate_test_split: bool,
+    resume_checkpoint: Optional[Path] = None,
 ) -> Tuple[LanguageTransformer, Dict[str, Any]]:
     if dataset is None:
         return model, {"status": "skipped", "reason": "no records for stage", "stage": stage_name}
@@ -3928,6 +4043,7 @@ def train_explicit_stage(
         stage_name=stage_name,
         epochs=epochs,
         evaluate_test_split=evaluate_test_split,
+        resume_checkpoint=resume_checkpoint,
     )
     selected = Path(result["checkpoints"]["final"])
     model = LanguageTransformer.load_language_model(selected, device=device, strict=True)
@@ -4309,7 +4425,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         continual_state = load_continual_state(state_path)
         auto_resumed = False
         if config.init_from is None and config.auto_resume:
-            resume_checkpoint = discover_resume_checkpoint(Path(config.output_dir), continual_state)
+            resume_checkpoint = discover_resume_checkpoint(Path(config.output_dir), continual_state, config)
             if resume_checkpoint is not None:
                 mismatches = checkpoint_recommendation_mismatches(resume_checkpoint, config)
                 if mismatches:
@@ -4517,6 +4633,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOGGER.info("Resolved LANTRA device: %s", device)
         model = initialize_model(config, tokenizer, device)
 
+        resume_checkpoint_path = Path(config.init_from) if config.init_from else None
+        resume_summary = None
+        if resume_checkpoint_path is not None and resume_checkpoint_path.is_file():
+            resume_summary = summarize_checkpoint(
+                resume_checkpoint_path,
+                _load_checkpoint_payload(resume_checkpoint_path),
+            )
+        supervised_data_newer_than_resume = False
+        if resume_summary is not None and supervised_files:
+            checkpoint_mtime = resume_summary.mtime_ns
+            supervised_data_newer_than_resume = any(
+                path.stat().st_mtime_ns > checkpoint_mtime
+                for path in supervised_files
+                if path.is_file()
+            )
+        raw_training_pending = bool(raw_corpus.train_segments) and config.raw_pretrain_epochs > 0
+        safe_ordered_stage_resume = bool(
+            resume_summary is not None
+            and not supervised_data_newer_than_resume
+            and not raw_training_pending
+        )
+        resume_stage_rank = resume_summary.stage_rank if resume_summary is not None else 0
+        resume_stage_name = resume_summary.stage if resume_summary is not None else ""
+
         PRINTER.pretty(
             "LANTRA MODEL",
             {
@@ -4540,13 +4680,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             }
         }
         glove_asset: Optional[GloveAsset] = None
-        genuine_training_signal = False
+        # An unchanged compatible checkpoint already represents genuine prior training.
+        # This matters for idempotent no-op resumes where every completed ordered
+        # stage is intentionally skipped rather than replayed.
+        genuine_training_signal = bool(resume_summary is not None and safe_ordered_stage_resume)
 
         # --------------------------------------------------------------
         # Phase 1: GloVe embedding initialization + semantic distillation.
         # --------------------------------------------------------------
         glove_path = discover_glove_path(config, int(model.config.d_model))
-        if glove_path is not None:
+        if config.init_from:
+            phases["phase_1_glove"] = {
+                "status": "skipped",
+                "reason": "checkpoint continuation preserves learned embeddings; GloVe bootstrap is not reapplied",
+            }
+            PRINTER.status(
+                "LANTRA GLOVE",
+                "Skipped because model weights were restored from a checkpoint.",
+                "info",
+            )
+        elif glove_path is not None:
             glove_asset = load_glove_asset(
                 glove_path,
                 tokenizer,
@@ -4583,9 +4736,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             device,
             run_id,
             evaluate_test_split=False,
+            resume_checkpoint=(
+                resume_checkpoint_path
+                if resume_stage_name.startswith("raw_text_denoising_pretraining")
+                else None
+            ),
         )
         phase_2a_agent: Dict[str, Any]
-        if config.curriculum_enabled:
+        if config.curriculum_enabled and safe_ordered_stage_resume and resume_stage_rank >= 40:
+            phase_2a_agent = {
+                "status": "skipped_resume",
+                "reason": "selected checkpoint is from a later ordered phase and input data is unchanged",
+            }
+        elif config.curriculum_enabled:
             model, phase_2a_agent = train_explicit_stage(
                 config,
                 phase_datasets["2a"],
@@ -4596,6 +4759,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stage_name="phase_2a_knowledge",
                 epochs=config.curriculum_2a_epochs,
                 evaluate_test_split=False,
+                resume_checkpoint=(
+                    resume_checkpoint_path if resume_stage_name == "phase_2a_knowledge" else None
+                ),
             )
         else:
             phase_2a_agent = {"status": "skipped", "reason": "agent curriculum disabled"}
@@ -4613,7 +4779,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         # Phase 2B: retrieval representation learning.
         # --------------------------------------------------------------
-        if config.curriculum_enabled:
+        if config.curriculum_enabled and safe_ordered_stage_resume and resume_stage_rank >= 50:
+            phase_2b_result = {
+                "status": "skipped_resume",
+                "reason": "selected checkpoint is from a later ordered phase and input data is unchanged",
+            }
+        elif config.curriculum_enabled:
             model, phase_2b_result = train_explicit_stage(
                 config,
                 phase_datasets["2b"],
@@ -4624,6 +4795,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stage_name="phase_2b_retrieval",
                 epochs=config.curriculum_2b_epochs,
                 evaluate_test_split=False,
+                resume_checkpoint=(
+                    resume_checkpoint_path if resume_stage_name == "phase_2b_retrieval" else None
+                ),
             )
         else:
             phase_2b_result = {"status": "skipped", "reason": "agent curriculum disabled"}
@@ -4633,7 +4807,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         # Phase 2C: validated factual/reasoning curriculum.
         # --------------------------------------------------------------
-        if config.curriculum_enabled:
+        if config.curriculum_enabled and safe_ordered_stage_resume and resume_stage_rank >= 55:
+            phase_2c_result = {
+                "status": "skipped_resume",
+                "reason": "selected checkpoint is from a later ordered phase and input data is unchanged",
+            }
+        elif config.curriculum_enabled:
             model, phase_2c_result = train_explicit_stage(
                 config,
                 phase_datasets["2c"],
@@ -4644,6 +4823,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stage_name="phase_2c_reasoning",
                 epochs=config.curriculum_2c_epochs,
                 evaluate_test_split=False,
+                resume_checkpoint=(
+                    resume_checkpoint_path if resume_stage_name == "phase_2c_reasoning" else None
+                ),
             )
         else:
             phase_2c_result = {"status": "skipped", "reason": "agent curriculum disabled"}
@@ -4676,7 +4858,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Phase 3: real supervised specialization only.
         # --------------------------------------------------------------
         phase_3_result: Dict[str, Any]
-        if phase_datasets["3"] is not None:
+        resume_completed_supervised = bool(
+            safe_ordered_stage_resume
+            and resume_stage_name == "supervised"
+            and resume_summary is not None
+            and resume_summary.status == "final_best"
+        )
+        if phase_datasets["3"] is not None and resume_completed_supervised:
+            phase_3_result = {
+                "status": "already_completed",
+                "reason": "selected final supervised checkpoint matches unchanged input data",
+                "checkpoint": str(resume_checkpoint_path),
+                "test": None,
+            }
+            genuine_training_signal = True
+        elif phase_datasets["3"] is not None:
             model, phase_3_result = train_explicit_stage(
                 config,
                 phase_datasets["3"],
@@ -4687,6 +4883,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stage_name="supervised",
                 epochs=config.epochs,
                 evaluate_test_split=True,
+                resume_checkpoint=(
+                    resume_checkpoint_path if resume_stage_name == "supervised" else None
+                ),
             )
             genuine_training_signal = True
         else:
@@ -4739,7 +4938,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for result in (phase_2a_agent, phase_2b_result, phase_2c_result)
         )
 
-        if phase_3_result.get("status") == "completed":
+        if phase_3_result.get("status") == "already_completed":
+            final_checkpoint = str(phase_3_result["checkpoint"])
+            mode = "resumed_completed_supervised_checkpoint"
+        elif phase_3_result.get("status") == "completed":
             final_checkpoint = str(phase_3_result["checkpoints"]["final"])
             mode = (
                 "evolved_curriculum_with_supervised_specialization"

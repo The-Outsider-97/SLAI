@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
+from src.training.lantra_vocabulary_analysis import VocabularyTracker, load_english_dictionary
+
 
 LIBRARY = Path("data/library")
 OUTPUT_DIR = Path("src/agents/language/artifacts/training/lantra/library_analysis")
@@ -39,7 +41,7 @@ DEFAULT_TOKENS_PER_PARAMETER = 20.0
 DEFAULT_CONTEXT = 512
 TOKENIZER_CHUNK_CHARS = 50_000
 CHECKPOINT_FILENAME = "lantra_library_scan_checkpoint.json"
-CHECKPOINT_SCHEMA = "slai.lantra.library-scan-checkpoint.v1"
+CHECKPOINT_SCHEMA = "slai.lantra.library-scan-checkpoint.v2"
 
 # name, d_model, nhead, encoder layers, decoder layers
 PROFILE_LADDER = (
@@ -500,6 +502,15 @@ def scan_library(
     vocab = len(getattr(tokenizer, "vocab", {})) if tokenizer is not None else 50_000
     method = "slai_bpe" if tokenizer is not None else "characters_div_4"
     manifest, manifest_sha256 = build_manifest(library, files)
+    repo_root = Path(__file__).resolve().parent
+    english_dictionary, dictionary_sources = load_english_dictionary(repo_root)
+    vocabulary_path = checkpoint_path.with_name("lantra_library_vocabulary.sqlite3")
+    vocabulary = VocabularyTracker(
+        vocabulary_path,
+        dictionary_words=english_dictionary,
+        manifest_sha256=manifest_sha256,
+        reset=reset_progress,
+    )
 
     if reset_progress:
         checkpoint_path.unlink(missing_ok=True)
@@ -621,6 +632,7 @@ def scan_library(
                         else:
                             tokens = max(1, math.ceil(chars / 4))
 
+                        vocabulary.record_document(doc_hash, text)
                         pending_doc_hashes.add(doc_hash)
                         delta["unique_documents"] += 1
                         delta["characters"] += chars
@@ -671,11 +683,19 @@ def scan_library(
             )
 
     total_elapsed = prior_elapsed + (time.perf_counter() - started)
+    vocabulary_summary = vocabulary.summary()
+    vocabulary.close()
     if totals["tokens"] <= 0:
         raise RuntimeError("No usable training text was extracted")
 
     return {
         **dict(totals),
+        "total_documents": int(totals.get("unique_documents", 0)),
+        "total_bytes": int(totals.get("source_bytes", 0)),
+        "total_words": int(totals.get("words", 0)),
+        **vocabulary_summary,
+        "dictionary_sources": list(dictionary_sources),
+        "vocabulary_database": str(vocabulary_path),
         "vocab_size": vocab,
         "token_count_method": method,
         "tokenizer_note": tokenizer_note,
@@ -794,7 +814,13 @@ def print_summary(report: Mapping[str, Any], report_path: Path, config_path: Pat
     print(f"Duplicate documents:   {int(corpus.get('duplicate_documents', 0)):,}")
     print(f"Extraction failures:   {int(corpus.get('extraction_failures', 0)):,}")
     print(f"Characters:            {corpus['characters']:,}")
-    print(f"Words:                 {corpus['words']:,}")
+    print(f"Words:                 {corpus['total_words']:,}")
+    print(f"Unique words:          {corpus['total_unique_words']:,}")
+    print(
+        f"English dictionary:    {corpus['english_dictionary_percentage']:.2f}% "
+        f"({corpus['dictionary_matched_words']:,}/{corpus['dictionary_eligible_words']:,} eligible occurrences)"
+    )
+    print(f"Dictionary unmatched:  {corpus['dictionary_unmatched_words']:,}")
     print(f"Training tokens:       {corpus['tokens']:,} ({corpus['token_count_method']})")
     if corpus.get("tokenizer_note"):
         print(f"Tokenizer note:        {corpus['tokenizer_note']}")
