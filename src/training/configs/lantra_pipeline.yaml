@@ -2,7 +2,7 @@ lantra_pipeline:
   duplicate_similarity_threshold: 0.85
   duplicate_shingle_size: 5
   duplicate_minhash_permutations: 64
-  duplicate_lsh_bands: 8
+  duplicate_lsh_bands: 16
   minimum_document_words: 50
 
   cleaner:
