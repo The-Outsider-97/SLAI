@@ -256,6 +256,23 @@ class LanguageAgent(BaseAgent):
         self.lantra_policy = ensure_mapping(cfg.get("lantra", {}), field_name="language_agent.lantra", allow_none=True)
         self.lantra_enabled = coerce_bool(self.lantra_policy.get("enabled", False), default=False)
         self.lantra_required = coerce_bool(self.lantra_policy.get("required", False), default=False)
+        self.lstp_policy = ensure_mapping(
+            cfg.get("lstp", {}),
+            field_name="language_agent.lstp",
+            allow_none=True,
+        )
+        self.lstp_enabled = coerce_bool(
+            self.lstp_policy.get("enabled", False),
+            default=False,
+        )
+        self.lstp_required = coerce_bool(
+            self.lstp_policy.get("required", False),
+            default=False,
+        )
+        self.lstp_include_packet = coerce_bool(
+            self.lstp_policy.get("include_packet", True),
+            default=True,
+        )
 
         default_order = [stage.value for stage in StageName if stage != StageName.SHARED_MEMORY]
         self.pipeline_order = tuple(self._normalize_stage_name(stage) for stage in (cfg.get("pipeline_order") or default_order))
@@ -648,13 +665,97 @@ class LanguageAgent(BaseAgent):
         self._env_set("pending_entities", frame.entities or {})
         return True
 
-    def _finalize_response(self, text: str, artifacts: PipelineArtifacts, trace: PipelineTrace, status: PipelineStatus) -> LanguageAgentResponse:
-        trace.finish(status if status != PipelineStatus.SUCCESS or trace.status == PipelineStatus.SUCCESS else trace.status)
+    def _finalize_response(
+        self,
+        text: str,
+        artifacts: PipelineArtifacts,
+        trace: PipelineTrace,
+        status: PipelineStatus,
+    ) -> LanguageAgentResponse:
+        trace.finish(
+            status
+            if status != PipelineStatus.SUCCESS
+            or trace.status == PipelineStatus.SUCCESS
+            else trace.status
+        )
         frame = artifacts.frame or self._error_frame("internal_error", {})
-        response = LanguageAgentResponse(response=ensure_text(text) or self._policy_error_response("default_error"), confidence=float(getattr(frame, "confidence", 0.0) or 0.0), intent=str(getattr(frame, "intent", "unknown") or "unknown"), status=trace.status.value, trace_id=trace.trace_id, session_id=trace.session_id, frame=frame, grammar_ok=getattr(artifacts.grammar_result, "is_grammatical", None) if artifacts.grammar_result is not None else None, metadata={"trace": trace.to_dict(), "artifacts": artifacts.to_dict(preview_chars=self.response_preview_chars)})
+        metadata: Dict[str, Any] = {
+            "trace": trace.to_dict(),
+            "artifacts": artifacts.to_dict(
+                preview_chars=self.response_preview_chars
+            ),
+        }
+        if self.lstp_enabled:
+            metadata["lstp"] = self._build_lstp_metadata(
+                frame,
+                artifacts,
+                trace,
+            )
+            metadata["trace"] = trace.to_dict()
+
+        response = LanguageAgentResponse(
+            response=ensure_text(text)
+            or self._policy_error_response("default_error"),
+            confidence=float(getattr(frame, "confidence", 0.0) or 0.0),
+            intent=str(getattr(frame, "intent", "unknown") or "unknown"),
+            status=trace.status.value,
+            trace_id=trace.trace_id,
+            session_id=trace.session_id,
+            frame=frame,
+            grammar_ok=(
+                getattr(artifacts.grammar_result, "is_grammatical", None)
+                if artifacts.grammar_result is not None
+                else None
+            ),
+            metadata=metadata,
+        )
         self.pipeline_history.append(response.to_dict())
         self._stage_shared_memory(response, trace)
         return response
+
+    def _build_lstp_metadata(
+        self,
+        frame: LinguisticFrame,
+        artifacts: PipelineArtifacts,
+        trace: PipelineTrace,
+    ) -> Dict[str, Any]:
+        """Project the completed SLAI frame to LSTP without inferring authority."""
+
+        try:
+            from src.integrations.lstp_adapter import (
+                packet_from_frame,
+                packet_to_mapping,
+            )
+
+            packet = packet_from_frame(
+                frame,
+                source_text=artifacts.sanitized_text or artifacts.original_text,
+                packet_id=f"{trace.trace_id}-input",
+                thread_id=trace.session_id or trace.trace_id,
+                carrier_metadata={
+                    "slai_pipeline_status": trace.status.value,
+                },
+                audit_metadata={"slai_trace_id": trace.trace_id},
+            )
+            payload: Dict[str, Any] = {
+                "protocol_version": packet.protocol_version,
+                "packet_id": packet.packet_id,
+                "authority_inferred": False,
+            }
+            if self.lstp_include_packet:
+                payload["packet"] = packet_to_mapping(packet)
+            return payload
+        except Exception as exc:
+            message = f"LSTP projection failed: {type(exc).__name__}: {exc}"
+            logger.warning(message)
+            trace.warn(message)
+            if self.lstp_required:
+                trace.status = PipelineStatus.FAILED
+            return {
+                "error": type(exc).__name__,
+                "message": str(exc),
+                "authority_inferred": False,
+            }
 
     def health_check(self) -> Dict[str, Any]:
         runtime = getattr(self, "lantra_runtime", None)
@@ -668,9 +769,19 @@ class LanguageAgent(BaseAgent):
             "nlg_engine": hasattr(self, "nlg_engine"),
             "safety_guard": hasattr(self, "safety_guard"),
             "lantra_runtime": not self.lantra_enabled or bool(getattr(runtime, "ready", False)),
+            "lstp": not self.lstp_enabled or self._lstp_available(),
         }
         healthy = bool(self.enabled and all(components.values()))
         return {"ok": healthy, "health": "healthy" if healthy else "degraded", "version": __version__, "enabled": self.enabled, "uptime_seconds": round(time_module.time() - self.started_at, 3), "components": components, "component_status": json_safe(self.component_status)}
+
+    @staticmethod
+    def _lstp_available() -> bool:
+        try:
+            import lstp
+
+            return getattr(lstp, "__version__", None) == "0.1.0a1"
+        except Exception:
+            return False
 
     def diagnostics(self) -> Dict[str, Any]:
         return {"health": self.health_check(), "last_trace": self.pipeline_history[-1].get("metadata", {}).get("trace") if self.pipeline_history else None, "history_count": len(self.pipeline_history)}

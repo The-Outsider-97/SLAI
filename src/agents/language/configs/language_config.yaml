@@ -122,6 +122,13 @@ language_agent:
   diagnostics_enabled: true
   max_input_chars: 200000
 
+  # Optional semantic transport projection. LSTP does not replace NLU/LANTRA
+  # and never infers execution authority from the language frame.
+  lstp:
+    enabled: false
+    required: false
+    include_packet: true
+
 
 pipeline_contract:
   preserve_source_text: true

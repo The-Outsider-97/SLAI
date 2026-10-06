@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/The-Outsider-97/LSTP.git",
+  "commit": "56e9677de80cb60211f666e26bf0316159bd360e",
+  "package_version": "0.1.0a1",
+  "protocol_version": "0.1",
+  "install_mode": "editable",
+  "target": "model/LSTP"
+}
