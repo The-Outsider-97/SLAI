@@ -4680,7 +4680,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             }
         }
         glove_asset: Optional[GloveAsset] = None
-        genuine_training_signal = False
+        # An unchanged compatible checkpoint already represents genuine prior training.
+        # This matters for idempotent no-op resumes where every completed ordered
+        # stage is intentionally skipped rather than replayed.
+        genuine_training_signal = bool(resume_summary is not None and safe_ordered_stage_resume)
 
         # --------------------------------------------------------------
         # Phase 1: GloVe embedding initialization + semantic distillation.
