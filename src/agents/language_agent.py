@@ -691,6 +691,7 @@ class LanguageAgent(BaseAgent):
                 artifacts,
                 trace,
             )
+            metadata["trace"] = trace.to_dict()
 
         response = LanguageAgentResponse(
             response=ensure_text(text)
