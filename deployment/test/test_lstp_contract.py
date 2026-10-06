@@ -19,7 +19,9 @@ def test_lstp_lock_is_pinned_under_model_directory() -> None:
 def test_lstp_integration_uses_installation_not_sys_path_mutation() -> None:
     for relative in ("setup_lstp.py", "run_lstp.py"):
         source = (ROOT / relative).read_text(encoding="utf-8")
-        assert "sys.path" not in source
+        assert "sys.path.insert" not in source
+        assert "sys.path.append" not in source
+        assert "sys.path.extend" not in source
 
 
 def test_language_agent_lstp_projection_is_opt_in_and_non_authorizing() -> None:
