@@ -2781,6 +2781,7 @@ def raw_text_pretrain(
     run_id: str,
     *,
     evaluate_test_split: bool = True,
+    resume_checkpoint: Optional[Path] = None,
 ) -> Tuple[LanguageTransformer, Dict[str, Any]]:
     if config.raw_pretrain_epochs <= 0 or not corpus.train_segments:
         return model, {"status": "skipped", "reason": "no raw training segments or raw_pretrain_epochs=0"}
@@ -2805,137 +2806,183 @@ def raw_text_pretrain(
     best_validation = float("inf")
     best_path = Path(config.output_dir) / "lantra_raw_pretrain_best.pt"
     latest_path = Path(config.output_dir) / "lantra_raw_pretrain_latest.pt"
+    interrupted_path = Path(config.output_dir) / "lantra_raw_pretrain_interrupted.pt"
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     history: List[Dict[str, Any]] = []
     interval_checkpoints: List[str] = []
     rng = random.Random(config.seed + 202)
+    start_epoch = 1
+    resume_state = _restore_stage_optimizer(
+        resume_checkpoint,
+        optimizer,
+        expected_stage="raw_text_denoising_pretraining",
+        corpus_fingerprint=corpus.fingerprint,
+    )
+    if resume_state is not None:
+        resumed_epoch = int(resume_state.get("epoch", 0))
+        global_step = int(resume_state.get("global_optimizer_step", 0))
+        resume_meta = resume_state.get("metadata", {})
+        resume_phase = str(resume_meta.get("phase", "")) if isinstance(resume_meta, Mapping) else ""
+        start_epoch = max(1, resumed_epoch if resume_phase.endswith("_interval") else resumed_epoch + 1)
+        record = resume_meta.get("record", {}) if isinstance(resume_meta, Mapping) else {}
+        if isinstance(record, Mapping):
+            prior_metric = record.get("validation_loss")
+            if isinstance(prior_metric, (int, float)) and math.isfinite(float(prior_metric)):
+                best_validation = float(prior_metric)
+        LOGGER.info(
+            "Resuming raw pretraining at epoch=%d global_step=%d corpus=%s",
+            start_epoch, global_step, corpus.fingerprint[:16],
+        )
+    current_epoch = max(0, start_epoch - 1)
 
-    for epoch in range(1, config.raw_pretrain_epochs + 1):
-        order = list(train_segments)
-        rng.shuffle(order)
-        order = order[:per_epoch_count]
-        model.train()
-        epoch_loss = 0.0
-        example_count = 0
-        epoch_steps = 0
-
-        for group_start in range(0, len(order), config.gradient_accumulation):
-            group = order[group_start:group_start + config.gradient_accumulation]
-            if not group:
-                continue
-            optimizer.zero_grad(set_to_none=True)
-            # Segments are filtered to meaningful text before training, so nearly
-            # every item yields >=3 tokens. Backpropagate each graph immediately
-            # instead of retaining an entire accumulation group's graphs in memory.
-            scale = float(len(group))
-            valid_in_group = 0
-            for text in group:
-                loss = raw_reconstruction_loss(model, tokenizer, text, config, device, rng=rng)
-                if loss is None:
+    try:
+        for epoch in range(start_epoch, config.raw_pretrain_epochs + 1):
+            current_epoch = epoch
+            order = list(train_segments)
+            rng.shuffle(order)
+            order = order[:per_epoch_count]
+            model.train()
+            epoch_loss = 0.0
+            example_count = 0
+            epoch_steps = 0
+    
+            for group_start in range(0, len(order), config.gradient_accumulation):
+                group = order[group_start:group_start + config.gradient_accumulation]
+                if not group:
                     continue
-                (loss / scale).backward()
-                value = finite_loss_value(loss)
-                epoch_loss += value
-                example_count += 1
-                valid_in_group += 1
-            if valid_in_group == 0:
                 optimizer.zero_grad(set_to_none=True)
-                continue
-
-            global_step += 1
-            lr = scheduled_learning_rate(
-                global_step,
-                total_steps,
-                peak_lr=config.learning_rate,
-                min_lr=config.min_learning_rate,
-                warmup_steps=warmup,
-            )
-            set_optimizer_lr(optimizer, lr)
-            grad_norm = model.clip_gradients(optimizer)
-            optimizer.step()
-            epoch_steps += 1
-
-            if (
-                config.checkpoint_every_steps > 0
-                and global_step % config.checkpoint_every_steps == 0
-            ):
-                interval_path = Path(config.output_dir) / (
-                    f"lantra_raw_pretrain_{run_id}_step_{global_step:08d}.pt"
+                # Segments are filtered to meaningful text before training, so nearly
+                # every item yields >=3 tokens. Backpropagate each graph immediately
+                # instead of retaining an entire accumulation group's graphs in memory.
+                scale = float(len(group))
+                valid_in_group = 0
+                for text in group:
+                    loss = raw_reconstruction_loss(model, tokenizer, text, config, device, rng=rng)
+                    if loss is None:
+                        continue
+                    (loss / scale).backward()
+                    value = finite_loss_value(loss)
+                    epoch_loss += value
+                    example_count += 1
+                    valid_in_group += 1
+                if valid_in_group == 0:
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+    
+                global_step += 1
+                lr = scheduled_learning_rate(
+                    global_step,
+                    total_steps,
+                    peak_lr=config.learning_rate,
+                    min_lr=config.min_learning_rate,
+                    warmup_steps=warmup,
                 )
-                interval_saved = save_phase_checkpoint(
+                set_optimizer_lr(optimizer, lr)
+                grad_norm = model.clip_gradients(optimizer)
+                optimizer.step()
+                epoch_steps += 1
+    
+                if (
+                    config.checkpoint_every_steps > 0
+                    and global_step % config.checkpoint_every_steps == 0
+                ):
+                    interval_path = Path(config.output_dir) / (
+                        f"lantra_raw_pretrain_{run_id}_step_{global_step:08d}.pt"
+                    )
+                    interval_saved = save_phase_checkpoint(
+                        model,
+                        optimizer,
+                        interval_path,
+                        run_id=run_id,
+                        phase="raw_text_denoising_pretraining_interval",
+                        metadata={
+                            "epoch": epoch,
+                            "global_optimizer_step": global_step,
+                            "total_optimizer_steps": total_steps,
+                            "examples_in_epoch": example_count,
+                            "mean_train_loss_to_step": epoch_loss / max(1, example_count),
+                            "learning_rate": lr,
+                            "corpus_fingerprint": corpus.fingerprint,
+                            "checkpoint_every_steps": config.checkpoint_every_steps,
+                        },
+                    )
+                    interval_checkpoints.append(interval_saved)
+                    LOGGER.info(
+                        "Raw pretrain interval checkpoint saved at optimizer step %d/%d: %s",
+                        global_step,
+                        total_steps,
+                        interval_saved,
+                    )
+    
+                if config.log_every > 0 and global_step % config.log_every == 0:
+                    LOGGER.info(
+                        "Raw pretrain epoch=%d step=%d/%d examples=%d mean_loss=%.6f lr=%.8f grad_norm=%.4f",
+                        epoch,
+                        global_step,
+                        total_steps,
+                        example_count,
+                        epoch_loss / max(1, example_count),
+                        lr,
+                        grad_norm,
+                    )
+    
+            validation_loss = evaluate_raw_pretraining(
+                model,
+                tokenizer,
+                validation_segments,
+                config,
+                device,
+            )
+            record = {
+                "epoch": epoch,
+                "examples": example_count,
+                "optimizer_steps": epoch_steps,
+                "mean_train_loss": epoch_loss / max(1, example_count),
+                "validation_loss": validation_loss,
+                "global_optimizer_step": global_step,
+            }
+            history.append(record)
+            metric = validation_loss if validation_loss is not None else record["mean_train_loss"]
+            if metric < best_validation:
+                best_validation = metric
+                save_phase_checkpoint(
                     model,
                     optimizer,
-                    interval_path,
+                    best_path,
                     run_id=run_id,
-                    phase="raw_text_denoising_pretraining_interval",
-                    metadata={
-                        "epoch": epoch,
-                        "global_optimizer_step": global_step,
-                        "total_optimizer_steps": total_steps,
-                        "examples_in_epoch": example_count,
-                        "mean_train_loss_to_step": epoch_loss / max(1, example_count),
-                        "learning_rate": lr,
-                        "corpus_fingerprint": corpus.fingerprint,
-                        "checkpoint_every_steps": config.checkpoint_every_steps,
-                    },
+                    phase="raw_text_denoising_pretraining_best",
+                    metadata={"corpus": corpus.to_dict(), "record": record},
                 )
-                interval_checkpoints.append(interval_saved)
-                LOGGER.info(
-                    "Raw pretrain interval checkpoint saved at optimizer step %d/%d: %s",
-                    global_step,
-                    total_steps,
-                    interval_saved,
-                )
-
-            if config.log_every > 0 and global_step % config.log_every == 0:
-                LOGGER.info(
-                    "Raw pretrain epoch=%d step=%d/%d examples=%d mean_loss=%.6f lr=%.8f grad_norm=%.4f",
-                    epoch,
-                    global_step,
-                    total_steps,
-                    example_count,
-                    epoch_loss / max(1, example_count),
-                    lr,
-                    grad_norm,
-                )
-
-        validation_loss = evaluate_raw_pretraining(
-            model,
-            tokenizer,
-            validation_segments,
-            config,
-            device,
-        )
-        record = {
-            "epoch": epoch,
-            "examples": example_count,
-            "optimizer_steps": epoch_steps,
-            "mean_train_loss": epoch_loss / max(1, example_count),
-            "validation_loss": validation_loss,
-            "global_optimizer_step": global_step,
-        }
-        history.append(record)
-        metric = validation_loss if validation_loss is not None else record["mean_train_loss"]
-        if metric < best_validation:
-            best_validation = metric
             save_phase_checkpoint(
                 model,
                 optimizer,
-                best_path,
+                latest_path,
                 run_id=run_id,
-                phase="raw_text_denoising_pretraining_best",
+                phase="raw_text_denoising_pretraining_latest",
                 metadata={"corpus": corpus.to_dict(), "record": record},
             )
+            PRINTER.pretty("LANTRA RAW PRETRAIN", record, "success")
+    
+    except KeyboardInterrupt:
+        LOGGER.warning(
+            "Raw pretraining interrupted; saving recoverable checkpoint to %s",
+            interrupted_path,
+        )
         save_phase_checkpoint(
             model,
             optimizer,
-            latest_path,
+            interrupted_path,
             run_id=run_id,
-            phase="raw_text_denoising_pretraining_latest",
-            metadata={"corpus": corpus.to_dict(), "record": record},
+            phase="raw_text_denoising_pretraining_interrupted",
+            metadata={
+                "epoch": current_epoch,
+                "global_optimizer_step": global_step,
+                "total_optimizer_steps": total_steps,
+                "corpus_fingerprint": corpus.fingerprint,
+                "history": history,
+            },
         )
-        PRINTER.pretty("LANTRA RAW PRETRAIN", record, "success")
-
+        raise
     if best_path.is_file():
         model = LanguageTransformer.load_language_model(best_path, device=device, strict=True)
     test_loss = (
