@@ -58,10 +58,28 @@ def _git_head(target: Path) -> str:
     return _run(["git", "-C", str(target), "rev-parse", "HEAD"]).stdout.strip()
 
 
-def _verify_import(lock: dict[str, Any]) -> None:
+def _git_origin(target: Path) -> str:
+    return _run(
+        ["git", "-C", str(target), "remote", "get-url", "origin"]
+    ).stdout.strip()
+
+
+def _verify_origin(lock: dict[str, Any], target: Path) -> None:
+    actual = _git_origin(target)
+    expected = str(lock["repository"])
+    if actual != expected:
+        raise SystemExit(
+            f"LSTP origin mismatch: {actual!r} != pinned {expected!r}"
+        )
+
+
+def _verify_import(lock: dict[str, Any], target: Path) -> None:
     code = (
         "import json, lstp; "
-        "print(json.dumps({'package_version': lstp.__version__}))"
+        "print(json.dumps({"
+        "'package_version': lstp.__version__, "
+        "'package_file': lstp.__file__"
+        "}))"
     )
     completed = _run([sys.executable, "-c", code])
     payload = json.loads(completed.stdout)
@@ -69,6 +87,12 @@ def _verify_import(lock: dict[str, Any]) -> None:
         raise SystemExit(
             "Installed LSTP version mismatch: "
             f"{payload.get('package_version')!r} != {lock['package_version']!r}"
+        )
+    package_file = Path(str(payload.get("package_file", ""))).resolve()
+    package_root = (target / "src" / "lstp").resolve()
+    if package_root != package_file.parent and package_root not in package_file.parents:
+        raise SystemExit(
+            f"Installed lstp package is not sourced from pinned clone: {package_file}"
         )
 
 
@@ -90,6 +114,7 @@ def install(*, reinstall: bool = False, no_install: bool = False) -> None:
     if not target.exists():
         _run([git, "clone", str(lock["repository"]), str(target)])
 
+    _verify_origin(lock, target)
     _run([git, "-C", str(target), "fetch", "origin"])
     _run([git, "-C", str(target), "checkout", "--detach", str(lock["commit"])])
     if _git_head(target) != lock["commit"]:
@@ -101,7 +126,7 @@ def install(*, reinstall: bool = False, no_install: bool = False) -> None:
             command.append("--force-reinstall")
         command.extend(["--no-deps", "-e", str(target)])
         _run(command)
-        _verify_import(lock)
+        _verify_import(lock, target)
 
     print(
         json.dumps(
@@ -125,12 +150,13 @@ def check() -> None:
         raise SystemExit(
             "Pinned LSTP clone is missing. Run: python setup_lstp.py"
         )
+    _verify_origin(lock, target)
     head = _git_head(target)
     if head != lock["commit"]:
         raise SystemExit(
             f"LSTP checkout drift: {head} != pinned {lock['commit']}"
         )
-    _verify_import(lock)
+    _verify_import(lock, target)
     print(
         json.dumps(
             {
