@@ -1,5 +1,21 @@
 """
+sources:
+- Bentley, J. L. (1975). “Multidimensional Binary Search Trees Used for Associative Searching.” Communications of the ACM, 18(9), 509–517. This is the foundational k-d tree paper.
+- Guttman (1984) for R-trees.
+- Samet (2006) for quadtrees, octrees, R-trees, k-d trees, high-dimensional indexing and metric structures. Its scope maps remarkably well to what SpatialIndex should eventually provide.
+- Chávez et al. (2001) for metric-space indexing.
 
+It allows several backend indexes:
+
+SpatialIndex
+├── KDTree
+├── RTree
+├── Octree
+├── UniformGrid
+└── MetricIndex
+but expose a common SLAI-facing interface.
+
+Selection of the index should depend on representation/query type, rather than having one supposedly universal structure.
 """
 from __future__ import annotations
 

@@ -1,5 +1,20 @@
 """
-Subsystem memory module for caching, cotext-awere, and checkpointing.
+Subsystem memory module for caching, cotext-awere, and checkpointing. It store spatial state and derived spatial artifacts, like:
+entity poses
+reference frames
+geometry handles
+occupancy representations
+map versions
+spatial relations
+cached query results
+index snapshots
+transform timestamps
+
+sources:
+- The Spatial Semantic Hierarchy by Benjamin Kuipers
+- Hornung, A., Wurm, K.M., Bennewitz, M. et al. OctoMap: an efficient probabilistic 3D mapping framework based on octrees. Auton Robot 34, 189–206 (2013). https://doi.org/10.1007/s10514-012-9321-0
+
+Spatial memory is the SLAI architectural concern, not a research algorithm.
 """
 from __future__ import annotations
 

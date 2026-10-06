@@ -1,5 +1,10 @@
 """
+Spatial Types defines the canonical data contracts exchanged throughout the subsystem.
 
+sources:
+- ISO 19107:2019 — Geographic information — Spatial schema.
+- OGC Simple Feature Access / ISO 19125.
+- Egenhofer, M. J., & Franzosa, R. D. (1991). “Point-set topological spatial relations.” International Journal of Geographical Information Systems, 5(2), 161–174.
 """
 from __future__ import annotations
 
@@ -15,7 +20,14 @@ printer = PrettyPrinter()
 
 
 class SpatialEntity:
-    pass
+    """
+    SpatialEntity
+    ├── PointEntity
+    ├── LinearEntity
+    ├── SurfaceEntity
+    ├── VolumeEntity
+    └── CompositeEntity
+    """
 
 
 class SpatialActivity:
@@ -27,11 +39,24 @@ class SpatialRecords:
 
 
 class SpatialRelationship:
-    pass
+    """
+    SpatialRelationship
+    ├── MetricRelationship
+    ├── DirectionalRelationship
+    └── TopologicalRelationship
+    """
 
 
 class SpatialBundle:
     pass
+
+
+class SpatialReference:
+    """
+    SpatialReference
+    ├── CRSReference
+    └── LocalFrameReference
+    """
 
 
 class SpatialTypes:

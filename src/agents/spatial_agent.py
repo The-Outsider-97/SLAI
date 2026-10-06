@@ -3,23 +3,38 @@ SLAI v2.3 Spatial Agent orchestration façade.
 
 The Agent introduces a proper world-space representation layer.
 
-PerceptionAgent
-    detects / embeds things
-    "I detected object A and object B"
-              ↓
+Perception
+    observations / detections
+           ↓
 SpatialAgent
-    determines spatial structure
-    A = (2.1, 3.7, 0.5)
-    B = (4.8, 1.2, 0.5)
+    structured world-space representation
+    coordinate systems
+    geometry
+    topology
+    relations
+    maps
+    indices
+    spatial predicates
+           ↓
+Planning
+    consumes spatial state
 
-    distance(A,B)
-    intersects(A,B)
-    inside(A,room)
-    visibility(A,B)
-    transform(camera → world)
-              ↓
-PlanningAgent
-    decides what to do in that structure
+sources:
+- Cohn, A. G., & Renz, J. (2008). Qualitative Spatial Representation and Reasoning. In Handbook of Knowledge Representation.
+- Kuipers, B. (2000). “The Spatial Semantic Hierarchy.” Artificial Intelligence, 119(1–2), 191–233.
+- Lynch, K. M., & Park, F. C. (2017). Modern Robotics: Mechanics, Planning, and Control.
+
+
+A point cloud received from Perception should be interpreted spatially as a geometric dataset:
+
+Perception:
+raw sensor → detected/filtered point cloud
+
+Spatial:
+point cloud → spatial geometry
+            → index
+            → registration
+            → surface/volume representation
 """
 from __future__ import annotations
 
