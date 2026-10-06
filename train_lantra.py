@@ -2823,7 +2823,7 @@ def raw_text_pretrain(
         global_step = int(resume_state.get("global_optimizer_step", 0))
         resume_meta = resume_state.get("metadata", {})
         resume_phase = str(resume_meta.get("phase", "")) if isinstance(resume_meta, Mapping) else ""
-        start_epoch = max(1, resumed_epoch if resume_phase.endswith("_interval") else resumed_epoch + 1)
+        start_epoch = max(\n            1,\n            resumed_epoch\n            if resume_phase.endswith(("_interval", "_interrupted"))\n            else resumed_epoch + 1,\n        )
         record = resume_meta.get("record", {}) if isinstance(resume_meta, Mapping) else {}
         if isinstance(record, Mapping):
             prior_metric = record.get("validation_loss")
