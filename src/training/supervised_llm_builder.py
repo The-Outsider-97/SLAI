@@ -36,6 +36,7 @@ from src.training.llm_providers import (
 
 
 LOGGER = logging.getLogger("lantra_supervised_builder")
+ROOT = Path(__file__).resolve().parents[2]
 VALID_SPLITS = ("train", "validation", "test")
 ORIGIN = "validated_teacher_supervision"
 
@@ -50,6 +51,11 @@ class SupervisedBuildResult:
     deterministic_fallback_accepted: int
     rejected: int
     resumed_records: int
+
+
+def _resolve_path(value: str | Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
 
 
 def _safe_text(value: Any, *, minimum: int = 1, maximum: int = 20000) -> str:
@@ -293,6 +299,50 @@ def _llm_prompt(document: SourceDocument, excerpt: str) -> tuple[str, str]:
     return system, prompt
 
 
+def _second_model_accepts(
+    pool: ProviderPool,
+    *,
+    first_provider: str,
+    source_title: str | None,
+    source_text: str,
+    candidate_payload: Mapping[str, Any],
+) -> tuple[bool, str]:
+    """Optionally ask a different provider to critique one generated bundle.
+
+    Failure or malformed critique is non-fatal: deterministic SLAI validation still
+    runs. A well-formed explicit rejection blocks the external bundle.
+    """
+    system = (
+        "You are a strict training-data critic. Return JSON only. Decide whether the "
+        "candidate examples are grounded in the supplied source, non-trivial, and compatible "
+        "with their task schemas. Do not rewrite the examples."
+    )
+    prompt = json.dumps(
+        {
+            "source_title": source_title,
+            "source": source_text,
+            "candidate": candidate_payload,
+            "required_output": {"accept": True, "issues": ["short reason if any"]},
+        },
+        ensure_ascii=False,
+    )
+    critique = pool.complete(system=system, prompt=prompt, exclude=(first_provider,))
+    if critique is None:
+        return True, "no_secondary_provider_available"
+    try:
+        parsed = parse_json_object(critique.content)
+    except LLMProviderResponseError as exc:
+        LOGGER.warning("Secondary provider critique was malformed: %s", exc)
+        return True, "malformed_secondary_critique"
+    accepted = parsed.get("accept")
+    if not isinstance(accepted, bool):
+        LOGGER.warning("Secondary provider critique omitted boolean accept; continuing with SLAI validation.")
+        return True, "secondary_critique_missing_boolean"
+    issues = parsed.get("issues", [])
+    reason = "; ".join(str(item) for item in issues[:5]) if isinstance(issues, Sequence) and not isinstance(issues, (str, bytes, bytearray)) else ""
+    return accepted, reason or ("accepted" if accepted else "rejected")
+
+
 def _normalise_candidate(
     raw: Mapping[str, Any],
     *,
@@ -511,10 +561,10 @@ def build_supervised_dataset(
     cfg = pipeline_config.get("supervised_generation", {})
     if not isinstance(cfg, Mapping):
         raise ValueError("lantra_pipeline.supervised_generation must be a mapping.")
-    output_dir = Path(str(cfg.get("output_dir", "data/processed/lantra/supervised/generated")))
-    state_path = Path(str(cfg.get("state_path", "data/processed/lantra/supervised/.build_state.json")))
-    manifest_path = Path(str(cfg.get("manifest_path", "data/processed/lantra/supervised/generated_manifest.json")))
-    cache_path = Path(str(cfg.get("cache_path", "data/processed/lantra/supervised/.llm_cache.sqlite3")))
+    output_dir = _resolve_path(str(cfg.get("output_dir", "data/processed/lantra/supervised/generated")))
+    state_path = _resolve_path(str(cfg.get("state_path", "data/processed/lantra/supervised/.build_state.json")))
+    manifest_path = _resolve_path(str(cfg.get("manifest_path", "data/processed/lantra/supervised/generated_manifest.json")))
+    cache_path = _resolve_path(str(cfg.get("cache_path", "data/processed/lantra/supervised/.llm_cache.sqlite3")))
     train_min = int(cfg.get("minimum_train_examples_per_task", 8))
     validation_min = int(cfg.get("minimum_validation_examples_per_task", 1))
     test_min = int(cfg.get("minimum_test_examples_per_task", 1))
@@ -542,6 +592,8 @@ def build_supervised_dataset(
     processed = {str(value) for value in state.get("processed_documents", ())}
 
     providers = providers_from_config(cfg) if enable_external_llm and bool(cfg.get("external_llm_enabled", True)) else []
+    multi_model_critique = bool(cfg.get("multi_model_critique", False)) and len(providers) > 1
+    critique_rejections = 0
     external_accepted = 0
     deterministic_accepted = 0
 
@@ -584,6 +636,22 @@ def build_supervised_dataset(
                     if result is not None:
                         try:
                             parsed = parse_json_object(result.content)
+                            if multi_model_critique:
+                                critique_ok, critique_reason = _second_model_accepts(
+                                    pool,
+                                    first_provider=result.provider,
+                                    source_title=document.title,
+                                    source_text=excerpt,
+                                    candidate_payload=parsed,
+                                )
+                                if not critique_ok:
+                                    critique_rejections += 1
+                                    LOGGER.info(
+                                        "Secondary-model critique rejected bundle for source %s: %s",
+                                        document.document_id,
+                                        critique_reason,
+                                    )
+                                    raise CurriculumQualityError("secondary model rejected generated bundle")
                             raw_examples = parsed.get("examples", [])
                             if not isinstance(raw_examples, Sequence) or isinstance(raw_examples, (str, bytes, bytearray)):
                                 raise LLMProviderResponseError("examples must be an array.")
@@ -622,7 +690,7 @@ def build_supervised_dataset(
                                 except (CurriculumQualityError, ValueError) as exc:
                                     rejected[task] += 1
                                     LOGGER.debug("Rejected %s LLM example: %s", task, exc)
-                        except LLMProviderResponseError as exc:
+                        except (LLMProviderResponseError, CurriculumQualityError) as exc:
                             LOGGER.warning(
                                 "External LLM bundle rejected for source %s: %s",
                                 document.document_id,
@@ -677,6 +745,8 @@ def build_supervised_dataset(
         "coverage": summary,
         "missing_required_coverage": missing,
         "providers_available": [provider.name for provider in providers],
+        "multi_model_critique_enabled": multi_model_critique,
+        "multi_model_critique_rejections": critique_rejections,
         "external_calls_accepted": external_accepted,
         "deterministic_fallback_accepted": deterministic_accepted,
         "rejected": int(sum(rejected.values())),
