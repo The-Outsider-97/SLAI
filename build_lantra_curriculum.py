@@ -1219,6 +1219,16 @@ def build(
                 fallback_accepted=supervised_result.deterministic_fallback_accepted,
                 rejected=supervised_result.rejected,
             )
+            if isinstance(result.manifest, dict):
+                result.manifest["validated_teacher_supervision"] = {
+                    "manifest": supervised_result.manifest_path,
+                    "providers": list(supervised_result.providers),
+                    "coverage": dict(supervised_result.coverage),
+                    "external_accepted": supervised_result.external_calls_accepted,
+                    "fallback_accepted": supervised_result.deterministic_fallback_accepted,
+                    "rejected": supervised_result.rejected,
+                    "resumed_records": supervised_result.resumed_records,
+                }
         return result
     finally:
         if factory is not None or memory is not None:
@@ -1311,6 +1321,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "manifest": result.manifest_path,
                 "records": result.manifest.get("records", {}),
                 "coverage": result.manifest.get("coverage", {}),
+                "validated_teacher_supervision": result.manifest.get("validated_teacher_supervision", {}),
             }
         else:
             summary = {"status": "dry_run", **result}
