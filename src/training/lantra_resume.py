@@ -47,6 +47,7 @@ class CheckpointSummary:
     saved_at: str
     dataset_fingerprint: str
     corpus_fingerprint: str
+    mtime_ns: int
 
     @property
     def stage_rank(self) -> int:
@@ -123,6 +124,7 @@ def summarize_checkpoint(path: Path, payload: Mapping[str, Any]) -> CheckpointSu
             or corpus.get("fingerprint_sha256")
             or ""
         ),
+        mtime_ns=(path.stat().st_mtime_ns if path.exists() else 0),
     )
 
 
@@ -204,9 +206,10 @@ def select_resume_checkpoint(
 ) -> tuple[CheckpointSummary | None, list[dict[str, Any]]]:
     """Inspect checkpoint metadata and select the most advanced compatible state.
 
-    Ranking is based on stage, optimizer progress and status rather than a filename
-    containing the word latest. A continuation state's explicit checkpoint wins
-    ties because it is the last successfully committed training baseline.
+    Ranking is based primarily on checkpoint metadata time, then stage/progress,
+    rather than a filename containing the word latest. This matters when a newer
+    run has returned to raw pretraining after an older supervised checkpoint.
+    A continuation state's explicit checkpoint wins otherwise-equal ties.
     """
     expected = dict(expected_base_config or {})
     state_last = str(continual_state.get("last_checkpoint") or "")
@@ -246,19 +249,23 @@ def select_resume_checkpoint(
     if not candidates:
         return None, inspected
 
-    def rank(item: CheckpointSummary) -> tuple[int, int, int, int, str, int]:
+    def rank(item: CheckpointSummary) -> tuple[str, int, int, int, int, int, int]:
+        state_path = Path(state_last) if state_last else None
         state_bonus = int(
-            bool(state_last)
-            and str(item.path.resolve()) == str(Path(state_last).resolve())
-            if Path(state_last).is_absolute()
-            else bool(state_last) and item.path.name == Path(state_last).name
+            bool(state_path)
+            and (
+                str(item.path.resolve()) == str(state_path.resolve())
+                if state_path.is_absolute()
+                else item.path.name == state_path.name
+            )
         )
         return (
+            item.saved_at,
+            item.mtime_ns,
             item.stage_rank,
             item.epoch,
             item.global_optimizer_step,
             _STATUS_RANK.get(item.status, 0),
-            item.saved_at,
             state_bonus,
         )
 
