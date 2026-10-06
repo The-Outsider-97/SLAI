@@ -4633,6 +4633,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOGGER.info("Resolved LANTRA device: %s", device)
         model = initialize_model(config, tokenizer, device)
 
+        resume_checkpoint_path = Path(config.init_from) if config.init_from else None
+        resume_summary = None
+        if resume_checkpoint_path is not None and resume_checkpoint_path.is_file():
+            resume_summary = summarize_checkpoint(
+                resume_checkpoint_path,
+                _load_checkpoint_payload(resume_checkpoint_path),
+            )
+        supervised_data_newer_than_resume = False
+        if resume_summary is not None and supervised_files:
+            checkpoint_mtime = resume_summary.mtime_ns
+            supervised_data_newer_than_resume = any(
+                path.stat().st_mtime_ns > checkpoint_mtime
+                for path in supervised_files
+                if path.is_file()
+            )
+        raw_training_pending = bool(raw_corpus.train_segments) and config.raw_pretrain_epochs > 0
+        safe_ordered_stage_resume = bool(
+            resume_summary is not None
+            and not supervised_data_newer_than_resume
+            and not raw_training_pending
+        )
+        resume_stage_rank = resume_summary.stage_rank if resume_summary is not None else 0
+        resume_stage_name = resume_summary.stage if resume_summary is not None else ""
+
         PRINTER.pretty(
             "LANTRA MODEL",
             {
@@ -4662,7 +4686,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Phase 1: GloVe embedding initialization + semantic distillation.
         # --------------------------------------------------------------
         glove_path = discover_glove_path(config, int(model.config.d_model))
-        if glove_path is not None:
+        if config.init_from:
+            phases["phase_1_glove"] = {
+                "status": "skipped",
+                "reason": "checkpoint continuation preserves learned embeddings; GloVe bootstrap is not reapplied",
+            }
+            PRINTER.status(
+                "LANTRA GLOVE",
+                "Skipped because model weights were restored from a checkpoint.",
+                "info",
+            )
+        elif glove_path is not None:
             glove_asset = load_glove_asset(
                 glove_path,
                 tokenizer,
@@ -4699,9 +4733,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             device,
             run_id,
             evaluate_test_split=False,
+            resume_checkpoint=(
+                resume_checkpoint_path
+                if resume_stage_name.startswith("raw_text_denoising_pretraining")
+                else None
+            ),
         )
         phase_2a_agent: Dict[str, Any]
-        if config.curriculum_enabled:
+        if config.curriculum_enabled and safe_ordered_stage_resume and resume_stage_rank >= 40:
+            phase_2a_agent = {
+                "status": "skipped_resume",
+                "reason": "selected checkpoint is from a later ordered phase and input data is unchanged",
+            }
+        elif config.curriculum_enabled:
             model, phase_2a_agent = train_explicit_stage(
                 config,
                 phase_datasets["2a"],
@@ -4712,6 +4756,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stage_name="phase_2a_knowledge",
                 epochs=config.curriculum_2a_epochs,
                 evaluate_test_split=False,
+                resume_checkpoint=(
+                    resume_checkpoint_path if resume_stage_name == "phase_2a_knowledge" else None
+                ),
             )
         else:
             phase_2a_agent = {"status": "skipped", "reason": "agent curriculum disabled"}
@@ -4729,7 +4776,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         # Phase 2B: retrieval representation learning.
         # --------------------------------------------------------------
-        if config.curriculum_enabled:
+        if config.curriculum_enabled and safe_ordered_stage_resume and resume_stage_rank >= 50:
+            phase_2b_result = {
+                "status": "skipped_resume",
+                "reason": "selected checkpoint is from a later ordered phase and input data is unchanged",
+            }
+        elif config.curriculum_enabled:
             model, phase_2b_result = train_explicit_stage(
                 config,
                 phase_datasets["2b"],
@@ -4740,6 +4792,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stage_name="phase_2b_retrieval",
                 epochs=config.curriculum_2b_epochs,
                 evaluate_test_split=False,
+                resume_checkpoint=(
+                    resume_checkpoint_path if resume_stage_name == "phase_2b_retrieval" else None
+                ),
             )
         else:
             phase_2b_result = {"status": "skipped", "reason": "agent curriculum disabled"}
@@ -4749,7 +4804,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         # Phase 2C: validated factual/reasoning curriculum.
         # --------------------------------------------------------------
-        if config.curriculum_enabled:
+        if config.curriculum_enabled and safe_ordered_stage_resume and resume_stage_rank >= 55:
+            phase_2c_result = {
+                "status": "skipped_resume",
+                "reason": "selected checkpoint is from a later ordered phase and input data is unchanged",
+            }
+        elif config.curriculum_enabled:
             model, phase_2c_result = train_explicit_stage(
                 config,
                 phase_datasets["2c"],
@@ -4760,6 +4820,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stage_name="phase_2c_reasoning",
                 epochs=config.curriculum_2c_epochs,
                 evaluate_test_split=False,
+                resume_checkpoint=(
+                    resume_checkpoint_path if resume_stage_name == "phase_2c_reasoning" else None
+                ),
             )
         else:
             phase_2c_result = {"status": "skipped", "reason": "agent curriculum disabled"}
@@ -4792,7 +4855,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Phase 3: real supervised specialization only.
         # --------------------------------------------------------------
         phase_3_result: Dict[str, Any]
-        if phase_datasets["3"] is not None:
+        resume_completed_supervised = bool(
+            safe_ordered_stage_resume
+            and resume_stage_name == "supervised"
+            and resume_summary is not None
+            and resume_summary.status == "final_best"
+        )
+        if phase_datasets["3"] is not None and resume_completed_supervised:
+            phase_3_result = {
+                "status": "already_completed",
+                "reason": "selected final supervised checkpoint matches unchanged input data",
+                "checkpoint": str(resume_checkpoint_path),
+                "test": None,
+            }
+            genuine_training_signal = True
+        elif phase_datasets["3"] is not None:
             model, phase_3_result = train_explicit_stage(
                 config,
                 phase_datasets["3"],
@@ -4803,6 +4880,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stage_name="supervised",
                 epochs=config.epochs,
                 evaluate_test_split=True,
+                resume_checkpoint=(
+                    resume_checkpoint_path if resume_stage_name == "supervised" else None
+                ),
             )
             genuine_training_signal = True
         else:
@@ -4855,7 +4935,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for result in (phase_2a_agent, phase_2b_result, phase_2c_result)
         )
 
-        if phase_3_result.get("status") == "completed":
+        if phase_3_result.get("status") == "already_completed":
+            final_checkpoint = str(phase_3_result["checkpoint"])
+            mode = "resumed_completed_supervised_checkpoint"
+        elif phase_3_result.get("status") == "completed":
             final_checkpoint = str(phase_3_result["checkpoints"]["final"])
             mode = (
                 "evolved_curriculum_with_supervised_specialization"
