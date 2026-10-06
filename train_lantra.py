@@ -118,6 +118,7 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Seque
 from src.agents.language.modules.language_tokenizer import LanguageTokenizer
 from src.agents.language.modules.language_transformer import LanguageTransformer
 from src.training.lantra_phase_scheduler import *
+from src.training.lantra_resume import load_optimizer_resume_state, select_resume_checkpoint, summarize_checkpoint
 from logs.logger import PrettyPrinter, configure_logging, get_logger
 
 
@@ -543,33 +544,51 @@ def save_continual_state(path: Path, state: Mapping[str, Any]) -> None:
     atomic_json_write(path, payload)
 
 
-def discover_resume_checkpoint(output_dir: Path, state: Mapping[str, Any]) -> Optional[Path]:
-    configured = state.get("last_checkpoint")
-    if isinstance(configured, str) and configured.strip():
-        candidate = Path(configured)
-        if candidate.is_file():
-            return candidate
+def _load_checkpoint_payload(path: Path) -> Mapping[str, Any]:
+    runtime = torch_runtime()
+    try:
+        try:
+            payload = runtime.load(path, map_location="cpu", weights_only=True, mmap=True)
+        except TypeError:
+            try:
+                payload = runtime.load(path, map_location="cpu", weights_only=True)
+            except TypeError:
+                payload = runtime.load(path, map_location="cpu")
+    except Exception as exc:
+        raise LantraTrainingError(
+            f"Failed to inspect LANTRA checkpoint {path}: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise LantraTrainingError(f"LANTRA checkpoint {path} does not contain a mapping payload.")
+    return payload
 
-    # Prefer a completed top-level final checkpoint over phase-local best/latest
-    # checkpoints even when a raw-pretraining file happens to have a newer mtime.
-    final_pattern = re.compile(r"^lantra_\d{8}T\d{6}Z\.pt$")
-    finals = [
-        path for path in output_dir.glob("lantra_*.pt")
-        if path.is_file() and final_pattern.match(path.name)
-    ]
-    if finals:
-        return max(finals, key=lambda item: item.stat().st_mtime_ns)
 
-    for candidate in (
-        output_dir / "lantra_latest.pt",
-        output_dir / "lantra_best.pt",
-        output_dir / "lantra_raw_pretrain_latest.pt",
-        output_dir / "lantra_raw_pretrain_best.pt",
-        output_dir / "lantra_interrupted.pt",
-    ):
-        if candidate.is_file():
-            return candidate
-    return None
+def discover_resume_checkpoint(
+    output_dir: Path,
+    state: Mapping[str, Any],
+    config: Optional["TrainerConfig"] = None,
+) -> Optional[Path]:
+    expected = config.recommended_model_overrides if config is not None else {}
+    summary, inspected = select_resume_checkpoint(
+        output_dir,
+        continual_state=state,
+        loader=_load_checkpoint_payload,
+        expected_base_config=expected,
+    )
+    for item in inspected:
+        LOGGER.debug("LANTRA resume candidate: %s", item)
+    if summary is None:
+        return None
+    LOGGER.info(
+        "Metadata-selected LANTRA checkpoint: %s | stage=%s status=%s epoch=%d step=%d optimizer=%s",
+        summary.path,
+        summary.stage or "unknown",
+        summary.status or "unknown",
+        summary.epoch,
+        summary.global_optimizer_step,
+        summary.has_optimizer_state,
+    )
+    return summary.path
 
 
 def inventory_raw_files(
@@ -663,23 +682,9 @@ def _architecture_mismatches(
 
 
 def _checkpoint_base_config(path: Path) -> Dict[str, Any]:
-    """Read only the native LanguageTransformer checkpoint metadata needed for resume selection."""
+    """Read native LanguageTransformer architecture metadata for compatibility checks."""
 
-    runtime = torch_runtime()
-    try:
-        try:
-            checkpoint = runtime.load(path, map_location="cpu", weights_only=True)
-        except TypeError:
-            checkpoint = runtime.load(path, map_location="cpu")
-    except Exception as exc:
-        raise LantraTrainingError(
-            f"Failed to inspect LANTRA resume checkpoint {path}: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    if not isinstance(checkpoint, Mapping):
-        raise LantraTrainingError(
-            f"LANTRA resume checkpoint {path} does not contain a mapping payload."
-        )
+    checkpoint = _load_checkpoint_payload(path)
     base_config = checkpoint.get("base_config")
     if not isinstance(base_config, Mapping):
         raise LantraTrainingError(
@@ -4309,7 +4314,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         continual_state = load_continual_state(state_path)
         auto_resumed = False
         if config.init_from is None and config.auto_resume:
-            resume_checkpoint = discover_resume_checkpoint(Path(config.output_dir), continual_state)
+            resume_checkpoint = discover_resume_checkpoint(Path(config.output_dir), continual_state, config)
             if resume_checkpoint is not None:
                 mismatches = checkpoint_recommendation_mismatches(resume_checkpoint, config)
                 if mismatches:
