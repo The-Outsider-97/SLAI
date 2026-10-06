@@ -9,6 +9,7 @@ on:
     branches:
       - SLAI-v.2.2
       - SLAI-v.2.3
+      - lantra-pipeline-upgrade-2026-10-06
   workflow_dispatch:
 
 permissions:
