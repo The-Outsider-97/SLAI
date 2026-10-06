@@ -206,7 +206,7 @@ class NearDuplicateIndex:
         threshold: float = 0.85,
         shingle_size: int = 5,
         permutations: int = 64,
-        bands: int = 8,
+        bands: int = 16,
     ) -> None:
         self.database = Path(database)
         self.threshold = float(threshold)
