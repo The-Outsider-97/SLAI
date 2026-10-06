@@ -292,13 +292,7 @@ def closest_point_on_aabb(point: Any, box: AABB) -> np.ndarray:
     return np.minimum(np.maximum(p, box.minimum), box.maximum)
 
 
-def ray_triangle_intersection(
-    ray: Ray,
-    triangle: Triangle,
-    *,
-    tolerance: float = DEFAULT_ABS_TOL,
-    max_distance: float | None = None,
-) -> float | None:
+def ray_triangle_intersection(ray: Ray, triangle: Triangle, *, tolerance: float = DEFAULT_ABS_TOL, max_distance: float | None = None) -> float | None:
     """Möller-Trumbore ray/triangle intersection distance."""
     edge1 = triangle.b - triangle.a
     edge2 = triangle.c - triangle.a
@@ -323,13 +317,7 @@ def ray_triangle_intersection(
     return distance
 
 
-def ray_aabb_intersection(
-    ray: Ray,
-    box: AABB,
-    *,
-    max_distance: float | None = None,
-    tolerance: float = DEFAULT_ABS_TOL,
-) -> float | None:
+def ray_aabb_intersection(ray: Ray, box: AABB, *, max_distance: float | None = None, tolerance: float = DEFAULT_ABS_TOL) -> float | None:
     if box.dimension != 3:
         raise SpatialGeometryError("ray/AABB intersection requires a 3D AABB")
     t_min = 0.0
@@ -353,13 +341,7 @@ def ray_aabb_intersection(
     return max(0.0, t_min)
 
 
-def ray_sphere_intersection(
-    ray: Ray,
-    sphere: Sphere,
-    *,
-    max_distance: float | None = None,
-    tolerance: float = DEFAULT_ABS_TOL,
-) -> float | None:
+def ray_sphere_intersection(ray: Ray, sphere: Sphere, *, max_distance: float | None = None, tolerance: float = DEFAULT_ABS_TOL) -> float | None:
     oc = ray.origin - sphere.center
     b = float(oc @ ray.direction)
     c = float(oc @ oc) - sphere.radius * sphere.radius

@@ -14,10 +14,10 @@ from threading import RLock
 from time import monotonic
 from typing import Any, Mapping
 
-from .spatial_types import SpatialEntity, SpatialRelationship
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.spatial_errors import SpatialValidationError
 from .utils.spatial_helpers import *
+from .spatial_types import SpatialEntity, SpatialRelationship
 from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Spatial Memory")
@@ -31,6 +31,7 @@ class SpatialMemory:
         self.max_history = max(1, int(self.memory_config.get("max_history", 1000)))
         self.max_query_cache = max(1, int(self.memory_config.get("max_query_cache", 256)))
         self.default_cache_ttl = max(0.0, float(self.memory_config.get("query_cache_ttl_seconds", 30.0)))
+
         self._lock = RLock()
         self._entities: dict[str, SpatialEntity] = {}
         self._relationships: dict[tuple[str, str, str], SpatialRelationship] = {}

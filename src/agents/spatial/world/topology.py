@@ -16,7 +16,7 @@ from typing import Any
 
 from .geometry import AABB, Polygon, Segment, Sphere, aabb_intersects, point_in_aabb, point_in_polygon_2d, segment_intersection_2d, sphere_intersects
 from ..utils.spatial_errors import SpatialTopologyError, SpatialValidationError
-from ..utils.spatial_helpers import DEFAULT_ABS_TOL, all_close, finite_vector
+from ..utils.spatial_helpers import DEFAULT_ABS_TOL, all_close
 from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Topology")

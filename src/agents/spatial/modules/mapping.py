@@ -15,11 +15,11 @@ from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Mapping as MappingType
 
-from .transform import RigidTransform
 from ..utils.config_loader import get_config_section, load_global_config
 from ..utils.spatial_errors import SpatialMappingError, SpatialValidationError
 from ..utils.spatial_helpers import DEFAULT_ABS_TOL, finite_array, to_json_safe, utc_now_iso, validate_identifier
-from ..world.geometry import PointCloud, aabb_from_points
+from ..world.geometry import PointCloud
+from .transform import RigidTransform
 from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Mapping")

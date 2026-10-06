@@ -32,32 +32,17 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def is_close(
-    a: float,
-    b: float,
-    *,
-    abs_tol: float = DEFAULT_ABS_TOL,
-    rel_tol: float = DEFAULT_REL_TOL,
-) -> bool:
+def is_close(a: float, b: float, *, abs_tol: float = DEFAULT_ABS_TOL, rel_tol: float = DEFAULT_REL_TOL) -> bool:
     return bool(np.isclose(float(a), float(b), atol=abs_tol, rtol=rel_tol))
 
 
-def all_close(
-    a: Any,
-    b: Any,
-    *,
-    abs_tol: float = DEFAULT_ABS_TOL,
-    rel_tol: float = DEFAULT_REL_TOL,
-) -> bool:
+def all_close(a: Any, b: Any, *, abs_tol: float = DEFAULT_ABS_TOL, rel_tol: float = DEFAULT_REL_TOL) -> bool:
     return bool(np.allclose(np.asarray(a, dtype=float), np.asarray(b, dtype=float), atol=abs_tol, rtol=rel_tol))
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
     if lower > upper:
-        raise SpatialValidationError(
-            "lower bound must not exceed upper bound",
-            context={"lower": lower, "upper": upper},
-        )
+        raise SpatialValidationError("lower bound must not exceed upper bound", context={"lower": lower, "upper": upper})
     return float(min(max(float(value), float(lower)), float(upper)))
 
 
@@ -89,20 +74,11 @@ def finite_array(
             context={"name": name, "actual_shape": array.shape},
         )
     if not np.all(np.isfinite(array)):
-        raise SpatialValidationError(
-            f"{name} contains NaN or infinite values",
-            context={"name": name},
-        )
+        raise SpatialValidationError(f"{name} contains NaN or infinite values", context={"name": name})
     return array
 
 
-def finite_vector(
-    value: Any,
-    *,
-    name: str = "vector",
-    dimension: int | None = None,
-    allow_empty: bool = False,
-) -> np.ndarray:
+def finite_vector(value: Any, *, name: str = "vector", dimension: int | None = None, allow_empty: bool = False) -> np.ndarray:
     vector = finite_array(value, name=name, ndim=1)
     if not allow_empty and vector.size == 0:
         raise SpatialValidationError(f"{name} must not be empty", context={"name": name})
@@ -121,12 +97,7 @@ def stable_norm(value: Any) -> float:
     return float(np.linalg.norm(vector))
 
 
-def unit_vector(
-    value: Any,
-    *,
-    name: str = "vector",
-    tolerance: float = DEFAULT_ABS_TOL,
-) -> np.ndarray:
+def unit_vector(value: Any, *, name: str = "vector", tolerance: float = DEFAULT_ABS_TOL) -> np.ndarray:
     vector = finite_vector(value, name=name)
     norm = float(np.linalg.norm(vector))
     if norm <= tolerance:

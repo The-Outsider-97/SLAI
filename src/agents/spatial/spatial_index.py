@@ -15,12 +15,12 @@ from dataclasses import dataclass
 from heapq import heappop, heappush
 from typing import Any
 
-from .spatial_memory import SpatialMemory, get_default_spatial_memory
-from .spatial_types import SpatialBounds, SpatialEntity
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.spatial_errors import SpatialGeometryError, SpatialIndexError
 from .utils.spatial_helpers import finite_vector, validate_non_negative
 from .world.geometry import AABB, geometry_bounds
+from .spatial_memory import SpatialMemory, get_default_spatial_memory
+from .spatial_types import SpatialBounds, SpatialEntity
 from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Spatial Index")
@@ -153,50 +153,8 @@ class SpatialIndex:
     def get(self, entity_id: str) -> SpatialEntity | None:
         return self.memory.get_entity(entity_id)
 
-    def nearest(self, point: Any, *, k: int = 1, frame_id: str | None = None, exclude_ids: set[str] | None = None) -> tuple[tuple[SpatialEntity, float], ...]:
-        self._ensure_rebuilt(frame_id=frame_id)
-        exclusions = exclude_ids or set()
-        if not exclusions:
-            raw = self._tree.nearest(point, k=k)
-        else:
-            raw = self._tree.nearest(point, k=min(len(self._tree.ids), k + len(exclusions)))
-            raw = tuple(item for item in raw if item[0] not in exclusions)[:k]
-        return tuple((self.memory.require_entity(entity_id), distance) for entity_id, distance in raw)
-
     def k_nearest(self, point: Any, k: int, *, frame_id: str | None = None) -> tuple[tuple[SpatialEntity, float], ...]:
         return self.nearest(point, k=k, frame_id=frame_id)
-
-    def within_radius(self, point: Any, radius: float, *, frame_id: str | None = None) -> tuple[tuple[SpatialEntity, float], ...]:
-        self._ensure_rebuilt(frame_id=frame_id)
-        return tuple((self.memory.require_entity(entity_id), distance) for entity_id, distance in self._tree.within_radius(point, radius))
-
-    def within_bounds(self, bounds: AABB | SpatialBounds, *, frame_id: str | None = None) -> tuple[SpatialEntity, ...]:
-        box = self._coerce_bounds(bounds)
-        self._ensure_rebuilt(frame_id=frame_id)
-        if self._tree.root is None:
-            return ()
-        points = self._tree.points
-        mask = np.all(points >= box.minimum, axis=1) & np.all(points <= box.maximum, axis=1)
-        return tuple(self.memory.require_entity(self._tree.ids[index]) for index in np.flatnonzero(mask))
-
-    def intersecting_bounds(self, bounds: AABB | SpatialBounds, *, frame_id: str | None = None) -> tuple[SpatialEntity, ...]:
-        box = self._coerce_bounds(bounds)
-        self._ensure_rebuilt(frame_id=frame_id)
-        if len(self._bounds_ids) == 0:
-            return ()
-        if box.dimension != self._bounds_min.shape[1]:
-            raise SpatialIndexError("query bounds dimension does not match index dimension")
-        mask = np.all(self._bounds_max >= box.minimum, axis=1) & np.all(self._bounds_min <= box.maximum, axis=1)
-        return tuple(self.memory.require_entity(self._bounds_ids[index]) for index in np.flatnonzero(mask))
-
-    def snapshot(self) -> dict[str, Any]:
-        self._ensure_rebuilt()
-        return {
-            "entity_revision": self._revision,
-            "dimension": self._dimension,
-            "point_entries": len(self._tree.ids),
-            "bounded_entries": len(self._bounds_ids),
-        }
 
     def _ensure_rebuilt(self, *, frame_id: str | None = None) -> None:
         # Frame-filtered views are rebuilt on demand because the authoritative
@@ -240,6 +198,48 @@ class SpatialIndex:
         self._bounds_max = np.asarray([item[1].maximum for item in bounded], dtype=float) if bounded else np.empty((0, dimension))
         self._revision = revision
         self._active_frame = frame_id
+
+    def nearest(self, point: Any, *, k: int = 1, frame_id: str | None = None, exclude_ids: set[str] | None = None) -> tuple[tuple[SpatialEntity, float], ...]:
+        self._ensure_rebuilt(frame_id=frame_id)
+        exclusions = exclude_ids or set()
+        if not exclusions:
+            raw = self._tree.nearest(point, k=k)
+        else:
+            raw = self._tree.nearest(point, k=min(len(self._tree.ids), k + len(exclusions)))
+            raw = tuple(item for item in raw if item[0] not in exclusions)[:k]
+        return tuple((self.memory.require_entity(entity_id), distance) for entity_id, distance in raw)
+
+    def within_radius(self, point: Any, radius: float, *, frame_id: str | None = None) -> tuple[tuple[SpatialEntity, float], ...]:
+        self._ensure_rebuilt(frame_id=frame_id)
+        return tuple((self.memory.require_entity(entity_id), distance) for entity_id, distance in self._tree.within_radius(point, radius))
+
+    def within_bounds(self, bounds: AABB | SpatialBounds, *, frame_id: str | None = None) -> tuple[SpatialEntity, ...]:
+        box = self._coerce_bounds(bounds)
+        self._ensure_rebuilt(frame_id=frame_id)
+        if self._tree.root is None:
+            return ()
+        points = self._tree.points
+        mask = np.all(points >= box.minimum, axis=1) & np.all(points <= box.maximum, axis=1)
+        return tuple(self.memory.require_entity(self._tree.ids[index]) for index in np.flatnonzero(mask))
+
+    def intersecting_bounds(self, bounds: AABB | SpatialBounds, *, frame_id: str | None = None) -> tuple[SpatialEntity, ...]:
+        box = self._coerce_bounds(bounds)
+        self._ensure_rebuilt(frame_id=frame_id)
+        if len(self._bounds_ids) == 0:
+            return ()
+        if box.dimension != self._bounds_min.shape[1]:
+            raise SpatialIndexError("query bounds dimension does not match index dimension")
+        mask = np.all(self._bounds_max >= box.minimum, axis=1) & np.all(self._bounds_min <= box.maximum, axis=1)
+        return tuple(self.memory.require_entity(self._bounds_ids[index]) for index in np.flatnonzero(mask))
+
+    def snapshot(self) -> dict[str, Any]:
+        self._ensure_rebuilt()
+        return {
+            "entity_revision": self._revision,
+            "dimension": self._dimension,
+            "point_entries": len(self._tree.ids),
+            "bounded_entries": len(self._bounds_ids),
+        }
 
     @staticmethod
     def _coerce_bounds(bounds: AABB | SpatialBounds) -> AABB:

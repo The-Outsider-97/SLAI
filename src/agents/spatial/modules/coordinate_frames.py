@@ -270,10 +270,7 @@ class CRSRegistry:
             return array.copy()
         function = self._transforms.get((source_crs, target_crs))
         if function is None:
-            raise SpatialFrameError(
-                "no registered CRS transform",
-                context={"source_crs": source_crs, "target_crs": target_crs},
-            )
+            raise SpatialFrameError("no registered CRS transform", context={"source_crs": source_crs, "target_crs": target_crs})
         result = np.asarray(function(array), dtype=float)
         if result.shape != array.shape or not np.all(np.isfinite(result)):
             raise SpatialFrameError("CRS transform returned malformed coordinates")
