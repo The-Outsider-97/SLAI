@@ -3695,6 +3695,7 @@ def train(
     stage_name: str = "supervised",
     epochs: Optional[int] = None,
     evaluate_test_split: bool = True,
+    resume_checkpoint: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Train one explicit LANTRA objective stage.
 
@@ -3740,6 +3741,32 @@ def train(
     epochs_without_improvement = 0
     history: List[Dict[str, Any]] = []
     interval_checkpoints: List[str] = []
+    start_epoch = 1
+    resume_state = _restore_stage_optimizer(
+        resume_checkpoint,
+        optimizer,
+        expected_stage=stage_name,
+        dataset_fingerprint=dataset.fingerprint,
+    )
+    if resume_state is not None:
+        resumed_epoch = int(resume_state.get("epoch", 0))
+        global_optimizer_step = int(resume_state.get("global_optimizer_step", 0))
+        status = str(resume_state.get("status", "")).casefold()
+        start_epoch = max(1, resumed_epoch if status == "interval" else resumed_epoch + 1)
+        metadata = resume_state.get("metadata", {})
+        validation = metadata.get("validation_metrics", {}) if isinstance(metadata, Mapping) else {}
+        if isinstance(validation, Mapping):
+            value = validation.get("macro_normalized_task_loss")
+            if value is None:
+                value = validation.get("best_validation_objective")
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                best_validation_objective = float(value)
+                best_epoch = resumed_epoch
+                best_global_optimizer_step = global_optimizer_step
+        LOGGER.info(
+            "Resuming LANTRA stage=%s at epoch=%d global_step=%d dataset=%s",
+            stage_name, start_epoch, global_optimizer_step, dataset.fingerprint[:16],
+        )
 
     def save_interval_checkpoint(
         epoch: int,
@@ -3792,7 +3819,7 @@ def train(
     )
 
     try:
-        for epoch in range(1, stage_epochs + 1):
+        for epoch in range(start_epoch, stage_epochs + 1):
             epoch_started = time.perf_counter()
             train_stats, global_optimizer_step = train_epoch(
                 model,
@@ -4000,6 +4027,7 @@ def train_explicit_stage(
     stage_name: str,
     epochs: int,
     evaluate_test_split: bool,
+    resume_checkpoint: Optional[Path] = None,
 ) -> Tuple[LanguageTransformer, Dict[str, Any]]:
     if dataset is None:
         return model, {"status": "skipped", "reason": "no records for stage", "stage": stage_name}
@@ -4015,6 +4043,7 @@ def train_explicit_stage(
         stage_name=stage_name,
         epochs=epochs,
         evaluate_test_split=evaluate_test_split,
+        resume_checkpoint=resume_checkpoint,
     )
     selected = Path(result["checkpoints"]["final"])
     model = LanguageTransformer.load_language_model(selected, device=device, strict=True)
