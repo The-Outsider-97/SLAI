@@ -190,6 +190,54 @@ Note: If you see an error about execution policy:
    - Additional runnable modules exist (for example `finance/app.py`, `games/train_chronos_agents.py`, and multiple agent module demos guarded by `if __name__ == "__main__":`).
 
 
+## LSTP v0.1 integration
+
+SLAI v2.3 integrates LSTP as a pinned external semantic-transport dependency.
+LSTP is **not vendored** into SLAI and does not replace the Language Agent,
+NLUEngine, or LANTRA.
+
+Target layout:
+
+```text
+SLAI/
+├── run_lstp.py
+├── setup_lstp.py
+├── model/
+│   ├── lstp.lock.json
+│   └── LSTP/              # pinned external clone; gitignored by SLAI
+└── src/
+    └── integrations/
+        └── lstp_adapter.py
+```
+
+Provision the exact LSTP revision and install it into the active SLAI
+environment:
+
+```console
+python setup_lstp.py
+python run_lstp.py doctor
+```
+
+The lock file records the repository URL, exact commit, package version, and
+protocol version. The bootstrap refuses checkout drift rather than silently
+following LSTP `main`.
+
+Useful launcher commands:
+
+```console
+python run_lstp.py validate-json packet.json
+python run_lstp.py canonical-lattice packet.lstp --packet-id p1
+python run_lstp.py compact-lattice request.lat --packet-id p1 --thread-id t1
+python run_lstp.py frame-json frame.json --packet-id p1 --thread-id t1
+```
+
+The Language Agent has an optional `language_agent.lstp` configuration block.
+It is disabled by default. When enabled, the already-produced SLAI semantic
+frame is projected into LSTP response metadata after NLU/LANTRA processing.
+The projection never derives write/execute/commit permission from natural
+language; requested LSTP permissions remain empty unless a separate trusted
+caller explicitly supplies them.
+
 ## Continuous Integration and Testing
 - This branch currently includes Python tests under `deployment/test/` (release invariants and CI trigger contract checks).
 - No `.github/workflows/` CI workflow file is present in this snapshot, so CI behavior should be treated as repository-external or pending sync.
