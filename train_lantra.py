@@ -707,6 +707,41 @@ def checkpoint_recommendation_mismatches(
     )
 
 
+def _restore_stage_optimizer(
+    checkpoint_path: Optional[Path],
+    optimizer: Any,
+    *,
+    expected_stage: str,
+    dataset_fingerprint: str = "",
+    corpus_fingerprint: str = "",
+) -> Optional[Dict[str, Any]]:
+    if checkpoint_path is None or not checkpoint_path.is_file():
+        return None
+    payload = _load_checkpoint_payload(checkpoint_path)
+    resume = load_optimizer_resume_state(
+        payload,
+        expected_stage=expected_stage,
+        dataset_fingerprint=dataset_fingerprint,
+        corpus_fingerprint=corpus_fingerprint,
+    )
+    if resume is None:
+        return None
+    try:
+        optimizer.load_state_dict(resume["optimizer_state_dict"])
+    except Exception as exc:
+        raise LantraTrainingError(
+            f"Checkpoint {checkpoint_path} has incompatible optimizer state for {expected_stage}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    LOGGER.info(
+        "Restored LANTRA optimizer state from %s for stage=%s epoch=%d step=%d",
+        checkpoint_path,
+        expected_stage,
+        int(resume.get("epoch", 0)),
+        int(resume.get("global_optimizer_step", 0)),
+    )
+    return dict(resume)
+
 def _reset_continual_state_for_fresh_architecture(
     state: Mapping[str, Any],
 ) -> Dict[str, Any]:
