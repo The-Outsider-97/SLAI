@@ -328,7 +328,7 @@ def _checkpoint_payload(
 
 def test_checkpoint_discovery_uses_metadata_not_filename(tmp_path: Path) -> None:
     older = tmp_path / "lantra_latest.pt"
-    newer = tmp_path / "odd_name.pt"
+    newer = tmp_path / "lantra_unusual.pt"
     older.write_bytes(b"a")
     newer.write_bytes(b"b")
     payloads = {
