@@ -223,6 +223,7 @@ class AgentFactory:
         "reasoning": {"module_path": "src.agents.reasoning_agent", "class_name": "ReasoningAgent"},
         "safety": {"module_path": "src.agents.safety_agent", "class_name": "SafetyAgent"},
         "simulation": {"module_path": "src.agents.simulation_agent", "class_name": "SimulationAgent"},
+        "spatial": {"module_path": "src.agents.spatial_agent", "class_name": "SpatialAgent"},
         "verification": {"module_path": "src.agents.verification_agent", "class_name": "VerificationAgent"},
     }
 
@@ -264,6 +265,7 @@ class AgentFactory:
         "simulation": {"torch_required": False, "notes": (
                        "Simulation orchestration and numerical execution are torch-free by default;"
                        "externally supplied learned world models may carry their own optional dependencies.")},
+        "spatial": {"torch_required": False, "notes": "Spatial tracking is torch-free; optional learned models may require torch."},
         "verification": {"torch_required": False, "notes": (
             "Formal verification/model-checking orchestration is torch-free; "
             "SAT/SMT backends remain optional dependencies of the "
@@ -485,6 +487,7 @@ class AgentFactory:
             "reasoning",
             "safety",
             "simulation",
+            "spatial",
             "verification",
         )
         return defaults
