@@ -278,6 +278,60 @@ physics_constraints:
   enable_history: true
   history_limit: 200
   random_seed: null
+  # classical
+  body_radius: 0.5
+  buoyancy_enabled: true
+  fluid_density: 997.0
+  magnus_coeff: 0.02
+  pendulum_enabled: false
+  pendulum_length: 1.0
+  pendulum_anchor: [0.0, 0.0]
+  spring_constants: [50.0]
+  spring_anchors: [[0.0, 2.0]]
+  spring_damping: 0.5
+  nbody_G_enabled: false
+  nbody_masses: [1.0, 1.0]
+  nbody_positions: [[-5.0, 0.0], [5.0, 0.0]]
+
+  # thermodynamics
+  enable_thermodynamics: true
+  ambient_temperature: 293.15
+  body_temperature: 300.0
+  heat_transfer_coeff: 5.0
+  emissivity: 0.9
+  specific_heat: 4186.0
+
+  # EM
+  enable_electromagnetic: true
+  electric_field: [0.0, 10.0]
+  magnetic_field: 0.5
+  enable_coulomb: true
+  other_charges: [[[3.0, 0.0], -1e-6]]
+  enable_radiation_pressure: false
+
+  # relativity
+  enable_relativistic: true
+  enable_time_dilation: true
+  enable_length_contraction: true
+
+  # quantum
+  enable_wkb_tunneling: false
+  particle_mass_kg: 9.11e-31
+
+  # materials
+  enable_material_stress: true
+  youngs_modulus: 2.0e11
+  yield_strength: 2.5e8
+  fracture_strain: 0.05
+
+  # constraints
+  max_velocity: 1.0e6
+  max_acceleration: 1.0e9
+  max_jerk: 1.0e12
+
+  # audit
+  enable_conservation_audit: true
+  energy_tolerance: 1e-4
 
 
 input_sanitizer:
