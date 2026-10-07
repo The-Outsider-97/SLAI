@@ -334,6 +334,177 @@ physics_constraints:
   energy_tolerance: 1e-4
 
 
+base_engineering:
+  # ------------------------- Engine-level -------------------------
+  enable_history: true
+  history_limit: 200
+  numeric_tolerance: 1.0e-12
+  strict_checks: false
+  default_safety_factor: 1.5
+  check_warn_utilization: 0.9
+  check_critical_utilization: 1.5
+  sampling_oversample_factor: 2.5
+  default_material: structural_steel_a36
+
+  # ------------------------- Material library ---------------------
+  # Every entry must define exactly these five keys:
+  #   youngs_modulus [Pa], yield_strength [Pa], ultimate_strength [Pa],
+  #   density [kg/m^3], poissons_ratio [-]
+  materials:
+    structural_steel_a36:
+      youngs_modulus: 2.00e11
+      yield_strength: 2.50e8
+      ultimate_strength: 4.00e8
+      density: 7850.0
+      poissons_ratio: 0.26
+    stainless_steel_304:
+      youngs_modulus: 1.93e11
+      yield_strength: 2.15e8
+      ultimate_strength: 5.05e8
+      density: 8000.0
+      poissons_ratio: 0.29
+    aluminum_6061_t6:
+      youngs_modulus: 6.90e10
+      yield_strength: 2.76e8
+      ultimate_strength: 3.10e8
+      density: 2700.0
+      poissons_ratio: 0.33
+    titanium_ti6al4v:
+      youngs_modulus: 1.14e11
+      yield_strength: 8.80e8
+      ultimate_strength: 9.50e8
+      density: 4430.0
+      poissons_ratio: 0.34
+    copper_c110:
+      youngs_modulus: 1.17e11
+      yield_strength: 6.90e7
+      ultimate_strength: 2.20e8
+      density: 8960.0
+      poissons_ratio: 0.34
+
+  # ------------------------- Medical ------------------------------
+  medical:
+    bsa_formula: mosteller          # mosteller | dubois | haycock
+    qt_formula: bazett              # bazett | fridericia | framingham | hodges
+    hemoglobin_binding_capacity_ml_per_g: 1.34
+    oxygen_solubility_ml_per_dl_per_mmhg: 0.003
+    water_vapor_pressure_mmhg: 47.0
+    respiratory_quotient: 0.8
+    atmospheric_pressure_mmhg: 760.0
+    spo2_ratio_intercept: 110.0
+    spo2_ratio_slope: 25.0
+    blood_viscosity_pa_s: 0.0035
+
+    # ICRP-103 style weighting factors (dimensionless)
+    radiation_weighting_factors:
+      photons: 1.0
+      electrons: 1.0
+      protons: 2.0
+      neutrons: 20.0
+      alpha: 20.0
+      fission_fragments: 20.0
+
+    # ICRP-103 tissue weights; MUST sum to 1.0 (validated at load time).
+    tissue_weighting_factors:
+      gonads: 0.08
+      red_bone_marrow: 0.12
+      colon: 0.12
+      lung: 0.12
+      stomach: 0.12
+      bladder: 0.04
+      breast: 0.12
+      liver: 0.04
+      esophagus: 0.04
+      thyroid: 0.04
+      skin: 0.01
+      bone_surface: 0.01
+      brain: 0.01
+      salivary_glands: 0.01
+      remainder: 0.12
+
+    # IEC 60601-1 inspired patient leakage current limits (microamps).
+    leakage_current_limits_ua:
+      b:
+        normal: 100.0
+        single_fault: 500.0
+      bf:
+        normal: 100.0
+        single_fault: 500.0
+      cf:
+        normal: 10.0
+        single_fault: 50.0
+
+    # Adult resting reference ranges (low, high) -- engineering QA, not clinical.
+    vital_sign_ranges:
+      heart_rate_bpm: [60.0, 100.0]
+      systolic_mmhg: [90.0, 120.0]
+      diastolic_mmhg: [60.0, 80.0]
+      respiratory_rate_bpm: [12.0, 20.0]
+      spo2_percent: [95.0, 100.0]
+      temperature_c: [36.1, 37.2]
+
+    # Diagnostic-signal bands (Hz) used to derive minimum sampling rates.
+    biosignal_bands_hz:
+      ecg: [0.05, 150.0]
+      eeg: [0.5, 100.0]
+      emg: [10.0, 500.0]
+      ppg: [0.5, 10.0]
+      respiration: [0.1, 3.0]
+
+  # ------------------------- Civil --------------------------------
+  civil:
+    dead_load_factor: 1.2
+    live_load_factor: 1.6
+    deflection_limit_ratio: 360.0
+    concrete_modulus_coefficient: 4700.0
+    flexural_resistance_factor: 0.9
+    rebar_yield_strength_pa: 4.2e8
+    concrete_stress_block_factor: 0.85
+    tension_controlled_c_over_d: 0.375
+    bearing_capacity_safety_factor: 3.0
+    soil_unit_weight_n_m3: 18000.0
+    seismic_importance_factor: 1.0
+    seismic_response_modification: 3.0
+    seismic_min_cs_sds_coefficient: 0.044
+    seismic_min_cs: 0.01
+    runoff_coefficient: 0.7
+    manning_roughness: 0.013
+    effective_length_factor: 1.0
+
+  # ------------------------- Computer -----------------------------
+  computer:
+    max_cpu_utilization: 0.8
+    availability_target: 0.999
+    dynamic_power_activity_factor: 0.1
+
+  # ------------------------- Electronics / Comms ------------------
+  electronics_comms:
+    resistor_power_derating: 0.5
+    max_junction_temperature_c: 125.0
+    battery_derating_factor: 0.8
+    copper_resistivity_ohm_m: 1.68e-8
+    copper_temp_coefficient_per_c: 0.00393
+    reference_conductor_temperature_c: 20.0
+    noise_temperature_k: 290.0
+    antenna_efficiency: 0.55
+    required_link_margin_db: 6.0
+
+  # ------------------------- Mechanical ---------------------------
+  mechanical:
+    bolt_torque_coefficient: 0.2
+    bolt_preload_proof_fraction: 0.75
+    gear_stage_efficiency: 0.98
+    bearing_ball_exponent: 3.0
+    bearing_roller_exponent: 3.3333333333333335   # = 10 / 3
+    thin_wall_ratio_limit: 10.0
+    pipe_roughness_m: 4.5e-5
+    pump_efficiency: 0.7
+    laminar_reynolds_limit: 2300.0
+    fluid_viscosity_pa_s: 8.9e-4
+    endurance_ratio: 0.5
+    endurance_limit_cap_pa: 7.0e8
+
+
 input_sanitizer:
   unicode_normalization_form: "NFKC"
   strip_control_characters: true

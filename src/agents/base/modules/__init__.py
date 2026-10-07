@@ -1,4 +1,5 @@
 from .activation_engine import *
+from .base_engineering import *
 from .base_tokenizer import *
 from .base_transformer import *
 from .biology_constraints import *
@@ -7,6 +8,19 @@ from .input_sanitizer import *
 from .math_science import *
 from .numpy_encoder import *
 from .physics_constraints import *
+
+
+from .activation_engine import *
+from .base_engineering import __all__ as _base_engineering_exports
+from .base_tokenizer import *
+from .base_transformer import *
+from .biology_constraints import *
+from .chemistry_constraints import *
+from .input_sanitizer import *
+from .math_science import *
+from .numpy_encoder import *
+from .physics_constraints import *
+
 
 __all__ = [
     # Activations
@@ -31,6 +45,7 @@ __all__ = [
     "lecun_normal",
     "xavier_uniform",
     "xavier_normal",
+    *_base_engineering_exports,
     # Base Tokenizer
     "BaseTokenizer",
     "TokenizerStats",
@@ -46,7 +61,6 @@ __all__ = [
     "BiologyStepSummary",
     "BiologyEngine",
     "apply_biological_constants",
-    "_sync_engine_from_env",
     "apply_biological_processes",
     "enforce_biological_constraints",
     "apply_all_biological_constraints",
@@ -59,7 +73,6 @@ __all__ = [
     "enforce_chemical_constraints",
     "apply_all_chemical_constraints",
     # Physics Constraints
-    "PhysicsConfig",
     "PhysicsStepSummary",
     "PhysicsEngine",
     "apply_constants",
@@ -74,4 +87,4 @@ __all__ = [
     "NumpyEncoder",
     "NumpyEncodingRecord",
     "NumpyEncoderStats",
-]
+] # type: ignore
