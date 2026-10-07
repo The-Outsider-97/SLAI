@@ -224,6 +224,7 @@ class AgentFactory:
         "safety": {"module_path": "src.agents.safety_agent", "class_name": "SafetyAgent"},
         "simulation": {"module_path": "src.agents.simulation_agent", "class_name": "SimulationAgent"},
         "spatial": {"module_path": "src.agents.spatial_agent", "class_name": "SpatialAgent"},
+        "stem": {"module_path": "src.agents.stem_agent", "class_name": "STEMAgent"},
         "verification": {"module_path": "src.agents.verification_agent", "class_name": "VerificationAgent"},
     }
 
@@ -266,6 +267,7 @@ class AgentFactory:
                        "Simulation orchestration and numerical execution are torch-free by default;"
                        "externally supplied learned world models may carry their own optional dependencies.")},
         "spatial": {"torch_required": False, "notes": "Spatial tracking is torch-free; optional learned models may require torch."},
+        "stem": {"torch_required": False, "notes": "STEM tracking is torch-free; optional learned models may require torch."},
         "verification": {"torch_required": False, "notes": (
             "Formal verification/model-checking orchestration is torch-free; "
             "SAT/SMT backends remain optional dependencies of the "
@@ -488,6 +490,7 @@ class AgentFactory:
             "safety",
             "simulation",
             "spatial",
+            "stem",
             "verification",
         )
         return defaults
@@ -750,10 +753,7 @@ class AgentFactory:
         agent_type = metadata.name
         definition_id = metadata.identity
         runtime_key = self._runtime_unavailable_key(metadata, scope_id)
-        unavailable_key = next(
-            (key for key in (definition_id, runtime_key) if key in self.unavailable_agents),
-            None,
-        )
+        unavailable_key = next((key for key in (definition_id, runtime_key) if key in self.unavailable_agents), None)
         if unavailable_key is not None:
             reason = self.unavailable_agents[unavailable_key]
             raise AgentInitializationError(
@@ -782,12 +782,7 @@ class AgentFactory:
                 context={"agent_type": agent_type, "definition_id": definition_id, "profile": profile},
             )
 
-    def _resolve_dependency_order(
-        self,
-        agent_type: str,
-        *,
-        version: Optional[str] = None,
-    ) -> Tuple[str, ...]:
+    def _resolve_dependency_order(self, agent_type: str, *, version: Optional[str] = None) -> Tuple[str, ...]:
         try:
             load_order = tuple(
                 self.registry.resolve_dependency_tree(agent_type, version=version)

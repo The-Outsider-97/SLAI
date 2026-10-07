@@ -42,6 +42,7 @@ _EXPORTS = {
     "ReasoningAgent": (".reasoning_agent", "ReasoningAgent"),
     "SafetyAgent": (".safety_agent", "SafetyAgent"),
     "SpatialAgent": (".spatial_agent", "SpatialAgent"),
+    "STEMAgent": (".stem_agent", "STEMAgent"),
     "VerificationAgent": (".verification_agent", "VerificationAgent"),
     # For later: add more agents like social agent, emotional agent, gamer agent, simulation agent, etc.
 }

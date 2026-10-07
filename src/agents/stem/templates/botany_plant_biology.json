@@ -1,0 +1,192 @@
+{
+    "plant_profile": {
+        "metadata": {
+            "record_id": "UUID-or-String",
+            "recorded_by": "String",
+            "date_recorded": "YYYY-MM-DD",
+            "last_updated": "YYYY-MM-DD"
+        },
+        "taxonomy": {
+            "kingdom": "Plantae",
+            "clade": [
+                "Tracheophytes",
+                "Angiosperms",
+                "Eudicots",
+                "Asterids"
+            ],
+            "order": "String",
+            "family": "String",
+            "subfamily": "String",
+            "genus": "String",
+            "species": "String",
+            "subspecies_or_variety": "String",
+            "scientific_name": "String",
+            "author_citation": "String",
+            "common_names": [
+                "String"
+            ]
+        },
+        "morphology": {
+            "life_form": "Tree | Shrub | Herb | Vine | Epiphyte | Succulent",
+            "height_meters": {
+                "min": 0.0,
+                "max": 0.0
+            },
+            "spread_meters": {
+                "min": 0.0,
+                "max": 0.0
+            },
+            "root_system": {
+                "type": "Taproot | Fibrous | Adventitious | Tuberous",
+                "description": "String"
+            },
+            "stem_and_bark": {
+                "type": "Woody | Herbaceous",
+                "texture": "String",
+                "color": "String",
+                "modifications": [
+                    "Rhizome",
+                    "Stolon",
+                    "Bulb",
+                    "Corm",
+                    "None"
+                ]
+            },
+            "leaves": {
+                "type": "Simple | Compound",
+                "arrangement": "Alternate | Opposite | Whorled | Basal",
+                "shape": "String",
+                "margin": "Entire | Serrate | Dentate | Lobed",
+                "venation": "Parallel | Pinnate | Palmate",
+                "color": "String",
+                "phenology": "Deciduous | Evergreen | Semi-evergreen"
+            },
+            "flowers": {
+                "presence": true,
+                "inflorescence_type": "Solitary | Spike | Raceme | Panicle | Umbel | Head",
+                "symmetry": "Actinomorphic | Zygomorphic",
+                "color": [
+                    "String"
+                ],
+                "blooming_season": [
+                    "Spring",
+                    "Summer",
+                    "Autumn",
+                    "Winter"
+                ]
+            },
+            "fruits_and_seeds": {
+                "fruit_type": "Berry | Drupe | Capsule | Legume | Nut | Follicle | Achene",
+                "fruit_color": "String",
+                "seed_description": "String",
+                "dispersal_mechanism": [
+                    "Wind (Anemochory)",
+                    "Water (Hydrochory)",
+                    "Animals (Zoochory)",
+                    "Gravity (Barochory)"
+                ]
+            }
+        },
+        "ecology_and_distribution": {
+            "native_range": [
+                "String"
+            ],
+            "introduced_range": [
+                "String"
+            ],
+            "habitat_types": [
+                "Forest",
+                "Grassland",
+                "Wetland",
+                "Desert",
+                "Alpine",
+                "Urban"
+            ],
+            "climate_preferences": {
+                "hardiness_zones": {
+                    "min": 1,
+                    "max": 13
+                },
+                "sunlight": [
+                    "Full Sun",
+                    "Partial Shade",
+                    "Full Shade"
+                ],
+                "water_requirements": "Low | Moderate | High"
+            },
+            "soil_preferences": {
+                "type": [
+                    "Sand",
+                    "Loam",
+                    "Clay",
+                    "Chalk",
+                    "Peat"
+                ],
+                "ph_range": {
+                    "min": 0.0,
+                    "max": 14.0
+                },
+                "drainage": "Well-drained | Moist but well-drained | Poorly drained"
+            },
+            "biotic_interactions": {
+                "pollinators": [
+                    "Bees",
+                    "Butterflies",
+                    "Birds",
+                    "Bats",
+                    "Wind",
+                    "Water"
+                ],
+                "pests_and_diseases": [
+                    "String"
+                ],
+                "symbiosis": [
+                    "Mycorrhizae",
+                    "Nitrogen-fixing bacteria",
+                    "None"
+                ]
+            }
+        },
+        "physiology": {
+            "photosynthetic_pathway": "C3 | C4 | CAM",
+            "growth_rate": "Slow | Moderate | Fast",
+            "lifespan": "Annual | Biennial | Perennial",
+            "reproduction_methods": [
+                "Seed",
+                "Vegetative (Clonal)"
+            ]
+        },
+        "genetics": {
+            "chromosome_number_2n": 0,
+            "ploidy_level": "Diploid | Tetraploid | Hexaploid",
+            "genome_size_mb": 0.0
+        },
+        "human_uses_and_impact": {
+            "edibility": false,
+            "culinary_uses": [
+                "String"
+            ],
+            "medicinal_uses": [
+                "String"
+            ],
+            "industrial_materials": [
+                "Wood",
+                "Fiber",
+                "Dye",
+                "Resin",
+                "Oil"
+            ],
+            "ornamental_value": "String",
+            "toxicity_and_warnings": [
+                "String"
+            ]
+        },
+        "conservation": {
+            "iucn_red_list_status": "NE | DD | LC | NT | VU | EN | CR | EW | EX",
+            "cites_appendix": "I | II | III | None",
+            "local_protections": [
+                "String"
+            ]
+        }
+    }
+}
