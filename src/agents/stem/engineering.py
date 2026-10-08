@@ -1,55 +1,68 @@
 """
+Deterministic engineering computations for SLAI STEM.
 
-Ownership
-mechanics calculations;
-structural quantities;
-fluid/thermal calculations;
-electrical engineering formulae;
-engineering constitutive relations;
-continuum-equation evaluation;
-discretized engineering systems;
-engineering-specific input/output transformations.
-
-sources:
-- Schäfer, M. (2022). Computational Engineering – Introduction to Numerical Methods (2nd ed.). Springer. DOI 10.1007/978-3-030-76027-4.
-- Quarteroni, A., Sacco, R., & Saleri, F. (2007). Numerical Mathematics. Springer. DOI 10.1007/978-0-387-22750-4.
+The class extends the current Base EngineeringEngine rather than duplicating
+its civil/mechanical/electronics/computer/medical engineering implementations.
 """
-
 from __future__ import annotations
-
-from typing import Any, Mapping
 
 __version__ = "2.3.0"
 
-from ..base.modules.biology_constraints import *
-from ..base.modules.chemistry_constraints import *
-from ..base.modules.base_engineering import *
-from ..base.modules.math_science import *
-from .utils.config_loader import load_global_config, get_config_section
-from .utils.stem_errors import *
-from .utils.stem_helpers import *
-from .units.unit_system import *
-from .stem_memory import *
-from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
+from dataclasses import dataclass
+from typing import Any, Dict, Mapping, Optional
 
+from ..base.modules.base_engineering import EngineeringEngine
+from .utils.config_loader import get_config_section, load_global_config
+from .utils.stem_errors import STEMDomainError
+from .utils.stem_helpers import ensure_finite_number, ensure_positive
+from .stem_memory import STEMMemory
+from .stem_types import Quantity, Unit
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("SLAI Engineering")
 printer = PrettyPrinter()
 
+
 @dataclass(frozen=True)
 class EngineeringQuantity:
-    """conforms to the BIPM SI system and ISO quantity/unit definitions."""
+    name: str
+    quantity: Quantity
+    method: str
 
 
 class Engineering(EngineeringEngine):
-    """deterministic engineering equations and computational models."""
     def __init__(self, config: Mapping[str, Any] | None = None, memory: Optional[STEMMemory] = None) -> None:
-        super().__init__(config)
-        self.config: Dict[str, Any] = load_global_config()
-        self.engineering_config = dict(get_config_section("stem_engineering", config=self.config) or {})
+        # Base engineering configuration remains owned by BaseEngine.
+        super().__init__(None)
+        self.stem_config: Dict[str, Any] = load_global_config()
+        self.engineering_config_stem = dict(get_config_section("stem_engineering", config=self.stem_config) or {})
         if config:
-            self.engineering_config.update(dict(config))
+            self.engineering_config_stem.update(dict(config))
+        self.memory = memory
 
-        self.memory=memory
+    @staticmethod
+    def axial_stress(force: float, area: float) -> float:
+        return ensure_finite_number(force, "force", error_cls=STEMDomainError) / ensure_positive(area, "area", error_cls=STEMDomainError)
 
-__all__ = ["Engineering"]
+    @staticmethod
+    def heat_conduction_1d(conductivity: float, area: float, delta_temperature: float, length: float) -> float:
+        k = ensure_positive(conductivity, "conductivity", error_cls=STEMDomainError)
+        a = ensure_positive(area, "area", error_cls=STEMDomainError)
+        dt = ensure_finite_number(delta_temperature, "delta_temperature", error_cls=STEMDomainError)
+        l = ensure_positive(length, "length", error_cls=STEMDomainError)
+        return k * a * dt / l
+
+    @staticmethod
+    def electrical_power(voltage: float, current: float) -> float:
+        return ensure_finite_number(voltage, "voltage", error_cls=STEMDomainError) * ensure_finite_number(current, "current", error_cls=STEMDomainError)
+
+    @staticmethod
+    def reynolds_number(density: float, velocity: float, characteristic_length: float, dynamic_viscosity: float) -> float:
+        rho = ensure_positive(density, "density", error_cls=STEMDomainError)
+        v = ensure_finite_number(velocity, "velocity", error_cls=STEMDomainError)
+        length = ensure_positive(characteristic_length, "characteristic_length", error_cls=STEMDomainError)
+        mu = ensure_positive(dynamic_viscosity, "dynamic_viscosity", error_cls=STEMDomainError)
+        return rho * abs(v) * length / mu
+
+
+__all__ = ["Engineering", "EngineeringQuantity"]

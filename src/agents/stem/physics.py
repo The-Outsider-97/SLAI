@@ -1,56 +1,57 @@
+"""Deterministic physical equations and constants for SLAI STEM.
+
+The class extends SLAI's existing PhysicsEngine. It does not own scenario/world
+rollout; SimulationAgent may consume these equations and constants.
 """
-
-Ownership
-This module should provide:
-
-deterministic physical laws/equations;
-- physical constants;
-- kinematics;
-- dynamics;
-- energy/momentum calculations;
-- field/electromagnetic formulas;
-- thermodynamic relationships;
-- waves/optics relationships;
-- formula evaluation;
-- physical model construction.
-- It shouldn't decide why a physical event happened—that is Reasoning—and shouldn't evolve an entire physical world—that is Simulation.
-
-sources:
-- Landau, R. H., Páez, M. J., & Bordeianu, C. C. (2007). Computational Physics: Problem Solving with Computers. Wiley-VCH. DOI 10.1002/9783527618835.
-- Mohr, P. J., Newell, D. B., Taylor, B. N., & Tiesinga, E. (2025). “CODATA Recommended Values of the Fundamental Physical Constants: 2022.” Reviews of Modern Physics.
-- BIPM SI Brochure, 9th ed., updated 2026 should govern units/constants representation.
-"""
-
 from __future__ import annotations
 
 __version__ = "2.3.0"
 
-from typing import Any, Mapping
+import math
+from typing import Any, Dict, Mapping, Optional
 
-from ..base.modules.biology_constraints import *
-from ..base.modules.chemistry_constraints import *
-from ..base.modules.physics_constraints import *
-from ..base.modules.math_science import *
-from .utils.config_loader import load_global_config, get_config_section
-from .utils.stem_errors import *
+from ..base.modules.physics_constraints import PhysicsEngine
+from .utils.config_loader import get_config_section, load_global_config
+from .utils.stem_errors import STEMDomainError
 from .utils.stem_helpers import *
-from .units.unit_system import *
-from .stem_memory import *
-from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
-
+from .stem_memory import STEMMemory
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("SLAI Physics")
 printer = PrettyPrinter()
 
 
 class Physics(PhysicsEngine):
-    def __init__(self, config: Mapping[str, Any] | None = None, memory: Optional[STEMMemory] = None):
-        super().__init__(config)
-        self.config: Dict[str, Any] = load_global_config()
-        self.physics_config = dict(get_config_section("stem_physics", config=self.config) or {})
+    def __init__(self, config: Mapping[str, Any] | None = None, memory: Optional[STEMMemory] = None) -> None:
+        super().__init__(None)
+        self.stem_config: Dict[str, Any] = load_global_config()
+        self.physics_config_stem = dict(get_config_section("stem_physics", config=self.stem_config) or {})
         if config:
-            self.physics_config.update(dict(config))
-
+            self.physics_config_stem.update(dict(config))
         self.memory = memory
 
-__all__ = []
+    @staticmethod
+    def kinetic_energy(mass: float, velocity: float) -> float:
+        m = ensure_non_negative(mass, "mass", error_cls=STEMDomainError); v = ensure_finite_number(velocity, "velocity", error_cls=STEMDomainError)
+        return 0.5 * m * v * v
+
+    @staticmethod
+    def momentum(mass: float, velocity: float) -> float:
+        return ensure_non_negative(mass, "mass", error_cls=STEMDomainError) * ensure_finite_number(velocity, "velocity", error_cls=STEMDomainError)
+
+    def gravitational_force(self, mass_a: float, mass_b: float, distance: float) -> float:
+        m1 = ensure_non_negative(mass_a, "mass_a", error_cls=STEMDomainError); m2 = ensure_non_negative(mass_b, "mass_b", error_cls=STEMDomainError); r = ensure_positive(distance, "distance", error_cls=STEMDomainError)
+        return float(self.CONSTANTS["G"]) * m1 * m2 / (r * r)
+
+    def ideal_gas_pressure(self, moles: float, temperature: float, volume: float) -> float:
+        n = ensure_non_negative(moles, "moles", error_cls=STEMDomainError); t = ensure_positive(temperature, "temperature", error_cls=STEMDomainError); v = ensure_positive(volume, "volume", error_cls=STEMDomainError)
+        return n * float(self.CONSTANTS["R"]) * t / v
+
+    @staticmethod
+    def relativistic_gamma(velocity: float, c: float = 299792458.0) -> float:
+        v = abs(ensure_finite_number(velocity, "velocity", error_cls=STEMDomainError)); speed = ensure_positive(c, "c", error_cls=STEMDomainError)
+        if v >= speed: raise STEMDomainError("velocity magnitude must be less than c")
+        return 1.0 / math.sqrt(1.0 - (v / speed) ** 2)
+
+
+__all__ = ["Physics"]

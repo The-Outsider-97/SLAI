@@ -1,33 +1,32 @@
-"""
-Top-level exports for the STEM Agent subsystem.
-"""
-from .biology import *
-from .computer import *
-from .engineering import *
-from .math import *
-from .physics import *
-from .stem_memory import *
-from .stem_types import *
-from .uncertainty import *
-
-
-from .biology import __all__ as _biology_exports
-from .computer import __all__ as _computer_exports
-from .engineering import __all__ as _engineering_exports
-from .math import __all__ as _math_exports
-from .physics import __all__ as _physics_exports
-from .stem_memory import __all__ as _stem_memory_exports
-from .stem_types import __all__ as _stem_types_exports
-from .uncertainty import __all__ as _uncertainty_exports
-
+"""Public exports for the SLAI v2.3 STEM subsystem."""
+from .biology import Biology
+from .computer import Computing
+from .engineering import Engineering, EngineeringQuantity
+from .math import Algebra, Calculus, Dual, NumericalMethods, OnlineCovariance, OnlineMoments, Statistics
+from .physics import Physics
+from .stem_memory import STEMMemory
+from .stem_types import (
+    BoundaryCondition, BoundaryConditionKind, ConvergenceStatus, Dimension, Distribution,
+    Domain, Equation, InitialCondition, NumericResult, PhysicalConstant, PrecisionPolicy,
+    Quantity, SolverResult, Tolerance, Unit, Uncertainty as UncertaintyValue,
+    UncertaintyBudget, UncertaintyType,
+)
+from .uncertainty import (
+    Uncertainty, combined_standard_uncertainty, covariance_propagation,
+    coverage_interval, expanded_uncertainty, jacobian_propagation,
+    monte_carlo_propagation, numerical_error_budget, sensitivity_coefficients,
+    standard_uncertainty,
+)
+from .units import Dimensions, UnitSystem
 
 __all__ = [
-    *_biology_exports,
-    *_computer_exports,
-    *_engineering_exports,
-    *_math_exports,
-    *_physics_exports,
-    *_stem_memory_exports,
-    *_stem_types_exports,
-    *_uncertainty_exports,
-] # type: ignore
+    "Biology", "Computing", "Engineering", "EngineeringQuantity", "Physics", "STEMMemory",
+    "Algebra", "Calculus", "Dual", "NumericalMethods", "Statistics", "OnlineMoments", "OnlineCovariance",
+    "Dimension", "Unit", "Quantity", "PrecisionPolicy", "Tolerance", "UncertaintyValue",
+    "UncertaintyBudget", "UncertaintyType", "Distribution", "NumericResult", "SolverResult",
+    "ConvergenceStatus", "BoundaryCondition", "BoundaryConditionKind", "InitialCondition", "Domain",
+    "Equation", "PhysicalConstant", "Dimensions", "UnitSystem", "Uncertainty",
+    "standard_uncertainty", "combined_standard_uncertainty", "expanded_uncertainty",
+    "covariance_propagation", "jacobian_propagation", "sensitivity_coefficients",
+    "coverage_interval", "monte_carlo_propagation", "numerical_error_budget",
+]

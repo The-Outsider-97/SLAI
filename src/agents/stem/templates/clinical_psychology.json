@@ -1,169 +1,55 @@
 {
-    "patient_clinical_profile": {
-        "metadata": {
-            "record_id": "UUID-or-String",
-            "clinician_id": "String",
-            "date_of_intake": "YYYY-MM-DD",
-            "last_updated": "YYYY-MM-DD",
-            "session_count": 0
-        },
-        "demographics": {
-            "age": 0,
-            "gender_identity": "String",
-            "pronouns": "String",
-            "sexual_orientation": "String",
-            "relationship_status": "Single | Married | Divorced | Widowed | Partnered",
-            "living_situation": "String",
-            "employment_status": "Employed | Unemployed | Student | Retired | Disabled",
-            "education_level": "String"
-        },
-        "presenting_problem": {
-            "chief_complaint": "String",
-            "symptom_onset": "Acute | Insidious | Chronic",
-            "duration_months": Here is a comprehensive JSON template adapted for clinical psychology, structured around standard clinical case conceptualization, psychiatric diagnostics, and the biopsychosocial model.
-
-```json
-{
-    "patient_case_record": {
-        "metadata": {
-            "patient_id": "UUID-or-String",
-            "clinician_name": "String",
-            "intake_date": "YYYY-MM-DD",
-            "last_session_date": "YYYY-MM-DD",
-            "record_status": "Active | Discharged | Transferred | Waitlisted"
-        },
-        "demographics": {
-            "age": 0,
-            "gender_identity": "String",
-            "pronouns": "String",
-            "sexual_orientation": "String",
-            "relationship_status": "Single | Married | Divorced | Widowed | Partnered",
-            "living_situation": "String",
-            "employment_status": "Employed | Unemployed | Student | Retired | Disability",
-            "highest_education": "String"
-        },
-        "clinical_presentation": {
-            "chief_complaint": "String",
-            "reported_symptoms": [
-                "String"
-            ],
-            "symptom_onset": "Acute | Insidious | Lifelong",
-            "duration_months": 0,
-            "functional_impairment_level": "None | Mild | Moderate | Severe"
-        },
-        "diagnostics": {
-            "diagnostic_system": "DSM-5-TR | ICD-11",
-            "primary_diagnosis": {
-                "code": "String",
-                "name": "String",
-                "specifiers": ["String"]
-            },
-            "secondary_diagnoses": [
-                {
-                    "code": "String",
-                    "name": "String"
-                }
-            ],
-            "differential_diagnoses_considered": [
-                "String"
-            ]
-        },
-        "mental_status_examination": {
-            "appearance_and_behavior": "String",
-            "motor_activity": "Normal | Agitated | Retarded | Tics | Tremors",
-            "speech": "Normal | Pressured | Slow | Poverty of Speech",
-            "mood": "Euthymic | Depressed | Anxious | Elevated | Irritable",
-            "affect": "Congruent | Incongruent | Blunted | Flat | Labile",
-            "thought_process": "Linear | Tangential | Circumstantial | Flight of Ideas | Derailment",
-            "thought_content": "Normal | Delusions | Obsessions | Phobias",
-            "perception": "Intact | Auditory Hallucinations | Visual Hallucinations | Illusions",
-            "cognition_and_memory": "Intact | Impaired",
-            "insight": "Good | Fair | Poor | Absent",
-            "judgment": "Good | Fair | Poor | Impaired"
-        },
-        "assessments_and_psychometrics": [
-            {
-                "instrument_name": "String (e.g., BDI-II, GAD-7, WAIS-IV, MMPI-3)",
-                "date_administered": "YYYY-MM-DD",
-                "score": "String or Number",
-                "clinical_interpretation": "String"
-            }
-        ],
-        "historical_background": {
-            "previous_psychiatric_history": {
-                "prior_diagnoses": ["String"],
-                "prior_therapy": true,
-                "hospitalizations": 0
-            },
-            "substance_use_history": {
-                "current_use": ["String"],
-                "past_use": ["String"],
-                "meets_sud_criteria": false
-            },
-            "medical_history": {
-                "chronic_conditions": ["String"],
-                "traumatic_brain_injuries": false,
-                "relevant_surgeries": ["String"]
-            },
-            "developmental_and_social_history": {
-                "adverse_childhood_experiences": ["String"],
-                "trauma_history": "String",
-                "family_psychiatric_history": ["String"]
-            }
-        },
-        "biopsychosocial_formulation": {
-            "predisposing_factors": [
-                "String (e.g., Genetic vulnerability, early childhood trauma)"
-            ],
-            "precipitating_factors": [
-                "String (e.g., Recent job loss, relationship end)"
-            ],
-            "perpetuating_factors": [
-                "String (e.g., Avoidance behaviors, poor sleep hygiene)"
-            ],
-            "protective_factors": [
-                "String (e.g., Strong social support, high intelligence, steady income)"
-            ]
-        },
-        "risk_assessment": {
-            "suicidality": {
-                "ideation": "None | Passive | Active",
-                "plan": false,
-                "intent": false,
-                "past_attempts": 0
-            },
-            "homicidality": {
-                "ideation": "None | Passive | Active",
-                "plan": false,
-                "intent": false
-            },
-            "non_suicidal_self_injury": "None | Past | Current",
-            "overall_risk_level": "Low | Moderate | High | Imminent"
-        },
-        "treatment_plan": {
-            "primary_therapeutic_modality": [
-                "CBT",
-                "DBT",
-                "ACT",
-                "EMDR",
-                "Psychodynamic",
-                "Humanistic",
-                "Systemic/Family"
-            ],
-            "treatment_goals": [
-                "String"
-            ],
-            "session_frequency": "Weekly | Biweekly | Monthly | Intensive",
-            "psychopharmacology": [
-                {
-                    "medication_name": "String",
-                    "dosage": "String",
-                    "prescribing_provider": "String"
-                }
-            ],
-            "referrals_made": [
-                "String"
-            ]
-        }
+  "patient_case_record": {
+    "metadata": {
+      "patient_id": "UUID-or-String",
+      "clinician_name": "String",
+      "intake_date": "YYYY-MM-DD",
+      "last_session_date": "YYYY-MM-DD",
+      "record_status": "Active | Discharged | Transferred | Waitlisted"
+    },
+    "demographics": {
+      "age": 0,
+      "gender_identity": "String",
+      "pronouns": "String",
+      "relationship_status": "String",
+      "employment_status": "String",
+      "highest_education": "String"
+    },
+    "clinical_presentation": {
+      "chief_complaint": "String",
+      "reported_symptoms": [
+        "String"
+      ],
+      "symptom_onset": "Acute | Insidious | Lifelong",
+      "duration_months": 0,
+      "functional_impairment_level": "None | Mild | Moderate | Severe"
+    },
+    "assessments_and_psychometrics": [
+      {
+        "instrument_name": "String",
+        "date_administered": "YYYY-MM-DD",
+        "score": "String or Number",
+        "clinical_interpretation": "String"
+      }
+    ],
+    "risk_assessment": {
+      "suicidality": {
+        "ideation": "None | Passive | Active",
+        "plan": false,
+        "intent": false,
+        "past_attempts": 0
+      },
+      "overall_risk_level": "Low | Moderate | High | Imminent"
+    },
+    "treatment_plan": {
+      "treatment_goals": [
+        "String"
+      ],
+      "session_frequency": "Weekly | Biweekly | Monthly | Intensive",
+      "referrals_made": [
+        "String"
+      ]
     }
+  },
+  "_template_scope": "Structured record template only. STEM performs no diagnosis, treatment selection, or clinical inference."
 }

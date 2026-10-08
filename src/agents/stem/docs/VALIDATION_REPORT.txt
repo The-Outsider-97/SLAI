@@ -1,0 +1,33 @@
+Python compilation: PASS (21 files)
+Placeholder scan: PASS (0 findings)
+Config YAML unique-key validation: PASS (13 top-level sections)
+JSON templates: PASS (3 files)
+Package __all__ surfaces: PASS
+Required existing dependencies: PASS (numpy, scipy, PyYAML)
+External SLAI import surface: PASS (1 confirmed targets)
+Analytical smoke suite: PASS (20/20)
+Immutable config_loader exclusion: PASS
+Top-level STEMAgent exclusion: PASS
+Non-empty deliverable files: PASS
+
+SMOKE_SUCCESS 20
+PASS quadratic_roots
+PASS linear_system
+PASS root_positive
+PASS root_negative
+PASS integration
+PASS differentiation
+PASS ode_rk4
+PASS autodiff_gradient
+PASS unit_conversion
+PASS invalid_dimension_addition
+PASS force_dimension
+PASS statistics_mean
+PASS statistics_variance
+PASS uncertainty_rss
+PASS uncertainty_jacobian
+PASS uncertainty_monte_carlo
+PASS memory_key_deterministic
+PASS memory_roundtrip
+PASS templates_list
+PASS template_load

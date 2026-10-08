@@ -1,1259 +1,503 @@
+"""Floating-point numerical methods for SLAI STEM.
+
+Grounding: Higham; Trefethen & Bau; Quarteroni, Sacco & Saleri; Hairer,
+Nørsett & Wanner; LeVeque; Davis & Rabinowitz. The module owns numerical
+kernels, not scenario simulation or generic optimization.
 """
-Numerical methods for the STEM subsystem.
-
-Ownership
-- numerical linear algebra;
-- nonlinear equation/root solving;
-- interpolation;
-- approximation;
-- numerical differentiation;
-- numerical integration;
-- ODE algorithms;
-- PDE discretization interfaces;
-- convergence analysis;
-- conditioning;
-- residual calculation;
-- numerical precision / error controls.
-
-Sources
-- Quarteroni, A., Sacco, R., & Saleri, F. (2007). Numerical Mathematics (2nd ed.). Springer.
-- Higham, N. J. (2002). Accuracy and Stability of Numerical Algorithms (2nd ed.). SIAM.
-- Trefethen, L. N., & Bau, D. (2022 anniversary edition; original 1997).
-  Numerical Linear Algebra. SIAM.
-- Hairer, E., Nørsett, S. P., & Wanner, G. (1993). Solving Ordinary Differential
-  Equations I: Nonstiff Problems (2nd ed.). Springer. DOI 10.1007/978-3-540-78862-1.
-- LeVeque, R. J. (2007). Finite Difference Methods for Ordinary and Partial
-  Differential Equations. SIAM. DOI 10.1137/1.9780898717839.
-- Davis, P. J., & Rabinowitz, P. (1984). Methods of Numerical Integration (2nd ed.).
-  Academic Press. DOI 10.1016/C2013-0-10566-1.
-"""
-
 from __future__ import annotations
 
 __version__ = "2.3.0"
 
 import math
+import sys
 import time
+import numpy as np # type: ignore
 
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ..stem_types import ConvergenceStatus, SolverResult
 from ..utils.config_loader import get_config_section, load_global_config
 from ..utils.stem_errors import *
-from ..utils.stem_helpers import *
-from ..stem_types import ConvergenceStatus, SolverResult
-from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
+from ..utils.stem_helpers import (
+    as_float_array, as_float_matrix, backward_error as _backward_error_core,
+    check_positive_definite, check_square_matrix, check_symmetric_matrix,
+    condition_number_estimate, ensure_finite_number, ensure_non_negative,
+    ensure_positive, validate_bounds, validate_callable,
+)
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
-
-logger = get_logger("Numerical Methods")
+logger = get_logger("STEM Numerical Methods")
 printer = PrettyPrinter()
 
-class NumericalMethods:
-    """Finite-precision numerical algorithms for the STEM subsystem."""
 
+class NumericalMethods:
     def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
         self.config: Dict[str, Any] = load_global_config()
-        self.nm_config = dict(get_config_section("numerical_methods", config=self.config) or {})
+        self.num_config = dict(get_config_section("numerical_methods", config=self.config) or {})
         if config:
-            self.nm_config.update(dict(config))
+            self.num_config.update(dict(config))
+        self.default_abs_tol = float(self.num_config.get("absolute_tolerance", 1e-12))
+        self.default_rel_tol = float(self.num_config.get("relative_tolerance", 1e-9))
+        self.default_max_iter = int(self.num_config.get("max_iterations", 200))
+        self.condition_warning = float(self.num_config.get("condition_warning", 1e12))
+        self.ode_step = float(self.num_config.get("ode_step", 0.01))
+        ensure_non_negative(self.default_abs_tol, "absolute_tolerance")
+        ensure_non_negative(self.default_rel_tol, "relative_tolerance")
+        if self.default_max_iter < 1:
+            raise STEMValidationError("max_iterations must be >= 1")
 
-        self._default_tol = float(self.nm_config.get("default_tolerance", 1e-10))
-        self._default_max_iter = int(self.nm_config.get("default_max_iterations", 200))
-        self._default_h = float(self.nm_config.get("default_step", 1e-6))
-
-    # ======================================================================
+    # ------------------------------------------------------------------
     # Numerical linear algebra
-    # ======================================================================
-
+    # ------------------------------------------------------------------
     def lu_decomposition(self, A: Sequence[Sequence[float]]) -> Mapping[str, Any]:
-        """LU decomposition with partial pivoting."""
-        matrix = check_square_matrix(A, "A", error_cls=STEMLinearAlgebraError)
+        matrix = check_square_matrix(A)
         n = len(matrix)
-        L = [[0.0] * n for _ in range(n)]
         U = [row[:] for row in matrix]
-        P = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-
+        L = [[0.0] * n for _ in range(n)]
+        P = list(range(n))
         for k in range(n):
             pivot = max(range(k, n), key=lambda i: abs(U[i][k]))
-            if abs(U[pivot][k]) < 1e-300:
-                raise STEMLinearAlgebraError(
-                    "matrix is singular in LU decomposition",
-                    context={"pivot_index": k, "pivot_value": U[pivot][k]},
-                )
+            if abs(U[pivot][k]) <= self.default_abs_tol:
+                raise STEMSingularSystemError("Matrix is singular to working precision", context={"pivot": k})
             if pivot != k:
                 U[k], U[pivot] = U[pivot], U[k]
                 P[k], P[pivot] = P[pivot], P[k]
                 for j in range(k):
                     L[k][j], L[pivot][j] = L[pivot][j], L[k][j]
-
             L[k][k] = 1.0
             for i in range(k + 1, n):
                 factor = U[i][k] / U[k][k]
                 L[i][k] = factor
                 for j in range(k, n):
                     U[i][j] -= factor * U[k][j]
-
-        return {"L": L, "U": U, "P": P}
+        return {"L": L, "U": U, "permutation": P, "condition_estimate": condition_number_estimate(matrix)}
 
     def qr_decomposition(self, A: Sequence[Sequence[float]]) -> Mapping[str, Any]:
-        """Householder QR decomposition."""
-        matrix = as_float_matrix(A, "A", error_cls=STEMLinearAlgebraError)
-        m = len(matrix)
-        if m == 0:
-            raise STEMLinearAlgebraError("A must not be empty")
-        n = len(matrix[0])
-        for i, row in enumerate(matrix):
-            if len(row) != n:
-                raise STEMLinearAlgebraError("A must be rectangular", context={"row": i})
-
-        R = [row[:] for row in matrix]
-        Q = [[1.0 if i == j else 0.0 for j in range(m)] for i in range(m)]
-
-        for k in range(min(m - 1, n)):
-            x = [R[i][k] for i in range(k, m)]
-            norm_x = math.sqrt(sum(v * v for v in x))
-            if norm_x == 0.0:
-                continue
-            sign = 1.0 if x[0] >= 0.0 else -1.0
-            v = x[:]
-            v[0] += sign * norm_x
-            v_norm_sq = sum(vi * vi for vi in v)
-            if v_norm_sq == 0.0:
-                continue
-
-            for j in range(n):
-                s = 0.0
-                for i in range(k, m):
-                    s += v[i - k] * R[i][j]
-                factor = 2.0 * s / v_norm_sq
-                for i in range(k, m):
-                    R[i][j] -= factor * v[i - k]
-
-            for j in range(m):
-                s = 0.0
-                for i in range(k, m):
-                    s += v[i - k] * Q[j][i]
-                factor = 2.0 * s / v_norm_sq
-                for i in range(k, m):
-                    Q[j][i] -= factor * v[i - k]
-
-        return {"Q": Q, "R": R}
+        matrix = np.asarray(as_float_matrix(A, "A", error_cls=STEMLinearAlgebraError), dtype=float)
+        try:
+            Q, R = np.linalg.qr(matrix, mode="reduced")
+        except np.linalg.LinAlgError as exc:
+            raise STEMLinearAlgebraError("QR decomposition failed", cause=exc) from exc
+        residual = float(np.linalg.norm(matrix - Q @ R, ord=np.inf))
+        return {"Q": Q.tolist(), "R": R.tolist(), "residual": residual}
 
     def cholesky(self, A: Sequence[Sequence[float]]) -> List[List[float]]:
-        """Cholesky factorization of a symmetric positive-definite matrix."""
-        matrix = check_positive_definite(A, "A", error_cls=STEMLinearAlgebraError)
-        n = len(matrix)
-        L = [[0.0] * n for _ in range(n)]
-        for i in range(n):
-            for j in range(i + 1):
-                s = matrix[i][j] - sum(L[i][k] * L[j][k] for k in range(j))
-                if i == j:
-                    if s <= 0.0:
-                        raise STEMLinearAlgebraError("matrix is not positive definite", context={"pivot_index": i})
-                    L[i][j] = math.sqrt(s)
-                else:
-                    L[i][j] = s / L[j][j]
-        return L
+        matrix = np.asarray(check_positive_definite(A), dtype=float)
+        try:
+            return np.linalg.cholesky(matrix).tolist()
+        except np.linalg.LinAlgError as exc:
+            raise STEMLinearAlgebraError("Cholesky decomposition failed", cause=exc) from exc
 
     def _forward_substitution(self, L: List[List[float]], b: List[float]) -> List[float]:
-        n = len(L)
-        y = [0.0] * n
+        n = len(L); y = [0.0] * n
         for i in range(n):
-            s = b[i] - sum(L[i][j] * y[j] for j in range(i))
-            if L[i][i] == 0.0:
-                raise STEMLinearAlgebraError("zero pivot in forward substitution")
-            y[i] = s / L[i][i]
+            diag = L[i][i]
+            if abs(diag) <= self.default_abs_tol:
+                raise STEMSingularSystemError("Zero diagonal in forward substitution", context={"row": i})
+            y[i] = (b[i] - math.fsum(L[i][j] * y[j] for j in range(i))) / diag
         return y
 
     def _backward_substitution(self, U: List[List[float]], y: List[float]) -> List[float]:
-        n = len(U)
-        x = [0.0] * n
+        n = len(U); x = [0.0] * n
         for i in range(n - 1, -1, -1):
-            s = y[i] - sum(U[i][j] * x[j] for j in range(i + 1, n))
-            if U[i][i] == 0.0:
-                raise STEMLinearAlgebraError("zero pivot in backward substitution")
-            x[i] = s / U[i][i]
+            diag = U[i][i]
+            if abs(diag) <= self.default_abs_tol:
+                raise STEMSingularSystemError("Zero diagonal in backward substitution", context={"row": i})
+            x[i] = (y[i] - math.fsum(U[i][j] * x[j] for j in range(i + 1, n))) / diag
         return x
 
-    def solve_linear_system(
-        self,
-        A: Sequence[Sequence[float]],
-        b: Sequence[float],
-    ) -> List[float]:
-        """Solve ``Ax = b`` via LU decomposition with partial pivoting."""
-        matrix = check_square_matrix(A, "A", error_cls=STEMLinearAlgebraError)
-        rhs = as_float_array(b, "b", error_cls=STEMLinearAlgebraError)
-        n = len(matrix)
-        if len(rhs) != n:
-            raise STEMLinearAlgebraError("A and b must have compatible dimensions")
+    def solve_linear_system(self, A: Sequence[Sequence[float]], b: Sequence[float]) -> List[float]:
+        matrix = np.asarray(check_square_matrix(A), dtype=float)
+        rhs = np.asarray(as_float_array(b, "b", error_cls=STEMLinearAlgebraError), dtype=float)
+        if rhs.shape != (matrix.shape[0],):
+            raise STEMLinearAlgebraError("Right-hand side dimension mismatch")
+        cond = float(np.linalg.cond(matrix))
+        if not math.isfinite(cond):
+            raise STEMSingularSystemError("Matrix is singular")
+        try:
+            x = np.linalg.solve(matrix, rhs)
+        except np.linalg.LinAlgError as exc:
+            raise STEMSingularSystemError("Linear solve failed", cause=exc) from exc
+        residual = float(np.linalg.norm(matrix @ x - rhs, ord=np.inf))
+        if cond >= self.condition_warning:
+            logger.warning("Ill-conditioned linear system | cond=%g | residual=%g", cond, residual)
+        return [float(v) for v in x]
 
-        decomp = self.lu_decomposition(matrix)
-        L = decomp["L"]
-        U = decomp["U"]
-        P = decomp["P"]
+    def least_squares(self, A: Sequence[Sequence[float]], b: Sequence[float]) -> List[float]:
+        matrix = np.asarray(as_float_matrix(A, "A", error_cls=STEMLinearAlgebraError), dtype=float)
+        rhs = np.asarray(as_float_array(b, "b", error_cls=STEMLinearAlgebraError), dtype=float)
+        if matrix.shape[0] != rhs.shape[0]:
+            raise STEMLinearAlgebraError("Least-squares row count must match b")
+        x, _, rank, _ = np.linalg.lstsq(matrix, rhs, rcond=None)
+        if rank < min(matrix.shape):
+            logger.warning("Rank-deficient least-squares system | rank=%d", rank)
+        return [float(v) for v in x]
 
-        permuted_b = [sum((P[i][j] * rhs[j] for j in range(n)), 0.0) for i in range(n)]
-        y = self._forward_substitution(L, permuted_b)
-        return self._backward_substitution(U, y)
-
-    def least_squares(
-        self,
-        A: Sequence[Sequence[float]],
-        b: Sequence[float],
-    ) -> List[float]:
-        """Solve ``min ||Ax - b||`` via QR decomposition."""
-        matrix = as_float_matrix(A, "A", error_cls=STEMLinearAlgebraError)
-        rhs = as_float_array(b, "b", error_cls=STEMLinearAlgebraError)
-        m = len(matrix)
-        if m == 0:
-            raise STEMLinearAlgebraError("A must not be empty")
-        n = len(matrix[0])
-        if len(rhs) != m:
-            raise STEMLinearAlgebraError("A and b dimensions do not match")
-
-        qr = self.qr_decomposition(matrix)
-        Q = qr["Q"]
-        R = qr["R"]
-
-        qtb = [sum((Q[i][j] * rhs[j] for j in range(m)), 0.0) for i in range(m)]
-        # take upper n x n block of R
-        R_upper = [R[i][:n] for i in range(n)]
-        return self._backward_substitution(R_upper, qtb[:n])
-
-    def eigenvalues_symmetric(
-        self,
-        A: Sequence[Sequence[float]],
-        max_iter: int = 100,
-        tol: float = 1e-12,
-    ) -> List[float]:
-        """Eigenvalues of a symmetric matrix via cyclic Jacobi rotations."""
-        matrix = check_symmetric_matrix(A, "A", error_cls=STEMLinearAlgebraError)
-        n = len(matrix)
-        A_work = [row[:] for row in matrix]
-
-        for _ in range(int(max_iter)):
-            off = math.sqrt(sum(A_work[i][j] ** 2 for i in range(n) for j in range(n) if i != j))
-            if off < tol:
-                break
-            for p in range(n - 1):
-                for q in range(p + 1, n):
-                    if abs(A_work[p][q]) < 1e-300:
-                        continue
-                    theta = (A_work[q][q] - A_work[p][p]) / (2.0 * A_work[p][q])
-                    t = (1.0 if theta >= 0 else -1.0) / (abs(theta) + math.sqrt(theta * theta + 1.0))
-                    c = 1.0 / math.sqrt(t * t + 1.0)
-                    s = t * c
-                    for k in range(n):
-                        akp = A_work[k][p]
-                        akq = A_work[k][q]
-                        A_work[k][p] = c * akp - s * akq
-                        A_work[k][q] = s * akp + c * akq
-                    for k in range(n):
-                        apk = A_work[p][k]
-                        aqk = A_work[q][k]
-                        A_work[p][k] = c * apk - s * aqk
-                        A_work[q][k] = s * apk + c * aqk
-
-        return [A_work[i][i] for i in range(n)]
+    def eigenvalues_symmetric(self, A: Sequence[Sequence[float]], max_iter: int = 100, tol: float = 1e-12) -> List[float]:
+        del max_iter, tol
+        matrix = np.asarray(check_symmetric_matrix(A), dtype=float)
+        try:
+            vals = np.linalg.eigvalsh(matrix)
+        except np.linalg.LinAlgError as exc:
+            raise STEMLinearAlgebraError("Symmetric eigenvalue computation failed", cause=exc) from exc
+        return [float(v) for v in vals]
 
     def singular_values(self, A: Sequence[Sequence[float]]) -> List[float]:
-        """Singular values via eigenvalues of ``A^T A``."""
-        matrix = as_float_matrix(A, "A", error_cls=STEMLinearAlgebraError)
-        m = len(matrix)
-        n = len(matrix[0]) if m else 0
-        if n == 0:
-            raise STEMLinearAlgebraError("A must not be empty")
-
-        ATA = [[sum(matrix[k][i] * matrix[k][j] for k in range(m)) for j in range(n)] for i in range(n)]
-        eigenvalues = self.eigenvalues_symmetric(ATA)
-        return [math.sqrt(max(0.0, value)) for value in eigenvalues]
+        matrix = np.asarray(as_float_matrix(A, "A", error_cls=STEMLinearAlgebraError), dtype=float)
+        try:
+            vals = np.linalg.svd(matrix, compute_uv=False)
+        except np.linalg.LinAlgError as exc:
+            raise STEMLinearAlgebraError("SVD failed", cause=exc) from exc
+        return [float(v) for v in vals]
 
     def matrix_inverse(self, A: Sequence[Sequence[float]]) -> List[List[float]]:
-        """Matrix inverse via LU factorization with partial pivoting."""
-        matrix = check_square_matrix(A, "A", error_cls=STEMLinearAlgebraError)
-        n = len(matrix)
-        decomp = self.lu_decomposition(matrix)
-        L = decomp["L"]
-        U = decomp["U"]
-        P = decomp["P"]
+        matrix = np.asarray(check_square_matrix(A), dtype=float)
+        cond = float(np.linalg.cond(matrix))
+        if not math.isfinite(cond):
+            raise STEMSingularSystemError("Matrix is singular")
+        try:
+            inv = np.linalg.inv(matrix)
+        except np.linalg.LinAlgError as exc:
+            raise STEMSingularSystemError("Matrix inversion failed", cause=exc) from exc
+        if cond >= self.condition_warning:
+            logger.warning("Inverse of ill-conditioned matrix requested | cond=%g", cond)
+        return inv.tolist()
 
-        inverse = [[0.0] * n for _ in range(n)]
-        for col in range(n):
-            e = [0.0] * n
-            e[col] = 1.0
-            permuted = [float(sum(P[i][j] * e[j] for j in range(n))) for i in range(n)]
-            y = self._forward_substitution(L, permuted)
-            x = self._backward_substitution(U, y)
-            for i in range(n):
-                inverse[i][col] = x[i]
-        return inverse
+    # ------------------------------------------------------------------
+    # Root finding
+    # ------------------------------------------------------------------
+    def _root_result(self, solution: float, residual: float, iterations: int, converged: bool, status: ConvergenceStatus, started: float, method: str) -> SolverResult:
+        return SolverResult(solution, abs(residual), iterations, converged, status, method, {"method": method}, time.perf_counter() - started)
 
-    # ======================================================================
-    # Nonlinear root solving
-    # ======================================================================
+    def bisection(self, f: Callable[[float], float], a: float, b: float, *, tol: Optional[float] = None, max_iter: Optional[int] = None) -> SolverResult:
+        validate_callable(f, "f"); left, right = validate_bounds(a, b); epsilon = self.default_abs_tol if tol is None else ensure_positive(tol, "tol")
+        limit = self.default_max_iter if max_iter is None else int(max_iter); start = time.perf_counter()
+        fl, fr = ensure_finite_number(f(left), "f(a)"), ensure_finite_number(f(right), "f(b)")
+        if fl == 0.0: return self._root_result(left, fl, 0, True, ConvergenceStatus.CONVERGED, start, "bisection")
+        if fr == 0.0: return self._root_result(right, fr, 0, True, ConvergenceStatus.CONVERGED, start, "bisection")
+        if fl * fr > 0.0: raise STEMNumericalError("Bisection requires a sign-changing bracket")
+        mid = left
+        for iteration in range(1, limit + 1):
+            mid = left + 0.5 * (right - left); fm = ensure_finite_number(f(mid), "f(mid)")
+            if abs(fm) <= epsilon or 0.5 * abs(right - left) <= epsilon:
+                return self._root_result(mid, fm, iteration, True, ConvergenceStatus.CONVERGED, start, "bisection")
+            if fl * fm <= 0.0: right, fr = mid, fm
+            else: left, fl = mid, fm
+        fm = ensure_finite_number(f(mid), "f(mid)")
+        return self._root_result(mid, fm, limit, False, ConvergenceStatus.MAX_ITERATIONS, start, "bisection")
 
-    def bisection(
-        self,
-        f: Callable[[float], float],
-        a: float,
-        b: float,
-        *,
-        tol: Optional[float] = None,
-        max_iter: Optional[int] = None,
-    ) -> SolverResult:
-        """Bisection root finder on a sign-changing interval."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        a_f, b_f = validate_bounds(a, b, "interval", error_cls=STEMNumericalError)
-        tol_f = float(tol if tol is not None else self._default_tol)
-        max_iter_i = int(max_iter if max_iter is not None else self._default_max_iter)
+    def newton_raphson(self, f: Callable[[float], float], df: Callable[[float], float], x0: float, *, tol: Optional[float] = None, max_iter: Optional[int] = None) -> SolverResult:
+        validate_callable(f, "f"); validate_callable(df, "df"); x = ensure_finite_number(x0, "x0"); epsilon = self.default_abs_tol if tol is None else ensure_positive(tol, "tol")
+        limit = self.default_max_iter if max_iter is None else int(max_iter); start = time.perf_counter()
+        for iteration in range(1, limit + 1):
+            fx = ensure_finite_number(f(x), "f(x)"); dfx = ensure_finite_number(df(x), "df(x)")
+            if abs(fx) <= epsilon: return self._root_result(x, fx, iteration - 1, True, ConvergenceStatus.CONVERGED, start, "newton_raphson")
+            if abs(dfx) <= max(epsilon, sys.float_info.epsilon):
+                return self._root_result(x, fx, iteration, False, ConvergenceStatus.STALLED, start, "newton_raphson")
+            step = fx / dfx; candidate = x - step
+            if not math.isfinite(candidate): raise STEMNumericalError("Newton step produced a non-finite iterate")
+            x = candidate
+            if abs(step) <= epsilon * max(1.0, abs(x)):
+                fx = ensure_finite_number(f(x), "f(x)")
+                return self._root_result(x, fx, iteration, True, ConvergenceStatus.CONVERGED, start, "newton_raphson")
+        fx = ensure_finite_number(f(x), "f(x)")
+        return self._root_result(x, fx, limit, False, ConvergenceStatus.MAX_ITERATIONS, start, "newton_raphson")
 
-        start = time.perf_counter()
-        fa = float(f(a_f))
-        fb = float(f(b_f))
-        if fa == 0.0:
-            return SolverResult(
-                solution=a_f, residual=0.0, iterations=0, converged=True,
-                status=ConvergenceStatus.CONVERGED, message="left endpoint is a root",
-                runtime=time.perf_counter() - start,
-            )
-        if fb == 0.0:
-            return SolverResult(
-                solution=b_f, residual=0.0, iterations=0, converged=True,
-                status=ConvergenceStatus.CONVERGED, message="right endpoint is a root",
-                runtime=time.perf_counter() - start,
-            )
-        if fa * fb > 0.0:
-            raise STEMNumericalError(
-                "bisection requires a sign change on the interval",
-                context={"f(a)": fa, "f(b)": fb},
-            )
+    def secant(self, f: Callable[[float], float], x0: float, x1: float, *, tol: Optional[float] = None, max_iter: Optional[int] = None) -> SolverResult:
+        validate_callable(f, "f"); a, b = ensure_finite_number(x0, "x0"), ensure_finite_number(x1, "x1")
+        epsilon = self.default_abs_tol if tol is None else ensure_positive(tol, "tol"); limit = self.default_max_iter if max_iter is None else int(max_iter); start=time.perf_counter()
+        fa, fb = ensure_finite_number(f(a), "f(x0)"), ensure_finite_number(f(b), "f(x1)")
+        for iteration in range(1, limit + 1):
+            denom = fb - fa
+            if abs(denom) <= sys.float_info.epsilon:
+                return self._root_result(b, fb, iteration, False, ConvergenceStatus.STALLED, start, "secant")
+            c = b - fb * (b - a) / denom
+            fc = ensure_finite_number(f(c), "f(x)")
+            if abs(fc) <= epsilon or abs(c - b) <= epsilon * max(1.0, abs(c)):
+                return self._root_result(c, fc, iteration, True, ConvergenceStatus.CONVERGED, start, "secant")
+            a, fa, b, fb = b, fb, c, fc
+        return self._root_result(b, fb, limit, False, ConvergenceStatus.MAX_ITERATIONS, start, "secant")
 
-        last_mid = 0.5 * (a_f + b_f)
-        for iteration in range(1, max_iter_i + 1):
-            mid = 0.5 * (a_f + b_f)
-            fm = float(f(mid))
-            last_mid = mid
-            if abs(fm) < tol_f or 0.5 * (b_f - a_f) < tol_f:
-                return SolverResult(
-                    solution=mid, residual=abs(fm), iterations=iteration,
-                    converged=True, status=ConvergenceStatus.CONVERGED,
-                    message="converged",
-                    diagnostics={"final_interval": b_f - a_f},
-                    runtime=time.perf_counter() - start,
-                )
-            if fa * fm < 0.0:
-                b_f = mid
-                fb = fm
-            else:
-                a_f = mid
-                fa = fm
+    def fixed_point(self, g: Callable[[float], float], x0: float, *, tol: Optional[float] = None, max_iter: Optional[int] = None) -> SolverResult:
+        validate_callable(g, "g"); x=ensure_finite_number(x0,"x0"); epsilon=self.default_abs_tol if tol is None else ensure_positive(tol,"tol"); limit=self.default_max_iter if max_iter is None else int(max_iter); start=time.perf_counter()
+        for iteration in range(1,limit+1):
+            candidate=ensure_finite_number(g(x),"g(x)")
+            residual=candidate-x
+            if abs(residual)<=epsilon*max(1.0,abs(candidate)):
+                return self._root_result(candidate,residual,iteration,True,ConvergenceStatus.CONVERGED,start,"fixed_point")
+            x=candidate
+        return self._root_result(x,ensure_finite_number(g(x),"g(x)")-x,limit,False,ConvergenceStatus.MAX_ITERATIONS,start,"fixed_point")
 
-        return SolverResult(
-            solution=last_mid, residual=abs(float(f(last_mid))),
-            iterations=max_iter_i, converged=False,
-            status=ConvergenceStatus.MAX_ITERATIONS,
-            message="maximum iterations reached",
-            runtime=time.perf_counter() - start,
-        )
-
-    def newton_raphson(
-        self,
-        f: Callable[[float], float],
-        df: Callable[[float], float],
-        x0: float,
-        *,
-        tol: Optional[float] = None,
-        max_iter: Optional[int] = None,
-    ) -> SolverResult:
-        """Newton-Raphson root finder using an analytic derivative."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        validate_callable(df, "df", error_cls=STEMValidationError)
-        x = ensure_finite_number(x0, "x0", error_cls=STEMNumericalError)
-        tol_f = float(tol if tol is not None else self._default_tol)
-        max_iter_i = int(max_iter if max_iter is not None else self._default_max_iter)
-
-        start = time.perf_counter()
-        for iteration in range(1, max_iter_i + 1):
-            fx = float(f(x))
-            if abs(fx) < tol_f:
-                return SolverResult(
-                    solution=x, residual=abs(fx), iterations=iteration,
-                    converged=True, status=ConvergenceStatus.CONVERGED,
-                    message="converged",
-                    runtime=time.perf_counter() - start,
-                )
-            dfx = float(df(x))
-            if dfx == 0.0:
-                raise STEMNumericalError(
-                    "derivative vanished during Newton iteration",
-                    context={"x": x, "iteration": iteration},
-                )
-            x_next = x - fx / dfx
-            if abs(x_next - x) < tol_f:
-                fx_next = float(f(x_next))
-                return SolverResult(
-                    solution=x_next, residual=abs(fx_next), iterations=iteration,
-                    converged=True, status=ConvergenceStatus.CONVERGED,
-                    message="converged",
-                    runtime=time.perf_counter() - start,
-                )
-            x = x_next
-
-        return SolverResult(
-            solution=x, residual=abs(float(f(x))), iterations=max_iter_i,
-            converged=False, status=ConvergenceStatus.MAX_ITERATIONS,
-            message="maximum iterations reached",
-            runtime=time.perf_counter() - start,
-        )
-
-    def secant(
-        self,
-        f: Callable[[float], float],
-        x0: float,
-        x1: float,
-        *,
-        tol: Optional[float] = None,
-        max_iter: Optional[int] = None,
-    ) -> SolverResult:
-        """Secant root finder using two initial points."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        a = ensure_finite_number(x0, "x0", error_cls=STEMNumericalError)
-        b = ensure_finite_number(x1, "x1", error_cls=STEMNumericalError)
-        tol_f = float(tol if tol is not None else self._default_tol)
-        max_iter_i = int(max_iter if max_iter is not None else self._default_max_iter)
-
-        start = time.perf_counter()
-        fa = float(f(a))
-        fb = float(f(b))
-        for iteration in range(1, max_iter_i + 1):
-            if abs(fb) < tol_f:
-                return SolverResult(
-                    solution=b, residual=abs(fb), iterations=iteration,
-                    converged=True, status=ConvergenceStatus.CONVERGED,
-                    message="converged",
-                    runtime=time.perf_counter() - start,
-                )
-            if fb == fa:
-                raise STEMNumericalError("secant encountered f(b) == f(a)")
-            c = b - fb * (b - a) / (fb - fa)
-            if abs(c - b) < tol_f:
-                fc = float(f(c))
-                return SolverResult(
-                    solution=c, residual=abs(fc), iterations=iteration,
-                    converged=True, status=ConvergenceStatus.CONVERGED,
-                    message="converged",
-                    runtime=time.perf_counter() - start,
-                )
-            a, fa = b, fb
-            b = c
-            fb = float(f(b))
-
-        return SolverResult(
-            solution=b, residual=abs(fb), iterations=max_iter_i,
-            converged=False, status=ConvergenceStatus.MAX_ITERATIONS,
-            message="maximum iterations reached",
-            runtime=time.perf_counter() - start,
-        )
-
-    def fixed_point(
-        self,
-        g: Callable[[float], float],
-        x0: float,
-        *,
-        tol: Optional[float] = None,
-        max_iter: Optional[int] = None,
-    ) -> SolverResult:
-        """Fixed-point iteration ``x_{k+1} = g(x_k)``."""
-        validate_callable(g, "g", error_cls=STEMValidationError)
-        x = ensure_finite_number(x0, "x0", error_cls=STEMNumericalError)
-        tol_f = float(tol if tol is not None else self._default_tol)
-        max_iter_i = int(max_iter if max_iter is not None else self._default_max_iter)
-
-        start = time.perf_counter()
-        for iteration in range(1, max_iter_i + 1):
-            x_next = float(g(x))
-            if abs(x_next - x) < tol_f:
-                return SolverResult(
-                    solution=x_next, residual=abs(x_next - x), iterations=iteration,
-                    converged=True, status=ConvergenceStatus.CONVERGED,
-                    message="converged",
-                    runtime=time.perf_counter() - start,
-                )
-            x = x_next
-
-        return SolverResult(
-            solution=x, residual=0.0, iterations=max_iter_i, converged=False,
-            status=ConvergenceStatus.MAX_ITERATIONS,
-            message="maximum iterations reached",
-            runtime=time.perf_counter() - start,
-        )
-
-    # ======================================================================
+    # ------------------------------------------------------------------
     # Interpolation and approximation
-    # ======================================================================
+    # ------------------------------------------------------------------
+    def _xy(self, xs: Sequence[float], ys: Sequence[float]) -> Tuple[List[float], List[float]]:
+        x, y = as_float_array(xs, "xs", error_cls=STEMInterpolationError), as_float_array(ys, "ys", error_cls=STEMInterpolationError)
+        if len(x) != len(y) or len(x) < 2: raise STEMInterpolationError("xs and ys must have equal length >= 2")
+        if len(set(x)) != len(x): raise STEMInterpolationError("Interpolation abscissae must be unique")
+        pairs=sorted(zip(x,y)); return [p[0] for p in pairs],[p[1] for p in pairs]
 
-    def linear_interpolation(
-        self,
-        xs: Sequence[float],
-        ys: Sequence[float],
-    ) -> Callable[[float], float]:
-        """Return a piecewise-linear interpolant through ``(xs, ys)``."""
-        x = as_float_array(xs, "xs", error_cls=STEMInterpolationError)
-        y = as_float_array(ys, "ys", error_cls=STEMInterpolationError)
-        if len(x) != len(y):
-            raise STEMInterpolationError("xs and ys must have the same length")
-        if len(x) < 2:
-            raise STEMInterpolationError("linear interpolation requires at least two points")
-        for i in range(1, len(x)):
-            if x[i] <= x[i - 1]:
-                raise STEMInterpolationError("xs must be strictly increasing")
-
-        def interp(query: float) -> float:
-            q = ensure_finite_number(query, "query", error_cls=STEMInterpolationError)
-            if q <= x[0]:
-                return y[0]
-            if q >= x[-1]:
-                return y[-1]
-            # binary search
-            lo, hi = 0, len(x) - 1
-            while hi - lo > 1:
-                mid = (lo + hi) // 2
-                if x[mid] <= q:
-                    lo = mid
-                else:
-                    hi = mid
-            t = (q - x[lo]) / (x[hi] - x[lo])
-            return y[lo] + t * (y[hi] - y[lo])
-
+    def linear_interpolation(self, xs: Sequence[float], ys: Sequence[float]) -> Callable[[float], float]:
+        x,y=self._xy(xs,ys)
+        def interp(query: float)->float:
+            q=ensure_finite_number(query,"query",error_cls=STEMInterpolationError)
+            if q < x[0] or q > x[-1]: raise STEMInterpolationError("Query outside interpolation domain")
+            i=max(0,min(len(x)-2,int(np.searchsorted(x,q)-1)))
+            t=(q-x[i])/(x[i+1]-x[i]); return y[i]+t*(y[i+1]-y[i])
         return interp
 
-    def polynomial_interpolation(
-        self,
-        xs: Sequence[float],
-        ys: Sequence[float],
-    ) -> Callable[[float], float]:
-        """Lagrange polynomial interpolation."""
-        x = as_float_array(xs, "xs", error_cls=STEMInterpolationError)
-        y = as_float_array(ys, "ys", error_cls=STEMInterpolationError)
-        if len(x) != len(y):
-            raise STEMInterpolationError("xs and ys must have the same length")
-        if len(x) == 0:
-            raise STEMInterpolationError("at least one interpolation point is required")
-        for i in range(len(x)):
-            for j in range(i + 1, len(x)):
-                if x[i] == x[j]:
-                    raise STEMInterpolationError(
-                        "interpolation nodes must be distinct",
-                        context={"i": i, "j": j},
-                    )
-
-        def interp(query: float) -> float:
-            q = float(query)
-            total = 0.0
-            for i, xi in enumerate(x):
-                term = y[i]
-                for j, xj in enumerate(x):
-                    if i == j:
-                        continue
-                    denom = xi - xj
-                    if denom == 0.0:
-                        raise STEMInterpolationError("duplicate interpolation node encountered")
-                    term *= (q - xj) / denom
-                total += term
-            return total
-
+    def polynomial_interpolation(self, xs: Sequence[float], ys: Sequence[float]) -> Callable[[float], float]:
+        x,y=self._xy(xs,ys); n=len(x)
+        weights=[]
+        for j in range(n):
+            denom=1.0
+            for k in range(n):
+                if k!=j: denom*=x[j]-x[k]
+            weights.append(1.0/denom)
+        def interp(query: float)->float:
+            q=ensure_finite_number(query,"query",error_cls=STEMInterpolationError)
+            for xi,yi in zip(x,y):
+                if q==xi:return yi
+            num=math.fsum(w*yi/(q-xi) for xi,yi,w in zip(x,y,weights)); den=math.fsum(w/(q-xi) for xi,w in zip(x,weights))
+            return num/den
         return interp
 
-    def cubic_spline(
-        self,
-        xs: Sequence[float],
-        ys: Sequence[float],
-    ) -> Callable[[float], float]:
-        """Natural cubic spline interpolant."""
-        x = as_float_array(xs, "xs", error_cls=STEMInterpolationError)
-        y = as_float_array(ys, "ys", error_cls=STEMInterpolationError)
-        n = len(x)
-        if n != len(y):
-            raise STEMInterpolationError("xs and ys must have the same length")
-        if n < 3:
-            return self.linear_interpolation(x, y)
-        for i in range(1, n):
-            if x[i] <= x[i - 1]:
-                raise STEMInterpolationError("xs must be strictly increasing")
-
-        h = [x[i + 1] - x[i] for i in range(n - 1)]
-        alpha = [0.0] * n
-        for i in range(1, n - 1):
-            alpha[i] = 3.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1])
-
-        l = [1.0] + [0.0] * (n - 1)
-        mu = [0.0] * n
-        z = [0.0] * n
-
-        for i in range(1, n - 1):
-            l[i] = 2.0 * (x[i + 1] - x[i - 1]) - h[i - 1] * mu[i - 1]
-            mu[i] = h[i] / l[i]
-            z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i]
-
-        c = [0.0] * n
-        b = [0.0] * (n - 1)
-        d = [0.0] * (n - 1)
-
-        for j in range(n - 2, -1, -1):
-            c[j] = z[j] - mu[j] * c[j + 1]
-            b[j] = (y[j + 1] - y[j]) / h[j] - h[j] * (c[j + 1] + 2.0 * c[j]) / 3.0
-            d[j] = (c[j + 1] - c[j]) / (3.0 * h[j])
-
-        def interp(query: float) -> float:
-            q = float(query)
-            if q <= x[0]:
-                return y[0]
-            if q >= x[-1]:
-                return y[-1]
-            lo, hi = 0, n - 1
-            while hi - lo > 1:
-                mid = (lo + hi) // 2
-                if x[mid] <= q:
-                    lo = mid
-                else:
-                    hi = mid
-            dx = q - x[lo]
-            return y[lo] + b[lo] * dx + c[lo] * dx * dx + d[lo] * dx * dx * dx
-
+    def cubic_spline(self, xs: Sequence[float], ys: Sequence[float]) -> Callable[[float], float]:
+        x,y=self._xy(xs,ys); n=len(x)
+        h=[x[i+1]-x[i] for i in range(n-1)]
+        A=np.zeros((n,n),dtype=float); rhs=np.zeros(n,dtype=float); A[0,0]=A[-1,-1]=1.0
+        for i in range(1,n-1):
+            A[i,i-1]=h[i-1]; A[i,i]=2*(h[i-1]+h[i]); A[i,i+1]=h[i]
+            rhs[i]=6*((y[i+1]-y[i])/h[i]-(y[i]-y[i-1])/h[i-1])
+        m=np.linalg.solve(A,rhs)
+        def interp(query: float)->float:
+            q=ensure_finite_number(query,"query",error_cls=STEMInterpolationError)
+            if q < x[0] or q > x[-1]: raise STEMInterpolationError("Query outside spline domain")
+            i=max(0,min(n-2,int(np.searchsorted(x,q)-1))); hi=h[i]
+            a=(x[i+1]-q)/hi; b=(q-x[i])/hi
+            return float(a*y[i]+b*y[i+1]+((a**3-a)*m[i]+(b**3-b)*m[i+1])*(hi**2)/6.0)
         return interp
 
-    def chebyshev_approximation(
-        self,
-        f: Callable[[float], float],
-        a: float,
-        b: float,
-        degree: int,
-    ) -> Callable[[float], float]:
-        """Chebyshev-node polynomial approximation on ``[a, b]``."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        a_f, b_f = validate_bounds(a, b, "interval", error_cls=STEMNumericalError)
-        deg = int(ensure_positive(degree, "degree", allow_zero=True, error_cls=STEMValidationError))
-
-        n = deg + 1
-        nodes = [
-            0.5 * (a_f + b_f) + 0.5 * (b_f - a_f) * math.cos(math.pi * (2 * k + 1) / (2 * n))
-            for k in range(n)
-        ]
-        values = [
-            float(f(node)) if not math.isnan(float(f(node))) else float("nan")
-            for node in nodes
-        ]
-
-        interp = self.polynomial_interpolation(nodes, values)
-
-        def approx(query: float) -> float:
-            q = float(query)
-            if q < a_f or q > b_f:
-                raise STEMNumericalError(
-                    "query outside Chebyshev approximation interval",
-                    context={"query": q, "a": a_f, "b": b_f},
-                )
-            return float(interp(q))
-
+    def chebyshev_approximation(self, f: Callable[[float], float], a: float, b: float, degree: int) -> Callable[[float], float]:
+        validate_callable(f,"f"); left,right=validate_bounds(a,b,error_cls=STEMInterpolationError)
+        if degree < 0: raise STEMInterpolationError("degree must be non-negative")
+        nodes=np.cos((2*np.arange(degree+1)+1)*math.pi/(2*(degree+1)))
+        mapped=0.5*(left+right)+0.5*(right-left)*nodes
+        values=np.asarray([ensure_finite_number(f(float(z)),"f(x)",error_cls=STEMInterpolationError) for z in mapped])
+        coeff=np.polynomial.chebyshev.chebfit(nodes,values,degree)
+        def approx(query: float)->float:
+            q=ensure_finite_number(query,"query",error_cls=STEMInterpolationError); z=(2*q-left-right)/(right-left)
+            return float(np.polynomial.chebyshev.chebval(z,coeff))
         return approx
 
-    # ======================================================================
+    # ------------------------------------------------------------------
     # Numerical differentiation
-    # ======================================================================
+    # ------------------------------------------------------------------
+    def _step(self, x: float, h: Optional[float]) -> float:
+        if h is not None:return ensure_positive(h,"h",error_cls=STEMDifferentiationError)
+        return math.sqrt(sys.float_info.epsilon)*max(1.0,abs(x))
 
-    def forward_difference(
-        self,
-        f: Callable[[float], float],
-        x: float,
-        h: Optional[float] = None,
-    ) -> float:
-        """First-order forward finite difference."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        x_f = ensure_finite_number(x, "x", error_cls=STEMDifferentiationError)
-        h_f = float(h if h is not None else self._default_h)
-        if h_f == 0.0:
-            raise STEMDifferentiationError("step size must be nonzero")
-        try:
-            return (float(f(x_f + h_f)) - float(f(x_f))) / h_f
-        except STEMDifferentiationError:
-            raise
-        except Exception as exc:
-            raise STEMDifferentiationError(
-                "function evaluation failed in forward difference",
-                context={"x": x_f, "h": h_f},
-                cause=exc,
-            ) from exc
+    def forward_difference(self, f: Callable[[float], float], x: float, h: Optional[float] = None) -> float:
+        validate_callable(f,"f"); x0=ensure_finite_number(x,"x"); step=self._step(x0,h)
+        return (ensure_finite_number(f(x0+step),"f(x+h)")-ensure_finite_number(f(x0),"f(x)"))/step
 
-    def central_difference(
-        self,
-        f: Callable[[float], float],
-        x: float,
-        h: Optional[float] = None,
-    ) -> float:
-        """Second-order central finite difference."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        x_f = ensure_finite_number(x, "x", error_cls=STEMDifferentiationError)
-        h_f = float(h if h is not None else self._default_h)
-        if h_f == 0.0:
-            raise STEMDifferentiationError("step size must be nonzero")
-        try:
-            return (float(f(x_f + h_f)) - float(f(x_f - h_f))) / (2.0 * h_f)
-        except STEMDifferentiationError:
-            raise
-        except Exception as exc:
-            raise STEMDifferentiationError(
-                "function evaluation failed in central difference",
-                context={"x": x_f, "h": h_f},
-                cause=exc,
-            ) from exc
+    def central_difference(self, f: Callable[[float], float], x: float, h: Optional[float] = None) -> float:
+        validate_callable(f,"f"); x0=ensure_finite_number(x,"x"); step=(sys.float_info.epsilon**(1/3))*max(1.0,abs(x0)) if h is None else ensure_positive(h,"h",error_cls=STEMDifferentiationError)
+        return (ensure_finite_number(f(x0+step),"f(x+h)")-ensure_finite_number(f(x0-step),"f(x-h)"))/(2*step)
 
-    def richardson_extrapolation(
-        self,
-        f: Callable[[float], float],
-        x: float,
-        h: Optional[float] = None,
-        levels: int = 4,
-    ) -> float:
-        """Richardson extrapolation on central differences at dyadically refined steps."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        x_f = ensure_finite_number(x, "x", error_cls=STEMDifferentiationError)
-        h_f = float(h if h is not None else self._default_h)
-        levels_i = int(ensure_positive(levels, "levels", allow_zero=False, error_cls=STEMValidationError))
+    def richardson_extrapolation(self, f: Callable[[float], float], x: float, h: Optional[float] = None, levels: int = 4) -> float:
+        if levels < 1: raise STEMDifferentiationError("levels must be >= 1")
+        x0=ensure_finite_number(x,"x"); step=1e-2*max(1.0,abs(x0)) if h is None else ensure_positive(h,"h",error_cls=STEMDifferentiationError)
+        table=[]
+        for k in range(levels):
+            hk=step/(2**k); table.append([(f(x0+hk)-f(x0-hk))/(2*hk)])
+            for j in range(1,k+1): table[k].append(table[k][j-1]+(table[k][j-1]-table[k-1][j-1])/(4**j-1))
+        result=float(table[-1][-1])
+        if not math.isfinite(result): raise STEMDifferentiationError("Richardson extrapolation produced non-finite result")
+        return result
 
-        estimates = [self.central_difference(f, x_f, h_f / (2 ** k)) for k in range(levels_i)]
-        return richardson_extrapolate(estimates, 2.0, error_cls=STEMDifferentiationError)
+    # ------------------------------------------------------------------
+    # Quadrature
+    # ------------------------------------------------------------------
+    def trapezoidal(self, f: Callable[[float], float], a: float, b: float, n: int = 100) -> float:
+        validate_callable(f,"f"); left,right=validate_bounds(a,b,error_cls=STEMIntegrationError)
+        if n < 1: raise STEMIntegrationError("n must be >= 1")
+        h=(right-left)/n; values=[ensure_finite_number(f(left+i*h),"f(x)",error_cls=STEMIntegrationError) for i in range(n+1)]
+        return h*(0.5*values[0]+math.fsum(values[1:-1])+0.5*values[-1])
 
-    # ======================================================================
-    # Numerical integration
-    # ======================================================================
+    def simpson(self, f: Callable[[float], float], a: float, b: float, n: int = 100) -> float:
+        validate_callable(f,"f"); left,right=validate_bounds(a,b,error_cls=STEMIntegrationError)
+        if n < 2: raise STEMIntegrationError("n must be >= 2")
+        if n % 2:n += 1
+        h=(right-left)/n
+        values=[ensure_finite_number(f(left+i*h),"f(x)",error_cls=STEMIntegrationError) for i in range(n+1)]
+        return h/3*(values[0]+values[-1]+4*math.fsum(values[1:-1:2])+2*math.fsum(values[2:-1:2]))
 
-    def trapezoidal(
-        self,
-        f: Callable[[float], float],
-        a: float,
-        b: float,
-        n: int = 100,
-    ) -> float:
-        """Composite trapezoidal rule."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        a_f, b_f = validate_bounds(a, b, "interval", error_cls=STEMIntegrationError)
-        n_i = int(ensure_positive(n, "n", allow_zero=False, error_cls=STEMValidationError))
-        h = (b_f - a_f) / n_i
-        total = 0.5 * (float(f(a_f)) + float(f(b_f)))
-        for i in range(1, n_i):
-            total += float(f(a_f + i * h))
-        return total * h
+    def romberg(self, f: Callable[[float], float], a: float, b: float, *, tol: Optional[float] = None, max_iter: int = 8) -> float:
+        epsilon=self.default_abs_tol if tol is None else ensure_positive(tol,"tol",error_cls=STEMIntegrationError)
+        if max_iter < 1: raise STEMIntegrationError("max_iter must be >= 1")
+        left,right=validate_bounds(a,b,error_cls=STEMIntegrationError); R=[[0.5*(right-left)*(f(left)+f(right))]]
+        for k in range(1,max_iter):
+            h=(right-left)/(2**k); subtotal=math.fsum(f(left+(2*i-1)*h) for i in range(1,2**(k-1)+1))
+            row=[0.5*R[k-1][0]+h*subtotal]
+            for j in range(1,k+1):row.append(row[j-1]+(row[j-1]-R[k-1][j-1])/(4**j-1))
+            R.append(row)
+            if abs(R[k][k]-R[k-1][k-1])<=epsilon:return float(R[k][k])
+        return float(R[-1][-1])
 
-    def simpson(
-        self,
-        f: Callable[[float], float],
-        a: float,
-        b: float,
-        n: int = 100,
-    ) -> float:
-        """Composite Simpson's rule; ``n`` must be even."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        a_f, b_f = validate_bounds(a, b, "interval", error_cls=STEMIntegrationError)
-        n_i = int(ensure_positive(n, "n", allow_zero=False, error_cls=STEMValidationError))
-        if n_i % 2 != 0:
-            n_i += 1
-        h = (b_f - a_f) / n_i
-        total = float(f(a_f)) + float(f(b_f))
-        for i in range(1, n_i):
-            total += (4.0 if i % 2 == 1 else 2.0) * float(f(a_f + i * h))
-        return total * h / 3.0
+    def gauss_legendre(self, f: Callable[[float], float], a: float, b: float, n: int = 5) -> float:
+        validate_callable(f,"f"); left,right=validate_bounds(a,b,error_cls=STEMIntegrationError)
+        if n < 1 or n > 64: raise STEMIntegrationError("n must be in [1, 64]")
+        nodes,weights=np.polynomial.legendre.leggauss(n); mid=0.5*(left+right); half=0.5*(right-left)
+        return float(half*math.fsum(float(w)*ensure_finite_number(f(mid+half*float(x)),"f(x)",error_cls=STEMIntegrationError) for x,w in zip(nodes,weights)))
 
-    def romberg(
-        self,
-        f: Callable[[float], float],
-        a: float,
-        b: float,
-        *,
-        tol: Optional[float] = None,
-        max_iter: int = 8,
-    ) -> float:
-        """Romberg integration using trapezoidal refinements and Richardson."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        a_f, b_f = validate_bounds(a, b, "interval", error_cls=STEMIntegrationError)
-        tol_f = float(tol if tol is not None else self._default_tol)
-        max_iter_i = int(ensure_positive(max_iter, "max_iter", allow_zero=False, error_cls=STEMValidationError))
+    def adaptive_quadrature(self, f: Callable[[float], float], a: float, b: float, *, tol: Optional[float] = None, max_depth: int = 20) -> float:
+        validate_callable(f,"f"); left,right=validate_bounds(a,b,error_cls=STEMIntegrationError); epsilon=self.default_abs_tol if tol is None else ensure_positive(tol,"tol",error_cls=STEMIntegrationError)
+        def simp(x0:float,x1:float)->float:
+            m=0.5*(x0+x1); return (x1-x0)*(f(x0)+4*f(m)+f(x1))/6
+        def rec(x0:float,x1:float,whole:float,eps:float,depth:int)->float:
+            m=0.5*(x0+x1); l=simp(x0,m); r=simp(m,x1); delta=l+r-whole
+            if depth<=0:return l+r+delta/15
+            if abs(delta)<=15*eps:return l+r+delta/15
+            return rec(x0,m,l,eps/2,depth-1)+rec(m,x1,r,eps/2,depth-1)
+        result=float(rec(left,right,simp(left,right),epsilon,max_depth))
+        if not math.isfinite(result):raise STEMIntegrationError("Adaptive quadrature produced non-finite result")
+        return result
 
-        R = [[0.0] * max_iter_i for _ in range(max_iter_i)]
-        h = b_f - a_f
-        R[0][0] = 0.5 * h * (float(f(a_f)) + float(f(b_f)))
+    # ------------------------------------------------------------------
+    # ODE solver kernels
+    # ------------------------------------------------------------------
+    def _ode_setup(self, f: Callable[[float, Sequence[float]], Sequence[float]], y0: Sequence[float], t0: float, t1: float, h: Optional[float]) -> Tuple[List[float],float,float,float]:
+        validate_callable(f,"f"); y=as_float_array(y0,"y0",error_cls=STEMODEError); start=ensure_finite_number(t0,"t0",error_cls=STEMODEError); end=ensure_finite_number(t1,"t1",error_cls=STEMODEError)
+        if end <= start: raise STEMODEError("t1 must be greater than t0")
+        step=self.ode_step if h is None else ensure_positive(h,"h",error_cls=STEMODEError)
+        return y,start,end,step
 
-        for i in range(1, max_iter_i):
-            h *= 0.5
-            s = 0.0
-            k = 1
-            while k <= (1 << (i - 1)):
-                s += float(f(a_f + (2 * k - 1) * h))
-                k += 1
-            R[i][0] = 0.5 * R[i - 1][0] + h * s
+    @staticmethod
+    def _ode_eval(f: Callable[[float, Sequence[float]], Sequence[float]], t: float, y: Sequence[float], n: int) -> List[float]:
+        out=as_float_array(f(t,list(y)),"f(t,y)",error_cls=STEMODEError)
+        if len(out)!=n: raise STEMODEError("ODE derivative dimension mismatch")
+        return out
 
-            for j in range(1, i + 1):
-                R[i][j] = R[i][j - 1] + (R[i][j - 1] - R[i - 1][j - 1]) / (4.0 ** j - 1.0)
+    def euler(self, f: Callable[[float, Sequence[float]], Sequence[float]], y0: Sequence[float], t0: float, t1: float, h: Optional[float] = None) -> Mapping[str, Any]:
+        y,t,end,step=self._ode_setup(f,y0,t0,t1,h); ts=[t]; ys=[y[:]]; n=len(y)
+        while t < end:
+            dt=min(step,end-t); k=self._ode_eval(f,t,y,n); y=[yi+dt*ki for yi,ki in zip(y,k)]; t+=dt; ts.append(t); ys.append(y[:])
+        return {"t":ts,"y":ys,"method":"euler","steps":len(ts)-1,"converged":True}
 
-            if abs(R[i][i] - R[i - 1][i - 1]) < tol_f:
-                return R[i][i]
+    def rk4(self, f: Callable[[float, Sequence[float]], Sequence[float]], y0: Sequence[float], t0: float, t1: float, h: Optional[float] = None) -> Mapping[str, Any]:
+        y,t,end,step=self._ode_setup(f,y0,t0,t1,h); ts=[t]; ys=[y[:]]; n=len(y)
+        while t < end:
+            dt=min(step,end-t); k1=self._ode_eval(f,t,y,n)
+            y2=[yi+dt*k/2 for yi,k in zip(y,k1)]; k2=self._ode_eval(f,t+dt/2,y2,n)
+            y3=[yi+dt*k/2 for yi,k in zip(y,k2)]; k3=self._ode_eval(f,t+dt/2,y3,n)
+            y4=[yi+dt*k for yi,k in zip(y,k3)]; k4=self._ode_eval(f,t+dt,y4,n)
+            y=[yi+dt*(a+2*b+2*c+d)/6 for yi,a,b,c,d in zip(y,k1,k2,k3,k4)]; t+=dt; ts.append(t); ys.append(y[:])
+        return {"t":ts,"y":ys,"method":"rk4","steps":len(ts)-1,"converged":True}
 
-        return R[max_iter_i - 1][max_iter_i - 1]
+    def rk45_adaptive(self, f: Callable[[float, Sequence[float]], Sequence[float]], y0: Sequence[float], t0: float, t1: float, *, rtol: float = 1e-6, atol: float = 1e-9, h0: Optional[float] = None) -> Mapping[str, Any]:
+        y,t,end,h=self._ode_setup(f,y0,t0,t1,h0 or min(self.ode_step,(t1-t0)/10)); n=len(y); ts=[t]; ys=[y[:]]; accepted=0; rejected=0; attempts=0
+        ensure_positive(rtol,"rtol",error_cls=STEMODEError); ensure_positive(atol,"atol",error_cls=STEMODEError)
+        max_steps=int(self.num_config.get("ode_max_steps",100000))
+        while t < end:
+            attempts += 1
+            if attempts > max_steps: raise STEMConvergenceError("RK45 exceeded maximum step attempts")
+            h=min(h,end-t)
+            k1=self._ode_eval(f,t,y,n)
+            def combine(coeffs:Sequence[Tuple[float,List[float]]])->List[float]: return [y[i]+h*math.fsum(c*k[i] for c,k in coeffs) for i in range(n)]
+            k2=self._ode_eval(f,t+h/5,combine([(1/5,k1)]),n)
+            k3=self._ode_eval(f,t+3*h/10,combine([(3/40,k1),(9/40,k2)]),n)
+            k4=self._ode_eval(f,t+4*h/5,combine([(44/45,k1),(-56/15,k2),(32/9,k3)]),n)
+            k5=self._ode_eval(f,t+8*h/9,combine([(19372/6561,k1),(-25360/2187,k2),(64448/6561,k3),(-212/729,k4)]),n)
+            k6=self._ode_eval(f,t+h,combine([(9017/3168,k1),(-355/33,k2),(46732/5247,k3),(49/176,k4),(-5103/18656,k5)]),n)
+            y5=combine([(35/384,k1),(500/1113,k3),(125/192,k4),(-2187/6784,k5),(11/84,k6)])
+            k7=self._ode_eval(f,t+h,y5,n)
+            y4=combine([(5179/57600,k1),(7571/16695,k3),(393/640,k4),(-92097/339200,k5),(187/2100,k6),(1/40,k7)])
+            err=max(abs(a-b)/(atol+rtol*max(abs(yi),abs(a))) for yi,a,b in zip(y,y5,y4))
+            if err <= 1.0:
+                t+=h; y=y5; ts.append(t); ys.append(y[:]); accepted+=1
+            else: rejected+=1
+            factor=5.0 if err==0.0 else min(5.0,max(0.2,0.9*err**(-0.2))); h*=factor
+            if h <= sys.float_info.epsilon*max(1.0,abs(t)): raise STEMConvergenceError("RK45 step size underflow")
+        return {"t":ts,"y":ys,"method":"rk45_dormand_prince","steps":accepted,"rejected_steps":rejected,"converged":True,"rtol":rtol,"atol":atol}
 
-    def gauss_legendre(
-        self,
-        f: Callable[[float], float],
-        a: float,
-        b: float,
-        n: int = 5,
-    ) -> float:
-        """Gauss-Legendre quadrature for small n using tabulated nodes."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        a_f, b_f = validate_bounds(a, b, "interval", error_cls=STEMIntegrationError)
-        n_i = int(ensure_positive(n, "n", allow_zero=False, error_cls=STEMValidationError))
+    # ------------------------------------------------------------------
+    # PDE numerical interfaces
+    # ------------------------------------------------------------------
+    def discretize_operator_1d(self, order: int, n: int, dx: float) -> List[List[float]]:
+        if n < 3: raise STEMPDEInterfaceError("n must be >= 3")
+        spacing=ensure_positive(dx,"dx",error_cls=STEMPDEInterfaceError)
+        A=np.zeros((n,n),dtype=float)
+        if order==1:
+            c=1/(2*spacing)
+            for i in range(1,n-1): A[i,i-1],A[i,i+1]=-c,c
+        elif order==2:
+            c=1/(spacing*spacing)
+            for i in range(1,n-1): A[i,i-1],A[i,i],A[i,i+1]=c,-2*c,c
+        else: raise STEMPDEInterfaceError("Only first- and second-derivative 1D operators are supported")
+        return A.tolist()
 
-        nodes, weights = _gauss_legendre_table(n_i)
-        c = 0.5 * (b_f - a_f)
-        d = 0.5 * (b_f + a_f)
-        total = 0.0
-        for xi, wi in zip(nodes, weights):
-            total += wi * float(f(c * xi + d))
-        return c * total
+    def apply_boundary_conditions(self, matrix: Sequence[Sequence[float]], bc_left: float, bc_right: float) -> List[List[float]]:
+        A=np.asarray(check_square_matrix(matrix,error_cls=STEMPDEInterfaceError),dtype=float).copy()
+        ensure_finite_number(bc_left,"bc_left",error_cls=STEMPDEInterfaceError); ensure_finite_number(bc_right,"bc_right",error_cls=STEMPDEInterfaceError)
+        A[0,:]=0.0;A[0,0]=1.0;A[-1,:]=0.0;A[-1,-1]=1.0
+        return A.tolist()
 
-    def adaptive_quadrature(
-        self,
-        f: Callable[[float], float],
-        a: float,
-        b: float,
-        *,
-        tol: Optional[float] = None,
-        max_depth: int = 20,
-    ) -> float:
-        """Adaptive Simpson's rule."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        a_f, b_f = validate_bounds(a, b, "interval", error_cls=STEMIntegrationError)
-        tol_f = float(tol if tol is not None else self._default_tol)
-        max_depth_i = int(ensure_positive(max_depth, "max_depth", allow_zero=False, error_cls=STEMValidationError))
+    def solve_linearized_pde_system(self, A: Sequence[Sequence[float]], b: Sequence[float]) -> List[float]:
+        try:return self.solve_linear_system(A,b)
+        except STEMLinearAlgebraError as exc: raise STEMPDEInterfaceError("PDE linearized system solve failed",cause=exc) from exc
 
-        def simpson_segment(x0: float, x1: float) -> float:
-            m = 0.5 * (x0 + x1)
-            return (x1 - x0) / 6.0 * (float(f(x0)) + 4.0 * float(f(m)) + float(f(x1)))
-
-        def recurse(x0: float, x1: float, whole: float, eps: float, depth: int) -> float:
-            if depth >= max_depth_i:
-                return whole
-            m = 0.5 * (x0 + x1)
-            left = simpson_segment(x0, m)
-            right = simpson_segment(m, x1)
-            if abs(left + right - whole) < 15.0 * eps:
-                return left + right + (left + right - whole) / 15.0
-            return (
-                recurse(x0, m, left, eps * 0.5, depth + 1)
-                + recurse(m, x1, right, eps * 0.5, depth + 1)
-            )
-
-        whole = simpson_segment(a_f, b_f)
-        return recurse(a_f, b_f, whole, tol_f, 0)
-
-    # ======================================================================
-    # ODE algorithms
-    # ======================================================================
-
-    def euler(
-        self,
-        f: Callable[[float, Sequence[float]], Sequence[float]],
-        y0: Sequence[float],
-        t0: float,
-        t1: float,
-        h: Optional[float] = None,
-    ) -> Mapping[str, Any]:
-        """Explicit Euler integrator."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        t_start, t_end = validate_bounds(t0, t1, "time", error_cls=STEMODEError)
-        h_f = float(h if h is not None else (t_end - t_start) / 100.0)
-        if h_f <= 0.0:
-            raise STEMODEError("step size must be positive")
-
-        y = list(as_float_array(y0, "y0", error_cls=STEMODEError))
-        ts = [t_start]
-        ys = [y[:]]
-        t = t_start
-        max_steps = int(self.nm_config.get("ode_max_steps", 1_000_000))
-        for _ in range(max_steps):
-            if t >= t_end:
-                break
-            step = min(h_f, t_end - t)
-            dy = [float(v) for v in f(t, y)]
-            if len(dy) != len(y):
-                raise STEMODEError("derivative length does not match state length")
-            y = [yi + step * dyi for yi, dyi in zip(y, dy)]
-            t += step
-            ts.append(t)
-            ys.append(y[:])
-
-        return {"t": ts, "y": ys, "steps": len(ts) - 1}
-
-    def rk4(
-        self,
-        f: Callable[[float, Sequence[float]], Sequence[float]],
-        y0: Sequence[float],
-        t0: float,
-        t1: float,
-        h: Optional[float] = None,
-    ) -> Mapping[str, Any]:
-        """Classical fourth-order Runge-Kutta integrator."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        t_start, t_end = validate_bounds(t0, t1, "time", error_cls=STEMODEError)
-        h_f = float(h if h is not None else (t_end - t_start) / 100.0)
-        if h_f <= 0.0:
-            raise STEMODEError("step size must be positive")
-
-        y = list(as_float_array(y0, "y0", error_cls=STEMODEError))
-        ts = [t_start]
-        ys = [y[:]]
-        t = t_start
-        max_steps = int(self.nm_config.get("ode_max_steps", 1_000_000))
-
-        for _ in range(max_steps):
-            if t >= t_end:
-                break
-            step = min(h_f, t_end - t)
-            k1 = [float(v) for v in f(t, y)]
-            k2 = [float(v) for v in f(t + step / 2.0, [yi + step / 2.0 * k1i for yi, k1i in zip(y, k1)])]
-            k3 = [float(v) for v in f(t + step / 2.0, [yi + step / 2.0 * k2i for yi, k2i in zip(y, k2)])]
-            k4 = [float(v) for v in f(t + step, [yi + step * k3i for yi, k3i in zip(y, k3)])]
-            y = [
-                yi + step / 6.0 * (k1i + 2.0 * k2i + 2.0 * k3i + k4i)
-                for yi, k1i, k2i, k3i, k4i in zip(y, k1, k2, k3, k4)
-            ]
-            t += step
-            ts.append(t)
-            ys.append(y[:])
-
-        return {"t": ts, "y": ys, "steps": len(ts) - 1}
-
-    def rk45_adaptive(
-        self,
-        f: Callable[[float, Sequence[float]], Sequence[float]],
-        y0: Sequence[float],
-        t0: float,
-        t1: float,
-        *,
-        rtol: float = 1e-6,
-        atol: float = 1e-9,
-        h0: Optional[float] = None,
-    ) -> Mapping[str, Any]:
-        """Dormand-Prince RK45 adaptive step size integrator."""
-        validate_callable(f, "f", error_cls=STEMValidationError)
-        t_start, t_end = validate_bounds(t0, t1, "time", error_cls=STEMODEError)
-        rtol_f = ensure_positive(rtol, "rtol", allow_zero=False, error_cls=STEMODEError)
-        atol_f = ensure_non_negative_ode(atol)
-        h = float(h0 if h0 is not None else (t_end - t_start) / 100.0)
-        if h <= 0.0:
-            raise STEMODEError("initial step must be positive")
-
-        y = list(as_float_array(y0, "y0", error_cls=STEMODEError))
-        ts = [t_start]
-        ys = [y[:]]
-        t = t_start
-        max_steps = int(self.nm_config.get("ode_max_steps", 100_000))
-
-        c = [0.0, 1.0 / 5, 3.0 / 10, 4.0 / 5, 8.0 / 9, 1.0, 1.0]
-        a = [
-            [],
-            [1.0 / 5],
-            [3.0 / 40, 9.0 / 40],
-            [44.0 / 45, -56.0 / 15, 32.0 / 9],
-            [19372.0 / 6561, -25360.0 / 2187, 64448.0 / 6561, -212.0 / 729],
-            [9017.0 / 3168, -355.0 / 33, 46732.0 / 5247, 49.0 / 176, -5103.0 / 18656],
-            [35.0 / 384, 0.0, 500.0 / 1113, 125.0 / 192, -2187.0 / 6784, 11.0 / 84],
-        ]
-        b5 = [35.0 / 384, 0.0, 500.0 / 1113, 125.0 / 192, -2187.0 / 6784, 11.0 / 84, 0.0]
-        b4 = [5179.0 / 57600, 0.0, 7571.0 / 16695, 393.0 / 640, -92097.0 / 339200, 187.0 / 2100, 1.0 / 40]
-
-        for _ in range(max_steps):
-            if t >= t_end:
-                break
-            h = min(h, t_end - t)
-            ks: List[List[float]] = []
-            for i in range(7):
-                yi = y[:]
-                for j, aij in enumerate(a[i]):
-                    kj = ks[j]
-                    for m in range(len(y)):
-                        yi[m] += h * aij * kj[m]
-                ks.append([float(v) for v in f(t + c[i] * h, yi)])
-
-            y5 = [
-                y[m] + h * sum(b5[i] * ks[i][m] for i in range(7))
-                for m in range(len(y))
-            ]
-            y4 = [
-                y[m] + h * sum(b4[i] * ks[i][m] for i in range(7))
-                for m in range(len(y))
-            ]
-
-            error = max(
-                abs(y5[m] - y4[m]) / (atol_f + rtol_f * max(abs(y[m]), abs(y5[m])))
-                for m in range(len(y))
-            ) if y else 0.0
-
-            if error <= 1.0:
-                t += h
-                y = y5
-                ts.append(t)
-                ys.append(y[:])
-
-            factor = 0.9 * (1.0 / error) ** 0.2 if error > 0.0 else 5.0
-            factor = max(0.2, min(5.0, factor))
-            h *= factor
-
-        return {"t": ts, "y": ys, "steps": len(ts) - 1}
-
-    # ======================================================================
-    # PDE interfaces
-    # ======================================================================
-
-    def discretize_operator_1d(
-        self,
-        order: int,
-        n: int,
-        dx: float,
-    ) -> List[List[float]]:
-        """Return the 1D finite-difference operator matrix of the given order."""
-        n_i = int(ensure_positive(n, "n", allow_zero=False, error_cls=STEMPDEInterfaceError))
-        dx_f = ensure_positive(dx, "dx", allow_zero=False, error_cls=STEMPDEInterfaceError)
-        order_i = int(order)
-        if order_i not in (1, 2):
-            raise STEMPDEInterfaceError("only first and second order operators are supported")
-
-        A = [[0.0] * n_i for _ in range(n_i)]
-        if order_i == 1:
-            for i in range(1, n_i - 1):
-                A[i][i - 1] = -1.0 / (2.0 * dx_f)
-                A[i][i + 1] = 1.0 / (2.0 * dx_f)
-        else:
-            for i in range(1, n_i - 1):
-                A[i][i - 1] = 1.0 / (dx_f * dx_f)
-                A[i][i] = -2.0 / (dx_f * dx_f)
-                A[i][i + 1] = 1.0 / (dx_f * dx_f)
-        return A
-
-    def apply_boundary_conditions(
-        self,
-        matrix: Sequence[Sequence[float]],
-        bc_left: float,
-        bc_right: float,
-    ) -> List[List[float]]:
-        """Zero out boundary rows and pin them to given values on the diagonal."""
-        A = as_float_matrix(matrix, "matrix", error_cls=STEMPDEInterfaceError)
-        n = len(A)
-        if n < 2:
-            raise STEMPDEInterfaceError("matrix must have at least two rows")
-        left = ensure_finite_number(bc_left, "bc_left", error_cls=STEMPDEInterfaceError)
-        right = ensure_finite_number(bc_right, "bc_right", error_cls=STEMPDEInterfaceError)
-
-        A[0] = [0.0] * n
-        A[0][0] = 1.0
-        A[-1] = [0.0] * n
-        A[-1][-1] = 1.0
-        _ = (left, right)
-        return A
-
-    def solve_linearized_pde_system(
-        self,
-        A: Sequence[Sequence[float]],
-        b: Sequence[float],
-    ) -> List[float]:
-        """Solve a linearized PDE discretization system using LU."""
-        try:
-            return self.solve_linear_system(A, b)
-        except STEMLinearAlgebraError as exc:
-            raise STEMPDEInterfaceError(
-                "failed to solve linearized PDE system",
-                cause=exc,
-            ) from exc
-
-    # ======================================================================
-    # Diagnostics and error controls
-    # ======================================================================
-
+    # ------------------------------------------------------------------
+    # Numerical diagnostics
+    # ------------------------------------------------------------------
     def condition_numbers(self, A: Sequence[Sequence[float]]) -> Mapping[str, float]:
-        """Return 1-norm and infinity-norm condition number estimates."""
-        matrix = as_float_matrix(A, "A", error_cls=STEMLinearAlgebraError)
-        if not matrix:
-            raise STEMLinearAlgebraError("A must not be empty")
-        inverse = self.matrix_inverse(matrix)
-        a_inf = max(sum(abs(v) for v in row) for row in matrix)
-        a_1 = max(sum(abs(matrix[i][j]) for i in range(len(matrix))) for j in range(len(matrix[0])))
-        inv_inf = max(sum(abs(v) for v in row) for row in inverse)
-        inv_1 = max(sum(abs(inverse[i][j]) for i in range(len(inverse))) for j in range(len(inverse[0])))
-        return {
-            "cond_inf": a_inf * inv_inf,
-            "cond_1": a_1 * inv_1,
-        }
+        matrix=np.asarray(check_square_matrix(A),dtype=float)
+        return {"2_norm":float(np.linalg.cond(matrix,2)),"1_norm":float(np.linalg.cond(matrix,1)),"inf_norm":float(np.linalg.cond(matrix,np.inf))}
 
     def floating_point_effects(self) -> Mapping[str, Any]:
-        """Documented diagnostics about the current floating-point environment."""
-        return {
-            "machine_epsilon": _machine_epsilon(),
-            "max_finite": float.fromhex("0x1.fffffffffffffp+1023"),
-            "min_normal": float.fromhex("0x1.0p-1022"),
-            "min_subnormal": float.fromhex("0x0.0000000000001p-1022"),
-            "has_signed_zero": True,
-        }
+        info=np.finfo(float)
+        return {"epsilon":float(info.eps),"tiny":float(info.tiny),"max":float(info.max),"radix":2,"mantissa_bits":int(info.nmant+1),"ieee754_binary64":True}
 
     def algorithmic_stability(self) -> Mapping[str, Any]:
-        """Return notes on numerical stability defaults used by this class."""
-        return {
-            "linear_algebra": "LU with partial pivoting; Householder QR; Cholesky with no pivoting",
-            "root_solving": "Bisection, secant, Newton, fixed-point iteration",
-            "integration": "Composite trapezoidal/Simpson, Romberg, Gauss-Legendre, adaptive Simpson",
-            "ode": "Euler, RK4, Dormand-Prince RK45 adaptive",
-            "variance": "Welford/Chan stable accumulation (in statistics module)",
-        }
+        return {"principle":"Prefer backward-stable formulations and report conditioning separately.","condition_warning":self.condition_warning,"absolute_tolerance":self.default_abs_tol,"relative_tolerance":self.default_rel_tol}
 
     def catastrophic_cancellation(self, a: float, b: float) -> Mapping[str, Any]:
-        """Report catastrophic cancellation for ``a - b``."""
-        a_f = ensure_finite_number(a, "a", error_cls=STEMNumericalError)
-        b_f = ensure_finite_number(b, "b", error_cls=STEMNumericalError)
-        result = a_f - b_f
-        eps = _machine_epsilon()
-        denom = max(abs(a_f), abs(b_f), 1.0)
-        relative_loss = abs(result) / denom if denom > 0.0 else 0.0
-        return {
-            "a": a_f,
-            "b": b_f,
-            "result": result,
-            "relative_magnitude": relative_loss,
-            "cancellation_risk": relative_loss < eps and a_f != b_f,
-        }
+        x,y=ensure_finite_number(a,"a"),ensure_finite_number(b,"b"); diff=x-b
+        scale=max(abs(x),abs(y),sys.float_info.min); ratio=abs(diff)/scale
+        return {"difference":diff,"relative_separation":ratio,"risk":"high" if ratio < math.sqrt(sys.float_info.epsilon) else "low"}
 
-    def residuals(
-        self,
-        A: Sequence[Sequence[float]],
-        x: Sequence[float],
-        b: Sequence[float],
-    ) -> Mapping[str, float]:
-        """Absolute, relative, and backward residuals for ``Ax = b``."""
-        matrix = as_float_matrix(A, "A", error_cls=STEMNumericalError)
-        xv = as_float_array(x, "x", error_cls=STEMNumericalError)
-        bv = as_float_array(b, "b", error_cls=STEMNumericalError)
-        if len(matrix) != len(bv):
-            raise STEMNumericalError("A and b dimensions do not match")
-
-        residual_vector = [
-            sum(matrix[i][j] * xv[j] for j in range(len(xv))) - bv[i]
-            for i in range(len(matrix))
-        ]
-        abs_res = math.sqrt(sum(r * r for r in residual_vector))
-        b_norm = math.sqrt(sum(v * v for v in bv)) if bv else 0.0
-        rel_res = abs_res / b_norm if b_norm > 0.0 else abs_res
-        back = helper_backward_error(matrix, xv, bv, error_cls=STEMNumericalError)
-        return {
-            "absolute": abs_res,
-            "relative": rel_res,
-            "backward": back,
-        }
+    def residuals(self, A: Sequence[Sequence[float]], x: Sequence[float], b: Sequence[float]) -> Mapping[str, float]:
+        matrix=np.asarray(as_float_matrix(A,"A"),dtype=float); xv=np.asarray(as_float_array(x,"x"),dtype=float); rhs=np.asarray(as_float_array(b,"b"),dtype=float)
+        if matrix.shape[1]!=xv.size or matrix.shape[0]!=rhs.size: raise STEMLinearAlgebraError("Residual dimension mismatch")
+        r=matrix@xv-rhs
+        return {"l1":float(np.linalg.norm(r,1)),"l2":float(np.linalg.norm(r,2)),"linf":float(np.linalg.norm(r,np.inf))}
 
     def forward_error(self, x_approx: Sequence[float], x_exact: Sequence[float]) -> float:
-        """Infinity-norm forward error."""
-        a = as_float_array(x_approx, "x_approx", error_cls=STEMNumericalError)
-        b = as_float_array(x_exact, "x_exact", error_cls=STEMNumericalError)
-        if len(a) != len(b):
-            raise STEMNumericalError("vector dimensions do not match")
-        return max(abs(ai - bi) for ai, bi in zip(a, b)) if a else 0.0
+        a=np.asarray(as_float_array(x_approx,"x_approx"),dtype=float); e=np.asarray(as_float_array(x_exact,"x_exact"),dtype=float)
+        if a.shape!=e.shape: raise STEMNumericalError("Forward-error vector shape mismatch")
+        return float(np.linalg.norm(a-e,np.inf))
 
-    def backward_error(
-        self,
-        A: Sequence[Sequence[float]],
-        x_approx: Sequence[float],
-        b: Sequence[float],
-    ) -> float:
-        """Delegate to the shared backward-error helper."""
-        return helper_backward_error(A, x_approx, b, error_cls=STEMNumericalError)
+    def backward_error(self, A: Sequence[Sequence[float]], x_approx: Sequence[float], b: Sequence[float]) -> float:
+        return helper_backward_error(A,x_approx,b)
 
 
-# ---------------------------------------------------------------------------
-# Small internal helpers local to numerical_methods.py
-# ---------------------------------------------------------------------------
-
-
-def helper_backward_error(
-    A: Sequence[Sequence[float]],
-    x: Sequence[float],
-    b: Sequence[float],
-    *,
-    error_cls: type = STEMNumericalError,
-) -> float:
-    """Compute the normwise infinity-norm backward error for ``Ax = b``."""
-    matrix = as_float_matrix(A, "A", error_cls=error_cls)
-    xv = as_float_array(x, "x", error_cls=error_cls)
-    bv = as_float_array(b, "b", error_cls=error_cls)
-    if len(matrix) != len(bv) or any(len(row) != len(xv) for row in matrix):
-        raise error_cls("A, x, and b dimensions do not match")
-
-    residual_norm = max(
-        (
-            abs(sum(value * xv[j] for j, value in enumerate(row)) - bv[i])
-            for i, row in enumerate(matrix)
-        ),
-        default=0.0,
-    )
-    matrix_norm = max(
-        (sum(abs(value) for value in row) for row in matrix),
-        default=0.0,
-    )
-    x_norm = max((abs(value) for value in xv), default=0.0)
-    b_norm = max((abs(value) for value in bv), default=0.0)
-    scale = matrix_norm * x_norm + b_norm
-    if scale == 0.0:
-        return 0.0 if residual_norm == 0.0 else math.inf
-    return residual_norm / scale
+def helper_backward_error(A: Sequence[Sequence[float]], x: Sequence[float], b: Sequence[float], *, error_cls: type = STEMNumericalError) -> float:
+    return _backward_error_core(A, x, b, error_cls=error_cls)
 
 
 def _machine_epsilon() -> float:
-    eps = 1.0
-    while 1.0 + eps / 2.0 > 1.0:
-        eps /= 2.0
-    return eps
+    return sys.float_info.epsilon
 
 
 def _ensure_non_negative_ode(value: Any) -> float:
-    v = float(value)
-    if v < 0.0:
-        raise STEMODEError("absolute tolerance must be non-negative")
-    return v
-
+    return ensure_non_negative(value,"value",error_cls=STEMODEError)
 
 ensure_non_negative_ode = _ensure_non_negative_ode
 
 
 def _gauss_legendre_table(n: int) -> Tuple[List[float], List[float]]:
-    """Return nodes and weights for the given Gauss-Legendre order."""
-    if n == 1:
-        return [0.0], [2.0]
-    if n == 2:
-        a = 1.0 / math.sqrt(3.0)
-        return [-a, a], [1.0, 1.0]
-    if n == 3:
-        a = math.sqrt(3.0 / 5.0)
-        return [-a, 0.0, a], [5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0]
-    if n == 4:
-        a = math.sqrt(3.0 / 7.0 - 2.0 / 7.0 * math.sqrt(6.0 / 5.0))
-        b = math.sqrt(3.0 / 7.0 + 2.0 / 7.0 * math.sqrt(6.0 / 5.0))
-        wa = (18.0 + math.sqrt(30.0)) / 36.0
-        wb = (18.0 - math.sqrt(30.0)) / 36.0
-        return [-b, -a, a, b], [wb, wa, wa, wb]
-    if n == 5:
-        a = 1.0 / 3.0 * math.sqrt(5.0 - 2.0 * math.sqrt(10.0 / 7.0))
-        b = 1.0 / 3.0 * math.sqrt(5.0 + 2.0 * math.sqrt(10.0 / 7.0))
-        wa = (322.0 + 13.0 * math.sqrt(70.0)) / 900.0
-        wb = (322.0 - 13.0 * math.sqrt(70.0)) / 900.0
-        w0 = 128.0 / 225.0
-        return [-b, -a, 0.0, a, b], [wb, wa, w0, wa, wb]
-    raise STEMIntegrationError(
-        "Gauss-Legendre table supports n in {1, 2, 3, 4, 5}",
-        context={"n": n},
-    )
+    if n < 1 or n > 64: raise STEMIntegrationError("n must be in [1, 64]")
+    nodes,weights=np.polynomial.legendre.leggauss(n); return nodes.tolist(),weights.tolist()
 
 
-__all__ = ["NumericalMethods"]
+__all__ = ["NumericalMethods", "helper_backward_error", "ensure_non_negative_ode"]
