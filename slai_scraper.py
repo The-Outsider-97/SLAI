@@ -21,6 +21,8 @@ HTTP retrieval.
 from __future__ import annotations
 
 import argparse
+import random
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import logging
@@ -36,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from src.training.corpus_dedup import (
@@ -53,7 +55,9 @@ from src.utils.configuration import bind_config
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "src" / "training" / "configs" / "lantra_pipeline.yaml"
 _CONFIG = bind_config(DEFAULT_CONFIG)
-LOGGER = logging.getLogger("slai_scraper")
+from logs.logger import get_logger, PrettyPrinter
+
+LOGGER = get_logger("slai_scraper")
 
 WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
 WIKISOURCE_API = "https://en.wikisource.org/w/api.php"
@@ -204,53 +208,85 @@ class SourceJob:
 class RequestLimiter:
     def __init__(self, requests_per_minute: int) -> None:
         self.minimum_interval = 60.0 / max(1, int(requests_per_minute))
-        self.last_request = 0.0
+        self.next_request = 0.0
 
     def wait(self) -> None:
-        elapsed = time.monotonic() - self.last_request
-        delay = self.minimum_interval - elapsed
+        delay = self.next_request - time.monotonic()
         if delay > 0:
             time.sleep(delay)
-        self.last_request = time.monotonic()
+        self.next_request = time.monotonic() + self.minimum_interval
+
+    def cooldown(self, seconds: float) -> None:
+        self.next_request = max(self.next_request, time.monotonic() + seconds)
 
 
 class HttpClient:
-    def __init__(
-        self,
-        *,
-        timeout: float,
-        retry_limit: int,
-        backoff: float,
-        requests_per_minute: int,
-        user_agent: str,
-    ) -> None:
+    def __init__(self, *, timeout: float, retry_limit: int, backoff: float,
+                 requests_per_minute: int, user_agent: str,
+                 source_rates: Mapping[str, int] | None = None) -> None:
         self.timeout = float(timeout)
         self.retry_limit = max(0, int(retry_limit))
         self.backoff = max(0.1, float(backoff))
         self.user_agent = str(user_agent)
-        self.limiter = RequestLimiter(requests_per_minute)
+        self.rates = {str(k): int(v) for k, v in (source_rates or {}).items()}
+        self.default_rate = int(requests_per_minute)
+        self.limiters: dict[str, RequestLimiter] = {}
+
+    def _source(self, url: str) -> str:
+        host = urlparse(url).hostname or ""
+        if host.endswith("wikipedia.org"):
+            return "wikipedia"
+        if host.endswith("wikisource.org"):
+            return "wikisource"
+        if host in {"gutendex.com", "www.gutenberg.org", "gutenberg.org"} or host.endswith(".gutenberg.org"):
+            return "gutenberg"
+        return host
+
+    def available(self, source: str) -> bool:
+        limiter = self.limiters.get(source)
+        return limiter is None or limiter.next_request <= time.monotonic()
 
     def get_bytes(self, url: str) -> bytes:
+        if urlparse(url).scheme != "https":
+            raise ValueError(f"Non-HTTPS source URL: {url}")
+        source = self._source(url)
+        limiter = self.limiters.setdefault(
+            source, RequestLimiter(self.rates.get(source, self.default_rate))
+        )
         last_error: BaseException | None = None
         for attempt in range(self.retry_limit + 1):
-            self.limiter.wait()
-            request = Request(
-                url,
-                headers={
-                    "User-Agent": self.user_agent,
-                    "Accept": "application/json,text/plain;q=0.9,*/*;q=0.5",
-                },
-            )
+            limiter.wait()
+            request = Request(url, headers={
+                "User-Agent": self.user_agent,
+                "Accept": "application/json,text/plain;q=0.9,text/html;q=0.8,*/*;q=0.5",
+            })
             try:
                 with urlopen(request, timeout=self.timeout) as response:
                     return response.read()
-            except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            except HTTPError as exc:
                 last_error = exc
-                if isinstance(exc, HTTPError) and exc.code not in {408, 425, 429, 500, 502, 503, 504}:
-                    break
-                if attempt < self.retry_limit:
-                    time.sleep(self.backoff * (2 ** attempt))
-        assert last_error is not None
+                if exc.code not in {408, 425, 429, 500, 502, 503, 504}:
+                    raise
+                retry_after = 0.0
+                header = exc.headers.get("Retry-After") if exc.headers else None
+                if header:
+                    try:
+                        retry_after = max(0.0, float(header))
+                    except ValueError:
+                        try:
+                            retry_after = max(0.0, (parsedate_to_datetime(header) - datetime.now(timezone.utc)).total_seconds())
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+                delay = max(retry_after, min(300.0, self.backoff * (2 ** attempt) + random.uniform(0, self.backoff)))
+            except (URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+                delay = min(300.0, self.backoff * (2 ** attempt) + random.uniform(0, self.backoff))
+            limiter.cooldown(delay)
+            LOGGER.warning("BACKOFF | %s | %s | %.1fs | attempt=%d/%d", source, last_error, delay, attempt + 1, self.retry_limit + 1)
+            if attempt == self.retry_limit or delay > 10.0:
+                break  # Defer this provider; do not stall other source jobs.
+        if last_error is None:
+            raise RuntimeError("HTTP request completed without result or failure")
         raise last_error
 
     def get_json(self, base: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -260,18 +296,12 @@ class HttpClient:
         payload = json.loads(self.get_bytes(url).decode("utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("Expected a JSON object response.")
+        if "error" in payload:
+            raise ValueError(f"Source API reported error: {payload['error']}")
         return payload
 
 
-def _mediawiki_candidates(
-    client: HttpClient,
-    *,
-    api: str,
-    source: str,
-    topic: str,
-    cursor: int,
-    limit: int = 8,
-) -> list[Candidate]:
+def _mediawiki_candidates(client: HttpClient, *, api: str, source: str, topic: str, cursor: int, limit: int = 8) -> list[Candidate]:
     search = client.get_json(
         api,
         {
@@ -342,14 +372,8 @@ def _select_gutenberg_text_url(formats: Mapping[str, Any]) -> str | None:
     return sorted(preferred)[0][1]
 
 
-def _gutenberg_candidates(
-    client: HttpClient,
-    *,
-    topic: str,
-    cursor: int,
-    limit: int = 5,
-) -> list[Candidate]:
-    page = max(1, int(cursor) // 32 + 1)
+def _gutenberg_candidates(client: HttpClient, *, topic: str, cursor: int, limit: int = 5) -> list[Candidate]:
+    page = max(1, int(cursor) + 1)
     payload = client.get_json(
         GUTENDEX_API,
         {"search": topic, "languages": "en", "page": page},
@@ -358,7 +382,7 @@ def _gutenberg_candidates(
     if not isinstance(rows, Sequence):
         return []
     result: list[Candidate] = []
-    for row in rows[:limit]:
+    for row in rows:
         if not isinstance(row, Mapping):
             continue
         book_id = row.get("id")
@@ -369,7 +393,11 @@ def _gutenberg_candidates(
         text_url = _select_gutenberg_text_url(formats)
         if not text_url:
             continue
-        body = client.get_bytes(text_url).decode("utf-8", errors="replace")
+        try:
+            body = client.get_bytes(text_url).decode("utf-8-sig", errors="replace")
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            LOGGER.warning("BOOK_SKIP | gutenberg | %s | book=%s | %s", topic, book_id, exc)
+            continue
         body = clean_visible_text(body)
         if body:
             result.append(
@@ -382,6 +410,8 @@ def _gutenberg_candidates(
                     metadata={"book_id": str(book_id)},
                 )
             )
+            if len(result) >= limit:
+                break
     return result
 
 
@@ -391,6 +421,7 @@ class SLAITeam:
         self.memory = self.factory = None
         self.planning = self.reasoning = self.quality = self.knowledge = None
         self.Task = self.TaskType = self.ResourceProfile = None
+        self._planning_disabled_until = 0.0
         if not self.enabled:
             return
         from src.agents.agent_factory import AgentFactory
@@ -450,7 +481,7 @@ class SLAITeam:
         LOGGER.info("AGENTS | Planning + Reasoning + Quality + Knowledge active")
 
     def order_jobs(self, jobs: Sequence[SourceJob]) -> list[SourceJob]:
-        if not self.enabled or len(jobs) < 2:
+        if not self.enabled or len(jobs) < 2 or time.monotonic() < self._planning_disabled_until:
             return list(jobs)
         assert self.Task is not None and self.TaskType is not None and self.ResourceProfile is not None
         try:
@@ -477,14 +508,17 @@ class SLAITeam:
                 duration=10 * len(tasks),
                 deadline=deadline,
             )
+            assert self.planning is not None
             plan = self.planning.generate_plan(goal)
             if not plan:
+                self._planning_disabled_until = time.monotonic() + 900
                 return list(jobs)
             mapping = {f"scrape_{index}": job for index, job in enumerate(jobs)}
             ordered = [mapping[item.id] for item in plan if getattr(item, "id", None) in mapping]
             return ordered if len(ordered) == len(jobs) else list(jobs)
         except Exception as exc:
-            LOGGER.warning("PlanningAgent advisory ordering failed: %s", exc)
+            self._planning_disabled_until = time.monotonic() + 900
+            LOGGER.warning("PlanningAgent advisory ordering failed; pausing advisory planning for 15m: %s", exc)
             return list(jobs)
 
     def classify_topic(self, title: str, text: str, fallback: str) -> str:
@@ -501,6 +535,7 @@ class SLAITeam:
             return candidates[0][0]
 
         subject = "scraper_candidate"
+        assert self.reasoning is not None
         self.reasoning.forget_by_subject(subject)
         try:
             for domain, confidence in candidates[:4]:
@@ -510,18 +545,12 @@ class SLAITeam:
                 domain: float(self.reasoning.knowledge_base.get((subject, "selected_topic", domain), 0.0))
                 for domain, _ in candidates
             }
-            chosen = max(scores, key=scores.get)
+            chosen = max(scores, key=lambda domain: scores[domain])
             return chosen if scores[chosen] > 0 else candidates[0][0]
         finally:
             self.reasoning.forget_by_subject(subject)
 
-    def quality_accepts(
-        self,
-        *,
-        candidate: Candidate,
-        topic: str,
-        deterministic_score: float,
-    ) -> tuple[bool, Mapping[str, Any]]:
+    def quality_accepts(self, *, candidate: Candidate, topic: str, deterministic_score: float) -> tuple[bool, Mapping[str, Any]]:
         if not self.enabled:
             return True, {"verdict": "accepted_without_agents"}
         record = {
@@ -544,6 +573,7 @@ class SLAITeam:
                 "word_count": {"type": "int", "required": True},
             },
         }
+        assert self.quality is not None
         result = self.quality.evaluate_batch(
             [record],
             dataset_id="lantra_general_corpus",
@@ -552,12 +582,18 @@ class SLAITeam:
             schema=schema,
             context={"use_case": "language_model_training_corpus"},
         )
-        verdict = str(result.get("verdict", result.get("decision", "warn"))).casefold()
-        blocked = verdict in {"reject", "rejected", "block", "blocked", "fail", "failed"}
-        return not blocked, result
+        if not isinstance(result, Mapping):
+            raise TypeError(f"QualityAgent returned {type(result).__name__}, expected mapping")
+        verdict = str(result.get("verdict", result.get("decision", "unknown"))).casefold()
+        accepted = verdict in {"accept", "accepted", "pass", "passed", "approve", "approved"}
+        if not accepted:
+            LOGGER.warning("QUALITY_REJECT | source=%s | title=%r | verdict=%s | report=%s",
+                           candidate.source, candidate.title, verdict, str(result)[:1200])
+        return accepted, result
 
     def index_accepted(self, candidate: Candidate, topic: str) -> None:
         if self.enabled:
+            assert self.knowledge is not None
             self.knowledge.add_document(
                 candidate.content,
                 doc_id=candidate.source_key,
@@ -570,7 +606,10 @@ class SLAITeam:
             active = getattr(self.factory, "get_active_agent_types", None)
             if callable(release) and callable(active):
                 try:
-                    for name in reversed(list(active())):
+                    active_types = active()
+                    if not isinstance(active_types, Iterable):
+                        active_types = ()
+                    for name in reversed(list(active_types)):
                         release(name)
                 except Exception as exc:
                     LOGGER.debug("Agent shutdown warning: %s", exc)
@@ -596,6 +635,9 @@ def _new_state(target_bytes: int) -> dict[str, Any]:
         "duplicates": 0,
         "recoverable_failures": 0,
         "processed_source_keys": [],
+        "failed_jobs": {},
+        "discovered_documents": 0,
+        "fetched_documents": 0,
         "source_stats": {},
         "topic_stats": {},
         "cursors": {},
@@ -654,9 +696,12 @@ def _productivity(state: Mapping[str, Any], source: str, topic: str) -> float:
 def _choose_jobs(state: Mapping[str, Any], enabled_sources: Sequence[str], count: int = 6) -> list[SourceJob]:
     cursors = state.get("cursors", {})
     candidates: list[tuple[float, SourceJob]] = []
+    blocked = state.get("failed_jobs", {})
     for source in enabled_sources:
         for topic in TOPICS:
             key = f"{source}:{topic}"
+            if isinstance(blocked, Mapping) and float(blocked.get(key, {}).get("retry_at", 0)) > time.time():
+                continue
             cursor = int(cursors.get(key, 0)) if isinstance(cursors, Mapping) else 0
             score = _productivity(state, source, topic)
             jitter = int.from_bytes(hashlib.sha256(f"{key}:{cursor}".encode()).digest()[:2], "big") / 65535.0
@@ -740,6 +785,27 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
         raise ValueError("At least one scraper source must be enabled.")
 
     state = _load_state(state_path, target_bytes, reset=bool(args.reset_campaign))
+    if not state.get("gutenberg_cursor_v2"):
+        cursors = state.setdefault("cursors", {})
+        if isinstance(cursors, MutableMapping):
+            for key in list(cursors):
+                if key.startswith("gutenberg:"):
+                    cursors[key] = 0
+        state["gutenberg_cursor_v2"] = True
+        _save_state(state_path, state)
+    if not state.get("processed_reconciled_v2"):
+        accepted_keys: set[str] = set()
+        if manifest_path.is_file():
+            for line in manifest_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, Mapping) and entry.get("source_key"):
+                    accepted_keys.add(str(entry["source_key"]))
+        state["processed_source_keys"] = sorted(accepted_keys)
+        state["processed_reconciled_v2"] = True
+        _save_state(state_path, state)
     processed = {str(value) for value in state.get("processed_source_keys", ())}
     team = SLAITeam(enabled=args.agents == "team")
     client = HttpClient(
@@ -748,6 +814,7 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
         backoff=float(scraper_cfg.get("retry_backoff_seconds", 2.0)),
         requests_per_minute=int(scraper_cfg.get("requests_per_minute", 40)),
         user_agent=str(scraper_cfg.get("user_agent", "SLAI-LANTRA-Corpus/2.3")),
+        source_rates=scraper_cfg.get("source_requests_per_minute", {}),
     )
     consecutive_failures = 0
     max_consecutive_failures = int(scraper_cfg.get("max_consecutive_failures", 12))
@@ -767,7 +834,10 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                 if _STOP:
                     raise KeyboardInterrupt
 
-                jobs = team.order_jobs(_choose_jobs(state, enabled_sources))
+                jobs = team.order_jobs([
+                    job for job in _choose_jobs(state, enabled_sources)
+                    if client.available(job.source)
+                ])
                 made_progress = False
                 for job in jobs:
                     if int(state.get("accepted_bytes", 0)) >= target_bytes:
@@ -778,18 +848,29 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                     topic_bucket["attempts"] = int(topic_bucket.get("attempts", 0)) + 1
                     cursor_key = f"{job.source}:{job.topic}"
                     cursors = state.setdefault("cursors", {})
-                    if isinstance(cursors, MutableMapping):
-                        cursors[cursor_key] = int(job.cursor) + 8
-
                     try:
                         candidates = _fetch_job(client, job)
                         consecutive_failures = 0
+                        if isinstance(cursors, MutableMapping):
+                            cursors[cursor_key] = int(job.cursor) + (1 if job.source == "gutenberg" else 8)
+                        state["discovered_documents"] = int(state.get("discovered_documents", 0)) + len(candidates)
+                        state["fetched_documents"] = int(state.get("fetched_documents", 0)) + len(candidates)
+                        state.setdefault("failed_jobs", {}).pop(cursor_key, None)
+                        LOGGER.info("DISCOVER | %s | %s | candidates=%d | cursor=%d", job.source, job.topic, len(candidates), job.cursor)
                     except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
                         consecutive_failures += 1
                         state["recoverable_failures"] = int(state.get("recoverable_failures", 0)) + 1
                         source_bucket["errors"] = int(source_bucket.get("errors", 0)) + 1
                         topic_bucket["errors"] = int(topic_bucket.get("errors", 0)) + 1
-                        LOGGER.warning("FETCH | %s | %s | %s: %s", job.source, job.topic, type(exc).__name__, exc)
+                        cooldown = 86400 if isinstance(exc, HTTPError) and exc.code in {400, 404, 410} else 30
+                        limiter = client.limiters.get(job.source)
+                        if limiter is not None:
+                            cooldown = max(cooldown, int(max(0.0, limiter.next_request - time.monotonic())))
+                        state.setdefault("failed_jobs", {})[cursor_key] = {
+                            "retry_at": time.time() + cooldown,
+                            "reason": str(exc),
+                        }
+                        LOGGER.warning("FETCH | %s | %s | %s: %s | cooldown=%ds", job.source, job.topic, type(exc).__name__, exc, cooldown)
                         _save_state(state_path, state)
                         if consecutive_failures >= max_consecutive_failures:
                             raise RuntimeError(
@@ -800,8 +881,7 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                     for candidate in candidates:
                         if candidate.source_key in processed:
                             continue
-                        processed.add(candidate.source_key)
-                        state["processed_source_keys"] = sorted(processed)
+                        # Mark processed only after durable acceptance or an explicit rejection.
                         words = meaningful_words(candidate.content)
                         reject_reason: str | None = None
                         if len(words) < minimum_words:
@@ -816,6 +896,8 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                             state["rejected_documents"] = int(state.get("rejected_documents", 0)) + 1
                             source_bucket["rejected"] = int(source_bucket.get("rejected", 0)) + 1
                             topic_bucket["rejected"] = int(topic_bucket.get("rejected", 0)) + 1
+                            processed.add(candidate.source_key)
+                            state["processed_source_keys"] = sorted(processed)
                             _save_state(state_path, state)
                             continue
 
@@ -827,6 +909,8 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                             state["duplicates"] = int(state.get("duplicates", 0)) + 1
                             source_bucket["duplicates"] = int(source_bucket.get("duplicates", 0)) + 1
                             topic_bucket["duplicates"] = int(topic_bucket.get("duplicates", 0)) + 1
+                            processed.add(candidate.source_key)
+                            state["processed_source_keys"] = sorted(processed)
                             _save_state(state_path, state)
                             continue
 
@@ -840,6 +924,8 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                             state["rejected_documents"] = int(state.get("rejected_documents", 0)) + 1
                             source_bucket["rejected"] = int(source_bucket.get("rejected", 0)) + 1
                             topic_bucket["rejected"] = int(topic_bucket.get("rejected", 0)) + 1
+                            processed.add(candidate.source_key)
+                            state["processed_source_keys"] = sorted(processed)
                             _save_state(state_path, state)
                             continue
 
@@ -848,6 +934,8 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                             filename = sanitize_windows_filename(title) + ".txt"
                         except ValueError:
                             state["rejected_documents"] = int(state.get("rejected_documents", 0)) + 1
+                            processed.add(candidate.source_key)
+                            state["processed_source_keys"] = sorted(processed)
                             _save_state(state_path, state)
                             continue
 
@@ -860,7 +948,6 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                             size=accepted_bytes,
                             mtime_ns=destination.stat().st_mtime_ns,
                         )
-                        team.index_accepted(candidate, topic)
                         state["accepted_documents"] = int(state.get("accepted_documents", 0)) + 1
                         state["accepted_bytes"] = int(state.get("accepted_bytes", 0)) + accepted_bytes
                         state["accepted_words"] = int(state.get("accepted_words", 0)) + len(words)
@@ -892,7 +979,13 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                                 "agent_verdict": str(agent_report.get("verdict", agent_report.get("decision", "accepted"))),
                             },
                         )
+                        processed.add(candidate.source_key)
+                        state["processed_source_keys"] = sorted(processed)
                         _save_state(state_path, state)
+                        try:
+                            team.index_accepted(candidate, topic)
+                        except Exception as exc:
+                            LOGGER.warning("KNOWLEDGE_INDEX | saved=%s | error=%s", candidate.source_key, exc)
                         made_progress = True
                         LOGGER.info(
                             "ACCEPT | %s | %s | words=%d | bytes=%d | total=%d/%d",
@@ -902,7 +995,10 @@ def run(args: argparse.Namespace) -> Mapping[str, Any]:
                         if int(state.get("accepted_bytes", 0)) >= target_bytes:
                             break
 
-                if not made_progress:
+                if not jobs:
+                    pending = [float(v.get("retry_at", time.time() + 60)) for v in state.get("failed_jobs", {}).values() if isinstance(v, Mapping)]
+                    time.sleep(min(60.0, max(1.0, min(pending, default=time.time() + 60) - time.time())))
+                elif not made_progress:
                     time.sleep(0.5)
 
     finally:
