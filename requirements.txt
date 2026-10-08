@@ -1,3 +1,4 @@
+-e ./model/LSTP
 boto3
 botocore
 beautifulsoup4  # provides bs4
