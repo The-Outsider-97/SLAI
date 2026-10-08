@@ -1,0 +1,88 @@
+stem_types: {}
+
+stem_types:
+  precision:
+    significant_digits: 12
+    decimal_places: null
+    rounding_mode: ROUND_HALF_EVEN
+    absolute_tolerance: 1.0e-12
+    relative_tolerance: 1.0e-9
+    nan_policy: equal
+
+dimensions:
+  base_dimensions:
+    L: length
+    M: mass
+    T: time
+    I: electric_current
+    Θ: thermodynamic_temperature
+    N: amount_of_substance
+    J: luminous_intensity
+  allow_rational_exponents: true
+  strict_consistency: true
+  buckingham_pi:
+    enabled: false
+    tolerance: 1.0e-10
+
+unit_system:
+  default_system: SI
+  si_only: false
+  allow_non_si_with_conversion: true
+  default_linear_scale: 1.0
+  default_affine_offset: 0.0
+  prefixes:
+    - {symbol: "Q", name: quetta, factor: 1.0e30}
+    - {symbol: "R", name: ronna,  factor: 1.0e27}
+    - {symbol: "Y", name: yotta,  factor: 1.0e24}
+    - {symbol: "Z", name: zetta,  factor: 1.0e21}
+    - {symbol: "E", name: exa,    factor: 1.0e18}
+    - {symbol: "P", name: peta,   factor: 1.0e15}
+    - {symbol: "T", name: tera,   factor: 1.0e12}
+    - {symbol: "G", name: giga,   factor: 1.0e9}
+    - {symbol: "M", name: mega,   factor: 1.0e6}
+    - {symbol: "k", name: kilo,   factor: 1.0e3}
+    - {symbol: "h", name: hecto,  factor: 1.0e2}
+    - {symbol: "da", name: deca,  factor: 1.0e1}
+    - {symbol: "d", name: deci,   factor: 1.0e-1}
+    - {symbol: "c", name: centi,  factor: 1.0e-2}
+    - {symbol: "m", name: milli,  factor: 1.0e-3}
+    - {symbol: "µ", name: micro,  factor: 1.0e-6}
+    - {symbol: "n", name: nano,   factor: 1.0e-9}
+    - {symbol: "p", name: pico,   factor: 1.0e-12}
+    - {symbol: "f", name: femto,  factor: 1.0e-15}
+    - {symbol: "a", name: atto,   factor: 1.0e-18}
+    - {symbol: "z", name: zepto,  factor: 1.0e-21}
+    - {symbol: "y", name: yocto,  factor: 1.0e-24}
+    - {symbol: "r", name: ronto,  factor: 1.0e-27}
+    - {symbol: "q", name: quecto, factor: 1.0e-30}
+  base_units:
+    m:   {name: metre,    dimension: {L: 1.0}}
+    kg:  {name: kilogram, dimension: {M: 1.0}}
+    s:   {name: second,   dimension: {T: 1.0}}
+    A:   {name: ampere,   dimension: {I: 1.0}}
+    K:   {name: kelvin,   dimension: {Θ: 1.0}}
+    mol: {name: mole,     dimension: {N: 1.0}}
+    cd:  {name: candela,  dimension: {J: 1.0}}
+  derived_units:
+    Hz:  {name: hertz,     dimension: {T: -1.0},                   scale: 1.0}
+    N:   {name: newton,    dimension: {M: 1.0, L: 1.0, T: -2.0},   scale: 1.0}
+    Pa:  {name: pascal,    dimension: {M: 1.0, L: -1.0, T: -2.0},  scale: 1.0}
+    J:   {name: joule,     dimension: {M: 1.0, L: 2.0, T: -2.0},   scale: 1.0}
+    W:   {name: watt,      dimension: {M: 1.0, L: 2.0, T: -3.0},   scale: 1.0}
+    C:   {name: coulomb,   dimension: {I: 1.0, T: 1.0},            scale: 1.0}
+    V:   {name: volt,      dimension: {M: 1.0, L: 2.0, T: -3.0, I: -1.0}, scale: 1.0}
+    F:   {name: farad,     dimension: {M: -1.0, L: -2.0, T: 4.0, I: 2.0}, scale: 1.0}
+    Ω:   {name: ohm,       dimension: {M: 1.0, L: 2.0, T: -3.0, I: -2.0}, scale: 1.0}
+    S:   {name: siemens,   dimension: {M: -1.0, L: -2.0, T: 3.0, I: 2.0}, scale: 1.0}
+    Wb:  {name: weber,     dimension: {M: 1.0, L: 2.0, T: -2.0, I: -1.0}, scale: 1.0}
+    T:   {name: tesla,     dimension: {M: 1.0, T: -2.0, I: -1.0},  scale: 1.0}
+    H:   {name: henry,     dimension: {M: 1.0, L: 2.0, T: -2.0, I: -2.0}, scale: 1.0}
+    lm:  {name: lumen,     dimension: {J: 1.0},                    scale: 1.0}
+    lx:  {name: lux,       dimension: {J: 1.0, L: -2.0},           scale: 1.0}
+    Bq:  {name: becquerel, dimension: {T: -1.0},                   scale: 1.0}
+    Gy:  {name: gray,      dimension: {L: 2.0, T: -2.0},           scale: 1.0}
+    Sv:  {name: sievert,   dimension: {L: 2.0, T: -2.0},           scale: 1.0}
+    kat: {name: katal,     dimension: {N: 1.0, T: -1.0},           scale: 1.0}
+  affine_units:
+    "°C": {name: degree_celsius,    dimension: {Θ: 1.0}, scale: 1.0,        offset: 273.15}
+    "°F": {name: degree_fahrenheit, dimension: {Θ: 1.0}, scale: 0.55555556, offset: 255.3722222222222}

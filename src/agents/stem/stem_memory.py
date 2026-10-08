@@ -1,5 +1,22 @@
 """
-Memory module consumed by the stem submodule  for caching, storage, and logic
+Memory module consumed by the stem submodules for scientific computation caching and reproducibility.
+
+the caching identity should consider:
+- function/model
+- inputs
+- units
+- algorithm
+- algorithm version
+- precision
+- tolerances
+- boundary conditions
+- constants version
+- seed, if applicable
+
+sources:
+- Michie, D. (1968). “‘Memo’ Functions and Machine Learning.” Nature, 218, 19–22. DOI 10.1038/218019a0.
+- Sandve, G. K., et al. (2013). “Ten Simple Rules for Reproducible Computational Research.” PLOS Computational Biology, 9(10), e1003285.
+- Wilson et al. (2014) also supports reproducible and reliable scientific-software practice.
 """
 
 from __future__ import annotations

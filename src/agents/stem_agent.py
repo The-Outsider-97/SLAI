@@ -25,6 +25,11 @@ Simulation
 Optimization
 Spatial
 Experiment
+
+sources:
+- Higham, N. J. (2002). Accuracy and Stability of Numerical Algorithms (2nd ed.). SIAM. DOI 10.1137/1.9780898718027. | It establishes the distinction between a mathematically correct formulation and a numerically reliable computation, including finite precision, stability, conditioning and rounding error.
+- IEEE. (2019). IEEE Standard for Floating-Point Arithmetic (IEEE 754-2019). | This should govern floating-point representation, exceptional values, rounding and arithmetic semantics.
+- Wilson, G., et al. (2014). “Best Practices for Scientific Computing.” PLOS Biology, 12(1), e1001745. | Useful for the software-level requirements around tested, maintainable and reproducible scientific calculations.
 """
 
 from __future__ import annotations
@@ -52,6 +57,21 @@ from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissi
 
 logger = get_logger("STEM Agent")
 printer = PrettyPrinter()
+
+
+@dataclass(frozen=True)
+class STEMResult:
+    value: str
+    unit: str
+    precision: str
+    method: str
+    converged=True,
+    iterations: str
+    absolute_error: str
+    relative_error: str
+    condition_number: str
+    warnings: str
+    references: str
 
 
 class STEMAgent(BaseAgent):

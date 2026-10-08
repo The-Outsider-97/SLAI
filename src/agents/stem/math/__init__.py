@@ -1,8 +1,18 @@
-"""
-Top-level exports for the Verification Agent subsystem.
-"""
+from .algebra import *
+from .calculus import *
+from .numerical_methods import *
+from .statistics import *
 
-__version__ = "2.3.0"
+
+from .algebra import __all__ as _algebra_exports
+from .calculus import __all__ as _calculus_exports
+from .numerical_methods import __all__ as _numerical_methods_exports
+from .statistics import __all__ as _statistics_exports
 
 
-__all__ = []
+__all__ = [
+    *_algebra_exports,
+    *_calculus_exports,
+    *_numerical_methods_exports,
+    *_statistics_exports,
+] # type: ignore
