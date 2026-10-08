@@ -470,3 +470,56 @@ Developed by [@The-Outsider-97](https://github.com/The-Outsider-97)
 
 > SLAI is an experiment in building safe, scalable, intelligent systems that learn and grow with every user interaction.
 =======
+
+
+## LSTP v0.1 semantic transport
+
+SLAI pins LSTP as an independent Git submodule at:
+
+```text
+SLAI/
+├── run_lstp.py
+└── model/
+    └── LSTP/
+```
+
+Clone SLAI with submodules:
+
+```bash
+git clone --recurse-submodules https://github.com/The-Outsider-97/SLAI.git
+cd SLAI
+pip install -r requirements.txt
+```
+
+For an existing checkout:
+
+```bash
+git submodule update --init --recursive
+pip install -r requirements.txt
+```
+
+Run the real SLAI LanguageAgent through the pinned LSTP v0.1 boundary:
+
+```bash
+python run_lstp.py "Summarize the quarterly report." \
+  --session-id demo-thread \
+  --packet-id demo-packet
+```
+
+The launcher performs:
+
+```text
+natural language
+  -> SLAI LanguageAgent / LinguisticFrame
+  -> deterministic frame-to-Octad adapter
+  -> LSTP semantic validation
+  -> canonical LSTP JSON
+```
+
+The language frame never grants execution authority. The adapter emits empty
+`Permissions()`; execution/write/commit authorization remains a separate
+trusted host decision.
+
+The LSTP gitlink is intentionally pinned to a specific commit. Updating LSTP
+inside SLAI is therefore an explicit compatibility change and requires the SLAI
+integration smoke tests to pass before the pin moves.
