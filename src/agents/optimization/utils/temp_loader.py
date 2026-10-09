@@ -1,8 +1,8 @@
-"""Canonical, subsystem-owned loader for STEM templates.
+"""Canonical, subsyOptimization-owned loader for Optimization templates.
 
-Templates are data assets owned by the STEM subsystem. Domain modules and the
-future STEMAgent may access them only through this API; no caller needs to know
-the template filesystem layout.
+Templates are data assets owned by the Optimization subsyOptimization. Domain modules and the
+future OptimizationAgent may access them only through this API; no caller needs to know
+the template filesyOptimization layout.
 """
 from __future__ import annotations
 
@@ -10,14 +10,15 @@ __version__ = "2.3.0"
 
 import copy
 import json
+
 from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, Tuple
 
-from .stem_errors import STEMTemplateError
+from .optimization_errors import OptimizationTemplateError
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
-logger = get_logger("STEM Template Loader")
+logger = get_logger("Optimization Template Loader")
 printer = PrettyPrinter()
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates"
@@ -27,18 +28,18 @@ _LOCK = RLock()
 
 def resolve_template_path(name: str) -> Path:
     if not isinstance(name, str) or not name.strip():
-        raise STEMTemplateError("Template name must be a non-empty string")
+        raise OptimizationTemplateError("Template name must be a non-empty string")
     relative = Path(name.strip())
     if relative.is_absolute():
-        raise STEMTemplateError("Absolute template paths are not allowed")
+        raise OptimizationTemplateError("Absolute template paths are not allowed")
     candidate = (TEMPLATE_ROOT / relative).resolve()
     root = TEMPLATE_ROOT.resolve()
     try:
         candidate.relative_to(root)
     except ValueError as exc:
-        raise STEMTemplateError("Template path escapes the STEM template directory", cause=exc) from exc
+        raise OptimizationTemplateError("Template path escapes the Optimization template directory", cause=exc) from exc
     if not candidate.is_file():
-        raise STEMTemplateError("Template does not exist", context={"template": name})
+        raise OptimizationTemplateError("Template does not exist", context={"template": name})
     return candidate
 
 
@@ -53,19 +54,19 @@ def load_template(name: str, *, structured: bool | None = None, force_reload: bo
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise STEMTemplateError("Failed to read STEM template", context={"path": str(path)}, cause=exc) from exc
+            raise OptimizationTemplateError("Failed to read Optimization template", context={"path": str(path)}, cause=exc) from exc
 
         parse_structured = path.suffix.lower() == ".json" if structured is None else bool(structured)
         if parse_structured:
             try:
                 value: Any = json.loads(text)
             except json.JSONDecodeError as exc:
-                raise STEMTemplateError("Invalid JSON STEM template", context={"path": str(path), "line": exc.lineno}, cause=exc) from exc
+                raise OptimizationTemplateError("Invalid JSON Optimization template", context={"path": str(path), "line": exc.lineno}, cause=exc) from exc
         else:
             value = text
 
         _CACHE[path] = (stat.st_mtime_ns, stat.st_size, copy.deepcopy(value))
-        logger.debug("STEM template loaded | path=%s", path)
+        logger.debug("Optimization template loaded | path=%s", path)
         return copy.deepcopy(value)
 
 

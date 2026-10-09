@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 """
-Verification subsystem configuration facade.
+Optimization subsystem configuration facade.
 
-This module preserves the established Verification configuration API while
+This module preserves the established Optimization configuration API while
 delegating all generic configuration infrastructure to
 ``src.utils.configuration``.
 
@@ -11,8 +11,8 @@ Ownership
 ---------
 This module owns only:
 
-- the default path to ``Verification_config.yaml``;
-- the Verification-facing compatibility API:
+- the default path to ``optimization_config.yaml``;
+- the Optimization-facing compatibility API:
     - ``load_global_config``
     - ``reload_config``
     - ``clear_config_cache``
@@ -30,7 +30,7 @@ Generic configuration concerns are owned exclusively by
 - cache TTL handling;
 - defensive deep copies.
 
-This preserves the existing Verification import surface without maintaining a
+This preserves the existing Optimization import surface without maintaining a
 second configuration implementation.
 """
 
@@ -41,18 +41,18 @@ from src.utils.configuration import DEFAULT_CACHE_TTL_SECONDS, ConfigBinding, bi
 from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
 
-logger = get_logger("Verification Config Loader")
+logger = get_logger("Optimization Config Loader")
 printer = PrettyPrinter()
 
 
 # ---------------------------------------------------------------------------
-# Canonical Verification configuration binding
+# Canonical Optimization configuration binding
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[1]
     / "configs"
-    / "Verification_config.yaml"
+    / "optimization_config.yaml"
 )
 
 _CONFIG_BINDING: ConfigBinding = bind_config(DEFAULT_CONFIG_PATH)
@@ -64,10 +64,10 @@ _CONFIG_BINDING: ConfigBinding = bind_config(DEFAULT_CONFIG_PATH)
 
 def resolve_config_path(config_path: Optional[Union[str, Path]] = None) -> Path:
     """
-    Resolve a Verification configuration path without reading the file.
+    Resolve a Optimization configuration path without reading the file.
 
     When ``config_path`` is omitted, the canonical
-    ``Verification/configs/Verification_config.yaml`` path is returned.
+    ``optimization/configs/optimization_config.yaml`` path is returned.
 
     Args:
         config_path:
@@ -96,16 +96,16 @@ def load_global_config(
     cache_ttl: float = DEFAULT_CACHE_TTL_SECONDS,
 ) -> Dict[str, Any]:
     """
-    Load the Verification subsystem configuration.
+    Load the Optimization subsystem configuration.
 
-    This function preserves the established Verification API while delegating
+    This function preserves the established Optimization API while delegating
     parsing, caching, modification detection, locking, and defensive copying
     to SLAI's shared configuration repository.
 
     Args:
         config_path:
-            Optional custom Verification configuration path. When omitted,
-            ``Verification_config.yaml`` is used.
+            Optional custom Optimization configuration path. When omitted,
+            ``optimization_config.yaml`` is used.
 
         force_reload:
             If ``True``, bypass the cached value and reload the YAML file.
@@ -140,14 +140,14 @@ def load_global_config(
         force_reload=force_reload,
         cache_ttl=cache_ttl,
     )
-    logger.debug("Verification configuration loaded | path=%s | force_reload=%s", resolved, force_reload)
+    logger.debug("Optimization configuration loaded | path=%s | force_reload=%s", resolved, force_reload)
 
     return config
 
 
 def reload_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     """
-    Force-reload the Verification configuration.
+    Force-reload the Optimization configuration.
 
     Equivalent to::
 
@@ -156,26 +156,26 @@ def reload_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, A
     resolved = resolve_config_path(config_path)
     config = _CONFIG_BINDING.reload(resolved)
 
-    logger.info("Verification configuration reloaded | path=%s", resolved)
+    logger.info("Optimization configuration reloaded | path=%s", resolved)
 
     return config
 
 
 def clear_config_cache() -> None:
     """
-    Clear configuration entries loaded through this Verification binding.
+    Clear configuration entries loaded through this Optimization binding.
 
     The shared configuration repository itself is not globally cleared.
     Configuration entries owned by other SLAI subsystems remain untouched.
     """
     _CONFIG_BINDING.clear()
 
-    logger.debug("Verification configuration cache cleared")
+    logger.debug("Optimization configuration cache cleared")
 
 
 def get_config_cache_info() -> Dict[str, Any]:
     """
-    Return cache diagnostics for the Verification configuration binding.
+    Return cache diagnostics for the Optimization configuration binding.
 
     Returns:
         Mapping containing fields such as:
@@ -199,7 +199,7 @@ def get_config_section(
     default: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Return one top-level Verification configuration section.
+    Return one top-level Optimization configuration section.
 
     When an already-loaded ``config`` mapping is supplied, no additional file
     access is performed.
@@ -209,7 +209,7 @@ def get_config_section(
             Top-level YAML section name.
 
         config:
-            Optional already-loaded Verification configuration.
+            Optional already-loaded Optimization configuration.
 
         config_path:
             Optional configuration path used only when ``config`` is omitted.

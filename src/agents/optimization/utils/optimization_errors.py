@@ -9,10 +9,10 @@ from typing import Any, Dict, Optional, Type, TypeVar
 from ...base.utils.base_errors import BaseError, BaseErrorType
 
 
-TVerificationError = TypeVar("TVerificationError", bound="VerificationError")
+TOptimizationError = TypeVar("TOptimizationError", bound="OptimizationError")
 
 
-class VerificationError(BaseError):
+class OptimizationError(BaseError):
     """
     Root of the Reasoning domain error hierarchy.
 
@@ -21,10 +21,10 @@ class VerificationError(BaseError):
     """
 
     error_type = BaseErrorType.RUNTIME
-    default_code = "verification_error"
+    default_code = "optimization_error"
     default_severity = "medium"
     default_retryable = False
-    default_category = "verification"
+    default_category = "optimization"
 
     def __init__(self, message: str,
             *,
