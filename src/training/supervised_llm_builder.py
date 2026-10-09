@@ -19,20 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Optional, Sequence
 
-from src.training.corpus_dedup import atomic_write_json, normalize_text_for_dedup
-from src.training.enrichment_contracts import (
-    SUPPORTED_TASKS,
-    CurriculumQualityError,
-    SourceDocument,
-    sha256_payload,
-)
-from src.training.llm_providers import (
-    LLMCache,
-    LLMProviderResponseError,
-    ProviderPool,
-    parse_json_object,
-    providers_from_config,
-)
+from .corpus_dedup import atomic_write_json, normalize_text_for_dedup
+from .enrichment_contracts import SUPPORTED_TASKS, CurriculumQualityError, SourceDocument, sha256_payload
+from .llm_providers import LLMCache, LLMProviderResponseError, ProviderPool, parse_json_object, providers_from_config
 
 
 LOGGER = logging.getLogger("lantra_supervised_builder")

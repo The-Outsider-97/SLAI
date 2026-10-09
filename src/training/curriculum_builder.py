@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import tempfile
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -346,7 +347,19 @@ class LantraCurriculumBuilder:
         else:
             self._checkpoint_phase("2c", len(documents), records, completed=True)
 
+        candidate_counts = self._record_counts(records)
         records, coverage = self._apply_heldout_coverage(records)
+        accepted_counts = self._record_counts(records)
+
+        if accepted_counts["total"] <= 0:
+            raise CurriculumError(
+                "LANTRA curriculum generated zero accepted records. "
+                f"Candidates before coverage: "
+                f"{candidate_counts['total']}. "
+                f"Counts: {candidate_counts['by_task']}. "
+                f"Coverage: {coverage}. "
+                f"Quality gate: {gate.summary()}."
+            )
         manifest = self._write_artifacts(
             output_dir,
             documents=documents,
@@ -381,10 +394,7 @@ class LantraCurriculumBuilder:
     ) -> None:
         ordered_segments = sorted(
             segments,
-            key=lambda item: (
-                stable_unit_interval(item.segment_id, self.config.seed + 211),
-                item.segment_id,
-            ),
+            key=lambda item: (stable_unit_interval(item.segment_id, self.config.seed + 211), item.segment_id),
         )
         per_document = collections.Counter()
         for record in records.get(("2a", "generation"), ()):
@@ -1053,7 +1063,14 @@ class LantraCurriculumBuilder:
         if manifest.get("build_fingerprint") != build_fingerprint:
             return None
         artifacts = manifest.get("artifacts", [])
-        if not isinstance(artifacts, Sequence):
+        record_counts = manifest.get("records", {})
+
+        if (
+            not isinstance(artifacts, list)
+            or not artifacts
+            or not isinstance(record_counts, Mapping)
+            or int(record_counts.get("total", 0)) <= 0
+        ):
             return None
         for item in artifacts:
             if not isinstance(item, Mapping):
