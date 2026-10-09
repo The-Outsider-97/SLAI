@@ -37,7 +37,7 @@ def resolve_template_path(name: str) -> Path:
     try:
         candidate.relative_to(root)
     except ValueError as exc:
-        raise OptimizationTemplateError("Template path escapes the Optimization template directory", cause=exc) from exc
+        raise OptimizationTemplateError("Template path escapes the Optimization template directory") from exc
     if not candidate.is_file():
         raise OptimizationTemplateError("Template does not exist", context={"template": name})
     return candidate
@@ -54,14 +54,14 @@ def load_template(name: str, *, structured: bool | None = None, force_reload: bo
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise OptimizationTemplateError("Failed to read Optimization template", context={"path": str(path)}, cause=exc) from exc
+            raise OptimizationTemplateError("Failed to read Optimization template", context={"path": str(path)}) from exc
 
         parse_structured = path.suffix.lower() == ".json" if structured is None else bool(structured)
         if parse_structured:
             try:
                 value: Any = json.loads(text)
             except json.JSONDecodeError as exc:
-                raise OptimizationTemplateError("Invalid JSON Optimization template", context={"path": str(path), "line": exc.lineno}, cause=exc) from exc
+                raise OptimizationTemplateError("Invalid JSON Optimization template", context={"path": str(path), "line": exc.lineno}) from exc
         else:
             value = text
 

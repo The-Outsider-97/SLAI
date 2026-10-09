@@ -33,4 +33,12 @@ class OptimizationError(BaseError):
         pass
 
 
+class OptimizationTemplateError(OptimizationError):
+    error_type = BaseErrorType.CONFIGURATION
+    default_code = "stem_template_error"
+    default_severity = "medium"
+    default_retryable = False
+    default_category = "stem.template"
+
+
 __all__ = []

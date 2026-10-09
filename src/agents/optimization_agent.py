@@ -39,8 +39,14 @@ Cross-agent relationship:
                         ▼
                     Execution
 
+The agent façade is supported primarily by operations-research and mathematical-programming literature, rather than individual algorithm papers.
 
+sources:
+- Boyd, S., & Vandenberghe, L. (2004). Convex Optimization. Cambridge University Press.
+- Nocedal, J., & Wright, S. J. (2006). Numerical Optimization (2nd ed.). Springer.
+- Bynum, M. L., et al. (2021). Pyomo — Optimization Modeling in Python (3rd ed.). Springer.
 """
+
 from __future__ import annotations
 
 __version__ = "2.3.0"
