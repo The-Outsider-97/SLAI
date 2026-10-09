@@ -1337,6 +1337,16 @@ class KnowledgeAgent(BaseAgent):
             return 0.0
         return self._cosine_similarity(self._calculate_tfidf(tokens1), self._calculate_tfidf(tokens2))
 
+    def score_text_relevance(self, query_text: str, candidate_text: str) -> float:
+        """Public, threshold-independent TF-IDF cosine score for text pairs.
+
+        Used by offline curriculum enrichment to compare a known positive with
+        scoped candidate negatives on the same numerical scale.  Unlike
+        retrieve(), this method does not apply the global retrieval threshold,
+        truncate top-k results, or perform cross-document search.
+        """
+        return float(self._fallback_relevance_tfidf(query_text, candidate_text))
+
     def _validate_with_safety(self, action_params: Dict, context: Optional[Dict] = None) -> bool:
         if not self.safety_check_callback:
             return True
