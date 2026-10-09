@@ -274,6 +274,22 @@ class STEMPDEInterfaceError(STEMError):
     default_category = "stem.pde_interface"
 
 
+class STEMTemplateError(STEMError):
+    """
+    Raised when a STEM template cannot be resolved, read, parsed, or is
+    otherwise invalid.
+
+    Covers: non-string/empty template names, absolute paths, path-escape
+    attempts outside the template root, missing template files, unreadable
+    files, and malformed JSON payloads.
+    """
+    error_type = BaseErrorType.CONFIGURATION
+    default_code = "stem_template_error"
+    default_severity = "medium"
+    default_retryable = False
+    default_category = "stem.template"
+
+
 __all__ = [
     "STEMError",
     "STEMValidationError",
@@ -307,15 +323,5 @@ __all__ = [
     "STEMDifferentiationError",
     "STEMODEError",
     "STEMPDEInterfaceError",
-]ossError",
-    "STEMIllConditionedError",
-    "STEMStatisticsError",
-    "STEMConvergenceError",
-    "STEMLinearAlgebraError",
-    "STEMSingularSystemError",
-    "STEMInterpolationError",
-    "STEMIntegrationError",
-    "STEMDifferentiationError",
-    "STEMODEError",
-    "STEMPDEInterfaceError",
+    "STEMTemplateError",
 ]
