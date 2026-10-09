@@ -27,13 +27,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, cast
 
+from src.training.supervised_llm_builder import build_supervised_dataset
 from src.training.curriculum_builder import LantraCurriculumBuilder
 from src.training.enrichment_contracts import *
 from src.training.knowledge_adapter import KnowledgeAdapter
 from src.training.perception_adapter import PerceptionAdapter
 from src.training.reasoning_adapter import ReasoningAdapter
 from src.training.source_adapter import CanonicalLantraSourceAdapter
-from src.utils.configuration import bind_config
+from src.utils.configuration import bind_config, DEFAULT_CONFIG_REPOSITORY
 from logs.logger import get_logger, PrettyPrinter
 
 
@@ -45,6 +46,7 @@ reasoning = None
 perception = None
 
 DEFAULT_CONFIG = Path("src/training/configs/lantra_curriculum.yaml")
+DEFAULT_PIPELINE_CONFIG = Path("src/training/configs/lantra_pipeline.yaml")
 _CONFIG = bind_config(DEFAULT_CONFIG)
 
 DEFAULT_PROGRESS_INTERVAL = 30.0
@@ -707,7 +709,7 @@ def _shutdown_runtime(memory: Any, factory: Any) -> None:
 
 
 def build(
-    config: CurriculumConfig,
+    config: CurriculumConfig, artifacts: Optional[Sequence[Any]] = None,
     *,
     dry_run: bool = False,
     progress_interval: float = DEFAULT_PROGRESS_INTERVAL,
@@ -1169,7 +1171,51 @@ def build(
         # CurriculumBuilder owns the seven-task agent-enriched curriculum.
         # A separate supervised-generation stage must be wired only after its
         # callable, validated configuration, and agent lifecycle are available.
-        artifacts = result.manifest.get("artifacts", [])
+        pipeline_loaded = DEFAULT_CONFIG_REPOSITORY.load(DEFAULT_PIPELINE_CONFIG)
+        pipeline_config = pipeline_loaded.get("lantra_pipeline")
+        if not isinstance(pipeline_config, Mapping):
+            raise CurriculumError("Missing or invalid lantra_pipeline configuration.")
+
+        supervised_cfg = pipeline_config.get("supervised_generation")
+        if not isinstance(supervised_cfg, Mapping):
+            raise CurriculumError("Missing or invalid supervised_generation configuration.")
+
+        supervised_result = None
+        if bool(supervised_cfg.get("enabled", False)):
+            with _ProgressStage(
+                "Build validated teacher supervision",
+                heartbeat_seconds=progress_interval,
+                detail="SLAI + external LLM validation",
+            ):
+                supervised_result = build_supervised_dataset(
+                    documents,
+                    pipeline_config=pipeline_config,
+                    quality_agent=None,
+                    enable_external_llm=bool(supervised_cfg.get("external_llm_enabled", False)),
+                    force=not resume,
+                )
+
+            if supervised_result is not None:
+                cast(Dict[str, Any], result.manifest)[
+                    "validated_teacher_supervision"
+                ] = {
+                    "manifest": supervised_result.manifest_path,
+                    "providers": list(supervised_result.providers),
+                    "coverage": dict(supervised_result.coverage),
+                    "external_accepted": supervised_result.external_calls_accepted,
+                    "fallback_accepted": supervised_result.deterministic_fallback_accepted,
+                    "rejected": supervised_result.rejected,
+                    "resumed_records": supervised_result.resumed_records,
+                }
+
+                _emit_progress(
+                    "INFO",
+                    "Teacher supervision complete",
+                    providers=",".join(supervised_result.providers),
+                    external_accepted=supervised_result.external_calls_accepted,
+                    fallback_accepted=supervised_result.deterministic_fallback_accepted,
+                    rejected=supervised_result.rejected,
+                )
         coverage = result.manifest.get("coverage", {})
         _emit_progress(
             "DONE",
