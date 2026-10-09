@@ -15,9 +15,11 @@ import collections
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -34,6 +36,7 @@ from .enrichment_contracts import (
     SourceDocument,
     SourceSegment,
     sha256_payload,
+    normalized_text_hash,
     stable_unit_interval,
     unique_facts,
 )
@@ -292,6 +295,12 @@ class LantraCurriculumBuilder:
 
         self._work_state = (self._load_work_state(build_fingerprint))
         self._restore_records(gate, records)
+        # A former failed run can mark every phase complete with zero records.
+        # Do not silently reuse that terminally empty state.
+        if not any(records.values()) and any(
+            self._phase_completed(phase) for phase in ("2a", "2b", "2c")
+        ):
+            self._work_state = self._new_work_state(build_fingerprint)
         indexed = self.knowledge.index_segments(segments)
         needs_knowledge_facts = (
             not self._phase_completed("2a")
@@ -358,7 +367,8 @@ class LantraCurriculumBuilder:
                 f"{candidate_counts['total']}. "
                 f"Counts: {candidate_counts['by_task']}. "
                 f"Coverage: {coverage}. "
-                f"Quality gate: {gate.summary()}."
+                f"Quality gate: {gate.summary()}. "
+                f"Retrieval diagnostics: {self.knowledge.retrieval_diagnostics()}."
             )
         manifest = self._write_artifacts(
             output_dir,
@@ -471,6 +481,32 @@ class LantraCurriculumBuilder:
                 if self._accept(record, gate, records):
                     per_document[segment.document_id] += 1
 
+            if not facts and per_document[segment.document_id] < self.config.max_phase_2a_examples_per_document:
+                span = self._extractive_denoising_span(segment.text)
+                if span is not None:
+                    masked_text, gold_span = span
+                    record = self._seq2seq_record(
+                        task="generation",
+                        split=segment.split,
+                        source=(
+                            "Recover the single masked phrase from its surrounding "
+                            "source passage. Return only that phrase.\n\n"
+                            + masked_text
+                        ),
+                        target=gold_span,
+                        phase="2a",
+                        derivation="source_grounded_span_denoising",
+                        source_document_ids=(segment.document_id,),
+                        metadata={
+                            "grounding": "extractive_source_text_not_ontology",
+                            "source_segment_id": segment.segment_id,
+                            "source_segment_sha256": segment.normalized_text_sha256,
+                            "group_id": segment.document_id,
+                        },
+                    )
+                    if self._accept(record, gate, records):
+                        per_document[segment.document_id] += 1
+
             completed_segments = segment_index + 1
             if self._checkpoint_due(completed_segments):
                 self._checkpoint_phase("2a", completed_segments, records)
@@ -481,6 +517,38 @@ class LantraCurriculumBuilder:
     # ------------------------------------------------------------------
     # Phase 2B: retrieval representation learning + hard negatives
     # ------------------------------------------------------------------
+    @staticmethod
+    def _extractive_query_view(text: str) -> Optional[str]:
+        """Create a non-identical, verbatim query excerpt from a source segment."""
+        tokens = list(re.finditer(r"\S+", text))
+        if len(tokens) < 18:
+            return None
+        end = tokens[min(len(tokens) - 1, 39)].end()
+        # Prefer a useful excerpt, not the whole document and not a tiny heading.
+        if len(text) - end < 35:
+            end = tokens[max(11, len(tokens) // 2)].end()
+        query = text[:end].strip()
+        if len(query) < 70 or query == text.strip():
+            return None
+        return query
+
+    @staticmethod
+    def _extractive_denoising_span(text: str) -> Optional[Tuple[str, str]]:
+        """Mask an authentic multiword phrase; never invent a knowledge relation."""
+        tokens = list(re.finditer(r"\b[^\W_]+(?:[-’'][^\W_]+)*\b", text, re.UNICODE))
+        if len(tokens) < 12:
+            return None
+        index = max(2, min(len(tokens) - 4, len(tokens) // 3))
+        selected = tokens[index:index + 3]
+        start, end = selected[0].start(), selected[-1].end()
+        gold = text[start:end]
+        if not 8 <= len(gold) <= 120 or len(gold.split()) < 2:
+            return None
+        return text[:start] + "[MASK]" + text[end:], gold
+
+    # ------------------------------------------------------------------
+    # Phase 2B: corpus-backed retrieval representation learning
+    # ------------------------------------------------------------------
     def _build_phase_2b(
         self,
         segments: Sequence[SourceSegment],
@@ -489,97 +557,81 @@ class LantraCurriculumBuilder:
         records: MutableMapping[Tuple[str, str], List[Dict[str, Any]]],
         start_index: int = 0,
     ) -> None:
-        by_document: Dict[str, List[SourceSegment]] = collections.defaultdict(list)
-        for segment in segments:
-            by_document[segment.document_id].append(segment)
-
-        candidate_pairs: List[Tuple[SourceSegment, SourceSegment]] = []
-        for document_id, items in by_document.items():
-            ordered = sorted(items, key=lambda item: (item.segment_index, item.segment_id))
-            for left, right in zip(ordered, ordered[1:]):
-                if left.split == right.split:
-                    candidate_pairs.append((left, right))
-
-        candidate_pairs.sort(
-            key=lambda pair: (
-                stable_unit_interval(pair[0].segment_id + ":" + pair[1].segment_id, self.config.seed + 307),
-                pair[0].segment_id,
-                pair[1].segment_id,
-            )
+        # A query excerpt is an extractive view of *the same* source segment.
+        # It is known to be relevant to the complete positive passage; adjacent
+        # passages from a document are not assumed semantically equivalent.
+        ordered = sorted(
+            segments,
+            key=lambda item: (
+                stable_unit_interval(item.segment_id, self.config.seed + 307),
+                item.segment_id,
+            ),
         )
+        eligible = [
+            (segment, query)
+            for segment in ordered
+            if (query := self._extractive_query_view(segment.text)) is not None
+        ]
         if self.config.max_retrieval_pairs > 0:
-            candidate_pairs = candidate_pairs[: self.config.max_retrieval_pairs]
+            eligible = eligible[:self.config.max_retrieval_pairs]
 
-        start_index = min(max(0, int(start_index)), len(candidate_pairs))
-        for pair_index in range(start_index, len(candidate_pairs)):
-            anchor, positive = (candidate_pairs[pair_index])
-            triplet = self.knowledge.retrieval_triplet(
-                anchor,
+        start_index = min(max(0, int(start_index)), len(eligible))
+        for index in range(start_index, len(eligible)):
+            positive, query = eligible[index]
+            anchor = replace(
                 positive,
-                perception=self.perception,
+                text=query,
+                normalized_text_sha256=normalized_text_hash(query),
             )
-            if triplet is None:
-                completed_pairs = (pair_index + 1)
-                if self._checkpoint_due(completed_pairs):
-                    self._checkpoint_phase("2b", completed_pairs, records)
-                continue
-
-            source_ids = tuple(sorted({
-                triplet.anchor.document_id,
-                triplet.positive.document_id,
-                triplet.negative.document_id,
-            }))
-            shared_metadata = {
-                "retrieval": triplet.to_metadata(),
-                "source_segment_ids": [
-                    triplet.anchor.segment_id,
-                    triplet.positive.segment_id,
-                    triplet.negative.segment_id,
-                ],
-                "group_id": sha256_payload({"source_document_ids": source_ids})[:24],
-                "curriculum_stages": ["2b"] + (["2d"] if self.perception is not None else []),
-            }
-            if self.perception is not None:
-                shared_metadata["perception_teacher"] = {
-                    "used_for": "semantic_hardness_filter",
-                    "checkpoint": dict(getattr(self.perception, "checkpoint_metadata", {}) or {}),
-                    "note": (
-                        "Current train_lantra.py has no teacher-representation distillation loss; "
-                        "the frozen Perception representation is used only to accept/reject hard negatives."
-                    ),
+            triplet = self.knowledge.retrieval_triplet(
+                anchor, positive, perception=self.perception
+            )
+            if triplet is not None:
+                source_ids = tuple(sorted({
+                    triplet.anchor.document_id,
+                    triplet.positive.document_id,
+                    triplet.negative.document_id,
+                }))
+                shared_metadata: Dict[str, Any] = {
+                    "retrieval": {
+                        **triplet.to_metadata(),
+                        "positive_grounding": "verbatim_excerpt_of_positive_segment",
+                        "negative_label_strength": "weak_cross_document_negative",
+                    },
+                    "source_segment_ids": [
+                        triplet.anchor.segment_id,
+                        triplet.positive.segment_id,
+                        triplet.negative.segment_id,
+                    ],
+                    "group_id": sha256_payload({"source_document_ids": source_ids})[:24],
+                    "curriculum_stages": ["2b"] + (["2d"] if self.perception is not None else []),
                 }
-
-            embedding_record = self._pairwise_record(
-                task="embedding",
-                split=triplet.anchor.split,
-                anchor=triplet.anchor.text,
-                positive=triplet.positive.text,
-                negative=triplet.negative.text,
-                phase="2b",
-                derivation="knowledge_hard_negative",
-                source_document_ids=source_ids,
-                metadata=shared_metadata,
-            )
-            self._accept(embedding_record, gate, records)
-
-            reranking_record = self._pairwise_record(
-                task="reranking",
-                split=triplet.anchor.split,
-                anchor=triplet.anchor.text,
-                positive=triplet.positive.text,
-                negative=triplet.negative.text,
-                phase="2b",
-                derivation="knowledge_hard_negative",
-                source_document_ids=source_ids,
-                metadata=shared_metadata,
-            )
-            self._accept(reranking_record, gate, records)
-
-            completed_pairs = pair_index + 1
-            if self._checkpoint_due(completed_pairs):
-                self._checkpoint_phase("2b", completed_pairs, records)
-
-        self._checkpoint_phase("2b", len(candidate_pairs), records, completed=True)
+                if self.perception is not None:
+                    shared_metadata["perception_teacher"] = {
+                        "used_for": "semantic_hardness_filter",
+                        "checkpoint": dict(getattr(self.perception, "checkpoint_metadata", {}) or {}),
+                        "note": "Similarity filtering only; this is not distillation.",
+                    }
+                for task in ("embedding", "reranking"):
+                    self._accept(
+                        self._pairwise_record(
+                            task=task,
+                            split=triplet.anchor.split,
+                            anchor=triplet.anchor.text,
+                            positive=triplet.positive.text,
+                            negative=triplet.negative.text,
+                            phase="2b",
+                            derivation="extractive_positive_scoped_retrieval_negative",
+                            source_document_ids=source_ids,
+                            metadata=shared_metadata,
+                        ),
+                        gate,
+                        records,
+                    )
+            cursor = index + 1
+            if self._checkpoint_due(cursor):
+                self._checkpoint_phase("2b", cursor, records)
+        self._checkpoint_phase("2b", len(eligible), records, completed=True)
 
     # ------------------------------------------------------------------
     # Phase 2C: validated factual + reasoning curriculum
@@ -759,6 +811,11 @@ class LantraCurriculumBuilder:
         Dict[str, Tuple[KnowledgeFact, ...]],
         Dict[Tuple[str, Tuple[str, str, str]], SourceSegment],
     ]:
+        if not self.knowledge.ontology_has_facts:
+            # Empty persisted ontology: there is nothing to query or validate.
+            # Do not issue hundreds of thousands of empty SQLite lookups.
+            return {}, {}, {}
+
         facts_by_segment: Dict[str, Tuple[KnowledgeFact, ...]] = {}
         raw_by_document: Dict[str, List[KnowledgeFact]] = collections.defaultdict(list)
         origin_by_fact: Dict[Tuple[str, Tuple[str, str, str]], SourceSegment] = {}
@@ -1006,6 +1063,8 @@ class LantraCurriculumBuilder:
                 },
                 "agents": {
                     "knowledge_indexed_segments": int(knowledge_indexed_segments),
+                    "retrieval_diagnostics": self.knowledge.retrieval_diagnostics(),
+                    "ontology_has_facts": self.knowledge.ontology_has_facts,
                     "reasoning_enabled": self.reasoning is not None,
                     "perception_enabled": self.perception is not None,
                 },

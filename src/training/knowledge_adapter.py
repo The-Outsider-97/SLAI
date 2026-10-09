@@ -8,6 +8,8 @@ KnowledgeAgent inputs/outputs.
 from __future__ import annotations
 
 import collections
+import hashlib
+import math
 import re
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -48,15 +50,36 @@ class KnowledgeAdapter:
         self._segment_by_id: Dict[str, SourceSegment] = {}
         self._relation_cache: Dict[str, Tuple[KnowledgeFact, ...]] = {}
         self._term_fact_cache: Dict[str, Tuple[KnowledgeFact, ...]] = {}
+        self._negative_pool: Dict[str, Tuple[SourceSegment, ...]] = {}
+        self._retrieval_diagnostics: collections.Counter[str] = collections.Counter()
+        # Use the KnowledgeAgent's own TF-IDF relevance function.  The public
+        # retrieve() operation remains the first negative-candidate source.
+        self._pair_score = getattr(agent, "score_text_relevance", None)
+        if not callable(self._pair_score):
+            raise CurriculumCompatibilityError(
+                "KnowledgeAgent.score_text_relevance() is required for "
+                "direct positive and negative relevance comparison."
+            )
+
+    def retrieval_diagnostics(self) -> Dict[str, int]:
+        return {key: int(value) for key, value in sorted(self._retrieval_diagnostics.items())}
 
     @property
     def retrieval_mode(self) -> str:
         return str(getattr(self.agent, "retrieval_mode", "unknown"))
 
+    @property
+    def ontology_has_facts(self) -> bool:
+        """Use the ontology manager's already-loaded authoritative RDF graph."""
+        graph = getattr(self.ontology, "graph", None)
+        return True if graph is None else len(graph) > 0
+
     def index_segments(self, segments: Sequence[SourceSegment]) -> int:
         indexed = 0
+        by_split: Dict[str, List[SourceSegment]] = collections.defaultdict(list)
         for segment in segments:
             self._segment_by_id[segment.segment_id] = segment
+            by_split[segment.split].append(segment)
             before = len(getattr(self.agent, "doc_index", {}))
             self.agent.add_document(
                 segment.text,
@@ -77,7 +100,12 @@ class KnowledgeAdapter:
 
         if callable(finalize):
             finalize()
-
+        self._negative_pool = {
+            split: tuple(sorted(items, key=lambda item: item.segment_id))
+            for split, items in by_split.items()
+        }
+        self._retrieval_diagnostics["indexed_segments"] = indexed
+        self._retrieval_diagnostics["source_segments"] = len(segments)
         return indexed
 
     def retrieval_triplet(
@@ -87,90 +115,137 @@ class KnowledgeAdapter:
         *,
         perception: Optional[Any] = None,
     ) -> Optional[RetrievalTriplet]:
-        """Mine one hard negative while preserving source-split isolation.
+        """Mine a source-grounded pair with same-split negative supervision.
 
-        The positive must be retrieved with sufficient relevance. The hard
-        negative must come from a *different document in the same split* and must
-        remain less relevant than the positive by the configured minimum margin.
+        Positives are scored directly by KnowledgeAgent's TF-IDF similarity;
+        their presence in retrieve()'s top-k is NOT required.  Retrieval is used
+        to propose negatives; a bounded same-split lexical search compensates
+        when KnowledgeAgent's global similarity threshold is too restrictive.
+        No cross-document fact/entailment labels are manufactured here.
         """
-
-        if anchor.split != positive.split:
+        self._retrieval_diagnostics["pairs_attempted"] += 1
+        if anchor.split != positive.split or not anchor.text.strip() or not positive.text.strip():
+            self._retrieval_diagnostics["invalid_positive"] += 1
             return None
+        if anchor.text.strip() == positive.text.strip():
+            self._retrieval_diagnostics["identical_views"] += 1
+            return None
+
+        try:
+            positive_score = float(self._pair_score(anchor.text, positive.text))
+        except Exception:
+            self._retrieval_diagnostics["positive_score_error"] += 1
+            if self.config.fail_on_agent_error:
+                raise
+            return None
+        if not math.isfinite(positive_score) or positive_score < self.config.min_positive_retrieval_score:
+            self._retrieval_diagnostics["weak_positive"] += 1
+            return None
+
         try:
             results = self.agent.retrieve(anchor.text, k=self.config.retrieval_top_k)
         except Exception:
+            self._retrieval_diagnostics["retrieval_error"] += 1
             if self.config.fail_on_agent_error:
                 raise
             return None
         if not isinstance(results, Sequence):
+            self._retrieval_diagnostics["invalid_retrieval_response"] += 1
             return None
 
-        positive_score: Optional[float] = None
-        negative_candidates: List[Tuple[float, SourceSegment]] = []
-
+        candidates: Dict[str, SourceSegment] = {}
         for item in results:
-            if not isinstance(item, Sequence) or len(item) != 2:
+            if not isinstance(item, Sequence) or isinstance(item, (str, bytes)) or len(item) != 2:
                 continue
-            raw_score, raw_doc = item
+            _, raw_doc = item
             if not isinstance(raw_doc, Mapping):
                 continue
-            doc_id = str(raw_doc.get("doc_id") or "")
-            candidate = self._segment_by_id.get(doc_id)
-            if candidate is None:
-                continue
-            try:
-                score = float(raw_score)
-            except (TypeError, ValueError):
-                continue
-            if candidate.segment_id == positive.segment_id:
-                positive_score = score
-                continue
-            if candidate.segment_id == anchor.segment_id:
-                continue
-            if candidate.split != anchor.split:
-                continue
-            if candidate.document_id == anchor.document_id:
-                # Same-document passages are plausible positives/near-positives;
-                # never use them as negative supervision.
-                continue
-            if score < self.config.min_negative_retrieval_score:
-                continue
-            negative_candidates.append((score, candidate))
+            candidate = self._segment_by_id.get(str(raw_doc.get("doc_id") or ""))
+            if (candidate is not None
+                    and candidate.split == anchor.split
+                    and candidate.document_id != positive.document_id
+                    and candidate.document_id != anchor.document_id):
+                candidates[candidate.segment_id] = candidate
+        self._retrieval_diagnostics["retriever_scoped_candidates"] += len(candidates)
 
-        if positive_score is None or positive_score < self.config.min_positive_retrieval_score:
-            return None
-        eligible = [
-            (score, candidate)
-            for score, candidate in negative_candidates
-            if positive_score - score >= self.config.min_retrieval_margin
-        ]
-        if not eligible:
-            return None
-        eligible.sort(key=lambda item: (-item[0], item[1].segment_id))
-        negative_score, negative = eligible[0]
+        negative = self._best_negative(anchor, positive_score, candidates.values())
+        if negative is None:
+            # The default KnowledgeAgent threshold can eliminate all plausible
+            # negatives before LANTRA sees them.  Score a bounded, deterministic
+            # subset with *the same* KnowledgeAgent scoring function.
+            pool = self._negative_pool.get(anchor.split, ())
+            if pool:
+                start = int.from_bytes(
+                    hashlib.sha256(anchor.segment_id.encode("utf-8")).digest()[:8], "big"
+                ) % len(pool)
+                stride = max(1, len(pool) // 96)
+                sampled: List[SourceSegment] = []
+                seen_ids: set[str] = set(candidates)
+                for offset in range(min(len(pool), 192)):
+                    candidate = pool[(start + offset * stride) % len(pool)]
+                    if (candidate.document_id not in {anchor.document_id, positive.document_id}
+                            and candidate.segment_id not in seen_ids):
+                        sampled.append(candidate)
+                        seen_ids.add(candidate.segment_id)
+                        if len(sampled) >= 96:
+                            break
+                self._retrieval_diagnostics["fallback_scoped_candidates"] += len(sampled)
+                negative = self._best_negative(anchor, positive_score, sampled)
 
+        if negative is None:
+            self._retrieval_diagnostics["no_eligible_negative"] += 1
+            return None
+
+        negative_score, negative_segment = negative
         perception_positive: Optional[float] = None
         perception_negative: Optional[float] = None
         if perception is not None:
-            scores = perception.score_triplet(anchor.text, positive.text, negative.text)
+            scores = perception.score_triplet(anchor.text, positive.text, negative_segment.text)
             perception_positive = float(scores["positive_similarity"])
             perception_negative = float(scores["negative_similarity"])
-            if (
-                perception_positive - perception_negative
-                < self.config.min_perception_margin
-            ):
+            if (not math.isfinite(perception_positive)
+                    or not math.isfinite(perception_negative)
+                    or perception_positive - perception_negative < self.config.min_perception_margin):
+                self._retrieval_diagnostics["perception_rejected"] += 1
                 return None
 
+        self._retrieval_diagnostics["triplets_accepted"] += 1
         return RetrievalTriplet(
             anchor=anchor,
             positive=positive,
-            negative=negative,
-            positive_score=float(positive_score),
-            negative_score=float(negative_score),
-            retrieval_mode=self.retrieval_mode,
+            negative=negative_segment,
+            positive_score=positive_score,
+            negative_score=negative_score,
+            retrieval_mode=f"{self.retrieval_mode}:direct_tfidf_scoring",
             perception_positive_similarity=perception_positive,
             perception_negative_similarity=perception_negative,
         )
+
+    def _best_negative(
+        self,
+        anchor: SourceSegment,
+        positive_score: float,
+        candidates: Iterable[SourceSegment],
+    ) -> Optional[Tuple[float, SourceSegment]]:
+        ranked: List[Tuple[float, SourceSegment]] = []
+        for candidate in candidates:
+            if candidate.split != anchor.split or candidate.document_id == anchor.document_id:
+                continue
+            try:
+                score = float(self._pair_score(anchor.text, candidate.text))
+            except Exception:
+                self._retrieval_diagnostics["negative_score_error"] += 1
+                if self.config.fail_on_agent_error:
+                    raise
+                continue
+            if (math.isfinite(score)
+                    and score >= self.config.min_negative_retrieval_score
+                    and positive_score - score >= self.config.min_retrieval_margin):
+                ranked.append((score, candidate))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda item: (-item[0], item[1].segment_id))
+        return ranked[0]
 
     def relations_for_segment(self, segment: SourceSegment) -> Tuple[KnowledgeFact, ...]:
         """Find ontology facts whose subject terms are plausibly present in text.
@@ -178,6 +253,9 @@ class KnowledgeAdapter:
         Candidate-term extraction is intentionally conservative and bounded. The
         ontology manager remains the authority for whether a relation exists.
         """
+
+        if not self.ontology_has_facts:
+            return ()
 
         cached = self._relation_cache.get(segment.normalized_text_sha256)
         if cached is not None:
