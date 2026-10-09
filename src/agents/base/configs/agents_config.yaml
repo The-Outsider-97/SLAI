@@ -127,6 +127,7 @@ agent_factory:
       evaluation_agent: evaluation
       simulation_agent: simulation
       verification_agent: verification
+      stem_agent: stem
     out_of_process_fallback_agents:
       - adaptive
       - alignment
@@ -193,6 +194,9 @@ agent_factory:
       verification:
         torch_required: false
         notes: "Formal verification/model-checking orchestration is torch-free; SAT/SMT backends remain optional dependencies of the Verification subsystem."
+      stem:
+        torch_required: false
+        notes: "Deterministic scientific-computing orchestration is torch-free; numerical dependencies are provided by the existing STEM subsystem."
 
     agent_specs:
       adaptive:
@@ -301,6 +305,15 @@ agent_factory:
           - satisfiability
           - model_checking
           - invariant_verification
+      stem:
+        module_path: src.agents.stem_agent
+        class_name: STEMAgent
+        capabilities:
+          - deterministic_scientific_computing
+          - numerical_methods
+          - symbolic_math
+          - unit_aware_computation
+          - measurement_uncertainty
 
 
 base_agent:
@@ -335,6 +348,42 @@ base_agent:
     warm_start_key_prefix: warm_state
     retraining_flag_key_prefix: retraining_flag
 
+
+stem_agent:
+  enabled: true
+  supported_domains:
+    - algebra
+    - calculus
+    - numerical_methods
+    - statistics
+    - units
+    - dimensions
+    - uncertainty
+    - biology
+    - physics
+    - engineering
+    - computing
+  default_domain: numerical_methods
+
+  # Dual-memory orchestration policy. SharedMemory remains BaseAgent-owned;
+  # STEMMemory remains the local deterministic calculation cache.
+  shared_memory_enabled: true
+  publish_shared_results: false
+  shared_result_key_prefix: "stem:result"
+  shared_result_topic: "stem.results"
+  local_memory_enabled: true
+  cache_enabled: true
+
+  template_loading_enabled: true
+  diagnostics_enabled: true
+  strict_validation: true
+
+  # Only Agent-owned/local state participates in the central checkpoint.
+  checkpoint_local_memory: true
+  restore_local_memory: true
+
+  max_batch_size: 32
+  metrics_enabled: true
 
 adaptive_agent:
   state_dim: 10
@@ -1137,7 +1186,6 @@ quality_agent:
       batch_aggregation:
         mean_weight: 0.70
         minimum_weight: 0.30
-
 
 reader_agent:
   enabled: true
