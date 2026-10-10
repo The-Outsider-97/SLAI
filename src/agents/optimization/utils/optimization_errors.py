@@ -26,19 +26,51 @@ class OptimizationError(BaseError):
     default_retryable = False
     default_category = "optimization"
 
-    def __init__(self, message: str,
-            *,
-            code: Optional[str] = None,
-            context: Optional[Dict[str, Any]] = None) -> None:
-        pass
+    def __init__(self, message: str, *, code: Optional[str] = None,
+                 context: Optional[Dict[str, Any]] = None) -> None:
+        # was `pass`: without this the message/code/context never reach BaseError
+        super().__init__(message, code=code, context=context)   # adjust to BaseError's real signature
 
 
 class OptimizationTemplateError(OptimizationError):
     error_type = BaseErrorType.CONFIGURATION
-    default_code = "stem_template_error"
+    default_code = "optimization_template_error"
     default_severity = "medium"
     default_retryable = False
-    default_category = "stem.template"
+    default_category = "optimization.template" 
 
 
-__all__ = []
+class OptimizationConfigurationError(OptimizationError):
+    """Invalid pareto_efficiency settings."""
+    error_type = BaseErrorType.CONFIGURATION
+    default_code = "optimization_configuration_error"
+    default_severity = "medium"
+    default_retryable = False
+    default_category = "optimization.configuration"
+
+
+class OptimizationValidationError(OptimizationError):
+    """Bad objectives, candidates, limits, weights or reference points supplied by the caller."""
+    error_type = BaseErrorType.RUNTIME
+    default_code = "optimization_validation_error"
+    default_severity = "low"
+    default_retryable = False
+    default_category = "optimization.validation"
+
+
+class OptimizationEvaluationError(OptimizationError):
+    """Evaluation failed during objective, metric, or constraint evaluation."""
+    error_type = BaseErrorType.RUNTIME
+    default_code = "optimization_evaluation_error"
+    default_severity = "medium"
+    default_retryable = False
+    default_category = "optimization.evaluation"
+
+
+__all__ = [
+    "OptimizationError",
+    "OptimizationTemplateError",
+    "OptimizationConfigurationError",
+    "OptimizationValidationError",
+    "OptimizationEvaluationError",
+]
