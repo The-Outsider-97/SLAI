@@ -42,6 +42,9 @@ class Multiobjective:
             self.multiobjective_config.update(dict(config))
 
         self.template: Dict[str, Any] = load_template("multiobjective")
+        self.multi_temp = {}
+        if template:
+            self.multi_temp.update(dict(template))
 
 
 __all__ = ["Multiobjective"]
