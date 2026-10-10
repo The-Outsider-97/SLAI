@@ -48,6 +48,9 @@ class OptimizationMemory:
             self.memory_config.update(dict(config))
 
         self.template: Dict[str, Any] = load_template("memory")
+        self.memory_temp = {}
+        if template:
+            self.memory_temp.update(dict(template))
 
 
 __all__ = ["OptimizationMemory"]
