@@ -3,12 +3,14 @@ lantra_curriculum:
   output_dir: data/processed/lantra/agent_enriched
   source_paths: []
   seed: 42
-  validation_fraction: 0.10
-  test_fraction: 0.10
+  # These MUST match train_lantra.py --raw-validation-fraction / --raw-test-fraction.
+  validation_fraction: 0.02
+  test_fraction: 0.02
 
   # Canonical source preparation. Document extraction/chunking is delegated to
   # train_lantra.py so this package does not duplicate PDF/DOCX/EPUB/HTML logic.
-  min_document_chars: 180
+  # Match train_lantra.py --raw-min-chars; changing eligibility can move split boundaries.
+  min_document_chars: 40
   segment_min_chars: 160
   segment_chunk_chars: 1600
   max_documents: 0

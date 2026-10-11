@@ -65,6 +65,66 @@ def stable_unit_interval(text: str, seed: int) -> float:
     return int.from_bytes(digest[:8], "big", signed=False) / float(2**64 - 1)
 
 
+def assign_corpus_document_splits(
+    documents: Sequence[Any],
+    *,
+    validation_fraction: float,
+    test_fraction: float,
+    seed: int,
+) -> Dict[str, str]:
+    """One document-level split policy for LANTRA raw and curriculum datasets.
+
+    Consumers must supply the same *eligible document set* and fractions. This
+    function never partitions source segments, since that could leak documents
+    across held-out splits.
+    """
+    if not documents:
+        return {}
+    if not (0.0 <= validation_fraction < 0.5):
+        raise ValueError("validation_fraction must be in [0, 0.5).")
+    if not (0.0 <= test_fraction < 0.5):
+        raise ValueError("test_fraction must be in [0, 0.5).")
+    if validation_fraction + test_fraction >= 1.0:
+        raise ValueError("validation_fraction + test_fraction must be < 1.")
+
+    ordered = sorted(
+        documents,
+        key=lambda item: (
+            stable_unit_interval(item.normalized_text_sha256, seed),
+            item.normalized_text_sha256,
+            item.document_id,
+        ),
+    )
+    count = len(ordered)
+    ids = [item.document_id for item in ordered]
+    if len(set(ids)) != count:
+        raise ValueError("duplicate document IDs in canonical source split input")
+    n_validation = (
+        0 if validation_fraction <= 0.0
+        else max(1, int(round(count * validation_fraction)))
+    )
+    n_test = (
+        0 if test_fraction <= 0.0
+        else max(1, int(round(count * test_fraction)))
+    )
+    while n_validation + n_test >= count:
+        if n_test >= n_validation and n_test > 0:
+            n_test -= 1
+        elif n_validation > 0:
+            n_validation -= 1
+        else:
+            break
+
+    return {
+        item.document_id: (
+            "test" if index < n_test
+            else "validation" if index < n_test + n_validation
+            else "train"
+        )
+        for index, item in enumerate(ordered)
+    }
+
+
 def normalized_text_hash(text: str) -> str:
     canonical = " ".join(str(text).split())
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -279,10 +339,10 @@ class CurriculumConfig:
     output_dir: str = "data/processed/lantra/agent_enriched"
     source_paths: Tuple[str, ...] = ()
     seed: int = 42
-    validation_fraction: float = 0.10
-    test_fraction: float = 0.10
+    validation_fraction: float = 0.02
+    test_fraction: float = 0.02
 
-    min_document_chars: int = 180
+    min_document_chars: int = 40
     segment_min_chars: int = 160
     segment_chunk_chars: int = 1600
     max_documents: int = 0

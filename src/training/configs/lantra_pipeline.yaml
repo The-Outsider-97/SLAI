@@ -39,39 +39,57 @@ lantra_pipeline:
 
   supervised_generation:
     enabled: true
-    output_dir: data/processed/lantra/supervised/generated
-    state_path: data/processed/lantra/supervised/.build_state.json
-    manifest_path: data/processed/lantra/supervised/generated_manifest.json
+    output_dir: data/processed/lantra/supervised/teacher_v2
+    state_path: data/processed/lantra/supervised/.teacher_v2_state.json
+    manifest_path: data/processed/lantra/supervised/teacher_v2_manifest.json
     cache_path: data/processed/lantra/supervised/.llm_cache.sqlite3
     minimum_train_examples_per_task: 8
-    minimum_validation_examples_per_task: 1
-    minimum_test_examples_per_task: 1
+    minimum_validation_examples_per_task: 0
+    minimum_test_examples_per_task: 0
     max_source_characters: 6000
     max_examples_per_document: 7
     multi_model_critique: false
     external_llm_enabled: true
+    deterministic_fallback_enabled: false
+    provider_order: [openai, groq, gemini, openrouter]
+    scheduler_state_path: data/processed/lantra/state/teacher_scheduler.sqlite3
+    review_path: artifacts/lantra_review/candidates.jsonl
+    max_output_tokens: 2048
+    provider_limits:
+      daily_requests: 100
+      total_requests: 1000
+      requests_per_minute: 10
+      total_token_budget: 2000000
+      max_concurrency: 1
+      cooldown_seconds: 60
+      quota_cooldown_seconds: 3600
     provider_retry_limit: 2
     provider_backoff_seconds: 2.0
     provider_timeout_seconds: 45
     providers:
       - name: openai
         enabled: true
+        url_env: OPENAI_URL
         api_key_env: OPENAI_API_KEY
         model_env: OPENAI_MODEL
+        token_limit_field: max_completion_tokens
         default_model: gpt-4o-mini
       - name: gemini
         enabled: true
+        url_env: GEMINI_URL
         api_key_env: GEMINI_API_KEY
         alternate_api_key_env: GOOGLE_API_KEY
         model_env: GEMINI_MODEL
         default_model: gemini-2.0-flash
       - name: openrouter
         enabled: true
+        url_env: OPENROUTER_URL
         api_key_env: OPENROUTER_API_KEY
         model_env: OPENROUTER_MODEL
         default_model: openai/gpt-4o-mini
       - name: groq
         enabled: true
+        url_env: GROQ_URL
         api_key_env: GROQ_API_KEY
         model_env: GROQ_MODEL
         default_model: llama-3.3-70b-versatile

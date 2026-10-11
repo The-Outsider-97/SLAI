@@ -19,6 +19,7 @@ from .enrichment_contracts import (
     SourceDocument,
     SourceSegment,
     normalized_text_hash,
+    assign_corpus_document_splits,
     sha256_payload,
     stable_unit_interval,
 )
@@ -27,6 +28,8 @@ from .lantra_corpus import (
     extract_raw_documents,
     segment_raw_document,
     sha256_file,
+    normalize_document_text,
+    normalized_text_hash as corpus_normalized_text_hash,
 )
 
 
@@ -70,11 +73,11 @@ class CanonicalLantraSourceAdapter:
             source_hash = file_hashes.get(str(path)) or str(sha256_file(path))
             try:
                 for raw in extract_raw_documents(path, source_sha256=source_hash):
-                    text = str(raw.text or "").strip()
+                    text = normalize_document_text(str(raw.text or ""))
                     if len(text) < self.config.min_document_chars:
                         continue
 
-                    normalized_hash = normalized_text_hash(text)
+                    normalized_hash = corpus_normalized_text_hash(text)
                     document_id = sha256_payload(
                         {
                             "source_sha256": str(raw.source_sha256),
@@ -144,42 +147,12 @@ class CanonicalLantraSourceAdapter:
         if not documents:
             return ()
 
-        ordered = sorted(
+        split_by_id = assign_corpus_document_splits(
             documents,
-            key=lambda item: (
-                stable_unit_interval(item.normalized_text_sha256, self.config.seed),
-                item.normalized_text_sha256,
-                item.document_id,
-            ),
+            validation_fraction=self.config.validation_fraction,
+            test_fraction=self.config.test_fraction,
+            seed=self.config.seed,
         )
-        count = len(ordered)
-        n_validation = (
-            0
-            if self.config.validation_fraction <= 0.0
-            else max(1, int(round(count * self.config.validation_fraction)))
-        )
-        n_test = (
-            0
-            if self.config.test_fraction <= 0.0
-            else max(1, int(round(count * self.config.test_fraction)))
-        )
-        while n_validation + n_test >= count:
-            if n_test >= n_validation and n_test > 0:
-                n_test -= 1
-            elif n_validation > 0:
-                n_validation -= 1
-            else:
-                break
-
-        split_by_id: Dict[str, str] = {}
-        for index, document in enumerate(ordered):
-            if index < n_test:
-                split = "test"
-            elif index < n_test + n_validation:
-                split = "validation"
-            else:
-                split = "train"
-            split_by_id[document.document_id] = split
 
         return tuple(
             sorted(

@@ -207,9 +207,8 @@ def partition_lantra_dataset(dataset: Any) -> LantraPhasePlan:
       entering real supervised Phase 3.
     * 2D is not an optimizer stage in the current contract; records may advertise
       it through ``curriculum_stages`` as evidence of offline Perception filtering.
-    * Phase 3 excludes records marked ``synthetic=true``.  This keeps the final
-      specialization stage genuinely supervised instead of mixing agent-derived
-      curriculum back into it.
+    * Phase 3 excludes unvalidated synthetic records. Validated v2 teacher
+      examples may enter training only; evaluation remains independently sourced.
     * Existing split containers are authoritative.  This function never resplits
       an example and therefore cannot undo document-level leakage protection.
     """
@@ -254,9 +253,19 @@ def partition_lantra_dataset(dataset: Any) -> LantraPhasePlan:
                     "to route synthetic curriculum into real supervised Phase 3."
                 )
 
-            # Explicit Phase 3 is accepted only for non-synthetic data.  Records
-            # without a phase are ordinary supervised data and follow the same rule.
-            if synthetic:
+            # Retain the synthetic-data gate; admit only the explicit teacher
+            # validation contract to the existing supervised optimization stage.
+            validated_teacher = (
+                origin == "validated_teacher_supervision"
+                and meta.get("teacher_generated") is True
+                and meta.get("teacher_validated") is True
+                and meta.get("validation_status") == "accepted"
+                and (meta.get("validation_method") == "exact_source_extract_v1"
+                     or (meta.get("validation_method") == "human_review" and meta.get("human_verified") is True))
+            )
+            if validated_teacher and split_name != "train":
+                raise LantraPhaseScheduleError("Teacher supervision cannot enter held-out evaluation splits.")
+            if synthetic and not validated_teacher:
                 excluded_synthetic_phase3 += 1
                 continue
             buckets[REAL_SUPERVISED_PHASE][split_name].append(example)
