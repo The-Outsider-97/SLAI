@@ -376,10 +376,14 @@ class LanguageTransformer(BaseTransformer):
         )
 
     def _coerce_token_tensor(self, value: TensorLike, *, field_name: str, device: Optional[torch.device] = None) -> torch.Tensor:
+        tensor: torch.Tensor
         if isinstance(value, torch.Tensor):
-            tensor = value.detach() if not value.requires_grad else value
+            tensor = value
+            if not tensor.requires_grad:
+                tensor = tensor.detach()
         else:
-            tensor = torch.tensor(value, dtype=torch.long)
+            tensor = torch.as_tensor(value, dtype=torch.long)
+
         if tensor.dtype != torch.long:
             tensor = tensor.long()
         if tensor.dim() == 1:
@@ -446,6 +450,7 @@ class LanguageTransformer(BaseTransformer):
         key_padding_mask = None
         if attention_mask is not None:
             attention_mask = self._coerce_token_tensor(attention_mask, field_name="attention_mask", device=input_ids.device)
+            assert attention_mask is not None
             key_padding_mask = attention_mask.eq(0)
 
         was_training = self.training
