@@ -84,7 +84,3 @@ class Biology(BiologyEngine):
 
 
 __all__ = ["Biology"]
-    """"Mathematical Models in Biology""""
-
-
-__all__ = ["Biology"]
