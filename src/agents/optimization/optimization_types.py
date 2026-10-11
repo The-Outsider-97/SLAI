@@ -1,196 +1,40 @@
+"""Canonical solver-independent mathematical optimization contracts.
+
+The model follows the constrained-programming form
+
+    minimize/maximize f(x)
+    subject to g_i(x) <= 0, h_j(x) = 0, x in X
+
+and deliberately separates mathematical declaration from concrete solver
+backends.  The design is informed by Boyd & Vandenberghe (2004), Nocedal &
+Wright (2006), and solver-independent algebraic modeling principles described
+by Bynum et al. (2021).
 """
-Mathematical-domain type definitions for the SLAI optimization subsystem.
-
-This module describes *what* an optimization problem is. It does not solve
-anything.
-
-The types below provide a solver-agnostic vocabulary consistent with
-continuous optimization (Boyd & Vandenberghe, 2004), numerical optimization
-(Nocedal & Wright, 2006), and algebraic modeling (Hart et al., 2017). A generic
-problem is written
-
-.. math::
-
-    \\min_{x \\in \\mathcal{X}}\\ f(x)
-    \\quad \\text{s.t.}\\quad
-    g_i(x) \\le 0,\\quad h_j(x) = 0,
-
-and the objects in this module are the descriptive counterparts of
-:math:`\\mathcal{X}`, :math:`f`, :math:`g_i`, :math:`h_j`, the solver
-capabilities that may address them, and the results a solver may return.
-
-Nothing in this module performs dominance computation, derivative evaluation,
-simplex pivoting, interior-point iteration, or any other algorithmic step.
-"""
-
 from __future__ import annotations
 
 __version__ = "2.3.0"
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from .utils.optimization_errors import OptimizationValidationError
-from .utils.optimization_helpers import to_finite_float
-from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
+from .utils.optimization_helpers import require_finite, to_finite_float
 
 
-logger = get_logger("Optimization Types")
-printer = PrettyPrinter()
+Point = Mapping[str, Any]
+ScalarCallable = Callable[[Point], float]
+GradientCallable = Callable[[Point], Mapping[str, float] | Sequence[float]]
+HessianCallable = Callable[[Point], Sequence[Sequence[float]]]
+JacobianCallable = Callable[[Point], Mapping[str, float] | Sequence[float]]
 
 
-# ---------------------------------------------------------------------------
-# Private validation helpers
-# ---------------------------------------------------------------------------
-#
-# These helpers centralise the input contract shared by every value object in
-# this module. They are deliberately *not* exported: callers should rely on the
-# dataclass constructors, which raise ``OptimizationValidationError`` with a
-# structured ``context`` mapping.
-# ---------------------------------------------------------------------------
-
-
-def _validate_non_empty_string(value: Any, field_name: str) -> str:
-    """Return ``value`` if it is a non-empty string, else raise."""
-    if not isinstance(value, str) or not value.strip():
-        raise OptimizationValidationError(
-            f"{field_name} must be a non-empty string",
-            context={"field": field_name, "value": repr(value)},
-        )
-    return value
-
-
-def _validate_finite(value: Any, field_name: str) -> float:
-    """Return ``value`` as a finite float, rejecting bools, NaN and infinities."""
-    result = to_finite_float(value)
-    if result is None:
-        raise OptimizationValidationError(
-            f"{field_name} must be a finite real number",
-            context={"field": field_name, "value": repr(value)},
-        )
-    return result
-
-
-def _validate_optional_finite(value: Any, field_name: str) -> float | None:
-    """Return ``None`` for ``None``; otherwise validate as a finite float."""
-    if value is None:
-        return None
-    return _validate_finite(value, field_name)
-
-
-def _validate_positive_int(value: Any, field_name: str) -> int:
-    """Return ``value`` if it is a strictly positive ``int`` (not ``bool``)."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise OptimizationValidationError(
-            f"{field_name} must be a positive integer",
-            context={"field": field_name, "value": repr(value)},
-        )
-    if value <= 0:
-        raise OptimizationValidationError(
-            f"{field_name} must be a positive integer",
-            context={"field": field_name, "value": value},
-        )
-    return value
-
-
-def _validate_shape(value: Any, field_name: str) -> tuple[int, ...]:
-    """Return ``value`` if it is a tuple of non-negative integers."""
-    if not isinstance(value, tuple):
-        raise OptimizationValidationError(
-            f"{field_name} must be a tuple of non-negative integers",
-            context={"field": field_name, "type": type(value).__name__},
-        )
-    for index, dimension in enumerate(value):
-        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 0:
-            raise OptimizationValidationError(
-                f"{field_name}[{index}] must be a non-negative integer",
-                context={"field": field_name, "index": index, "value": repr(dimension)},
-            )
-    return value
-
-
-def _validate_mapping(value: Any, field_name: str) -> Mapping[Any, Any]:
-    """Return ``value`` if it is a mapping."""
-    if not isinstance(value, Mapping):
-        raise OptimizationValidationError(
-            f"{field_name} must be a mapping",
-            context={"field": field_name, "type": type(value).__name__},
-        )
-    return value
-
-
-def _validate_finite_mapping(value: Any, field_name: str) -> dict[Any, float]:
-    """Return a shallow copy of ``value`` with every value validated as finite."""
-    mapping = _validate_mapping(value, field_name)
-    validated: dict[Any, float] = {}
-    for key, item in mapping.items():
-        finite = to_finite_float(item)
-        if finite is None:
-            raise OptimizationValidationError(
-                f"{field_name}[{key!r}] must be a finite real number",
-                context={"field": field_name, "key": repr(key), "value": repr(item)},
-            )
-        validated[key] = finite
-    return validated
-
-
-def _validate_tuple_of(value: Any, expected_type: type, field_name: str) -> None:
-    """Require ``value`` to be a tuple whose members are all ``expected_type``."""
-    if not isinstance(value, tuple):
-        raise OptimizationValidationError(
-            f"{field_name} must be a tuple of {expected_type.__name__} instances",
-            context={"field": field_name, "type": type(value).__name__},
-        )
-    for index, item in enumerate(value):
-        if not isinstance(item, expected_type):
-            raise OptimizationValidationError(
-                f"{field_name} must contain only {expected_type.__name__} instances",
-                context={
-                    "field": field_name,
-                    "index": index,
-                    "type": type(item).__name__,
-                },
-            )
-
-
-def _validate_unique_names(items: Any, field_name: str, kind: str) -> None:
-    """Ensure ``items`` (each exposing ``.name``) do not repeat a name."""
-    seen: set[str] = set()
-    for item in items:
-        name = item.name
-        if name in seen:
-            raise OptimizationValidationError(
-                f"duplicate {kind} name in {field_name}: {name!r}",
-                context={"field": field_name, "kind": kind, "name": name},
-            )
-        seen.add(name)
-
-
-# ---------------------------------------------------------------------------
-# Domains
-# ---------------------------------------------------------------------------
-
-
-class DomainKind(Enum):
-    """
-    The mathematical kind of a decision-variable domain.
-
-    * ``REAL`` — :math:`\\mathcal{X} \\subseteq \\mathbb{R}`
-    * ``INTEGER`` — :math:`\\mathcal{X} \\subseteq \\mathbb{Z}`
-    * ``BINARY`` — :math:`\\mathcal{X} = \\{0, 1\\}`
-    * ``SEMI_CONTINUOUS`` — :math:`\\mathcal{X} = \\{0\\} \\cup [\\ell, u]`
-    * ``SEMI_INTEGER`` — :math:`\\mathcal{X} = \\{0\\} \\cup \\{\\ell, \\dots, u\\}`
-    * ``CUSTOM`` — an opaque domain whose structure is solver- or model-defined
-
-    The taxonomy is deliberately solver-agnostic; the concrete
-    ``kind``/bounds mapping is the caller's responsibility.
-    """
-
+class DomainKind(str, Enum):
     REAL = "real"
     INTEGER = "integer"
     BINARY = "binary"
+    FINITE = "finite"
     SEMI_CONTINUOUS = "semi_continuous"
     SEMI_INTEGER = "semi_integer"
     CUSTOM = "custom"
@@ -198,22 +42,11 @@ class DomainKind(Enum):
 
 @dataclass(frozen=True, slots=True)
 class VariableDomain:
-    """
-    Mathematical domain of a decision variable.
+    """Domain of a scalar decision variable.
 
-    A domain is a subset of an ambient space; when the variable is a
-    ``shape``-indexed array of length :math:`n` the domain of the whole
-    variable is the Cartesian product :math:`\\mathcal{X}_1 \\times \\dots
-    \\times \\mathcal{X}_n`.
-
-    The fields are descriptive only. This class performs no projection, no
-    rounding and no interval arithmetic; it merely records bounds, strictness,
-    discreteness and (optionally) a finite cardinality.
-
-    References
-    ----------
-    Boyd & Vandenberghe (2004), §4.2 (convex sets and domains);
-    Nocedal & Wright (2006), §12.1 (bound-constrained formulations).
+    ``FINITE`` stores explicit values.  ``INTEGER`` and ``SEMI_INTEGER`` use
+    numeric bounds.  ``CUSTOM`` is descriptive only and is rejected by generic
+    built-in solvers unless a compatible adapter explicitly opts in.
     """
 
     kind: DomainKind = DomainKind.REAL
@@ -222,81 +55,62 @@ class VariableDomain:
     strict_lower: bool = False
     strict_upper: bool = False
     cardinality: int | None = None
+    values: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, DomainKind):
-            raise OptimizationValidationError(
-                "kind must be a DomainKind member",
-                context={"kind": repr(self.kind)},
-            )
+            raise OptimizationValidationError("kind must be a DomainKind", context={"kind": repr(self.kind)})
+        if not isinstance(self.strict_lower, bool) or not isinstance(self.strict_upper, bool):
+            raise OptimizationValidationError("strict bound flags must be bool")
 
-        lower = _validate_optional_finite(self.lower, "lower")
-        upper = _validate_optional_finite(self.upper, "upper")
+        lower = None if self.lower is None else require_finite(self.lower, "lower")
+        upper = None if self.upper is None else require_finite(self.upper, "upper")
+        values = tuple(self.values)
 
-        if not isinstance(self.strict_lower, bool):
-            raise OptimizationValidationError(
-                "strict_lower must be a bool",
-                context={"strict_lower": repr(self.strict_lower)},
-            )
-        if not isinstance(self.strict_upper, bool):
-            raise OptimizationValidationError(
-                "strict_upper must be a bool",
-                context={"strict_upper": repr(self.strict_upper)},
-            )
+        if lower is not None and upper is not None and lower > upper:
+            raise OptimizationValidationError("lower bound must not exceed upper bound", context={"lower": lower, "upper": upper})
+        if lower is not None and upper is not None and lower == upper and (self.strict_lower or self.strict_upper):
+            raise OptimizationValidationError("strict bounds define an empty domain")
+        if self.strict_lower and lower is None:
+            raise OptimizationValidationError("strict_lower requires a finite lower bound")
+        if self.strict_upper and upper is None:
+            raise OptimizationValidationError("strict_upper requires a finite upper bound")
+
+        if self.kind is DomainKind.BINARY:
+            lower, upper, values = 0.0, 1.0, (0, 1)
+        elif self.kind is DomainKind.FINITE:
+            if not values:
+                raise OptimizationValidationError("FINITE domain requires at least one explicit value")
+            fingerprints = [repr(v) for v in values]
+            if len(set(fingerprints)) != len(fingerprints):
+                raise OptimizationValidationError("finite-domain values must be unique")
+        elif values:
+            raise OptimizationValidationError("explicit values are only valid for BINARY or FINITE domains")
+
+        if self.kind in {DomainKind.INTEGER, DomainKind.SEMI_INTEGER}:
+            for label, bound in (("lower", lower), ("upper", upper)):
+                if bound is not None and not float(bound).is_integer():
+                    raise OptimizationValidationError(
+                        f"{label} bound for integer domains must be integral",
+                        context={label: bound},
+                    )
+        if self.kind in {DomainKind.SEMI_CONTINUOUS, DomainKind.SEMI_INTEGER}:
+            if lower is None or upper is None or lower <= 0:
+                raise OptimizationValidationError("semi-continuous/integer domains require 0 < lower <= upper")
 
         cardinality = self.cardinality
         if cardinality is not None:
-            cardinality = _validate_positive_int(cardinality, "cardinality")
-
-        if lower is not None and upper is not None:
-            if lower > upper:
-                raise OptimizationValidationError(
-                    "lower bound must not exceed upper bound",
-                    context={"lower": lower, "upper": upper},
-                )
-            if lower == upper and (self.strict_lower or self.strict_upper):
-                raise OptimizationValidationError(
-                    "strict bounds make the interval empty",
-                    context={"lower": lower, "upper": upper},
-                )
-
-        if self.strict_lower and lower is None:
-            raise OptimizationValidationError(
-                "strict_lower requires a finite lower bound",
-                context={"kind": self.kind.value},
-            )
-        if self.strict_upper and upper is None:
-            raise OptimizationValidationError(
-                "strict_upper requires a finite upper bound",
-                context={"kind": self.kind.value},
-            )
-
-        if self.kind is DomainKind.BINARY:
-            if lower is not None and lower != 0.0:
-                raise OptimizationValidationError(
-                    "binary domain lower bound must be 0 when provided",
-                    context={"lower": lower},
-                )
-            if upper is not None and upper != 1.0:
-                raise OptimizationValidationError(
-                    "binary domain upper bound must be 1 when provided",
-                    context={"upper": upper},
-                )
-            if self.strict_lower or self.strict_upper:
-                raise OptimizationValidationError(
-                    "binary domains cannot use strict bounds",
-                )
-            if cardinality is not None and cardinality != 2:
-                raise OptimizationValidationError(
-                    "binary domain cardinality must be 2 when provided",
-                    context={"cardinality": cardinality},
-                )
+            if isinstance(cardinality, bool) or not isinstance(cardinality, int) or cardinality <= 0:
+                raise OptimizationValidationError("cardinality must be a positive integer")
+        if values:
+            if cardinality is not None and cardinality != len(values):
+                raise OptimizationValidationError("cardinality does not match explicit finite-domain values")
+            cardinality = len(values)
 
         object.__setattr__(self, "lower", lower)
         object.__setattr__(self, "upper", upper)
+        object.__setattr__(self, "values", values)
         object.__setattr__(self, "cardinality", cardinality)
-
-    # -- constructors ------------------------------------------------------
 
     @classmethod
     def real(
@@ -307,602 +121,588 @@ class VariableDomain:
         strict_lower: bool = False,
         strict_upper: bool = False,
     ) -> "VariableDomain":
-        """Continuous domain :math:`\\mathcal{X} \\subseteq \\mathbb{R}`."""
         return cls(DomainKind.REAL, lower, upper, strict_lower, strict_upper)
 
     @classmethod
-    def integer(
-        cls,
-        lower: float | None = None,
-        upper: float | None = None,
-        *,
-        strict_lower: bool = False,
-        strict_upper: bool = False,
-    ) -> "VariableDomain":
-        """Integer domain :math:`\\mathcal{X} \\subseteq \\mathbb{Z}`."""
-        return cls(DomainKind.INTEGER, lower, upper, strict_lower, strict_upper)
+    def integer(cls, lower: int | None = None, upper: int | None = None) -> "VariableDomain":
+        return cls(DomainKind.INTEGER, lower, upper)
 
     @classmethod
     def binary(cls) -> "VariableDomain":
-        """Binary domain :math:`\\mathcal{X} = \\{0, 1\\}` with cardinality 2."""
-        return cls(DomainKind.BINARY, 0.0, 1.0, False, False, 2)
+        return cls(DomainKind.BINARY)
+
+    @classmethod
+    def finite(cls, values: Sequence[Any]) -> "VariableDomain":
+        return cls(DomainKind.FINITE, values=tuple(values))
+
+    @classmethod
+    def semi_continuous(cls, lower: float, upper: float) -> "VariableDomain":
+        return cls(DomainKind.SEMI_CONTINUOUS, lower, upper)
+
+    @classmethod
+    def semi_integer(cls, lower: int, upper: int) -> "VariableDomain":
+        return cls(DomainKind.SEMI_INTEGER, lower, upper)
 
     @classmethod
     def nonnegative(cls) -> "VariableDomain":
-        """Continuous half-line :math:`\\mathcal{X} = [0, \\infty)`."""
         return cls(DomainKind.REAL, 0.0, None)
 
-    @classmethod
-    def bounds(
-        cls,
-        lower: float,
-        upper: float,
-        *,
-        strict_lower: bool = False,
-        strict_upper: bool = False,
-    ) -> "VariableDomain":
-        """Continuous box domain :math:`\\mathcal{X} = [\\ell, u]`."""
-        return cls(DomainKind.REAL, lower, upper, strict_lower, strict_upper)
+    @property
+    def discrete(self) -> bool:
+        return self.kind in {DomainKind.INTEGER, DomainKind.BINARY, DomainKind.FINITE, DomainKind.SEMI_INTEGER}
 
-
-# ---------------------------------------------------------------------------
-# Variables
-# ---------------------------------------------------------------------------
+    @property
+    def numeric(self) -> bool:
+        return self.kind is not DomainKind.CUSTOM and (
+            self.kind is not DomainKind.FINITE
+            or all(to_finite_float(v) is not None for v in self.values)
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class Variable:
-    """
-    A decision variable of an optimization problem.
-
-    A variable :math:`x` is a typed symbol ranging over ``domain``. When
-    ``shape`` is non-empty the variable denotes an array of independent
-    components; when ``index_set`` is provided it records the categorical
-    labels of those components (or of a single indexed component).
-
-    Instances are immutable descriptions; they carry no value. Concrete values
-    belong to :class:`Solution` or :class:`ParetoPoint`.
-    """
-
     name: str
-    domain: VariableDomain
+    domain: VariableDomain = field(default_factory=VariableDomain)
+    initial: Any | None = None
     shape: tuple[int, ...] = ()
-    index_set: tuple[Any, ...] | None = None
-    description: str | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_non_empty_string(self.name, "name")
-
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise OptimizationValidationError("variable name must be a non-empty string")
         if not isinstance(self.domain, VariableDomain):
+            raise OptimizationValidationError("domain must be VariableDomain", context={"variable": self.name})
+        if any(isinstance(d, bool) or not isinstance(d, int) or d <= 0 for d in self.shape):
+            raise OptimizationValidationError("shape dimensions must be positive integers", context={"variable": self.name})
+        if self.initial is not None:
+            self.validate_value(self.initial)
+
+    def validate_value(self, value: Any, *, tolerance: float = 1e-10) -> Any:
+        domain = self.domain
+        if domain.kind is DomainKind.FINITE:
+            if value not in domain.values:
+                raise OptimizationValidationError(
+                    "value is outside finite domain",
+                    context={"variable": self.name, "value": repr(value)},
+                )
+            return value
+        finite = to_finite_float(value)
+        if finite is None:
             raise OptimizationValidationError(
-                "domain must be a VariableDomain instance",
-                context={"type": type(self.domain).__name__},
+                "numeric variable value must be finite",
+                context={"variable": self.name, "value": repr(value)},
             )
+        if domain.kind in {DomainKind.INTEGER, DomainKind.BINARY, DomainKind.SEMI_INTEGER}:
+            rounded = round(finite)
+            if abs(finite - rounded) > tolerance:
+                raise OptimizationValidationError("integer-domain value is not integral", context={"variable": self.name, "value": finite})
+            finite = float(rounded)
+        if domain.kind is DomainKind.BINARY and finite not in (0.0, 1.0):
+            raise OptimizationValidationError("binary variable value must be 0 or 1", context={"variable": self.name})
+        if domain.kind in {DomainKind.SEMI_CONTINUOUS, DomainKind.SEMI_INTEGER} and finite == 0.0:
+            return int(finite) if domain.kind is DomainKind.SEMI_INTEGER else finite
+        if domain.lower is not None:
+            if domain.strict_lower and not finite > domain.lower:
+                raise OptimizationValidationError("value violates strict lower bound", context={"variable": self.name})
+            if not domain.strict_lower and finite < domain.lower - tolerance:
+                raise OptimizationValidationError("value violates lower bound", context={"variable": self.name})
+        if domain.upper is not None:
+            if domain.strict_upper and not finite < domain.upper:
+                raise OptimizationValidationError("value violates strict upper bound", context={"variable": self.name})
+            if not domain.strict_upper and finite > domain.upper + tolerance:
+                raise OptimizationValidationError("value violates upper bound", context={"variable": self.name})
+        if domain.kind in {DomainKind.INTEGER, DomainKind.BINARY, DomainKind.SEMI_INTEGER}:
+            return int(round(finite))
+        return finite
 
-        shape = _validate_shape(self.shape, "shape")
 
-        if self.index_set is not None and not isinstance(self.index_set, tuple):
-            raise OptimizationValidationError(
-                "index_set must be a tuple or None",
-                context={"type": type(self.index_set).__name__},
-            )
-
-        if self.description is not None and not isinstance(self.description, str):
-            raise OptimizationValidationError(
-                "description must be a string or None",
-                context={"type": type(self.description).__name__},
-            )
-
-        _validate_mapping(self.metadata, "metadata")
-
-        object.__setattr__(self, "shape", shape)
-
-
-# ---------------------------------------------------------------------------
-# Objectives
-# ---------------------------------------------------------------------------
-
-
-class ObjectiveSense(Enum):
-    """Direction of an objective function :math:`f`."""
-
+class ObjectiveSense(str, Enum):
     MINIMIZE = "minimize"
     MAXIMIZE = "maximize"
+
+    @classmethod
+    def coerce(cls, value: "ObjectiveSense | str") -> "ObjectiveSense":
+        if isinstance(value, cls):
+            return value
+        normalized = str(value).strip().lower()
+        aliases = {
+            "min": cls.MINIMIZE,
+            "minimum": cls.MINIMIZE,
+            "minimize": cls.MINIMIZE,
+            "max": cls.MAXIMIZE,
+            "maximum": cls.MAXIMIZE,
+            "maximize": cls.MAXIMIZE,
+        }
+        if normalized not in aliases:
+            raise OptimizationValidationError("invalid objective sense", context={"sense": value})
+        return aliases[normalized]
 
 
 @dataclass(frozen=True, slots=True)
 class Objective:
-    """
-    An objective function participating in an optimization problem.
-
-    Formally this describes :math:`f : \\mathcal{X} \\to \\mathbb{R}` together
-    with its sense (``min`` or ``max``) and the decision variables it depends
-    on. The ``expression`` payload is intentionally opaque: it may be a string,
-    a symbolic expression tree, a callable, or a backend-specific object.
-
-    The class stores only descriptive structure. It does not evaluate, compile
-    or differentiate the objective.
-    """
-
     name: str
-    sense: ObjectiveSense
-    expression: Any
-    variables: tuple[Variable, ...] = ()
+    sense: ObjectiveSense = ObjectiveSense.MINIMIZE
+    function: ScalarCallable | None = None
+    linear: Mapping[str, float] = field(default_factory=dict)
+    quadratic: Mapping[tuple[str, str], float] = field(default_factory=dict)
     constant: float = 0.0
-    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    weight: float = 1.0
+    priority: int = 0
+    gradient: GradientCallable | None = None
+    hessian: HessianCallable | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_non_empty_string(self.name, "name")
-
-        if not isinstance(self.sense, ObjectiveSense):
-            raise OptimizationValidationError(
-                "sense must be an ObjectiveSense member",
-                context={"sense": repr(self.sense)},
-            )
-
-        _validate_tuple_of(self.variables, Variable, "variables")
-        _validate_unique_names(self.variables, "variables", "variable")
-
-        constant = _validate_finite(self.constant, "constant")
-        _validate_mapping(self.metadata, "metadata")
-
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise OptimizationValidationError("objective name must be non-empty")
+        object.__setattr__(self, "sense", ObjectiveSense.coerce(self.sense))
+        constant = require_finite(self.constant, "constant")
+        weight = require_finite(self.weight, "weight")
+        if weight < 0:
+            raise OptimizationValidationError("objective weight must be non-negative")
+        if isinstance(self.priority, bool) or not isinstance(self.priority, int):
+            raise OptimizationValidationError("objective priority must be an integer")
+        if self.function is None and not self.linear and not self.quadratic:
+            raise OptimizationValidationError("objective requires callable, linear, or quadratic representation")
+        linear: dict[str, float] = {}
+        for key, value in self.linear.items():
+            if not isinstance(key, str) or not key:
+                raise OptimizationValidationError("linear objective coefficient key must be variable name")
+            linear[key] = require_finite(value, f"objective[{self.name}].linear[{key}]")
+        quadratic: dict[tuple[str, str], float] = {}
+        for key, value in self.quadratic.items():
+            if not isinstance(key, tuple) or len(key) != 2 or any(not isinstance(k, str) or not k for k in key):
+                raise OptimizationValidationError("quadratic coefficient key must be (variable, variable)")
+            quadratic[key] = require_finite(value, f"objective[{self.name}].quadratic[{key}]")
         object.__setattr__(self, "constant", constant)
+        object.__setattr__(self, "weight", weight)
+        object.__setattr__(self, "linear", linear)
+        object.__setattr__(self, "quadratic", quadratic)
+
+    @property
+    def algebraic(self) -> bool:
+        return self.function is None
+
+    @property
+    def nonlinear(self) -> bool:
+        return self.function is not None or bool(self.quadratic)
 
 
-# ---------------------------------------------------------------------------
-# Constraints
-# ---------------------------------------------------------------------------
+class ConstraintSense(str, Enum):
+    LE = "<="
+    GE = ">="
+    EQ = "=="
 
-
-class ConstraintSense(Enum):
-    """
-    Canonical sense of a scalar constraint.
-
-    Used when a constraint is expressed in the classical inequality form
-    rather than as a two-sided interval:
-
-    * ``LEQ`` — :math:`g(x) \\le u`
-    * ``GEQ`` — :math:`g(x) \\ge \\ell`
-    * ``EQ``  — :math:`h(x) = \\ell = u`
-    """
-
-    LEQ = "leq"
-    GEQ = "geq"
-    EQ = "eq"
+    @classmethod
+    def coerce(cls, value: "ConstraintSense | str") -> "ConstraintSense":
+        if isinstance(value, cls):
+            return value
+        normalized = str(value).strip()
+        aliases = {"<=": cls.LE, "<": cls.LE, ">=": cls.GE, ">": cls.GE, "=": cls.EQ, "==": cls.EQ}
+        if normalized not in aliases:
+            raise OptimizationValidationError("invalid constraint sense", context={"sense": value})
+        return aliases[normalized]
 
 
 @dataclass(frozen=True, slots=True)
 class Constraint:
-    """
-    A constraint on the decision variables.
-
-    The constraint is encoded as a two-sided bound on an opaque ``body``
-    expression:
-
-    .. math::
-
-        \\ell \\;\\le\\; \\text{body}(x) \\;\\le\\; u
-
-    Exactly one of ``lower`` / ``upper`` may be ``None`` for a one-sided
-    constraint; both being ``None`` is rejected. The class performs no
-    feasibility check — that is the role of a solver — and no symbolic
-    manipulation of ``body``.
-    """
-
     name: str
-    body: Any
-    lower: float | None = None
-    upper: float | None = None
-    variables: tuple[Variable, ...] = ()
-    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    sense: ConstraintSense = ConstraintSense.LE
+    rhs: float = 0.0
+    function: ScalarCallable | None = None
+    linear: Mapping[str, float] = field(default_factory=dict)
+    tolerance: float = 1e-8
+    jacobian: JacobianCallable | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_non_empty_string(self.name, "name")
-
-        lower = _validate_optional_finite(self.lower, "lower")
-        upper = _validate_optional_finite(self.upper, "upper")
-
-        if lower is None and upper is None:
-            raise OptimizationValidationError(
-                "constraint requires at least one of lower or upper",
-                context={"name": self.name},
-            )
-        if lower is not None and upper is not None and lower > upper:
-            raise OptimizationValidationError(
-                "constraint lower bound must not exceed upper bound",
-                context={"name": self.name, "lower": lower, "upper": upper},
-            )
-
-        _validate_tuple_of(self.variables, Variable, "variables")
-        _validate_unique_names(self.variables, "variables", "variable")
-
-        _validate_mapping(self.metadata, "metadata")
-
-        object.__setattr__(self, "lower", lower)
-        object.__setattr__(self, "upper", upper)
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise OptimizationValidationError("constraint name must be non-empty")
+        object.__setattr__(self, "sense", ConstraintSense.coerce(self.sense))
+        rhs = require_finite(self.rhs, "rhs")
+        tolerance = require_finite(self.tolerance, "tolerance")
+        if tolerance < 0:
+            raise OptimizationValidationError("constraint tolerance must be non-negative")
+        if self.function is None and not self.linear:
+            raise OptimizationValidationError("constraint requires callable or linear coefficients")
+        linear: dict[str, float] = {}
+        for key, value in self.linear.items():
+            if not isinstance(key, str) or not key:
+                raise OptimizationValidationError("constraint coefficient key must be variable name")
+            linear[key] = require_finite(value, f"constraint[{self.name}].linear[{key}]")
+        object.__setattr__(self, "rhs", rhs)
+        object.__setattr__(self, "tolerance", tolerance)
+        object.__setattr__(self, "linear", linear)
 
     @property
-    def sense(self) -> ConstraintSense | None:
-        """
-        Classify the constraint as ``LEQ``, ``GEQ`` or ``EQ`` when possible.
-
-        A genuinely two-sided constraint with distinct bounds returns
-        ``None`` because it does not correspond to a single canonical sense.
-        """
-        if self.lower is None and self.upper is not None:
-            return ConstraintSense.LEQ
-        if self.lower is not None and self.upper is None:
-            return ConstraintSense.GEQ
-        if self.lower is not None and self.upper is not None and self.lower == self.upper:
-            return ConstraintSense.EQ
-        return None
+    def nonlinear(self) -> bool:
+        return self.function is not None
 
 
-# ---------------------------------------------------------------------------
-# Problems
-# ---------------------------------------------------------------------------
-
-
-class ProblemClass(Enum):
-    """
-    Solver-agnostic classification of an optimization problem.
-
-    The taxonomy follows the standard mathematical-programming categories
-    (Boyd & Vandenberghe, 2004; Nocedal & Wright, 2006):
-
-    * ``LP`` — linear program
-    * ``MILP`` — mixed-integer linear program
-    * ``QP`` — quadratic program
-    * ``MIQP`` — mixed-integer quadratic program
-    * ``QCQP`` — quadratically constrained quadratic program
-    * ``SOCP`` — second-order cone program
-    * ``SDP`` — semidefinite program
-    * ``NLP`` — nonlinear program
-    * ``MINLP`` — mixed-integer nonlinear program
-    * ``CONVEX`` — a convex program outside the above named families
-    * ``NONCONVEX`` — a nonconvex program outside the above named families
-    * ``MULTI_OBJECTIVE`` — a vector-valued objective problem
-    * ``UNKNOWN`` — not yet classified
-    """
-
+class ProblemClass(str, Enum):
     LP = "lp"
+    IP = "ip"
     MILP = "milp"
     QP = "qp"
-    MIQP = "miqp"
-    QCQP = "qcqp"
-    SOCP = "socp"
-    SDP = "sdp"
     NLP = "nlp"
-    MINLP = "minlp"
-    CONVEX = "convex"
-    NONCONVEX = "nonconvex"
-    MULTI_OBJECTIVE = "multi_objective"
+    CP = "cp"
+    COMBINATORIAL = "combinatorial"
+    BLACK_BOX = "black_box"
+    MULTIOBJECTIVE = "multiobjective"
     UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
 class OptimizationProblem:
-    """
-    A mathematical optimization problem.
-
-    The object gathers the descriptive parts of
-
-    .. math::
-
-        \\min_{x \\in \\mathcal{X}}\\ f(x)
-        \\quad \\text{s.t.}\\quad
-        g_i(x) \\le 0,\\; h_j(x) = 0,
-
-    namely variables, objectives, constraints and an optional problem class.
-    It performs **no** analysis: no convexity test, no dual construction, no
-    substitution, no reduction. Any such work belongs to an algorithm module.
-    """
-
     name: str
     variables: tuple[Variable, ...]
-    objectives: tuple[Objective, ...] = ()
+    objectives: tuple[Objective, ...]
     constraints: tuple[Constraint, ...] = ()
     problem_class: ProblemClass = ProblemClass.UNKNOWN
-    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    known_convex: bool | None = None
+    known_smooth: bool | None = None
+    derivatives_available: bool = False
+    deterministic: bool = True
+    expected_evaluation_cost: float | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_non_empty_string(self.name, "name")
-
-        _validate_tuple_of(self.variables, Variable, "variables")
-        _validate_tuple_of(self.objectives, Objective, "objectives")
-        _validate_tuple_of(self.constraints, Constraint, "constraints")
-
-        _validate_unique_names(self.variables, "variables", "variable")
-        _validate_unique_names(self.objectives, "objectives", "objective")
-        _validate_unique_names(self.constraints, "constraints", "constraint")
-
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise OptimizationValidationError("problem name must be non-empty")
         if not isinstance(self.problem_class, ProblemClass):
-            raise OptimizationValidationError(
-                "problem_class must be a ProblemClass member",
-                context={"problem_class": repr(self.problem_class)},
-            )
+            raise OptimizationValidationError("problem_class must be ProblemClass")
+        if not self.variables:
+            raise OptimizationValidationError("problem requires at least one variable")
+        if not self.objectives:
+            raise OptimizationValidationError("problem requires at least one objective")
+        if any(not isinstance(v, Variable) for v in self.variables):
+            raise OptimizationValidationError("variables must contain only Variable objects")
+        if any(not isinstance(o, Objective) for o in self.objectives):
+            raise OptimizationValidationError("objectives must contain only Objective objects")
+        if any(not isinstance(c, Constraint) for c in self.constraints):
+            raise OptimizationValidationError("constraints must contain only Constraint objects")
+        if len({v.name for v in self.variables}) != len(self.variables):
+            raise OptimizationValidationError("variable names must be unique")
+        if len({o.name for o in self.objectives}) != len(self.objectives):
+            raise OptimizationValidationError("objective names must be unique")
+        if len({c.name for c in self.constraints}) != len(self.constraints):
+            raise OptimizationValidationError("constraint names must be unique")
 
-        _validate_mapping(self.metadata, "metadata")
+        variable_names = {v.name for v in self.variables}
+        for objective in self.objectives:
+            references = set(objective.linear)
+            references.update(name for pair in objective.quadratic for name in pair)
+            unknown = references - variable_names
+            if unknown:
+                raise OptimizationValidationError(
+                    "objective references unknown variables",
+                    context={"objective": objective.name, "unknown": sorted(unknown)},
+                )
+        for constraint in self.constraints:
+            unknown = set(constraint.linear) - variable_names
+            if unknown:
+                raise OptimizationValidationError(
+                    "constraint references unknown variables",
+                    context={"constraint": constraint.name, "unknown": sorted(unknown)},
+                )
+
+        if self.expected_evaluation_cost is not None:
+            cost = require_finite(self.expected_evaluation_cost, "expected_evaluation_cost")
+            if cost < 0:
+                raise OptimizationValidationError("expected_evaluation_cost must be non-negative")
+            object.__setattr__(self, "expected_evaluation_cost", cost)
+        if len(self.objectives) > 1 and self.problem_class is not ProblemClass.MULTIOBJECTIVE:
+            object.__setattr__(self, "problem_class", ProblemClass.MULTIOBJECTIVE)
 
     @property
     def objective(self) -> Objective | None:
-        """Return the single objective when exactly one is present, else None."""
-        if len(self.objectives) == 1:
-            return self.objectives[0]
-        return None
+        return self.objectives[0] if len(self.objectives) == 1 else None
 
     @property
     def is_multi_objective(self) -> bool:
-        """``True`` when the problem declares more than one objective."""
         return len(self.objectives) > 1
 
+    @property
+    def dimensionality(self) -> int:
+        return len(self.variables)
 
-# ---------------------------------------------------------------------------
-# Solver capability
-# ---------------------------------------------------------------------------
+    @property
+    def variable_names(self) -> tuple[str, ...]:
+        return tuple(variable.name for variable in self.variables)
+
+
+@dataclass(frozen=True, slots=True)
+class ProblemFeatures:
+    problem_class: ProblemClass
+    dimensionality: int
+    objective_count: int
+    continuous_variables: int
+    integer_variables: int
+    binary_variables: int
+    finite_domain_variables: int
+    semi_continuous_variables: int
+    semi_integer_variables: int
+    custom_domain_variables: int
+    has_quadratic_objective: bool
+    has_callable_objective: bool
+    has_nonlinear_constraints: bool
+    has_equality_constraints: bool
+    has_unbounded_variables: bool
+    known_convex: bool | None
+    known_smooth: bool | None
+    derivatives_available: bool
+    deterministic: bool
+    expected_evaluation_cost: float | None
+    warm_start_available: bool
+
+    @property
+    def has_discrete_variables(self) -> bool:
+        return any((self.integer_variables, self.binary_variables, self.finite_domain_variables, self.semi_integer_variables))
+
+    @property
+    def finite_domain_only(self) -> bool:
+        return self.dimensionality == self.finite_domain_variables + self.binary_variables + self.integer_variables
 
 
 @dataclass(frozen=True, slots=True)
 class SolverCapability:
-    """
-    A description of what a solver can handle.
-
-    This is a declarative record used for routing and compatibility checks.
-    It does not invoke the solver, and it does not attempt to derive
-    capabilities from the solver's behaviour.
-    """
-
-    solver_name: str
-    supported_problem_classes: frozenset[ProblemClass]
+    name: str
+    problem_classes: frozenset[ProblemClass]
     supports_continuous: bool = True
     supports_integer: bool = False
     supports_binary: bool = False
-    supports_nonlinear: bool = False
-    supports_multiobjective: bool = False
-    supports_duals: bool = False
+    supports_finite_domain: bool = False
+    supports_semi_continuous: bool = False
+    supports_semi_integer: bool = False
+    supports_quadratic_objective: bool = False
+    supports_callable_objective: bool = False
+    supports_nonlinear_constraints: bool = False
+    supports_multiple_objectives: bool = False
+    supports_black_box: bool = False
     supports_warm_start: bool = False
-    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    requires_finite_bounds: bool = False
+    deterministic: bool = True
+    backend: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_non_empty_string(self.solver_name, "solver_name")
-
-        classes = self.supported_problem_classes
-        if not isinstance(classes, frozenset):
-            try:
-                classes = frozenset(classes)
-            except TypeError as exc:  # pragma: no cover - defensive
-                raise OptimizationValidationError(
-                    "supported_problem_classes must be an iterable of ProblemClass",
-                    context={"type": type(self.supported_problem_classes).__name__},
-                ) from exc
-            object.__setattr__(self, "supported_problem_classes", classes)
-
-        for entry in classes:
-            if not isinstance(entry, ProblemClass):
-                raise OptimizationValidationError(
-                    "supported_problem_classes must contain only ProblemClass members",
-                    context={"value": repr(entry)},
-                )
-
-        for field_name in (
-            "supports_continuous",
-            "supports_integer",
-            "supports_binary",
-            "supports_nonlinear",
-            "supports_multiobjective",
-            "supports_duals",
-            "supports_warm_start",
-        ):
-            if not isinstance(getattr(self, field_name), bool):
-                raise OptimizationValidationError(
-                    f"{field_name} must be a bool",
-                    context={"field": field_name, "value": repr(getattr(self, field_name))},
-                )
-
-        _validate_mapping(self.metadata, "metadata")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise OptimizationValidationError("solver capability name must be non-empty")
+        if not isinstance(self.problem_classes, frozenset) or any(not isinstance(p, ProblemClass) for p in self.problem_classes):
+            raise OptimizationValidationError("problem_classes must be frozenset[ProblemClass]")
 
     def supports(self, problem_class: ProblemClass) -> bool:
-        """Return ``True`` when ``problem_class`` is declared as supported."""
-        if not isinstance(problem_class, ProblemClass):
-            raise OptimizationValidationError(
-                "problem_class must be a ProblemClass member",
-                context={"problem_class": repr(problem_class)},
-            )
-        return problem_class in self.supported_problem_classes
+        return problem_class in self.problem_classes
+
+    def incompatibilities(self, features: ProblemFeatures) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if features.problem_class not in self.problem_classes:
+            reasons.append(f"problem_class:{features.problem_class.value}")
+        if features.continuous_variables and not self.supports_continuous:
+            reasons.append("continuous_variables")
+        if features.integer_variables and not self.supports_integer:
+            reasons.append("integer_variables")
+        if features.binary_variables and not self.supports_binary:
+            reasons.append("binary_variables")
+        if features.finite_domain_variables and not self.supports_finite_domain:
+            reasons.append("finite_domain_variables")
+        if features.semi_continuous_variables and not self.supports_semi_continuous:
+            reasons.append("semi_continuous_variables")
+        if features.semi_integer_variables and not self.supports_semi_integer:
+            reasons.append("semi_integer_variables")
+        if features.custom_domain_variables:
+            reasons.append("custom_domain_variables")
+        if features.has_quadratic_objective and not self.supports_quadratic_objective:
+            reasons.append("quadratic_objective")
+        if features.has_callable_objective and not self.supports_callable_objective:
+            reasons.append("callable_objective")
+        if features.has_nonlinear_constraints and not self.supports_nonlinear_constraints:
+            reasons.append("nonlinear_constraints")
+        if features.objective_count > 1 and not self.supports_multiple_objectives:
+            reasons.append("multiple_objectives")
+        if self.requires_finite_bounds and features.has_unbounded_variables:
+            reasons.append("finite_bounds_required")
+        return tuple(reasons)
 
 
-# ---------------------------------------------------------------------------
-# Solver / solution status enums
-# ---------------------------------------------------------------------------
-
-
-class SolverStatus(Enum):
-    """Lifecycle state of a solver instance."""
-
-    CREATED = "created"
-    INITIALIZED = "initialized"
-    RUNNING = "running"
-    PAUSED = "paused"
-    TERMINATED = "terminated"
+class SolverStatus(str, Enum):
+    OPTIMAL = "optimal"
+    FEASIBLE = "feasible"
+    INFEASIBLE = "infeasible"
+    UNBOUNDED = "unbounded"
+    INFEASIBLE_OR_UNBOUNDED = "infeasible_or_unbounded"
+    LIMIT_REACHED = "limit_reached"
+    TIMEOUT = "timeout"
+    NUMERICAL_FAILURE = "numerical_failure"
+    INTERRUPTED = "interrupted"
+    SOLVER_UNAVAILABLE = "solver_unavailable"
+    UNSUPPORTED = "unsupported_problem"
     ERROR = "error"
-    UNKNOWN = "unknown"
 
 
-class FeasibilityStatus(Enum):
-    """
-    Feasibility classification of a candidate point or solution.
-
-    ``NEARLY_FEASIBLE`` denotes a point that violates the constraint system by
-    more than numerical noise but within a solver-declared feasibility
-    tolerance.
-    """
-
+class FeasibilityStatus(str, Enum):
     FEASIBLE = "feasible"
     INFEASIBLE = "infeasible"
     UNKNOWN = "unknown"
-    NEARLY_FEASIBLE = "nearly_feasible"
 
 
-class OptimalityStatus(Enum):
-    """
-    Optimality classification of a solution.
+class OptimalityStatus(str, Enum):
+    GLOBAL = "globally_optimal"
+    LOCAL = "locally_optimal"
+    PARETO = "pareto_optimal_or_nondominated"
+    NONE = "none"
+    UNKNOWN = "unknown"
 
-    The distinction between ``GLOBALLY_OPTIMAL`` and ``LOCALLY_OPTIMAL``
-    matters for nonconvex problems where first-order stationarity does not
-    imply global optimality (Nocedal & Wright, 2006, §12.4).
-    """
 
+class TerminationReason(str, Enum):
     OPTIMAL = "optimal"
-    GLOBALLY_OPTIMAL = "globally_optimal"
-    LOCALLY_OPTIMAL = "locally_optimal"
-    SUBOPTIMAL = "suboptimal"
-    UNBOUNDED = "unbounded"
-    INFEASIBLE = "infeasible"
-    UNKNOWN = "unknown"
-
-
-class TerminationReason(Enum):
-    """Why a solver stopped."""
-
     CONVERGED = "converged"
-    MAX_ITERATIONS = "max_iterations"
-    TIME_LIMIT = "time_limit"
-    OBJECTIVE_LIMIT = "objective_limit"
-    FEASIBLE_SOLUTION_FOUND = "feasible_solution_found"
     INFEASIBLE = "infeasible"
     UNBOUNDED = "unbounded"
-    USER_INTERRUPT = "user_interrupt"
-    NUMERICAL_ERROR = "numerical_error"
-    SOLVER_ERROR = "solver_error"
-    UNKNOWN = "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Solutions
-# ---------------------------------------------------------------------------
+    INFEASIBLE_OR_UNBOUNDED = "infeasible_or_unbounded"
+    ITERATION_LIMIT = "iteration_limit"
+    EVALUATION_LIMIT = "evaluation_limit"
+    NODE_LIMIT = "node_limit"
+    TIME_LIMIT = "time_limit"
+    NUMERICAL_FAILURE = "numerical_failure"
+    INTERRUPTED = "interrupted"
+    SOLVER_UNAVAILABLE = "solver_unavailable"
+    UNSUPPORTED = "unsupported_problem"
+    ERROR = "error"
 
 
 @dataclass(frozen=True, slots=True)
 class Solution:
-    """
-    The result of an optimization run.
-
-    A solution records concrete variable values, objective values, and the
-    status information produced by a solver. Solver-internal state (iterates,
-    dual vectors, factorisations) is deliberately excluded: if needed, it
-    belongs in ``metadata``.
-
-    The class performs no post-processing, no feasibility repair, and no
-    validation against a :class:`OptimizationProblem`.
-    """
-
-    variable_values: Mapping[str, Any]
+    solver_name: str
+    problem_class: ProblemClass
+    status: SolverStatus
+    termination_reason: TerminationReason
+    success: bool
+    primal_solution: Mapping[str, Any] | None = None
     objective_values: Mapping[str, float] = field(default_factory=dict)
     feasibility: FeasibilityStatus = FeasibilityStatus.UNKNOWN
     optimality: OptimalityStatus = OptimalityStatus.UNKNOWN
-    solver_status: SolverStatus = SolverStatus.UNKNOWN
-    termination_reason: TerminationReason = TerminationReason.UNKNOWN
-    constraint_violations: Mapping[str, float] = field(default_factory=dict)
-    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    max_constraint_violation: float | None = None
+    primal_bound: float | None = None
+    dual_bound: float | None = None
+    absolute_gap: float | None = None
+    relative_gap: float | None = None
+    iteration_count: int | None = None
+    node_count: int | None = None
+    function_evaluation_count: int | None = None
+    runtime_seconds: float | None = None
+    solver_version: str | None = None
+    warnings: tuple[str, ...] = ()
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_mapping(self.variable_values, "variable_values")
-
-        objective_values = _validate_finite_mapping(self.objective_values, "objective_values")
-        constraint_violations = _validate_finite_mapping(
-            self.constraint_violations, "constraint_violations"
-        )
-
-        if not isinstance(self.feasibility, FeasibilityStatus):
+        if not isinstance(self.solver_name, str) or not self.solver_name:
+            raise OptimizationValidationError("solution.solver_name must be non-empty")
+        if not isinstance(self.problem_class, ProblemClass):
+            raise OptimizationValidationError("solution.problem_class must be ProblemClass")
+        if not isinstance(self.status, SolverStatus) or not isinstance(self.termination_reason, TerminationReason):
+            raise OptimizationValidationError("solution status/termination must use canonical enums")
+        if not isinstance(self.feasibility, FeasibilityStatus) or not isinstance(self.optimality, OptimalityStatus):
+            raise OptimizationValidationError("solution feasibility/optimality must use canonical enums")
+        for name, value in self.objective_values.items():
+            if not isinstance(name, str) or to_finite_float(value) is None:
+                raise OptimizationValidationError("objective_values must contain finite numeric values")
+        for field_name in (
+            "max_constraint_violation",
+            "primal_bound",
+            "dual_bound",
+            "absolute_gap",
+            "relative_gap",
+            "runtime_seconds",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and to_finite_float(value) is None:
+                raise OptimizationValidationError(f"solution.{field_name} must be finite when present")
+        for field_name in ("absolute_gap", "relative_gap", "runtime_seconds", "max_constraint_violation"):
+            value = getattr(self, field_name)
+            if value is not None and value < 0:
+                raise OptimizationValidationError(f"solution.{field_name} must be non-negative")
+        for field_name in ("iteration_count", "node_count", "function_evaluation_count"):
+            value = getattr(self, field_name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise OptimizationValidationError(f"solution.{field_name} must be a non-negative integer")
+        if self.success and self.primal_solution is None:
+            raise OptimizationValidationError("successful solution requires primal_solution")
+        terminal_failure_statuses = {
+            SolverStatus.INFEASIBLE,
+            SolverStatus.UNBOUNDED,
+            SolverStatus.INFEASIBLE_OR_UNBOUNDED,
+            SolverStatus.SOLVER_UNAVAILABLE,
+            SolverStatus.UNSUPPORTED,
+        }
+        if self.status in terminal_failure_statuses and self.success:
             raise OptimizationValidationError(
-                "feasibility must be a FeasibilityStatus member",
-                context={"feasibility": repr(self.feasibility)},
+                "terminal failure status cannot be marked successful",
+                context={"status": self.status.value},
             )
-        if not isinstance(self.optimality, OptimalityStatus):
+        if self.status is SolverStatus.OPTIMAL and not self.success:
+            raise OptimizationValidationError("OPTIMAL status must be successful")
+        if self.success and self.feasibility is FeasibilityStatus.INFEASIBLE:
+            raise OptimizationValidationError("successful solution cannot be explicitly infeasible")
+        if self.status is SolverStatus.OPTIMAL and self.optimality not in {OptimalityStatus.GLOBAL, OptimalityStatus.LOCAL}:
+            raise OptimizationValidationError("OPTIMAL status requires explicit local/global optimality semantics")
+        expected_termination = {
+            SolverStatus.INFEASIBLE: TerminationReason.INFEASIBLE,
+            SolverStatus.UNBOUNDED: TerminationReason.UNBOUNDED,
+            SolverStatus.INFEASIBLE_OR_UNBOUNDED: TerminationReason.INFEASIBLE_OR_UNBOUNDED,
+            SolverStatus.TIMEOUT: TerminationReason.TIME_LIMIT,
+            SolverStatus.SOLVER_UNAVAILABLE: TerminationReason.SOLVER_UNAVAILABLE,
+            SolverStatus.UNSUPPORTED: TerminationReason.UNSUPPORTED,
+        }.get(self.status)
+        if expected_termination is not None and self.termination_reason is not expected_termination:
             raise OptimizationValidationError(
-                "optimality must be an OptimalityStatus member",
-                context={"optimality": repr(self.optimality)},
-            )
-        if not isinstance(self.solver_status, SolverStatus):
-            raise OptimizationValidationError(
-                "solver_status must be a SolverStatus member",
-                context={"solver_status": repr(self.solver_status)},
-            )
-        if not isinstance(self.termination_reason, TerminationReason):
-            raise OptimizationValidationError(
-                "termination_reason must be a TerminationReason member",
-                context={"termination_reason": repr(self.termination_reason)},
+                "solver status and termination reason are inconsistent",
+                context={
+                    "status": self.status.value,
+                    "termination_reason": self.termination_reason.value,
+                    "expected": expected_termination.value,
+                },
             )
 
-        _validate_mapping(self.metadata, "metadata")
-
-        object.__setattr__(self, "objective_values", objective_values)
-        object.__setattr__(self, "constraint_violations", constraint_violations)
-
-
-# ---------------------------------------------------------------------------
-# Pareto concepts
-# ---------------------------------------------------------------------------
+    @property
+    def objective_value(self) -> float | None:
+        return next(iter(self.objective_values.values())) if len(self.objective_values) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)
 class ParetoPoint:
-    """
-    A feasible point in a multiobjective optimization context.
-
-    For a vector objective :math:`f(x) = (f_1(x), \\dots, f_k(x))`, a Pareto
-    point is a point :math:`x` such that no other feasible point strictly
-    improves every objective. This class records the raw coordinates only;
-    dominance is a property of a *set* of points and is computed elsewhere
-    (see :class:`ParetoFront`).
-    """
-
-    variables: Mapping[str, Any]
-    objectives: Mapping[str, float]
+    decision: Mapping[str, Any]
+    objective_values: Mapping[str, float]
     feasible: bool = True
-    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    violation: float = 0.0
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_mapping(self.variables, "variables")
-        objectives = _validate_finite_mapping(self.objectives, "objectives")
-
-        if not isinstance(self.feasible, bool):
-            raise OptimizationValidationError(
-                "feasible must be a bool",
-                context={"feasible": repr(self.feasible)},
-            )
-
-        _validate_mapping(self.metadata, "metadata")
-
-        object.__setattr__(self, "objectives", objectives)
+        violation = require_finite(self.violation, "violation")
+        if violation < 0:
+            raise OptimizationValidationError("Pareto point violation must be non-negative")
+        for name, value in self.objective_values.items():
+            if not isinstance(name, str) or to_finite_float(value) is None:
+                raise OptimizationValidationError("Pareto point objectives must be finite")
+        object.__setattr__(self, "violation", violation)
 
 
 @dataclass(frozen=True, slots=True)
 class ParetoFront:
-    """
-    A container for Pareto-optimal points.
-
-    The front is the image of the Pareto set under the objective map. This
-    class is a passive container: it stores points, exposes them through the
-    standard container protocol, and performs no dominance filtering, crowding
-    distance computation, or hypervolume estimation.
-    """
-
-    points: tuple[ParetoPoint, ...] = ()
-    problem: OptimizationProblem | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    points: tuple[ParetoPoint, ...]
+    objective_names: tuple[str, ...]
+    approximate: bool = False
+    algorithm: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_tuple_of(self.points, ParetoPoint, "points")
-
-        if self.problem is not None and not isinstance(self.problem, OptimizationProblem):
-            raise OptimizationValidationError(
-                "problem must be an OptimizationProblem or None",
-                context={"type": type(self.problem).__name__},
-            )
-
-        _validate_mapping(self.metadata, "metadata")
+        if len(set(self.objective_names)) != len(self.objective_names):
+            raise OptimizationValidationError("Pareto objective_names must be unique")
+        for point in self.points:
+            if tuple(point.objective_values.keys()) != self.objective_names:
+                if set(point.objective_values) != set(self.objective_names):
+                    raise OptimizationValidationError("Pareto point objective set does not match front")
 
     def __iter__(self) -> Iterator[ParetoPoint]:
         return iter(self.points)
@@ -916,10 +716,63 @@ class ParetoFront:
     def __bool__(self) -> bool:
         return bool(self.points)
 
-    @property
-    def is_empty(self) -> bool:
-        """``True`` when the front contains no points."""
-        return not self.points
+
+@dataclass(frozen=True, slots=True)
+class SolverAttempt:
+    solver_name: str
+    available: bool
+    compatible: bool
+    preference_score: float | None = None
+    incompatibilities: tuple[str, ...] = ()
+    status: SolverStatus | None = None
+    termination_reason: TerminationReason | None = None
+    runtime_seconds: float | None = None
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.solver_name, str) or not self.solver_name:
+            raise OptimizationValidationError("solver attempt name must be non-empty")
+        if self.preference_score is not None and to_finite_float(self.preference_score) is None:
+            raise OptimizationValidationError("solver attempt preference_score must be finite")
+        if self.runtime_seconds is not None:
+            runtime = to_finite_float(self.runtime_seconds)
+            if runtime is None or runtime < 0:
+                raise OptimizationValidationError("solver attempt runtime_seconds must be non-negative and finite")
+        if self.status is not None and not isinstance(self.status, SolverStatus):
+            raise OptimizationValidationError("solver attempt status must be SolverStatus")
+        if self.termination_reason is not None and not isinstance(self.termination_reason, TerminationReason):
+            raise OptimizationValidationError("solver attempt termination_reason must be TerminationReason")
+
+
+@dataclass(frozen=True, slots=True)
+class SolverSelection:
+    selected_solver: str | None
+    attempts: tuple[SolverAttempt, ...]
+    requested_solver: str | None = None
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(attempt, SolverAttempt) for attempt in self.attempts):
+            raise OptimizationValidationError("solver selection attempts must contain SolverAttempt objects")
+        names = [attempt.solver_name for attempt in self.attempts]
+        if len(names) != len(set(names)):
+            raise OptimizationValidationError("solver selection attempts must have unique solver names")
+        if self.selected_solver is not None and self.selected_solver not in names:
+            raise OptimizationValidationError(
+                "selected solver must be represented in selection attempts",
+                context={"selected_solver": self.selected_solver, "attempts": names},
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationResult:
+    solution: Solution | None
+    pareto_front: ParetoFront | None = None
+    selection: SolverSelection | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.solution is None and self.pareto_front is None:
+            raise OptimizationValidationError("OptimizationResult requires solution or Pareto front")
 
 
 __all__ = [
@@ -927,15 +780,24 @@ __all__ = [
     "ConstraintSense",
     "DomainKind",
     "FeasibilityStatus",
+    "GradientCallable",
+    "HessianCallable",
+    "JacobianCallable",
     "Objective",
     "ObjectiveSense",
     "OptimalityStatus",
     "OptimizationProblem",
+    "OptimizationResult",
     "ParetoFront",
     "ParetoPoint",
+    "Point",
     "ProblemClass",
+    "ProblemFeatures",
+    "ScalarCallable",
     "Solution",
+    "SolverAttempt",
     "SolverCapability",
+    "SolverSelection",
     "SolverStatus",
     "TerminationReason",
     "Variable",
