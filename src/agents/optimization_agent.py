@@ -22,7 +22,7 @@ from threading import RLock
 from typing import Any, Dict, Optional, Tuple
 
 from .base.utils.config_contract import ConfigContractError, assert_valid_config_contract
-from .base.utils.main_config_loader import get_config_section
+from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base_agent import BaseAgent
 from .runtime_contracts import RuntimeLifecycle
 from .optimization.modules.problem_definition import ProblemDefinition
@@ -101,25 +101,21 @@ class OptimizationAgent(BaseAgent):
 
         self._optimization_lock = RLock()
         self._metrics_lock = RLock()
-
-        # BaseAgent has already loaded the authoritative central agent config.
-        # Reuse that snapshot instead of creating a second agent-level config path.
-        self.agent_config: Dict[str, Any] = dict(
-            get_config_section(self.AGENT_KEY, config=self.global_config) or {}
-        )
+        self.config = load_global_config()
+        self.optimization_config = get_config_section('optimization_agent') or {}
         if config is not None:
             if not isinstance(config, Mapping):
                 raise OptimizationConfigurationError(
                     "OptimizationAgent config override must be a mapping",
                     context={"actual_type": type(config).__name__},
                 )
-            self.agent_config.update(dict(config))
+            self.optimization_config.update(dict(config))
 
         try:
             assert_valid_config_contract(
                 global_config=self.config,
                 agent_key=self.AGENT_KEY,
-                agent_config=self.agent_config,
+                agent_config=self.optimization_config,
                 agent_allowed_keys=self._ALLOWED_CONFIG_KEYS,
                 required_agent_keys={"enabled"},
                 require_global_keys=False,
@@ -180,24 +176,18 @@ class OptimizationAgent(BaseAgent):
     def _config_bool(cfg: Mapping[str, Any], key: str, default: bool) -> bool:
         value = cfg.get(key, default)
         if not isinstance(value, bool):
-            raise OptimizationConfigurationError(
-                f"optimization_agent.{key} must be boolean",
-                context={"value": value},
-            )
+            raise OptimizationConfigurationError(f"optimization_agent.{key} must be boolean", context={"value": value})
         return value
 
     @staticmethod
     def _config_positive_int(cfg: Mapping[str, Any], key: str, default: int) -> int:
         value = cfg.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise OptimizationConfigurationError(
-                f"optimization_agent.{key} must be a positive integer",
-                context={"value": value},
-            )
+            raise OptimizationConfigurationError(f"optimization_agent.{key} must be a positive integer", context={"value": value})
         return value
 
     def _load_agent_config(self) -> None:
-        cfg = self.agent_config
+        cfg = self.optimization_config
         self.enabled = self._config_bool(cfg, "enabled", True)
         self.strict_validation = self._config_bool(cfg, "strict_validation", True)
         self.shared_memory_enabled = self._config_bool(cfg, "shared_memory_enabled", True)
@@ -338,10 +328,7 @@ class OptimizationAgent(BaseAgent):
         return merged
 
     @staticmethod
-    def _apply_explicit_warm_start(
-        problem: OptimizationProblem,
-        warm_start: Any,
-    ) -> OptimizationProblem:
+    def _apply_explicit_warm_start(problem: OptimizationProblem, warm_start: Any) -> OptimizationProblem:
         """Apply a solver-neutral warm start through canonical Variable.initial values."""
         if warm_start is None:
             return problem

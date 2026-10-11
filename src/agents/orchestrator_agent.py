@@ -69,7 +69,10 @@ __version__ = "2.3.0"
 import os
 import tempfile
 import time
+import importlib
+import re
 
+from threading import RLock
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
@@ -80,10 +83,21 @@ from .factory.utils.factory_errors import FactoryError
 from .factory.utils.factory_helpers import *
 from .factory.agent_meta_data import AgentMetaData
 from .factory.factory_cache import FactoryCache
+from .factory.operations import validate_specialist_spec
+from src.utils.configuration import bind_config # type: ignore
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Orchestrator Agent")
 printer = PrettyPrinter()
+
+
+_DYNAMIC_REGISTRATION_LOCK = RLock()
+_SUBAGENT_SETTINGS = bind_config(
+    Path(__file__).resolve().parent
+    / "subagents"
+    / "config"
+    / "subagents_config.yaml"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +110,9 @@ printer = PrettyPrinter()
 # is guarded by file existence and never overwrites an existing module.
 # ---------------------------------------------------------------------------
 _SUBAGENT_MODULE_TEMPLATE = '''"""
-Auto-generated specialist subagent for the ``{specialty}`` specialty.
+SLAI generated specialist: {specialty}
 
-Produced by :class:`OrchestratorAgent` on {timestamp}.
-
-Generation is guarded by file existence: edits to this file are preserved
-across future orchestration passes. Delete this file to force regeneration.
+A factory-managed specialized agent executing a validated operation.
 """
 
 from __future__ import annotations
@@ -109,23 +120,20 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional
 
 from ..base_agent import BaseAgent
-from ..base.utils.main_config_loader import get_config_section
-from logs.logger import get_logger  # pyright: ignore[reportMissingImports]
+from ..factory.operations import execute_operation
+from logs.logger import PrettyPrinter, get_logger
+
 
 logger = get_logger("{class_name}")
+printer = PrettyPrinter()
 
 
 class {class_name}(BaseAgent):
-    """Auto-generated specialist for the ``{specialty}`` specialty.
+    """Validated specialist for the {specialty} capability."""
 
-    Provides a structural default implementation: it honours the standard
-    :class:`BaseAgent` constructor contract and returns a structured
-    acknowledgement for delegated tasks. Replace this module with a
-    hand-written implementation to attach domain-specific behaviour.
-    """
-
-    SPECIALTY: str = "{specialty}"
-    CAPABILITIES: tuple = ("{specialty}", "dynamic_execution")
+    SPECIALTY = {specialty_repr}
+    SPECIALIST_SPEC = {specialist_spec}
+    CAPABILITIES = ({specialty_repr}, {operation_repr})
 
     def __init__(
         self,
@@ -141,39 +149,35 @@ class {class_name}(BaseAgent):
             config,
             checkpoint_manager=checkpoint_manager,
         )
-        self.specialty_config: dict = dict(
-            get_config_section("{specialty}_agent") or {{}}
+
+        logger.info(
+            "{class_name} initialized | specialty=%s",
+            self.SPECIALTY,
         )
-        if config:
-            self.specialty_config.update(dict(config))
-        logger.info("{class_name} initialized | specialty=%s", self.SPECIALTY)
 
-    def perform_task(self, task_data: Any) -> Any:
-        """Structural default handler for delegated work.
+    def perform_task(self, task_data: Any) -> dict[str, Any]:
+        printer.status(
+            "TASK",
+            "{class_name} executing specialized operation",
+            "info",
+        )
 
-        Extracts ``context`` and a task payload from the incoming request
-        and returns a structured acknowledgement. Override in a
-        hand-written implementation to attach domain-specific behaviour.
-        """
-        context: Any = None
-        payload: Any = task_data
-        if isinstance(task_data, Mapping):
-            context = task_data.get("context")
-            payload = task_data.get(
-                "task_data",
-                task_data.get("input_data", task_data.get("payload", task_data)),
-            )
-        return {{
-            "status": "success",
-            "specialty": self.SPECIALTY,
-            "capabilities": list(self.CAPABILITIES),
-            "result": payload,
-            "context": context,
-        }}
+        result = execute_operation(
+            self.SPECIALIST_SPEC,
+            task_data,
+        )
+
+        logger.info(
+            "{class_name} completed operation: %s",
+            self.SPECIALIST_SPEC["operation"],
+        )
+
+        return result
 
 
 __all__ = ["{class_name}"]
 '''
+
 
 
 class OrchestratorAgent(BaseAgent):
@@ -298,7 +302,15 @@ class OrchestratorAgent(BaseAgent):
         )
 
         # ---- Subagent module target ----------------------------------
-        self._subagent_dir: Path = (Path(__file__).resolve().parent / self.SUBAGENT_DIR_NAME)
+
+        # Initialize the complete subagent workspace automatically.
+        self._subagent_dir = (
+            Path(__file__).resolve().parent
+            / self.SUBAGENT_DIR_NAME
+        )
+
+        self._initialize_subagent_workspace()
+
 
         # Namespaces used for SharedMemory coordination channels.
         self._coordination_key: str = (f"{self.coordination_prefix}:task:{self.agent_id}")
@@ -325,6 +337,102 @@ class OrchestratorAgent(BaseAgent):
             self.cache_ttl_seconds,
             self._subagent_dir,
         )
+
+    @staticmethod
+    def _create_file_if_absent(path: Path, content: str) -> None:
+        """Atomically create a file without replacing an existing file."""
+        if path.is_symlink():
+            raise ValueError(f"Symlink is not permitted: {path}")
+
+        if path.exists():
+            if not path.is_file():
+                raise ValueError(f"Expected a regular file: {path}")
+            return
+
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            # Atomic, create-only publication.
+            # A concurrent initializer cannot overwrite this file.
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
+
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Workspace file was not created safely: {path}")
+
+    def _initialize_subagent_workspace(self) -> None:
+        """Create and validate the canonical subagent workspace.
+
+        Creates missing directories and initial configuration once.
+        Existing valid configuration is preserved.
+        """
+        with _DYNAMIC_REGISTRATION_LOCK:
+            root = Path(__file__).resolve().parent
+            subagents_dir = root / self.SUBAGENT_DIR_NAME
+            config_dir = subagents_dir / "config"
+
+            for directory in (subagents_dir, config_dir):
+                if directory.is_symlink():
+                    raise ValueError(f"Workspace directory cannot be a symlink: {directory}")
+                directory.mkdir(parents=True, exist_ok=True)
+
+            init_file = subagents_dir / "__init__.py"
+            config_file = config_dir / "subagents_config.yaml"
+
+            self._create_file_if_absent(init_file, '"""SLAI dynamically managed specialist subagents."""\n')
+
+            default_config = (
+                '# SLAI v2.3 — Managed subagent configuration\n'
+                'version: "2.3.0"\n'
+                '\n'
+                'generation:\n'
+                '  enabled: true\n'
+                '  max_definitions: 256\n'
+            )
+
+            self._create_file_if_absent(config_file, default_config)
+            configuration = _SUBAGENT_SETTINGS.load(force_reload=True)
+            generation = configuration.get("generation")
+            if not isinstance(generation, Mapping):
+                raise ValueError("subagents_config.yaml must define a generation mapping")
+
+            if not isinstance(generation.get("enabled"), bool):
+                raise ValueError("generation.enabled must be a boolean")
+
+            maximum = generation.get("max_definitions")
+
+            if (
+                isinstance(maximum, bool)
+                or not isinstance(maximum, int)
+                or maximum < 1
+            ):
+                raise ValueError("generation.max_definitions must be a positive integer")
+
+            self._subagent_dir = subagents_dir
+            self._subagent_config_dir = config_dir
+            self._subagent_config_path = config_file
+
+            logger.info(
+                "ORCHESTRATOR | Subagent workspace ready | "
+                "directory=%s | config=%s",
+                subagents_dir,
+                config_file,
+            )
 
     # ==================================================================
     # Task dispatch
@@ -487,7 +595,7 @@ class OrchestratorAgent(BaseAgent):
         #    surfaced as structured results because delegation cannot
         #    succeed without a target.
         try:
-            self._inspect_and_register_sub_agent(specialty, module_path, class_name)
+            self._inspect_and_register_sub_agent(specialty, module_path, class_name, specialist_spec=task_data.get("specialist_spec"))
         except FactoryError as fe:
             fe.log()
             return fe.to_result(agent=self.name, action=action)
@@ -582,73 +690,129 @@ class OrchestratorAgent(BaseAgent):
         specialty: str,
         module_path: Optional[str] = None,
         class_name: Optional[str] = None,
+        specialist_spec: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        """Ensure ``specialty`` is registered with the factory.
+        """Register a validated existing or newly generated specialist.
 
-        The registry is consulted on every call rather than relying on a
-        cache entry, because a peer agent may have unregistered the
-        target since the last orchestration pass.
-
-        Decision matrix:
-
-        * **Registered** — no-op.
-        * **Known factory default, not registered** — leave to the
-          factory. Default agents are owned by ``AgentFactory``; the
-          orchestrator does not shadow them with generated modules.
-        * **Unknown specialty, not registered** — materialise a
-          subagent module under ``src/agents/subagents/`` (if not
-          already present) and register metadata pointing at it.
+        The factory remains authoritative for agent registration.
+        Unknown specialties must have a valid executable specification.
         """
-        if not self.agent_factory:
-            return
+        if self.agent_factory is None:
+            raise RuntimeError("AgentFactory is required for delegation")
 
         normalized_type = self.agent_factory.normalize_agent_type(specialty)
+        default_specs = (getattr(self.agent_factory, "DEFAULT_AGENT_SPECS", {}) or {})
+        registered = self.agent_factory.get_registered_agent_types()
 
-        if normalized_type in self.agent_factory.get_registered_agent_types():
-            return
-
-        default_specs = getattr(self.agent_factory, "DEFAULT_AGENT_SPECS", {}) or {}
         if normalized_type in default_specs:
-            logger.info(
-                "Specialty '%s' is a known factory default that is not "
-                "currently registered; deferring to the factory's own "
-                "registration path.",
-                normalized_type,
-            )
+            if specialist_spec is not None:
+                raise ValueError("Core SLAI agents cannot be redefined as generated specialists")
             return
 
-        # ---- Dynamic onboarding of an unknown specialty --------------
-        safe_segment = self._safe_module_segment(normalized_type)
-        resolved_module = validate_module_path(module_path or f"{self.SUBAGENT_MODULE_PREFIX}.{safe_segment}_agent")
-        resolved_class = validate_class_name(class_name or self._class_name_for(safe_segment))
+        if module_path is not None or class_name is not None:
+            raise ValueError("Custom implementations must be registered directly through AgentFactory, not through an orchestration task payload")
 
-        # Only materialise a file when we own the target directory. If
-        # the caller supplied an explicit module path outside the
-        # subagents package, we register metadata and trust the caller.
-        if resolved_module.startswith(f"{self.SUBAGENT_MODULE_PREFIX}."):
-            self._ensure_subagent_module(safe_segment, resolved_class)
+        with _DYNAMIC_REGISTRATION_LOCK:
+            registered = self.agent_factory.get_registered_agent_types()
 
-        metadata = AgentMetaData(
-            name=normalized_type,
-            class_name=resolved_class,
-            module_path=resolved_module,
-            version=__version__,
-            description=(
-                f"Dynamically onboarded sub-agent for specialty "
-                f"'{normalized_type}'."
-            ),
-            capabilities=(normalized_type, "dynamic_execution"),
-            lifecycle="registered",
-        )
-        self.agent_factory.register_agent(metadata, overwrite=True)
+            if normalized_type in registered:
+                if specialist_spec is not None:
+                    expected_spec = validate_specialist_spec(specialist_spec)
 
-        logger.info(
-            "Dynamically registered sub-agent metadata for type '%s' at %s.%s",
-            normalized_type,
-            resolved_module,
-            resolved_class,
-        )
-        self._broadcast_registration(normalized_type, resolved_module, resolved_class)
+                    safe_segment = self._safe_module_segment(normalized_type)
+                    resolved_module = (f"{self.SUBAGENT_MODULE_PREFIX}.{safe_segment}_agent")
+
+                    module = importlib.import_module(resolved_module)
+                    expected_class = self._class_name_for(safe_segment)
+                    agent_class = getattr(module, expected_class)
+
+                    if (
+                        not issubclass(agent_class, BaseAgent)
+                        or getattr(agent_class, "SPECIALIST_SPEC", None)
+                        != expected_spec
+                    ):
+                        raise ValueError("Existing specialist has a conflicting definition")
+                return
+
+            if specialist_spec is None:
+                raise ValueError("Unknown specialty requires an executable specialist_spec")
+
+            validated_spec = validate_specialist_spec(specialist_spec)
+            policy = _SUBAGENT_SETTINGS.load()
+            generation = policy.get("generation", {})
+            if not isinstance(generation, Mapping):
+                raise ValueError("Invalid subagent generation configuration")
+
+            if not generation.get("enabled", False):
+                raise ValueError("Dynamic subagent generation is disabled")
+
+            safe_segment = self._safe_module_segment(normalized_type)
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", safe_segment):
+                raise ValueError("Unsafe subagent module identifier")
+
+            if len(safe_segment) > 64:
+                raise ValueError("Subagent identifier is too long")
+
+            resolved_module = validate_module_path(f"{self.SUBAGENT_MODULE_PREFIX}.{safe_segment}_agent")
+            resolved_class = validate_class_name(self._class_name_for(safe_segment))
+
+            max_definitions = int(generation.get("max_definitions", 256))
+            if max_definitions < 1:
+                raise ValueError("max_definitions must be positive")
+
+            module_target = self._subagent_dir / f"{safe_segment}_agent.py"
+
+            if not module_target.exists():
+                existing_count = sum(1 for path in self._subagent_dir.glob("*_agent.py") if path.is_file()) if self._subagent_dir.exists() else 0
+                if existing_count >= max_definitions:
+                    raise ValueError("Generated specialist limit reached")
+
+            module_file = self._ensure_subagent_module(safe_segment, resolved_class, validated_spec)
+
+            importlib.invalidate_caches()
+            module = importlib.import_module(resolved_module)
+            agent_class = getattr(module, resolved_class, None)
+
+            if (
+                not isinstance(agent_class, type)
+                or not issubclass(agent_class, BaseAgent)
+            ):
+                raise TypeError("Generated specialist is not a BaseAgent")
+
+            if getattr(agent_class, "SPECIALIST_SPEC", None) != validated_spec:
+                raise ValueError("Generated specialist specification mismatch")
+
+            if not callable(getattr(agent_class, "perform_task", None)):
+                raise TypeError("Generated specialist has no task handler")
+
+            metadata = AgentMetaData(
+                name=normalized_type,
+                class_name=resolved_class,
+                module_path=resolved_module,
+                version=__version__,
+                description=(f"Validated generated specialist: {normalized_type}"),
+                capabilities=(normalized_type, validated_spec["operation"]),
+                tags=("generated", "specialized"),
+                lifecycle="registered",
+                metadata={
+                    "specialist_spec": validated_spec,
+                    "source_file": str(module_file),
+                },
+            )
+
+            self.agent_factory.register_agent(metadata, overwrite=False)
+
+            logger.info(
+                "ORCHESTRATOR | Registered executable specialist %s | %s",
+                normalized_type,
+                validated_spec["operation"],
+            )
+
+            self._broadcast_registration(
+                normalized_type,
+                resolved_module,
+                resolved_class,
+            )
 
     # ------------------------------------------------------------------
     # Subagent materialisation helpers
@@ -678,56 +842,55 @@ class OrchestratorAgent(BaseAgent):
             return "DynamicAgent"
         return "".join(segment.capitalize() for segment in parts) + "Agent"
 
-    def _ensure_subagent_module(self, specialty: str, class_name: str) -> Path:
-        """Materialise the subagent module on disk if it does not exist.
 
-        Returns the path of the module file. Writing is atomic (temp file
-        followed by ``os.replace``) so that a partially-written module is
-        never visible to the import system. Existing files are preserved
-        unchanged, allowing hand-written implementations to survive
-        subsequent orchestration passes.
+
+    def _ensure_subagent_module(
+        self,
+        specialty: str,
+        class_name: str,
+        specialist_spec: Mapping[str, Any],
+    ) -> Path:
+        """Generate and verify a specialized agent module.
+
+        The workspace is initialized automatically.
+        Existing implementations are never silently overwritten.
         """
-        module_dir = self._subagent_dir
-        module_dir.mkdir(parents=True, exist_ok=True)
-
-        init_file = module_dir / "__init__.py"
-        if not init_file.exists():
-            init_file.write_text(
-                '"""Dynamically-onboarded SLAI specialist subagents."""\n',
-                encoding="utf-8",
+        with _DYNAMIC_REGISTRATION_LOCK:
+            self._initialize_subagent_workspace()
+            validated_spec = validate_specialist_spec(specialist_spec)
+            module_file = (
+                self._subagent_dir
+                / f"{specialty}_agent.py"
             )
 
-        module_file = module_dir / f"{specialty}_agent.py"
-        if module_file.exists():
-            logger.debug(
-                "Subagent module already present at %s; leaving untouched.",
+            rendered = _SUBAGENT_MODULE_TEMPLATE.format(
+                specialty=specialty,
+                specialty_repr=repr(specialty),
+                class_name=class_name,
+                specialist_spec=repr(validated_spec),
+                operation_repr=repr(
+                    validated_spec["operation"]
+                ),
+            )
+
+            compile(rendered, str(module_file), "exec")
+            self._create_file_if_absent(module_file, rendered)
+            existing = module_file.read_text(encoding="utf-8")
+
+            if existing != rendered:
+                raise ValueError(
+                    "Existing specialist definition conflicts "
+                    f"with requested implementation: {module_file}"
+                )
+
+            logger.info(
+                "ORCHESTRATOR | Specialist ready | "
+                "specialty=%s | module=%s",
+                specialty,
                 module_file,
             )
+
             return module_file
-
-        rendered = _SUBAGENT_MODULE_TEMPLATE.format(
-            specialty=specialty,
-            class_name=class_name,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-        )
-
-        fd, temp_path = tempfile.mkstemp(
-            prefix=f".{specialty}_agent.",
-            suffix=".py.tmp",
-            dir=str(module_dir),
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(rendered)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, module_file)
-        finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-
-        logger.info("Generated subagent module at %s", module_file)
-        return module_file
 
     # ==================================================================
     # Telemetry helpers
@@ -933,34 +1096,58 @@ if __name__ == "__main__":
     orchestrator._inspect_and_register_sub_agent("reasoning")
     assert "reasoning" in factory.get_registered_agent_types()
 
-    # ---- Dynamic onboarding of an unknown specialty ------------------
+
+    # ---- Dynamic specialist onboarding -------------------------------
     dynamic_specialty = "smoketest_dynamic_specialty"
+    specialist_spec = {"operation": "numeric_summary"}
     dynamic_module_file = (
-        orchestrator._subagent_dir / f"{dynamic_specialty}_agent.py"
+        orchestrator._subagent_dir
+        / f"{dynamic_specialty}_agent.py"
     )
+
+    dynamic_module_name = (
+        f"{OrchestratorAgent.SUBAGENT_MODULE_PREFIX}"
+        f".{dynamic_specialty}_agent"
+    )
+
     try:
-        orchestrator._inspect_and_register_sub_agent(dynamic_specialty)
-        assert dynamic_module_file.exists(), dynamic_module_file
-        assert dynamic_specialty in factory.get_registered_agent_types()
-
-        # Verify the generated module imports cleanly and constructs.
-        import importlib
-
-        module = importlib.import_module(
-            f"{OrchestratorAgent.SUBAGENT_MODULE_PREFIX}"
-            f".{dynamic_specialty}_agent"
+        # The Orchestrator creates and registers the specialist.
+        orchestrator._inspect_and_register_sub_agent(
+            dynamic_specialty,
+            specialist_spec=specialist_spec,
         )
+
+        assert dynamic_module_file.is_file()
+        assert (orchestrator._subagent_config_path.is_file())
+        assert (dynamic_specialty in factory.get_registered_agent_types())
+
+        # Repeated registration must not duplicate the agent.
+        orchestrator._inspect_and_register_sub_agent(dynamic_specialty, specialist_spec=specialist_spec)
+
+        # Import the actual generated implementation.
+        importlib.invalidate_caches()
+        module = importlib.import_module(dynamic_module_name)
         expected_class = orchestrator._class_name_for(dynamic_specialty)
-        assert hasattr(module, expected_class), expected_class
+        specialist_class = getattr(module, expected_class)
+        specialist = specialist_class(shared_memory=shared_memory, agent_factory=factory)
+
+        # Verify that the specialist performs real work.
+        result = specialist.perform_task({"values": [10, 20, 30, 40]})
+
+        assert result["status"] == "success"
+        assert result["result"]["count"] == 4
+        assert result["result"]["sum"] == 100
+        assert result["result"]["mean"] == 25
+
+        printer.status("TEST", "Dynamic specialist execution passed", "success")
+
     finally:
-        # Clean up the generated module and its registration so the
-        # repository is left unchanged.
-        if dynamic_module_file.exists():
-            dynamic_module_file.unlink()
-        try:
+        if dynamic_specialty in factory.get_registered_agent_types():
             factory.unregister_agent(dynamic_specialty)
-        except Exception:
-            pass
+
+        import sys
+        sys.modules.pop(dynamic_module_name, None)
+        dynamic_module_file.unlink(missing_ok=True)
 
     # ---- Shutdown ----------------------------------------------------
     orchestrator.shutdown()
