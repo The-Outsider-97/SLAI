@@ -181,7 +181,34 @@ class OptimizationSolver:
                 continue
 
             last_solution = result
-            self.memory.record(model, result, options=solver_options, metadata={"orchestrator_attempt": index + 1})
+            try:
+                self.memory.record(
+                    model,
+                    result,
+                    options=solver_options,
+                    metadata={"orchestrator_attempt": index + 1},
+                )
+            except (OptimizationError, OSError) as exc:
+                # Solver evidence persistence is operational bookkeeping, not a
+                # mathematical precondition for accepting a normalized solver
+                # result. Preserve the solution and surface the failed local
+                # evidence write explicitly for the agent/runtime layer.
+                logger.warning(
+                    "Optimization result valid but evidence recording failed | problem=%s | solver=%s | error=%s",
+                    model.name,
+                    adapter.solver_name,
+                    exc,
+                )
+                result = replace(
+                    result,
+                    warnings=tuple(result.warnings)
+                    + (f"optimization_memory_persistence_failed: {type(exc).__name__}: {exc}",),
+                    metadata={
+                        **dict(result.metadata),
+                        "optimization_memory_persistence_error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                last_solution = result
             previous = attempt_updates.get(adapter.solver_name)
             attempt_updates[adapter.solver_name] = SolverAttempt(
                 solver_name=adapter.solver_name,
@@ -243,25 +270,46 @@ class OptimizationSolver:
         primary: str | None = None,
         solver: str | None = None,
         options: Mapping[str, Any] | None = None,
+        allow_fallback: bool | None = None,
     ) -> OptimizationResult:
         if not problem.is_multi_objective:
             raise UnsupportedProblemError("multi-objective solve requires at least two objectives")
 
+        persistence_errors: list[str] = []
+
         def solve_scalar(subproblem: OptimizationProblem) -> Solution:
-            return self.solve_single(subproblem, solver=solver, options=options)
+            solution = self.solve_single(
+                subproblem,
+                solver=solver,
+                options=options,
+                allow_fallback=allow_fallback,
+            )
+            error = solution.metadata.get("optimization_memory_persistence_error")
+            if error:
+                persistence_errors.append(str(error))
+            return solution
+
+        def metadata(method_name: str) -> dict[str, Any]:
+            payload: dict[str, Any] = {"method": method_name}
+            if persistence_errors:
+                # Multi-objective transformations may solve several scalar
+                # subproblems. Preserve local-evidence failures without
+                # altering the mathematical Pareto/lexicographic result.
+                payload["optimization_memory_persistence_errors"] = tuple(persistence_errors)
+            return payload
 
         normalized = method.strip().lower()
         if normalized in {"weighted", "weighted_sum", "scalarization"}:
             front = self.multiobjective.solve_weighted_front(problem, solve_scalar, weight_vectors=weight_vectors)
-            return OptimizationResult(solution=None, pareto_front=front, metadata={"method": "weighted_scalarization"})
+            return OptimizationResult(solution=None, pareto_front=front, metadata=metadata("weighted_scalarization"))
         if normalized in {"epsilon", "epsilon_constraint"}:
             if primary is None or epsilon_grid is None:
                 raise UnsupportedProblemError("epsilon-constraint solve requires primary objective and epsilon_grid")
             front = self.multiobjective.solve_epsilon_front(problem, solve_scalar, primary=primary, epsilon_grid=epsilon_grid)
-            return OptimizationResult(solution=None, pareto_front=front, metadata={"method": "epsilon_constraint"})
+            return OptimizationResult(solution=None, pareto_front=front, metadata=metadata("epsilon_constraint"))
         if normalized in {"lexicographic", "lex"}:
             solution = self.multiobjective.lexicographic(problem, solve_scalar)
-            return OptimizationResult(solution=solution, metadata={"method": "lexicographic"})
+            return OptimizationResult(solution=solution, metadata=metadata("lexicographic"))
         raise UnsupportedProblemError("unsupported multi-objective orchestration method", context={"method": method})
 
     def solve(self, problem: OptimizationProblem, **kwargs: Any) -> Solution | OptimizationResult:
@@ -292,5 +340,6 @@ if __name__ == "__main__":
         assert result.solution is not None and result.solution.status is SolverStatus.OPTIMAL
         assert result.selection is not None and result.selection.selected_solver == "scipy_highs_linear"
         smoke_logger.info("OptimizationSolver smoke test passed | solver=%s", result.selection.selected_solver)
+
 
     _smoke_test()
