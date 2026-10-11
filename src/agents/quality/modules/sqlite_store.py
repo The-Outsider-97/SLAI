@@ -14,10 +14,12 @@ import zlib
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterator, Mapping, Optional
+
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Quality SQLite WAL")
 printer = PrettyPrinter()
+
 
 KINDS = {
     "quality_snapshot_recorded": ("snapshot_id", "source_id", None, "created_at"),
@@ -88,9 +90,7 @@ class SqliteQualityStore:
         if create:
             self.connection.executescript(SCHEMA)
         else:
-            row = self.connection.execute(
-                "SELECT value FROM metadata WHERE key='migration_complete'"
-            ).fetchone()
+            row = self.connection.execute("SELECT value FROM metadata WHERE key='migration_complete'").fetchone()
             if row is None or row[0] != "1":
                 self.connection.close()
                 raise RuntimeError("Quality Memory SQLite database has not passed migration")
@@ -101,14 +101,14 @@ class SqliteQualityStore:
         self.connection.close()
 
     def set_meta(self, key: str, value: str) -> None:
-        printer.status("SET META", f"Setting meta for the Sqlite Quality Store with: \n{key} \n{value}" "info")
+        logger.debug("SQLite quality metadata updated: key=%s", key)
         self.connection.execute(
             "INSERT INTO metadata(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value)
         )
 
     def get_meta(self, key: str) -> Optional[str]:
-        printer.status("GET META", f"Getting meta from the Sqlite Quality Store with: \n{key} " "info")
+        logger.debug("SQLite quality metadata read: key=%s", key)
         result = self.connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
         return None if result is None else str(result[0])
 
@@ -125,8 +125,7 @@ class SqliteQualityStore:
             raise ValueError("Quality record must be a JSON object")
         return value
 
-    def insert(self, kind: str, record: Mapping[str, Any],
-               *, allow_duplicate: bool = False) -> bool:
+    def insert(self, kind: str, record: Mapping[str, Any], *, allow_duplicate: bool = False) -> bool:
         if kind not in KINDS:
             raise ValueError(f"Unsupported event type: {kind}")
         id_key, scope_key, sub_key, time_key = KINDS[kind]
@@ -257,12 +256,8 @@ class SqliteQualityStore:
             yield str(kind), self._unpack(blob)
 
     def statistics(self) -> Dict[str, Any]:
-        by_kind = dict(self.connection.execute(
-            "SELECT kind,COUNT(*) FROM records GROUP BY kind"
-        ).fetchall())
-        archived = self.connection.execute(
-            "SELECT COUNT(*) FROM records WHERE archived=1"
-        ).fetchone()[0]
+        by_kind = dict(self.connection.execute("SELECT kind,COUNT(*) FROM records GROUP BY kind").fetchall())
+        archived = self.connection.execute("SELECT COUNT(*) FROM records WHERE archived=1").fetchone()[0]
         latest = self.connection.execute("SELECT MAX(happened_at) FROM records").fetchone()[0]
         return {"records_by_kind": by_kind, "archived_snapshots": archived,
                 "latest_recorded_at": latest,
@@ -278,6 +273,48 @@ class SqliteQualityStore:
         return int(self.connection.execute(
             "SELECT COUNT(DISTINCT scope) FROM records WHERE kind=?", (kind,)
         ).fetchone()[0])
+
+    def get_record(self, record_id: str) -> Optional[tuple[str, Dict[str, Any]]]:
+        """Fetch exact immutable record by its ID; intended for migration checks."""
+        row = self.connection.execute(
+            "SELECT kind,compressed_payload FROM records WHERE record_id=?",
+            (str(record_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), self._unpack(row[1])
+
+    def verify_sources(self, state_path: Path, journal_path: Path) -> Dict[str, int]:
+        """Deep, non-destructive record-by-record comparison with both legacy inputs.
+
+        The older legacy JSON representation changes `is_active` on previously
+        registered schema versions. Only this known derived field is ignored.
+        """
+        checked: Counter[str] = Counter()
+        for source_name, records in (
+            ("journal", iter_legacy_journal(journal_path)),
+            ("state", iter_legacy_state(state_path)),
+        ):
+            for kind, record in records:
+                id_key = KINDS[kind][0]
+                stored = self.get_record(str(record[id_key]))
+                if stored is None or stored[0] != kind:
+                    raise RuntimeError(
+                        f"Migrated record missing: source={source_name} "
+                        f"kind={kind} record_id={record[id_key]}"
+                    )
+                actual = dict(stored[1])
+                expected = dict(record)
+                if kind == "schema_version_registered":
+                    actual.pop("is_active", None)
+                    expected.pop("is_active", None)
+                if actual != expected:
+                    raise RuntimeError(
+                        f"Migrated payload mismatch: source={source_name} "
+                        f"kind={kind} record_id={record[id_key]}"
+                    )
+                checked[source_name] += 1
+        return dict(checked)
 
     def checkpoint(self, mode: str = "PASSIVE") -> tuple[int, int, int]:
         if mode not in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}:

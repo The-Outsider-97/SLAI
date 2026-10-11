@@ -203,9 +203,13 @@ class QualityMemory:
     for persistence, audit export, and shared-memory handoff to sibling agents.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, memory_config_override: Optional[Mapping[str, Any]] = None) -> None:
         self.config = load_global_config()
-        self.memory_config = get_config_section("quality_memory")
+        self.memory_config = (
+            get_config_section("quality_memory")
+            if memory_config_override is None
+            else deepcopy(dict(memory_config_override))
+        )
         self._lock = RLock()
         self._state = self._empty_state()
         self._write_counter = 0
