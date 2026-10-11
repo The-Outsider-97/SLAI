@@ -28,6 +28,8 @@ shared base contract.
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -35,9 +37,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple, Union
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import torch # type: ignore
+import torch.nn as nn # type: ignore
+import torch.nn.functional as F # type: ignore
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ...base.modules.base_transformer import BaseTransformer, GenerationOutput
@@ -837,12 +839,26 @@ class LanguageTransformer(BaseTransformer):
             "base_config": self.config.to_dict(),
             "language_config": self.language_config_snapshot(),
             "stats": self.stats().to_dict(),
-            "metadata": json_safe(dict(lang_metadata or {})),
+            "metadata": {
+                **json_safe({key: value for key, value in dict(lang_metadata or {}).items()
+                             if key not in {"rng_state", "corruption_rng"}}),
+                **{key: value for key, value in dict(lang_metadata or {}).items()
+                   if key in {"rng_state", "corruption_rng"}},
+            },
         }
         if optimizer is not None:
             checkpoint["optimizer_state_dict"] = optimizer.state_dict()
         try:
-            torch.save(checkpoint, target)
+            descriptor, temporary = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    torch.save(checkpoint, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
         except Exception as exc:
             raise ModelLanguageError(
                 ModelIssue(
