@@ -58,6 +58,14 @@ autonomous_control_loop:
   latest_state_key: "autonomy:control_loop:latest"
 
 
+orchestrator_agent:
+    enabled: true
+    default_specialty: "reasoning"
+    ttl_recycling: true
+    max_delegation_retries: 2
+    shared_memory_coordination_prefix: "orchestrator"
+
+
 agent_factory:
     enabled: true
     auto_register_default_agents: true
@@ -253,6 +261,15 @@ agent_factory:
         module_path: src.agents.observability_agent
         class_name: ObservabilityAgent
         capabilities: [observability, telemetry, monitoring]
+      orchestrator:
+        module_path: src.agents.orchestrator_agent
+        class_name: OrchestratorAgent
+        capabilities: [orchestration, dynamic_delegation, agent_factory]
+        constraints:
+          orchestration_scope: global_meta
+          factory_authority: true
+        metadata:
+          orchestration_role: meta_controller
       perception:
         module_path: src.agents.perception_agent
         class_name: PerceptionAgent
