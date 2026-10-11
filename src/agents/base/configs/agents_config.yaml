@@ -58,14 +58,6 @@ autonomous_control_loop:
   latest_state_key: "autonomy:control_loop:latest"
 
 
-orchestrator_agent:
-    enabled: true
-    default_specialty: "reasoning"
-    ttl_recycling: true
-    max_delegation_retries: 2
-    shared_memory_coordination_prefix: "orchestrator"
-
-
 agent_factory:
     enabled: true
     auto_register_default_agents: true
@@ -131,6 +123,7 @@ agent_factory:
       quality_agent: quality
       safety_agent: safety
       observability_agent: observability
+      optimization_agent: optimization
       reasoning_agent: reasoning
       evaluation_agent: evaluation
       simulation_agent: simulation
@@ -172,6 +165,9 @@ agent_factory:
       observability:
         torch_required: false
         notes: "Observability orchestration is telemetry-first and torch-free."
+      optimization:
+        torch_required: false
+        notes: "OptimizationAgent orchestration is torch-free; numerical backends are owned by the Optimization subsystem."
       network:
         torch_required: false
         notes: "Network transport/routing/reliability stack is torch-free."
@@ -261,6 +257,10 @@ agent_factory:
         module_path: src.agents.observability_agent
         class_name: ObservabilityAgent
         capabilities: [observability, telemetry, monitoring]
+      optimization:
+        module_path: src.agents.optimization_agent
+        class_name: OptimizationAgent
+        capabilities: [mathematical_optimization, single_objective_optimization, multi_objective_optimization, pareto_analysis]
       orchestrator:
         module_path: src.agents.orchestrator_agent
         class_name: OrchestratorAgent
@@ -365,42 +365,6 @@ base_agent:
     warm_start_key_prefix: warm_state
     retraining_flag_key_prefix: retraining_flag
 
-
-stem_agent:
-  enabled: true
-  supported_domains:
-    - algebra
-    - calculus
-    - numerical_methods
-    - statistics
-    - units
-    - dimensions
-    - uncertainty
-    - biology
-    - physics
-    - engineering
-    - computing
-  default_domain: numerical_methods
-
-  # Dual-memory orchestration policy. SharedMemory remains BaseAgent-owned;
-  # STEMMemory remains the local deterministic calculation cache.
-  shared_memory_enabled: true
-  publish_shared_results: false
-  shared_result_key_prefix: "stem:result"
-  shared_result_topic: "stem.results"
-  local_memory_enabled: true
-  cache_enabled: true
-
-  template_loading_enabled: true
-  diagnostics_enabled: true
-  strict_validation: true
-
-  # Only Agent-owned/local state participates in the central checkpoint.
-  checkpoint_local_memory: true
-  restore_local_memory: true
-
-  max_batch_size: 32
-  metrics_enabled: true
 
 adaptive_agent:
   state_dim: 10
@@ -790,6 +754,36 @@ observability_agent:
         evaluation_agent_names: ["evaluation", "evaluation_agent", "EvaluationAgent"]
 
 
+optimization_agent:
+  enabled: true
+  strict_validation: true
+
+  # SharedMemory remains BaseAgent-owned. Publish only bounded cross-agent summaries.
+  shared_memory_enabled: true
+  publish_shared_results: true
+  shared_result_key_prefix: "optimization_agent.result"
+  shared_latest_key: "optimization_agent.latest"
+  shared_event_topic: "optimization.events"
+  shared_memory_ttl_seconds: 86400
+  include_decision_variables_in_shared_memory: true
+  max_shared_pareto_points: 32
+  max_shared_warnings: 16
+
+  # These are agent-orchestration bounds only. Solver tolerances, backend options,
+  # numerical budgets, and algorithm parameters remain subsystem-owned.
+  max_batch_size: 16
+  metrics_enabled: true
+  local_reference_limit: 32
+
+
+orchestrator_agent:
+    enabled: true
+    default_specialty: "reasoning"
+    ttl_recycling: true
+    max_delegation_retries: 2
+    shared_memory_coordination_prefix: "orchestrator"
+
+
 perception_agent:
     device: "cpu"
     embed_dim: 512
@@ -806,7 +800,12 @@ perception_agent:
     contrastive_weight: 1.0  # for hybrid loss
 
 
-planning_agent: {}
+planning_agent: 
+  enabled: true
+
+  # SharedMemory remains BaseAgent-owned. Publish only bounded cross-agent summaries.
+  shared_memory_enabled: true
+  publish_shared_results: true
 
 
 privacy_agent:
@@ -1565,6 +1564,43 @@ simulation_agent:
   max_shared_trajectory_steps: 64
   max_shared_list_items: 128
   max_shared_string_length: 4096
+
+
+stem_agent:
+  enabled: true
+  supported_domains:
+    - algebra
+    - calculus
+    - numerical_methods
+    - statistics
+    - units
+    - dimensions
+    - uncertainty
+    - biology
+    - physics
+    - engineering
+    - computing
+  default_domain: numerical_methods
+
+  # Dual-memory orchestration policy. SharedMemory remains BaseAgent-owned;
+  # STEMMemory remains the local deterministic calculation cache.
+  shared_memory_enabled: true
+  publish_shared_results: false
+  shared_result_key_prefix: "stem:result"
+  shared_result_topic: "stem.results"
+  local_memory_enabled: true
+  cache_enabled: true
+
+  template_loading_enabled: true
+  diagnostics_enabled: true
+  strict_validation: true
+
+  # Only Agent-owned/local state participates in the central checkpoint.
+  checkpoint_local_memory: true
+  restore_local_memory: true
+
+  max_batch_size: 32
+  metrics_enabled: true
 
 
 verification_agent:
