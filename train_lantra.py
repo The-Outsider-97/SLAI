@@ -119,6 +119,7 @@ from src.agents.language.modules.language_tokenizer import LanguageTokenizer
 from src.agents.language.modules.language_transformer import LanguageTransformer
 from src.training.lantra_phase_scheduler import *
 from src.training.lantra_resume import load_optimizer_resume_state, select_resume_checkpoint, summarize_checkpoint
+from src.training.enrichment_contracts import assign_corpus_document_splits
 from logs.logger import PrettyPrinter, configure_logging, get_logger
 
 
@@ -725,6 +726,10 @@ def _restore_stage_optimizer(
         corpus_fingerprint=corpus_fingerprint,
     )
     if resume is None:
+        metadata = payload.get("metadata", {})
+        stage = str(metadata.get("stage") or metadata.get("phase") or "")
+        if stage == expected_stage or (expected_stage == "raw_text_denoising_pretraining" and stage.startswith(expected_stage)):
+            raise LantraTrainingError("Checkpoint stage matches but dataset/optimizer resume contract does not. Use --weights-only for an intentional new training run.")
         return None
     try:
         optimizer.load_state_dict(resume["optimizer_state_dict"])
@@ -742,9 +747,7 @@ def _restore_stage_optimizer(
     )
     return dict(resume)
 
-def _reset_continual_state_for_fresh_architecture(
-    state: Mapping[str, Any],
-) -> Dict[str, Any]:
+def _reset_continual_state_for_fresh_architecture(state: Mapping[str, Any]) -> Dict[str, Any]:
     """Retain the file-hash cache but clear model-specific continual-training progress."""
 
     reset = dict(state)
@@ -758,10 +761,7 @@ def _reset_continual_state_for_fresh_architecture(
     return reset
 
 
-def validate_recommended_architecture(
-    model: LanguageTransformer,
-    config: "TrainerConfig",
-) -> None:
+def validate_recommended_architecture(model: LanguageTransformer, config: "TrainerConfig") -> None:
     if not config.recommended_model_overrides:
         return
     actual_config = {
@@ -769,10 +769,7 @@ def validate_recommended_architecture(
         for key in RECOMMENDED_ARCHITECTURE_KEYS
         if hasattr(model.config, key)
     }
-    mismatches = _architecture_mismatches(
-        actual_config,
-        config.recommended_model_overrides,
-    )
+    mismatches = _architecture_mismatches(actual_config, config.recommended_model_overrides)
     if mismatches:
         raise LantraTrainingError(
             "The explicitly selected resume checkpoint architecture does not match "
@@ -789,9 +786,7 @@ def require_text(value: Any, field_name: str, *, max_chars: int = 500_000) -> st
     if not text:
         raise LantraTrainingError(f"Field '{field_name}' cannot be empty.")
     if len(text) > max_chars:
-        raise LantraTrainingError(
-            f"Field '{field_name}' contains {len(text)} characters, exceeding the safety limit {max_chars}."
-        )
+        raise LantraTrainingError(f"Field '{field_name}' contains {len(text)} characters, exceeding the safety limit {max_chars}.")
     return text
 
 
@@ -800,9 +795,7 @@ def first_text(record: Mapping[str, Any], names: Sequence[str], field_name: str)
         value = record.get(name)
         if isinstance(value, str) and value.strip():
             return require_text(value, name)
-    raise LantraTrainingError(
-        f"Missing required text for '{field_name}'. Accepted keys: {', '.join(names)}."
-    )
+    raise LantraTrainingError(f"Missing required text for '{field_name}'. Accepted keys: {', '.join(names)}.")
 
 
 def normalize_task(value: Any) -> str:
@@ -835,9 +828,7 @@ def normalize_split(value: Any) -> Optional[str]:
     aliases = {"val": "validation", "valid": "validation", "dev": "validation"}
     split = aliases.get(split, split)
     if split not in VALID_SPLITS:
-        raise LantraTrainingError(
-            f"Unsupported split {value!r}; expected train, validation, or test."
-        )
+        raise LantraTrainingError(f"Unsupported split {value!r}; expected train, validation, or test.")
     return split
 
 
@@ -859,6 +850,9 @@ def format_dialogue_history(value: Any) -> str:
 
 
 def normalize_record(record: Mapping[str, Any], provenance: str, line_number: int) -> TrainingExample:
+    candidate_metadata = record.get("metadata", {})
+    if isinstance(candidate_metadata, Mapping) and candidate_metadata.get("validation_status") in {"pending", "rejected"}:
+        raise LantraTrainingError("Unvalidated teacher candidate cannot enter training.")
     task = normalize_task(record.get("task"))
     split = normalize_split(record.get("split"))
     metadata = record.get("metadata")
@@ -2038,41 +2032,61 @@ def _assign_document_splits(
     test_fraction: float,
     seed: int,
 ) -> Dict[str, str]:
-    """Assign complete documents before chunking to prevent cross-split leakage."""
-    if not documents:
-        return {}
-    ordered = sorted(
+    """Delegate document splits to the shared curriculum/raw corpus policy."""
+    return assign_corpus_document_splits(
         documents,
-        key=lambda item: (
-            stable_unit_interval(item.normalized_text_sha256, seed),
-            item.normalized_text_sha256,
-            item.document_id,
-        ),
+        validation_fraction=validation_fraction,
+        test_fraction=test_fraction,
+        seed=seed,
     )
-    count = len(ordered)
-    n_validation = 0 if validation_fraction <= 0.0 else max(1, int(round(count * validation_fraction)))
-    n_test = 0 if test_fraction <= 0.0 else max(1, int(round(count * test_fraction)))
 
-    # Always retain at least one training document. Tiny corpora cannot support
-    # three statistically meaningful partitions; the manifest makes this explicit.
-    while n_validation + n_test >= count:
-        if n_test >= n_validation and n_test > 0:
-            n_test -= 1
-        elif n_validation > 0:
-            n_validation -= 1
-        else:
-            break
 
-    assignments: Dict[str, str] = {}
-    for index, document in enumerate(ordered):
-        if index < n_test:
-            split = "test"
-        elif index < n_test + n_validation:
-            split = "validation"
-        else:
-            split = "train"
-        assignments[document.document_id] = split
-    return assignments
+def validate_curriculum_manifest_compatibility(
+    supervised_files: Sequence[Path], config: TrainerConfig,
+) -> None:
+    """Fail early if a curriculum manifest conflicts with active raw-split settings.
+
+    This complements—not replaces—the per-document cross-phase leakage gate.
+    """
+    checked: set[Path] = set()
+    for data_file in supervised_files:
+        if not data_file.name.startswith("phase_") or data_file.suffix != ".jsonl":
+            continue
+        manifest_path = data_file.parent / "manifest.json"
+        if manifest_path in checked or not manifest_path.is_file():
+            continue
+        checked.add(manifest_path)
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise LantraTrainingError(
+                f"Unreadable curriculum manifest {manifest_path}: {exc}"
+            ) from exc
+        settings = payload.get("config")
+        if not isinstance(settings, dict):
+            raise LantraTrainingError(
+                f"Curriculum manifest {manifest_path} lacks its split configuration."
+            )
+        comparisons = {
+            "seed": config.seed,
+            "validation_fraction": config.raw_validation_fraction,
+            "test_fraction": config.raw_test_fraction,
+            "min_document_chars": config.raw_min_chars,
+        }
+        mismatches = [
+            f"{name}: curriculum={settings.get(name)!r}, raw={expected!r}"
+            for name, expected in comparisons.items()
+            if settings.get(name) != expected
+        ]
+        if mismatches:
+            raise LantraTrainingError(
+                f"Incompatible LANTRA curriculum {manifest_path}: "
+                + "; ".join(mismatches)
+                + ". Set matching split/eligibility configuration in "
+                "src/training/configs/lantra_curriculum.yaml, rebuild with "
+                "py -m build_lantra_curriculum, then restart training. "
+                "Do not disable source leakage validation."
+            )
 
 
 def load_raw_corpus(files: Sequence[Path], config: TrainerConfig) -> RawCorpus:
@@ -2527,6 +2541,23 @@ def initialize_embeddings_from_glove(
     }
 
 
+def capture_training_rng() -> Dict[str, Any]:
+    torch = torch_runtime()
+    return {"python": random.getstate(), "torch": torch.get_rng_state().tolist(),
+            "cuda": [value.tolist() for value in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else []}
+
+
+def restore_training_rng(state: Mapping[str, Any]) -> None:
+    torch = torch_runtime()
+    def tuples(value):
+        return tuple(tuples(item) for item in value) if isinstance(value, (list, tuple)) else value
+    if state:
+        random.setstate(tuples(state["python"]))
+        torch.set_rng_state(torch.tensor(state["torch"], dtype=torch.uint8, device="cpu"))
+        if state.get("cuda") and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([torch.tensor(value, dtype=torch.uint8, device="cpu") for value in state["cuda"]])
+
+
 def save_phase_checkpoint(
     model: LanguageTransformer,
     optimizer: Optional[Any],
@@ -2540,6 +2571,7 @@ def save_phase_checkpoint(
         "trainer": "train_lantra",
         "run_id": run_id,
         "phase": phase,
+        "rng_state": capture_training_rng(),
         "saved_at": utc_now(),
         **dict(metadata),
     }
@@ -2812,6 +2844,7 @@ def raw_text_pretrain(
     interval_checkpoints: List[str] = []
     rng = random.Random(config.seed + 202)
     start_epoch = 1
+    raw_resume_sample = 0
     resume_state = _restore_stage_optimizer(
         resume_checkpoint,
         optimizer,
@@ -2823,6 +2856,17 @@ def raw_text_pretrain(
         global_step = int(resume_state.get("global_optimizer_step", 0))
         resume_meta = resume_state.get("metadata", {})
         resume_phase = str(resume_meta.get("phase", "")) if isinstance(resume_meta, Mapping) else ""
+        if resume_phase.endswith("_interrupted"):
+            raise LantraTrainingError("Use a completed raw interval/latest checkpoint, not a potentially partial interrupted update.")
+        if resume_phase.endswith("_interval"):
+            if "next_sample" not in resume_meta or "corruption_rng" not in resume_meta:
+                raise LantraTrainingError("Legacy raw interval checkpoint lacks an exact cursor. Use weights-only initialization.")
+            raw_resume_sample = int(resume_meta["next_sample"])
+        restore_training_rng(resume_meta.get("rng_state", {}))
+        if "corruption_rng" in resume_meta:
+            def tuples(value):
+                return tuple(tuples(x) for x in value) if isinstance(value, (list, tuple)) else value
+            rng.setstate(tuples(resume_meta["corruption_rng"]))
         start_epoch = max(1, resumed_epoch if resume_phase.endswith(("_interval", "_interrupted")) else resumed_epoch + 1)
         record = resume_meta.get("record", {}) if isinstance(resume_meta, Mapping) else {}
         if isinstance(record, Mapping):
@@ -2839,14 +2883,17 @@ def raw_text_pretrain(
         for epoch in range(start_epoch, config.raw_pretrain_epochs + 1):
             current_epoch = epoch
             order = list(train_segments)
-            rng.shuffle(order)
+            random.Random(config.seed + 202 + epoch).shuffle(order)
             order = order[:per_epoch_count]
             model.train()
             epoch_loss = 0.0
             example_count = 0
             epoch_steps = 0
     
-            for group_start in range(0, len(order), config.gradient_accumulation):
+            raw_start = raw_resume_sample if epoch == start_epoch else 0
+            if raw_start < 0 or raw_start > len(order) or (raw_start != len(order) and raw_start % config.gradient_accumulation):
+                raise LantraTrainingError("Invalid raw resume cursor.")
+            for group_start in range(raw_start, len(order), config.gradient_accumulation):
                 group = order[group_start:group_start + config.gradient_accumulation]
                 if not group:
                     continue
@@ -2900,6 +2947,8 @@ def raw_text_pretrain(
                             "global_optimizer_step": global_step,
                             "total_optimizer_steps": total_steps,
                             "examples_in_epoch": example_count,
+                            "next_sample": group_start + len(group),
+                            "corruption_rng": rng.getstate(),
                             "mean_train_loss_to_step": epoch_loss / max(1, example_count),
                             "learning_rate": lr,
                             "corpus_fingerprint": corpus.fingerprint,
@@ -2951,7 +3000,7 @@ def raw_text_pretrain(
                     best_path,
                     run_id=run_id,
                     phase="raw_text_denoising_pretraining_best",
-                    metadata={"corpus": corpus.to_dict(), "record": record},
+                    metadata={"corpus": corpus.to_dict(), "record": record, "corruption_rng": rng.getstate()},
                 )
             save_phase_checkpoint(
                 model,
@@ -2959,7 +3008,7 @@ def raw_text_pretrain(
                 latest_path,
                 run_id=run_id,
                 phase="raw_text_denoising_pretraining_latest",
-                metadata={"corpus": corpus.to_dict(), "record": record},
+                metadata={"corpus": corpus.to_dict(), "record": record, "corruption_rng": rng.getstate()},
             )
             PRINTER.pretty("LANTRA RAW PRETRAIN", record, "success")
     
@@ -3329,6 +3378,7 @@ def train_epoch(
     effective_warmup_steps: int,
     global_optimizer_step: int,
     checkpoint_callback: Optional[Callable[[int, int, EpochStats, float], None]] = None,
+    start_sample: int = 0,
 ) -> Tuple[EpochStats, int]:
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -3341,7 +3391,11 @@ def train_epoch(
     )
     pending = 0
 
+    if start_sample < 0 or start_sample > len(ordered) or (start_sample != len(ordered) and start_sample % config.gradient_accumulation):
+        raise LantraTrainingError("Resume cursor must be a completed accumulation boundary.")
     for index, example in enumerate(ordered, 1):
+        if index <= start_sample:
+            continue
         loss, aux = compute_example_loss(model, tokenizer, example, config, device)
         raw_loss = finite_loss_value(loss)
         weight = task_weight(example.task)
@@ -3671,6 +3725,7 @@ def save_checkpoint(
         "dataset_fingerprint": dataset.fingerprint,
         "dataset_counts": dataset.counts(),
         "trainer_config": config.to_dict(),
+        "rng_state": capture_training_rng(),
         "objective_contract": OBJECTIVE_CONTRACT,
         "validation_metrics": dict(validation_metrics or {}),
         "saved_at": utc_now(),
@@ -3748,12 +3803,21 @@ def train(
         expected_stage=stage_name,
         dataset_fingerprint=dataset.fingerprint,
     )
+    resume_sample = 0
     if resume_state is not None:
         resumed_epoch = int(resume_state.get("epoch", 0))
         global_optimizer_step = int(resume_state.get("global_optimizer_step", 0))
         status = str(resume_state.get("status", "")).casefold()
         start_epoch = max(1, resumed_epoch if status == "interval" else resumed_epoch + 1)
         metadata = resume_state.get("metadata", {})
+        if status == "interrupted":
+            raise LantraTrainingError("Interrupted legacy snapshots may contain a partial optimizer update; resume a completed interval/latest checkpoint explicitly.")
+        if status == "interval":
+            progress = metadata.get("training_progress", {})
+            if "next_sample" not in progress or "rng_state" not in metadata:
+                raise LantraTrainingError("Legacy interval checkpoint lacks an exact cursor/RNG state. Use --init-from with --weights-only for intentional continuation.")
+            resume_sample = int(progress["next_sample"])
+        restore_training_rng(metadata.get("rng_state", {}))
         validation = metadata.get("validation_metrics", {}) if isinstance(metadata, Mapping) else {}
         if isinstance(validation, Mapping):
             value = validation.get("macro_normalized_task_loss")
@@ -3794,6 +3858,7 @@ def train(
                 "checkpoint_every_steps": config.checkpoint_every_steps,
                 "learning_rate": learning_rate,
                 "epoch_progress": stats.to_dict(),
+                "next_sample": (resume_sample if epoch == start_epoch else 0) + stats.examples,
             },
         )
         interval_checkpoints.append(saved)
@@ -3833,6 +3898,7 @@ def train(
                 effective_warmup_steps=effective_warmup_steps,
                 global_optimizer_step=global_optimizer_step,
                 checkpoint_callback=save_interval_checkpoint,
+                start_sample=resume_sample if epoch == start_epoch else 0,
             )
             validation_metrics = evaluate(
                 model,
@@ -4145,6 +4211,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Minimum training examples per active task within each curriculum phase.",
     )
 
+    parser.add_argument("--evaluate-only", action="store_true", help="Evaluate local checkpoint on explicit held-out data without optimization or teacher APIs.")
+    parser.add_argument("--weights-only", action="store_true", help="Load checkpoint parameters but intentionally reset optimizer, RNG and stage progression.")
+
     # Tokenizer.
     parser.add_argument("--retrain-tokenizer", action="store_true")
     parser.add_argument("--tokenizer-vocab-size", type=int, default=50_000)
@@ -4410,6 +4479,30 @@ def build_report(
     }
 
 
+def evaluate_local_checkpoint(config: TrainerConfig) -> int:
+    """Evaluate explicit held-out rows without initializing a training run."""
+    if not config.init_from or config.retrain_tokenizer:
+        raise LantraTrainingError("--evaluate-only requires --init-from and its original tokenizer; do not use --retrain-tokenizer.")
+    files = discover_data_files(config.data_paths)
+    examples, duplicates, fingerprint = load_examples(files)
+    heldout = tuple(example for example in examples if example.split == "test")
+    if not heldout:
+        raise LantraTrainingError("Evaluation requires explicit independently sourced test records.")
+    if any(example.metadata.get("teacher_generated") for example in heldout):
+        raise LantraTrainingError("Teacher-generated records cannot be the held-out evaluation set.")
+    dataset = DatasetSplit(train=(), validation=(), test=heldout, files=tuple(str(path) for path in files),
+                           fingerprint=fingerprint, duplicate_count=duplicates)
+    tokenizer = initialize_tokenizer(config, dataset, ())
+    device = resolve_device(config.device)
+    model = initialize_model(config, tokenizer, device)
+    metrics = evaluate(model, tokenizer, heldout, config, device, include_generation_metrics=True)
+    report_path = Path(config.report_dir) / "lantra_heldout_evaluation.json"
+    atomic_json_write(report_path, {"checkpoint": config.init_from, "checkpoint_sha256": sha256_file(Path(config.init_from)),
+        "dataset_fingerprint": fingerprint, "test_records": len(heldout), "metrics": metrics})
+    PRINTER.pretty("LANTRA HELD-OUT EVALUATION", {"report": str(report_path), "metrics": metrics}, "success")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     configure_logging()
     started_clock = time.perf_counter()
@@ -4419,6 +4512,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         args = parse_args(argv)
         config = config_from_args(args)
+        if args.evaluate_only:
+            return evaluate_local_checkpoint(config)
 
         state_path = Path(config.continual_state_path)
         state_was_new = not state_path.is_file()
@@ -4464,7 +4559,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # --------------------------------------------------------------
         # Discover raw corpus and normalized supervised/curriculum data.
         # --------------------------------------------------------------
+        supervised_files = discover_data_files(config.data_paths)
         needs_raw_corpus = config.raw_pretrain_epochs > 0 or config.retrain_tokenizer
+        if needs_raw_corpus:
+            validate_curriculum_manifest_compatibility(supervised_files, config)
         if needs_raw_corpus:
             discovered_raw_files = discover_raw_text_files(config.raw_text_paths)
             raw_files = discovered_raw_files
@@ -4533,7 +4631,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "info",
             )
 
-        supervised_files = discover_data_files(config.data_paths)
         dataset: Optional[DatasetSplit] = None
         phase_plan: Optional[LantraPhasePlan] = None
         phase_datasets: Dict[str, Optional[DatasetSplit]] = {
@@ -4633,7 +4730,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOGGER.info("Resolved LANTRA device: %s", device)
         model = initialize_model(config, tokenizer, device)
 
-        resume_checkpoint_path = Path(config.init_from) if config.init_from else None
+        resume_checkpoint_path = Path(config.init_from) if config.init_from and not args.weights_only else None
         resume_summary = None
         if resume_checkpoint_path is not None and resume_checkpoint_path.is_file():
             resume_summary = summarize_checkpoint(
