@@ -758,19 +758,17 @@ optimization_agent:
   enabled: true
   strict_validation: true
 
-  # SharedMemory remains BaseAgent-owned. Publish only bounded cross-agent summaries.
   shared_memory_enabled: true
   publish_shared_results: true
   shared_result_key_prefix: "optimization_agent.result"
   shared_latest_key: "optimization_agent.latest"
   shared_event_topic: "optimization.events"
   shared_memory_ttl_seconds: 86400
+
   include_decision_variables_in_shared_memory: true
   max_shared_pareto_points: 32
   max_shared_warnings: 16
 
-  # These are agent-orchestration bounds only. Solver tolerances, backend options,
-  # numerical budgets, and algorithm parameters remain subsystem-owned.
   max_batch_size: 16
   metrics_enabled: true
   local_reference_limit: 32
@@ -1202,6 +1200,7 @@ quality_agent:
       batch_aggregation:
         mean_weight: 0.70
         minimum_weight: 0.30
+
 
 reader_agent:
   enabled: true
