@@ -14,20 +14,23 @@ from __future__ import annotations
 
 __version__ = "2.3.0"
 
+import copy
 import math
 import random
 import re
 import threading
+import yaml # type: ignore
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from ..optimization_math import *
-from ..optimization_types import *
 from ..utils.config_loader import get_config_section, load_global_config
 from ..utils.optimization_errors import *
 from ..utils.optimization_helpers import *
+from ..utils.temp_loader import load_template
+from ..optimization_math import *
+from ..optimization_types import *
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Problem Definition")
@@ -309,6 +312,313 @@ def _build_constraint(index: int, spec: Any, *, default_tolerance: float, max_ex
     )
 
 
+_CATALOG_VERSION = "1.0"
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0"})
+_SUPPORTED_TEMPLATE_VERSIONS = frozenset({"1.0"})
+_TEMPLATE_PARAMETER_TYPES = frozenset({"any", "boolean", "integer", "mapping", "number", "sequence", "string"})
+_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_.]*)\}")
+_FULL_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_.]*)\}$")
+_FORBIDDEN_TEMPLATE_KEYS = frozenset({
+    "backend", "fallback_solver", "max_iterations", "population_size",
+    "solver", "solver_name", "solver_priority",
+})
+
+
+def _template_error(message: str, **context: Any) -> OptimizationTemplateError:
+    return OptimizationTemplateError(
+        message,
+        context={key: value for key, value in context.items() if value is not None},
+    )
+
+
+def _load_template_catalog(filename: str, root_key: str) -> Mapping[str, Any]:
+    """Parse canonical YAML text loaded through the existing template loader."""
+    raw = load_template(filename)
+    if not isinstance(raw, str):
+        raise _template_error("Optimization YAML template asset must load as text", template_file=filename)
+    try:
+        document = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise _template_error("Invalid Optimization template YAML", template_file=filename) from exc
+    if not isinstance(document, Mapping):
+        raise _template_error("Optimization template YAML root must be a mapping", template_file=filename)
+    if document.get("format_version") != _CATALOG_VERSION:
+        raise _template_error(
+            "Unsupported Optimization template catalog version",
+            template_file=filename,
+            expected=_CATALOG_VERSION,
+            received=document.get("format_version"),
+        )
+    payload = document.get(root_key)
+    if not isinstance(payload, Mapping):
+        raise _template_error("Optimization template catalog is missing its required mapping", template_file=filename, required_key=root_key)
+    return copy.deepcopy(payload)
+
+
+def _mapping(value: Any, label: str, *, template: str | None = None, schema: str | None = None) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _template_error(f"{label} must be a mapping", template=template, schema=schema, received_type=type(value).__name__)
+    return value
+
+
+def _reject_unknown_fields(value: Mapping[str, Any], allowed: set[str], label: str, *, template: str | None = None, schema: str | None = None) -> None:
+    unknown = sorted(str(key) for key in value if str(key) not in allowed)
+    if unknown:
+        raise _template_error(f"{label} contains unsupported fields", template=template, schema=schema, fields=unknown)
+
+
+def _validate_schema(schema_name: str, raw: Any) -> Mapping[str, Any]:
+    schema = _mapping(raw, "schema", schema=schema_name)
+    _reject_unknown_fields(schema, {"schema_version", "description", "parameters", "problem", "validation"}, "schema", schema=schema_name)
+    if schema.get("schema_version") not in _SUPPORTED_SCHEMA_VERSIONS:
+        raise _template_error("Unsupported optimization schema version", schema=schema_name, received=schema.get("schema_version"))
+    if not isinstance(schema.get("description"), str) or not str(schema["description"]).strip():
+        raise _template_error("Optimization schema requires a description", schema=schema_name)
+    parameters = _mapping(schema.get("parameters", {}), "schema.parameters", schema=schema_name)
+    _mapping(schema.get("problem", {}), "schema.problem", schema=schema_name)
+    validation = _mapping(schema.get("validation", {}), "schema.validation", schema=schema_name)
+    if validation.get("unknown_parameters", "reject") != "reject":
+        raise _template_error("Only the 'reject' unknown-parameter policy is supported", schema=schema_name, policy=validation.get("unknown_parameters"))
+    for name, raw_spec in parameters.items():
+        if not isinstance(name, str) or not name.strip():
+            raise _template_error("Schema parameter names must be non-empty strings", schema=schema_name)
+        spec = _mapping(raw_spec, "parameter specification", schema=schema_name)
+        _reject_unknown_fields(
+            spec,
+            {"type", "required", "default", "minimum", "maximum", "required_keys", "values_type", "description"},
+            "parameter specification",
+            schema=schema_name,
+        )
+        parameter_type = str(spec.get("type", "any")).strip().lower()
+        if parameter_type not in _TEMPLATE_PARAMETER_TYPES:
+            raise _template_error("Unsupported template parameter type", schema=schema_name, parameter=name, parameter_type=parameter_type)
+        if not isinstance(spec.get("required", False), bool):
+            raise _template_error("parameter.required must be boolean", schema=schema_name, parameter=name)
+        if spec.get("required", False) and "default" in spec:
+            raise _template_error("Required template parameter cannot define a default", schema=schema_name, parameter=name)
+    return schema
+
+
+def _find_forbidden_template_key(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in _FORBIDDEN_TEMPLATE_KEYS:
+                return normalized
+            found = _find_forbidden_template_key(child)
+            if found:
+                return found
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for child in value:
+            found = _find_forbidden_template_key(child)
+            if found:
+                return found
+    return None
+
+
+def _validate_template(template_name: str, raw: Any) -> Mapping[str, Any]:
+    template = _mapping(raw, "template", template=template_name)
+    _reject_unknown_fields(template, {"template_version", "schema", "description", "problem", "metadata"}, "template", template=template_name)
+    if template.get("template_version") not in _SUPPORTED_TEMPLATE_VERSIONS:
+        raise _template_error("Unsupported optimization template version", template=template_name, received=template.get("template_version"))
+    schema_name = template.get("schema")
+    if not isinstance(schema_name, str) or not schema_name.strip():
+        raise _template_error("Optimization template requires a schema reference", template=template_name)
+    if not isinstance(template.get("description"), str) or not str(template["description"]).strip():
+        raise _template_error("Optimization template requires a description", template=template_name, schema=schema_name)
+    problem = _mapping(template.get("problem"), "template.problem", template=template_name, schema=schema_name)
+    _mapping(template.get("metadata", {}), "template.metadata", template=template_name, schema=schema_name)
+    forbidden = _find_forbidden_template_key(problem)
+    if forbidden:
+        raise _template_error(
+            "Optimization templates may not contain solver/backend configuration",
+            template=template_name,
+            schema=schema_name,
+            offending_key=forbidden,
+        )
+    return template
+
+
+def _type_matches(value: Any, expected: str) -> bool:
+    if expected == "any":
+        return True
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and to_finite_float(value) is not None
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "mapping":
+        return isinstance(value, Mapping)
+    return expected == "sequence" and isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _validate_parameter(schema_name: str, name: str, value: Any, spec: Mapping[str, Any]) -> None:
+    expected = str(spec.get("type", "any")).strip().lower()
+    if not _type_matches(value, expected):
+        raise _template_error("Template parameter has wrong type", schema=schema_name, parameter=name, expected_type=expected, received_type=type(value).__name__)
+    if expected in {"number", "integer"}:
+        numeric = to_finite_float(value)
+        if numeric is None:
+            raise _template_error("Template numeric parameter must be finite", schema=schema_name, parameter=name)
+        minimum = to_finite_float(spec.get("minimum")) if "minimum" in spec else None
+        maximum = to_finite_float(spec.get("maximum")) if "maximum" in spec else None
+        if "minimum" in spec and (minimum is None or numeric < minimum):
+            raise _template_error("Template parameter is below its minimum", schema=schema_name, parameter=name, minimum=spec.get("minimum"))
+        if "maximum" in spec and (maximum is None or numeric > maximum):
+            raise _template_error("Template parameter exceeds its maximum", schema=schema_name, parameter=name, maximum=spec.get("maximum"))
+    required_keys = spec.get("required_keys")
+    if required_keys is not None:
+        if not isinstance(value, Mapping) or not isinstance(required_keys, Sequence) or isinstance(required_keys, (str, bytes, bytearray)):
+            raise _template_error("parameter.required_keys requires mapping data and a key sequence", schema=schema_name, parameter=name)
+        missing = [str(key) for key in required_keys if key not in value]
+        if missing:
+            raise _template_error("Template mapping parameter is missing required keys", schema=schema_name, parameter=name, missing_keys=missing)
+    values_type = spec.get("values_type")
+    if values_type is not None:
+        item_type = str(values_type).strip().lower()
+        if item_type not in {"boolean", "integer", "number", "string"}:
+            raise _template_error("Unsupported parameter values_type", schema=schema_name, parameter=name, values_type=item_type)
+        values = value.values() if isinstance(value, Mapping) else value if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else None
+        if values is None:
+            raise _template_error("parameter.values_type requires mapping or sequence data", schema=schema_name, parameter=name)
+        for item in values:
+            if not _type_matches(item, item_type):
+                raise _template_error("Template parameter contains value of wrong type", schema=schema_name, parameter=name, expected_value_type=item_type, received_type=type(item).__name__)
+
+
+def _bind_parameters(schema_name: str, schema: Mapping[str, Any], parameters: Mapping[str, Any] | None) -> dict[str, Any]:
+    supplied = {} if parameters is None else parameters
+    if not isinstance(supplied, Mapping):
+        raise _template_error("Template parameters must be a mapping", schema=schema_name, received_type=type(supplied).__name__)
+    specs = _mapping(schema.get("parameters", {}), "schema.parameters", schema=schema_name)
+    unknown = sorted(str(key) for key in supplied if key not in specs)
+    if unknown:
+        raise _template_error("Unknown template parameters are not allowed", schema=schema_name, unknown_parameters=unknown)
+    bound: dict[str, Any] = {}
+    for name, raw_spec in specs.items():
+        spec = _mapping(raw_spec, "parameter specification", schema=schema_name)
+        if name in supplied:
+            value = copy.deepcopy(supplied[name])
+        elif "default" in spec:
+            value = copy.deepcopy(spec["default"])
+        elif spec.get("required", False):
+            raise _template_error("Missing required template parameter", schema=schema_name, parameter=name)
+        else:
+            continue
+        _validate_parameter(schema_name, str(name), value, spec)
+        bound[str(name)] = value
+    return bound
+
+
+def _resolve_parameter(parameters: Mapping[str, Any], path: str, *, template: str, schema: str) -> Any:
+    value: Any = parameters
+    for segment in path.split("."):
+        if not isinstance(value, Mapping) or segment not in value:
+            raise _template_error("Template placeholder cannot be resolved", template=template, schema=schema, placeholder=path, missing_segment=segment)
+        value = value[segment]
+    return copy.deepcopy(value)
+
+
+def _substitute(value: Any, parameters: Mapping[str, Any], *, template: str, schema: str) -> Any:
+    if isinstance(value, str):
+        full = _FULL_PLACEHOLDER.fullmatch(value)
+        if full:
+            return _resolve_parameter(parameters, full.group(1), template=template, schema=schema)
+        rendered = value
+        for match in tuple(_PLACEHOLDER.finditer(value)):
+            replacement = _resolve_parameter(parameters, match.group(1), template=template, schema=schema)
+            if isinstance(replacement, (Mapping, list, tuple, set)):
+                raise _template_error("Container parameters require a complete placeholder value", template=template, schema=schema, placeholder=match.group(1))
+            rendered = rendered.replace(match.group(0), str(replacement))
+        if "${" in rendered:
+            raise _template_error("Malformed template placeholder", template=template, schema=schema, value=rendered)
+        return rendered
+    if isinstance(value, Mapping):
+        return {copy.deepcopy(key): _substitute(child, parameters, template=template, schema=schema) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_substitute(child, parameters, template=template, schema=schema) for child in value]
+    if isinstance(value, tuple):
+        return tuple(_substitute(child, parameters, template=template, schema=schema) for child in value)
+    return copy.deepcopy(value)
+
+
+def _structure(spec: Any) -> str:
+    if isinstance(spec, Mapping):
+        if spec.get("formula") is not None or spec.get("expression") is not None or spec.get("function") is not None:
+            return "expression"
+        if spec.get("quadratic"):
+            return "quadratic"
+        if spec.get("linear"):
+            return "linear"
+    return "expression" if isinstance(spec, str) else "unknown"
+
+
+def _collection(value: Any, label: str, *, template: str, schema: str) -> list[Any]:
+    if isinstance(value, Mapping):
+        return list(value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(value)
+    raise _template_error(f"Template {label} must be a mapping or sequence", template=template, schema=schema)
+
+
+def _check_collection_contract(label: str, raw: Any, contract: Mapping[str, Any], *, template: str, schema: str, structure: bool = False) -> list[Any]:
+    items = _collection(raw, label, template=template, schema=schema)
+    minimum, maximum = contract.get("min_items"), contract.get("max_items")
+    for field, bound in (("min_items", minimum), ("max_items", maximum)):
+        if bound is not None and (isinstance(bound, bool) or not isinstance(bound, int) or bound < 0):
+            raise _template_error(f"schema.problem.{label}.{field} must be a non-negative integer", schema=schema)
+    if minimum is not None and len(items) < minimum:
+        raise _template_error(f"Template has too few {label}", template=template, schema=schema, minimum=minimum, received=len(items))
+    if maximum is not None and len(items) > maximum:
+        raise _template_error(f"Template has too many {label}", template=template, schema=schema, maximum=maximum, received=len(items))
+    allowed = contract.get("allowed_structures") if structure else None
+    if allowed is not None:
+        if not isinstance(allowed, Sequence) or isinstance(allowed, (str, bytes, bytearray)):
+            raise _template_error(f"schema.problem.{label}.allowed_structures must be a sequence", schema=schema)
+        allowed_set = {str(item).strip().lower() for item in allowed}
+        for item in items:
+            actual = _structure(item)
+            if actual not in allowed_set:
+                raise _template_error(f"Template {label[:-1]} structure is not allowed by its schema", template=template, schema=schema, structure=actual, allowed_structures=sorted(allowed_set))
+    return items
+
+
+def _validate_problem_contract(template_name: str, schema_name: str, schema: Mapping[str, Any], problem: Mapping[str, Any]) -> None:
+    contract = _mapping(schema.get("problem", {}), "schema.problem", schema=schema_name)
+    _reject_unknown_fields(contract, {"class", "variables", "objectives", "constraints"}, "schema.problem", schema=schema_name)
+    expected_class = contract.get("class")
+    actual_class = problem.get("problem_class")
+    if expected_class is not None and (not isinstance(actual_class, str) or actual_class.strip().lower() != str(expected_class).strip().lower()):
+        raise _template_error("Template problem class does not match its schema", template=template_name, schema=schema_name, expected_class=expected_class, received_class=actual_class)
+
+    variable_contract = _mapping(contract.get("variables", {}), "schema.problem.variables", schema=schema_name)
+    _reject_unknown_fields(variable_contract, {"min_items", "max_items", "allowed_domains"}, "schema.problem.variables", schema=schema_name)
+    variables = _check_collection_contract("variables", problem.get("variables", {}), variable_contract, template=template_name, schema=schema_name)
+    allowed_domains = variable_contract.get("allowed_domains")
+    if allowed_domains is not None:
+        if not isinstance(allowed_domains, Sequence) or isinstance(allowed_domains, (str, bytes, bytearray)):
+            raise _template_error("schema.problem.variables.allowed_domains must be a sequence", schema=schema_name)
+        allowed = {str(item).strip().lower() for item in allowed_domains}
+        for variable in variables:
+            domain = _build_domain(variable)
+            if domain.kind.value not in allowed:
+                raise _template_error("Template variable domain is not allowed by its schema", template=template_name, schema=schema_name, domain=domain.kind.value, allowed_domains=sorted(allowed))
+
+    objectives = problem.get("objectives")
+    if objectives is None and "objective" in problem:
+        objectives = {"objective": problem["objective"]}
+    objective_contract = _mapping(contract.get("objectives", {}), "schema.problem.objectives", schema=schema_name)
+    _reject_unknown_fields(objective_contract, {"min_items", "max_items", "allowed_structures"}, "schema.problem.objectives", schema=schema_name)
+    _check_collection_contract("objectives", objectives, objective_contract, template=template_name, schema=schema_name, structure=True)
+
+    constraint_contract = _mapping(contract.get("constraints", {}), "schema.problem.constraints", schema=schema_name)
+    _reject_unknown_fields(constraint_contract, {"min_items", "max_items", "allowed_structures"}, "schema.problem.constraints", schema=schema_name)
+    _check_collection_contract("constraints", problem.get("constraints", ()), constraint_contract, template=template_name, schema=schema_name, structure=True)
+
+
 class ProblemDefinition:
     def __init__(self, config: Mapping[str, Any] | None = None, template: Mapping[str, Any] | None = None) -> None:
         global_config = load_global_config()
@@ -323,6 +633,52 @@ class ProblemDefinition:
         self.template = dict(template or {})
         self._problems: dict[str, OptimizationProblem] = {}
         self._lock = threading.RLock()
+
+    def from_template(
+        self,
+        name: str,
+        *,
+        parameters: Mapping[str, Any] | None = None,
+    ) -> OptimizationProblem:
+        """Instantiate a named read-only blueprint as a canonical ``OptimizationProblem``."""
+        if not isinstance(name, str) or not name.strip():
+            raise _template_error("Template name must be a non-empty string", template=name)
+        template_name = name.strip()
+        schemas = _load_template_catalog("schemas.yaml", "schemas")
+        templates = _load_template_catalog("instances.yaml", "templates")
+        if template_name not in templates:
+            raise _template_error("Unknown Optimization problem template", template=template_name)
+
+        template = _validate_template(template_name, templates[template_name])
+        schema_name = str(template["schema"]).strip()
+        if schema_name not in schemas:
+            raise _template_error("Optimization template references an unknown schema", template=template_name, schema=schema_name)
+        schema = _validate_schema(schema_name, schemas[schema_name])
+        bound = _bind_parameters(schema_name, schema, parameters)
+        problem_spec = _substitute(copy.deepcopy(template["problem"]), bound, template=template_name, schema=schema_name)
+        if not isinstance(problem_spec, Mapping):
+            raise _template_error("Template substitution did not produce a problem mapping", template=template_name, schema=schema_name)
+        _validate_problem_contract(template_name, schema_name, schema, problem_spec)
+
+        spec = dict(problem_spec)
+        metadata = dict(spec.get("metadata", {})) if isinstance(spec.get("metadata", {}), Mapping) else {}
+        if "template_provenance" in metadata:
+            raise _template_error("Template problem metadata reserves 'template_provenance'", template=template_name, schema=schema_name)
+        metadata["template_provenance"] = {
+            "template": template_name,
+            "template_version": template["template_version"],
+            "schema": schema_name,
+            "schema_version": schema["schema_version"],
+        }
+        if template.get("metadata"):
+            metadata["template_metadata"] = copy.deepcopy(dict(template["metadata"]))
+        spec["metadata"] = metadata
+
+        try:
+            return self.build(spec)
+        except OptimizationValidationError as exc:
+            exc.add_context(template=template_name, schema=schema_name)
+            raise
 
     def build(self, spec: Mapping[str, Any]) -> OptimizationProblem:
         if not isinstance(spec, Mapping):

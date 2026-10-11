@@ -265,21 +265,21 @@ class QuadraticSolver(BaseSolver):
 __all__ = ["QuadraticSolver"]
 
 
-def _smoke_test() -> None:
-    configure_logging()
-    smoke_logger = get_logger("QuadraticSolverSmoke")
-    problem = OptimizationProblem(
-        "quadratic_smoke",
-        (Variable("x", VariableDomain.real(-5, 5)),),
-        (Objective("f", linear={"x": -4}, quadratic={("x", "x"): 1}, constant=4),),
-        problem_class=ProblemClass.QP,
-        known_convex=True,
-    )
-    result = QuadraticSolver().solve(problem)
-    assert result.success and result.primal_solution is not None
-    assert abs(result.primal_solution["x"] - 2.0) <= 1e-4
-    smoke_logger.info("QuadraticSolver smoke test passed | objective=%s", result.objective_value)
-
-
 if __name__ == "__main__":
+    def _smoke_test() -> None:
+        configure_logging()
+        smoke_logger = get_logger("QuadraticSolverSmoke")
+        problem = OptimizationProblem(
+            "quadratic_smoke",
+            (Variable("x", VariableDomain.real(-5, 5)),),
+            (Objective("f", linear={"x": -4}, quadratic={("x", "x"): 1}, constant=4),),
+            problem_class=ProblemClass.QP,
+            known_convex=True,
+        )
+        result = QuadraticSolver().solve(problem)
+        assert result.success and result.primal_solution is not None
+        assert abs(result.primal_solution["x"] - 2.0) <= 1e-4
+        smoke_logger.info("QuadraticSolver smoke test passed | objective=%s", result.objective_value)
+
+
     _smoke_test()

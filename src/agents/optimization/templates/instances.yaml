@@ -1,0 +1,48 @@
+format_version: "1.0"
+
+templates:
+  warehouse_distribution:
+    template_version: "1.0"
+    schema: linear_resource_allocation
+    description: >-
+      Allocate demand between two bounded supply sources while minimizing total
+      linear cost. This is intentionally small enough to inspect but nontrivial:
+      runtime capacities and costs alter both the feasible region and optimum.
+
+    problem:
+      name: "${model_name}"
+      problem_class: lp
+      variables:
+        north:
+          type: real
+          lower: 0
+          upper: "${capacities.north}"
+        south:
+          type: real
+          lower: 0
+          upper: "${capacities.south}"
+
+      objectives:
+        total_cost:
+          sense: minimize
+          linear:
+            north: "${costs.north}"
+            south: "${costs.south}"
+
+      constraints:
+        - name: satisfy_demand
+          sense: ">="
+          linear:
+            north: 1
+            south: 1
+          rhs: "${demand}"
+
+      known_convex: true
+      known_smooth: true
+      deterministic: true
+      metadata:
+        family: linear_resource_allocation
+
+    metadata:
+      purpose: canonical_reusable_problem_blueprint
+      runtime_asset_policy: read_only

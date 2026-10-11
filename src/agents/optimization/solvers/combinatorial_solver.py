@@ -266,20 +266,19 @@ class CombinatorialSolver(BaseSolver):
 __all__ = ["CombinatorialSolver"]
 
 
-def _smoke_test() -> None:
-    configure_logging()
-    smoke_logger = get_logger("CombinatorialSolverSmoke")
-    problem = OptimizationProblem(
-        "combinatorial_smoke",
-        (Variable("x", VariableDomain.finite((1, 2, 3))),),
-        (Objective("f", function=lambda p: float((p["x"] - 2) ** 2)),),
-        problem_class=ProblemClass.CP,
-    )
-    result = CombinatorialSolver().solve(problem)
-    assert result.status is SolverStatus.OPTIMAL
-    assert result.primal_solution == {"x": 2}
-    smoke_logger.info("CombinatorialSolver smoke test passed | objective=%s", result.objective_value)
-
-
 if __name__ == "__main__":
+    def _smoke_test() -> None:
+        configure_logging()
+        smoke_logger = get_logger("CombinatorialSolverSmoke")
+        problem = OptimizationProblem(
+            "combinatorial_smoke",
+            (Variable("x", VariableDomain.finite((1, 2, 3))),),
+            (Objective("f", function=lambda p: float((p["x"] - 2) ** 2)),),
+            problem_class=ProblemClass.CP,
+        )
+        result = CombinatorialSolver().solve(problem)
+        assert result.status is SolverStatus.OPTIMAL
+        assert result.primal_solution == {"x": 2}
+        smoke_logger.info("CombinatorialSolver smoke test passed | objective=%s", result.objective_value)
+
     _smoke_test()

@@ -295,22 +295,22 @@ class NonLinearSolver(BaseSolver):
 __all__ = ["NonLinearSolver"]
 
 
-def _smoke_test() -> None:
-    configure_logging()
-    smoke_logger = get_logger("NonLinearSolverSmoke")
-    problem = OptimizationProblem(
-        "nonlinear_smoke",
-        (Variable("x", VariableDomain.real(-5, 5), initial=2.0),),
-        (Objective("f", function=lambda p: p["x"] ** 2),),
-        (Constraint("lower", ConstraintSense.GE, 1.0, function=lambda p: p["x"]),),
-        problem_class=ProblemClass.NLP,
-        known_convex=True,
-    )
-    result = NonLinearSolver().solve(problem)
-    assert result.success and result.primal_solution is not None
-    assert abs(result.primal_solution["x"] - 1.0) <= 1e-4
-    smoke_logger.info("NonLinearSolver smoke test passed | objective=%s", result.objective_value)
-
-
 if __name__ == "__main__":
+    def _smoke_test() -> None:
+        configure_logging()
+        smoke_logger = get_logger("NonLinearSolverSmoke")
+        problem = OptimizationProblem(
+            "nonlinear_smoke",
+            (Variable("x", VariableDomain.real(-5, 5), initial=2.0),),
+            (Objective("f", function=lambda p: p["x"] ** 2),),
+            (Constraint("lower", ConstraintSense.GE, 1.0, function=lambda p: p["x"]),),
+            problem_class=ProblemClass.NLP,
+            known_convex=True,
+        )
+        result = NonLinearSolver().solve(problem)
+        assert result.success and result.primal_solution is not None
+        assert abs(result.primal_solution["x"] - 1.0) <= 1e-4
+        smoke_logger.info("NonLinearSolver smoke test passed | objective=%s", result.objective_value)
+
+
     _smoke_test()

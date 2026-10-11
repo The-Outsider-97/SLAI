@@ -311,21 +311,19 @@ class LinearSolver(BaseSolver):
 __all__ = ["LinearSolver"]
 
 
-def _smoke_test() -> None:
-    configure_logging()
-    smoke_logger = get_logger("LinearSolverSmoke")
-    problem = OptimizationProblem(
-        "linear_smoke",
-        (Variable("x", VariableDomain.real(0, 2)),),
-        (Objective("f", ObjectiveSense.MAXIMIZE, linear={"x": 1}),),
-        problem_class=ProblemClass.LP,
-    )
-    result = LinearSolver().solve(problem)
-    assert result.status is SolverStatus.OPTIMAL
-    assert result.primal_solution is not None and abs(result.primal_solution["x"] - 2.0) <= 1e-8
-    smoke_logger.info("LinearSolver smoke test passed | objective=%s", result.objective_value)
-
-
 if __name__ == "__main__":
-    from ..optimization_types import Objective, ObjectiveSense, Variable, VariableDomain
+    def _smoke_test() -> None:
+        configure_logging()
+        smoke_logger = get_logger("LinearSolverSmoke")
+        problem = OptimizationProblem(
+            "linear_smoke",
+            (Variable("x", VariableDomain.real(0, 2)),),
+            (Objective("f", ObjectiveSense.MAXIMIZE, linear={"x": 1}),),
+            problem_class=ProblemClass.LP,
+        )
+        result = LinearSolver().solve(problem)
+        assert result.status is SolverStatus.OPTIMAL
+        assert result.primal_solution is not None and abs(result.primal_solution["x"] - 2.0) <= 1e-8
+        smoke_logger.info("LinearSolver smoke test passed | objective=%s", result.objective_value)
+
     _smoke_test()

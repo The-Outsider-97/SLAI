@@ -22,7 +22,7 @@ from .registries.scalarization_registry import ScalarizationRegistry
 from .registries.solver_registry import SolverRegistry
 from .solvers.base_solver import BaseSolver
 from .utils.config_loader import get_config_section, load_global_config
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Optimization Registries")
 printer = PrettyPrinter()
@@ -31,11 +31,7 @@ printer = PrettyPrinter()
 class OptimizationRegistries:
     """Composition façade for the Optimization subsystem's registry layer."""
 
-    def __init__(
-        self,
-        config: Mapping[str, Any] | None = None,
-        memory: OptimizationMemory | None = None,
-    ) -> None:
+    def __init__(self, config: Mapping[str, Any] | None = None, memory: OptimizationMemory | None = None) -> None:
         global_config = load_global_config()
         section = dict(get_config_section("optimization_registries", config=global_config) or {})
         if config:
@@ -54,14 +50,7 @@ class OptimizationRegistries:
         )
         self.scalarizations = ScalarizationRegistry(register_defaults=True)
 
-    def register_solver(
-        self,
-        solver: BaseSolver,
-        *,
-        priority: int = 100,
-        enabled: bool = True,
-        replace: bool = False,
-    ) -> None:
+    def register_solver(self, solver: BaseSolver, *, priority: int = 100, enabled: bool = True, replace: bool = False) -> None:
         self.solvers.register(solver, priority=priority, enabled=enabled, replace=replace)
         logger.info(
             "Optimization solver registered | solver=%s | priority=%d | enabled=%s",
@@ -82,10 +71,7 @@ class OptimizationRegistries:
     def selection(self, problem: OptimizationProblem, *, requested: str | None = None) -> SolverSelection:
         return self.solvers.selection(problem, requested=requested)
 
-    def capability_audit(
-        self,
-        required_classes: tuple[ProblemClass, ...] | None = None,
-    ) -> CapabilityAudit:
+    def capability_audit(self, required_classes: tuple[ProblemClass, ...] | None = None) -> CapabilityAudit:
         return self.capabilities.audit(required_classes)
 
     def scalarize(self, strategy: str, problem: OptimizationProblem, **parameters: Any) -> OptimizationProblem:

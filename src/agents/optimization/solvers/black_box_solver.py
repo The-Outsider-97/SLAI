@@ -335,20 +335,19 @@ class BlackBoxSolver(BaseSolver):
 __all__ = ["BlackBoxSolver"]
 
 
-def _smoke_test() -> None:
-    configure_logging()
-    smoke_logger = get_logger("BlackBoxSolverSmoke")
-    problem = OptimizationProblem(
-        "black_box_smoke",
-        (Variable("x", VariableDomain.real(-2, 2), initial=0.0),),
-        (Objective("f", function=lambda p: (p["x"] - 0.5) ** 2),),
-        problem_class=ProblemClass.BLACK_BOX,
-    )
-    result = BlackBoxSolver({"method": "pattern_search", "max_evaluations": 250}).solve(problem)
-    assert result.success and result.primal_solution is not None
-    assert abs(result.primal_solution["x"] - 0.5) <= 1e-3
-    smoke_logger.info("BlackBoxSolver smoke test passed | objective=%s", result.objective_value)
-
-
 if __name__ == "__main__":
+    def _smoke_test() -> None:
+        configure_logging()
+        smoke_logger = get_logger("BlackBoxSolverSmoke")
+        problem = OptimizationProblem(
+            "black_box_smoke",
+            (Variable("x", VariableDomain.real(-2, 2), initial=0.0),),
+            (Objective("f", function=lambda p: (p["x"] - 0.5) ** 2),),
+            problem_class=ProblemClass.BLACK_BOX,
+        )
+        result = BlackBoxSolver({"method": "pattern_search", "max_evaluations": 250}).solve(problem)
+        assert result.success and result.primal_solution is not None
+        assert abs(result.primal_solution["x"] - 0.5) <= 1e-3
+        smoke_logger.info("BlackBoxSolver smoke test passed | objective=%s", result.objective_value)
+
     _smoke_test()

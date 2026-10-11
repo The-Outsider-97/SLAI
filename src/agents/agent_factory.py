@@ -213,6 +213,8 @@ class AgentFactory:
         "learning": {"module_path": "src.agents.learning_agent", "class_name": "LearningAgent"},
         "network": {"module_path": "src.agents.network_agent", "class_name": "NetworkAgent"},
         "observability": {"module_path": "src.agents.observability_agent", "class_name": "ObservabilityAgent"},
+        "optimization": {"module_path": "src.agents.optimization_agent", "class_name": "OptimizationAgent"},
+        "orchestrator": {"module_path": "src.agents.orchestrator_agent", "class_name": "OrchestratorAgent"},
         "perception": {"module_path": "src.agents.perception_agent", "class_name": "PerceptionAgent"},
         "planning": {"module_path": "src.agents.planning_agent", "class_name": "PlanningAgent"},
         "privacy": {"module_path": "src.agents.privacy_agent", "class_name": "PrivacyAgent"},
@@ -263,6 +265,8 @@ class AgentFactory:
         "adaptive": {"torch_required": True, "notes": "Adaptive RL workers are torch-based."},
         "perception": {"torch_required": True, "notes": "Perception encoder/decoder stack is torch-based."},
         "provenance": {"torch_required": False, "notes": "Provenance tracking is torch-free; optional learned models may require torch."},
+        "optimization": {"torch_required": False, "notes": ""},
+        "orchestrator": {"torch_required": False, "notes": ""},
         "simulation": {"torch_required": False, "notes": (
                        "Simulation orchestration and numerical execution are torch-free by default;"
                        "externally supplied learned world models may carry their own optional dependencies.")},
@@ -479,6 +483,8 @@ class AgentFactory:
             "learning",
             "network",
             "observability",
+            "optimization",
+            "orchestrator",
             "perception",
             "planning",
             "privacy",
