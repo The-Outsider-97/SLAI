@@ -747,6 +747,13 @@ class OrchestratorAgent(BaseAgent):
                 raise ValueError("Dynamic subagent generation is disabled")
 
             safe_segment = self._safe_module_segment(normalized_type)
+            # A dotted or hyphenated specialty can collide with an underscored name.
+            # Fail before importing or registering a different generated agent.
+            for registered_name in registered:
+                if registered_name != normalized_type and self._safe_module_segment(registered_name) == safe_segment:
+                    raise ValueError(
+                        f"Specialty '{normalized_type}' conflicts with registered specialty '{registered_name}'"
+                    )
             if not re.fullmatch(r"[a-z][a-z0-9_]*", safe_segment):
                 raise ValueError("Unsafe subagent module identifier")
 

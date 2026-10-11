@@ -148,6 +148,17 @@ class AgentFactoryConfig:
         payload = normalize_payload(data)
         history_size = ensure_positive_int(int(payload.get("creation_history_size", 100)), "agent_factory.creation_history_size")
 
+        def _boolean(key: str, default: bool) -> bool:
+            value = payload.get(key, default)
+            if type(value) is not bool:
+                raise InvalidFactoryConfigurationError(
+                    f"agent_factory.{key} must be a YAML boolean (true/false)",
+                    context={"key": key, "actual_type": type(value).__name__},
+                    component="agent_factory",
+                    operation="load_config",
+                )
+            return value
+
         def _tuple_of_strings(key: str, default: Tuple[str, ...] = ()) -> Tuple[str, ...]:
             raw = payload.get(key, default)
             if raw in (None, ""):
@@ -164,25 +175,25 @@ class AgentFactoryConfig:
             return tuple(require_non_empty_string(item, f"agent_factory.{key}[]") for item in raw)
 
         return cls(
-            enabled=bool(payload.get("enabled", True)),
-            auto_register_default_agents=bool(payload.get("auto_register_default_agents", True)),
-            strict_base_agent_subclass=bool(payload.get("strict_base_agent_subclass", False)),
-            enforce_runtime_contracts=bool(payload.get("enforce_runtime_contracts", True)),
-            use_instance_cache=bool(payload.get("use_instance_cache", True)),
-            cache_agent_instances=bool(payload.get("cache_agent_instances", True)),
-            cache_imports=bool(payload.get("cache_imports", True)),
-            cache_constructor_signatures=bool(payload.get("cache_constructor_signatures", True)),
-            allow_runtime_config_override=bool(payload.get("allow_runtime_config_override", True)),
-            allow_unknown_constructor_kwargs=bool(payload.get("allow_unknown_constructor_kwargs", False)),
-            create_dependencies=bool(payload.get("create_dependencies", True)),
-            block_torch_required_when_unavailable=bool(payload.get("block_torch_required_when_unavailable", True)),
-            enable_out_of_process_fallback=bool(payload.get("enable_out_of_process_fallback", True)),
-            publish_observability_events=bool(payload.get("publish_observability_events", True)),
-            record_creation_history=bool(payload.get("record_creation_history", True)),
+            enabled=_boolean("enabled", True),
+            auto_register_default_agents=_boolean("auto_register_default_agents", True),
+            strict_base_agent_subclass=_boolean("strict_base_agent_subclass", False),
+            enforce_runtime_contracts=_boolean("enforce_runtime_contracts", True),
+            use_instance_cache=_boolean("use_instance_cache", True),
+            cache_agent_instances=_boolean("cache_agent_instances", True),
+            cache_imports=_boolean("cache_imports", True),
+            cache_constructor_signatures=_boolean("cache_constructor_signatures", True),
+            allow_runtime_config_override=_boolean("allow_runtime_config_override", True),
+            allow_unknown_constructor_kwargs=_boolean("allow_unknown_constructor_kwargs", False),
+            create_dependencies=_boolean("create_dependencies", True),
+            block_torch_required_when_unavailable=_boolean("block_torch_required_when_unavailable", True),
+            enable_out_of_process_fallback=_boolean("enable_out_of_process_fallback", True),
+            publish_observability_events=_boolean("publish_observability_events", True),
+            record_creation_history=_boolean("record_creation_history", True),
             creation_history_size=history_size,
-            diagnostics_import_check=bool(payload.get("diagnostics_import_check", True)),
-            diagnostics_constructor_check=bool(payload.get("diagnostics_constructor_check", True)),
-            discovery_enabled=bool(payload.get("discovery_enabled", False)),
+            diagnostics_import_check=_boolean("diagnostics_import_check", True),
+            diagnostics_constructor_check=_boolean("diagnostics_constructor_check", True),
+            discovery_enabled=_boolean("discovery_enabled", False),
             discovery_packages=_tuple_of_strings("discovery_packages"),
             required_action_methods=_tuple_of_strings("required_action_methods", ("predict", "get_action", "act", "perform_task", "execute")),
             native_failure_patterns=tuple(pattern.lower() for pattern in _tuple_of_strings("native_failure_patterns", ("winerror 1114", "c10.dll", "torch_cuda.dll", "cuda error"))),
@@ -205,6 +216,7 @@ class AgentFactory:
         "adaptive": {"module_path": "src.agents.adaptive_agent", "class_name": "AdaptiveAgent"},
         "alignment": {"module_path": "src.agents.alignment_agent", "class_name": "AlignmentAgent"},
         "browser": {"module_path": "src.agents.browser_agent", "class_name": "BrowserAgent"},
+        "collaborative": {"module_path": "src.agents.collaborative_agent", "class_name": "CollaborativeAgent"},
         "evaluation": {"module_path": "src.agents.evaluation_agent", "class_name": "EvaluationAgent"},
         "execution": {"module_path": "src.agents.execution_agent", "class_name": "ExecutionAgent"},
         "handler": {"module_path": "src.agents.handler_agent", "class_name": "HandlerAgent"},
