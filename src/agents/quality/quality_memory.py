@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.quality_error import *
 from .utils.quality_helpers import *
+from .modules.sqlite_store import SqliteQualityStore
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Quality Memory")
@@ -208,12 +209,16 @@ class QualityMemory:
         self._lock = RLock()
         self._state = self._empty_state()
         self._write_counter = 0
+        self._sqlite_store: Optional[SqliteQualityStore] = None
 
         self.enabled = bool(self.memory_config.get("enabled", True))
         self.backend = str(self.memory_config.get("backend", "hybrid")).strip().lower() or "hybrid"
         self.auto_persist = bool(self.memory_config.get("auto_persist", True))
         self.bootstrap_on_start = bool(self.memory_config.get("bootstrap_on_start", True))
         self.persist_every_n_writes = int(self.memory_config.get("persist_every_n_writes", 1))
+        self.max_snapshots_by_batch = int(
+            self.memory_config.get("retention", {}).get("max_snapshots_by_batch", 2000)
+        )
         self.journaling_enabled = bool(self.memory_config.get("journaling", {}).get("enabled", True))
         self.fsync_on_write = bool(self.memory_config.get("persistence", {}).get("fsync_on_write", False))
 
@@ -264,6 +269,9 @@ class QualityMemory:
         self._storage_dir = self._resolve_storage_path(self.memory_config.get("persistence", {}).get("storage_dir", "quality/storage/quality_memory"))
         self._state_file = self._storage_dir / self.memory_config.get("persistence", {}).get("state_filename", "quality_memory_state.json")
         self._journal_file = self._storage_dir / self.memory_config.get("persistence", {}).get("journal_filename", "quality_memory_journal.jsonl")
+        self._sqlite_file = self._storage_dir / self.memory_config.get("persistence", {}).get(
+            "sqlite_filename", "quality_memory.sqlite3"
+        )
 
         self._validate_runtime_configuration()
         self._ensure_storage_paths()
@@ -335,16 +343,9 @@ class QualityMemory:
             )
 
             with self._lock:
-                source_history = self._state["snapshots_by_source"].setdefault(snapshot.source_id, [])
-                source_history.append(snapshot.to_dict())
-                self._trim_history(source_history, self.snapshot_limits["snapshots_per_source"])
-                self._state["snapshots_by_batch"][snapshot.batch_id] = snapshot.to_dict()
-                self._touch_state()
-                self._record_mutation(
-                    event_type="quality_snapshot_recorded",
-                    payload=snapshot.to_dict(),
-                )
-                return deepcopy(snapshot.to_dict())
+                payload = snapshot.to_dict()
+                self._commit_event("quality_snapshot_recorded", payload)
+                return deepcopy(payload)
 
     def register_schema_version(
         self,
@@ -375,15 +376,9 @@ class QualityMemory:
             )
 
             with self._lock:
-                entries = self._state["schema_versions"].setdefault(record.source_id, [])
-                if record.is_active:
-                    for entry in entries:
-                        entry["is_active"] = False
-                entries.append(record.to_dict())
-                self._trim_history(entries, self.snapshot_limits["schema_versions_per_source"])
-                self._touch_state()
-                self._record_mutation("schema_version_registered", record.to_dict())
-                return deepcopy(record.to_dict())
+                payload = record.to_dict()
+                self._commit_event("schema_version_registered", payload)
+                return deepcopy(payload)
 
     def record_drift_baseline(
         self,
@@ -412,13 +407,9 @@ class QualityMemory:
             )
 
             with self._lock:
-                metrics = self._state["drift_baselines"].setdefault(record.source_id, {})
-                history = metrics.setdefault(record.metric, [])
-                history.append(record.to_dict())
-                self._trim_history(history, self.snapshot_limits["drift_baselines_per_metric"])
-                self._touch_state()
-                self._record_mutation("drift_baseline_recorded", record.to_dict())
-                return deepcopy(record.to_dict())
+                payload = record.to_dict()
+                self._commit_event("drift_baseline_recorded", payload)
+                return deepcopy(payload)
 
     def record_drift_observation(
         self,
@@ -462,13 +453,9 @@ class QualityMemory:
             )
 
             with self._lock:
-                metrics = self._state["drift_observations"].setdefault(record.source_id, {})
-                history = metrics.setdefault(record.metric, [])
-                history.append(record.to_dict())
-                self._trim_history(history, self.snapshot_limits["drift_observations_per_metric"])
-                self._touch_state()
-                self._record_mutation("drift_observation_recorded", record.to_dict())
-                return deepcopy(record.to_dict())
+                payload = record.to_dict()
+                self._commit_event("drift_observation_recorded", payload)
+                return deepcopy(payload)
 
     def record_threshold_decision(
         self,
@@ -507,12 +494,9 @@ class QualityMemory:
             )
 
             with self._lock:
-                history = self._state["threshold_decisions"].setdefault(record.rule_id, [])
-                history.append(record.to_dict())
-                self._trim_history(history, self.snapshot_limits["threshold_decisions_per_rule"])
-                self._touch_state()
-                self._record_mutation("threshold_decision_recorded", record.to_dict())
-                return deepcopy(record.to_dict())
+                payload = record.to_dict()
+                self._commit_event("threshold_decision_recorded", payload)
+                return deepcopy(payload)
 
     def record_remediation_outcome(
         self,
@@ -551,12 +535,9 @@ class QualityMemory:
             )
 
             with self._lock:
-                history = self._state["remediation_history"].setdefault(record.rule_id, [])
-                history.append(record.to_dict())
-                self._trim_history(history, self.snapshot_limits["remediation_outcomes_per_rule"])
-                self._touch_state()
-                self._record_mutation("remediation_outcome_recorded", record.to_dict())
-                return deepcopy(record.to_dict())
+                payload = record.to_dict()
+                self._commit_event("remediation_outcome_recorded", payload)
+                return deepcopy(payload)
 
     def record_source_reliability(
         self,
@@ -581,12 +562,9 @@ class QualityMemory:
             )
 
             with self._lock:
-                history = self._state["source_reliability_history"].setdefault(record.source_id, [])
-                history.append(record.to_dict())
-                self._trim_history(history, self.snapshot_limits["source_reliability_events"])
-                self._touch_state()
-                self._record_mutation("source_reliability_recorded", record.to_dict())
-                return deepcopy(record.to_dict())
+                payload = record.to_dict()
+                self._commit_event("source_reliability_recorded", payload)
+                return deepcopy(payload)
 
     def reconcile_conflicts(
         self,
@@ -707,12 +685,9 @@ class QualityMemory:
             )
 
             with self._lock:
-                history = self._state["conflict_history"].setdefault(record.scope_key, [])
-                history.append(record.to_dict())
-                self._trim_history(history, self.snapshot_limits["conflicts_per_scope"])
-                self._touch_state()
-                self._record_mutation("conflict_reconciled", record.to_dict())
-                return deepcopy(record.to_dict())
+                payload = record.to_dict()
+                self._commit_event("conflict_reconciled", payload)
+                return deepcopy(payload)
 
     # ---------------------------------------------------------------------
     # Public read APIs
@@ -725,6 +700,8 @@ class QualityMemory:
         ):
             source_key = self._nonempty(source_id, "source_id")
             with self._lock:
+                if self.backend == "sqlite":
+                    return self._sqlite().latest("quality_snapshot_recorded", source_key)
                 history = self._state["snapshots_by_source"].get(source_key, [])
                 if not history:
                     return None
@@ -738,6 +715,8 @@ class QualityMemory:
         ):
             batch_key = self._nonempty(batch_id, "batch_id")
             with self._lock:
+                if self.backend == "sqlite":
+                    return self._sqlite().batch(batch_key)
                 snapshot = self._state["snapshots_by_batch"].get(batch_key)
                 return None if snapshot is None else deepcopy(snapshot)
 
@@ -749,7 +728,17 @@ class QualityMemory:
         ):
             source_key = self._nonempty(source_id, "source_id")
             with self._lock:
-                history = self._state["schema_versions"].get(source_key, [])
+                history = (
+                    self._sqlite().history("schema_version_registered", source_key,
+                        limit=self.snapshot_limits["schema_versions_per_source"])
+                    if self.backend == "sqlite" else
+                    self._state["schema_versions"].get(source_key, [])
+                )
+                if self.backend == "sqlite":
+                    for index, entry in enumerate(history):
+                        if entry.get("is_active"):
+                            for previous in history[:index]:
+                                previous["is_active"] = False
                 if not history:
                     return None
                 active = [item for item in history if item.get("is_active")]
@@ -764,6 +753,8 @@ class QualityMemory:
         ):
             rule_key = self._nonempty(rule_id, "rule_id")
             with self._lock:
+                if self.backend == "sqlite":
+                    return self._sqlite().latest("threshold_decision_recorded", rule_key)
                 history = self._state["threshold_decisions"].get(rule_key, [])
                 if not history:
                     return None
@@ -777,6 +768,8 @@ class QualityMemory:
         ):
             source_key = self._nonempty(source_id, "source_id")
             with self._lock:
+                if self.backend == "sqlite":
+                    return self._sqlite().latest("source_reliability_recorded", source_key)
                 history = self._state["source_reliability_history"].get(source_key, [])
                 if not history:
                     return None
@@ -792,7 +785,12 @@ class QualityMemory:
             metric_key = self._nonempty(metric, "metric")
             cutoff = self._window_cutoff(window)
             with self._lock:
-                history = deepcopy(self._state["drift_observations"].get(source_key, {}).get(metric_key, []))
+                history = (
+                    self._sqlite().history("drift_observation_recorded", source_key, metric_key,
+                        limit=self.snapshot_limits["drift_observations_per_metric"])
+                    if self.backend == "sqlite" else
+                    deepcopy(self._state["drift_observations"].get(source_key, {}).get(metric_key, []))
+                )
             if cutoff is None:
                 return history
             return [item for item in history if float(item.get("recorded_at", 0.0)) >= cutoff]
@@ -805,7 +803,12 @@ class QualityMemory:
         ):
             rule_key = self._nonempty(rule_id, "rule_id")
             with self._lock:
-                history = deepcopy(self._state["remediation_history"].get(rule_key, []))
+                history = (
+                    self._sqlite().history("remediation_outcome_recorded", rule_key,
+                        limit=self.snapshot_limits["remediation_outcomes_per_rule"])
+                    if self.backend == "sqlite" else
+                    deepcopy(self._state["remediation_history"].get(rule_key, []))
+                )
 
             total = len(history)
             if total == 0:
@@ -862,14 +865,43 @@ class QualityMemory:
         ):
             scope = self._nonempty(scope_key, "scope_key")
             with self._lock:
+                if self.backend == "sqlite":
+                    return self._sqlite().history("conflict_reconciled", scope,
+                        limit=self.snapshot_limits["conflicts_per_scope"])
                 return deepcopy(self._state["conflict_history"].get(scope, []))
 
     def export_state(self) -> Dict[str, Any]:
         with self._lock:
+            if self.backend == "sqlite":
+                self._load_sqlite_hot_state()
             return deepcopy(self._state)
 
     def summary(self) -> Dict[str, Any]:
         with self._lock:
+            if self.backend == "sqlite":
+                store = self._sqlite()
+                stats = store.statistics()
+                return {
+                    "enabled": self.enabled,
+                    "backend": self.backend,
+                    "storage_dir": str(self._storage_dir),
+                    "state_file": str(self._sqlite_file),
+                    "journal_file": None,
+                    "statistics": stats,
+                    "counts": {
+                        "sources_with_snapshots": store.scope_count("quality_snapshot_recorded"),
+                        "batch_snapshots": store.batch_count(),
+                        "schema_sources": store.scope_count("schema_version_registered"),
+                        "baseline_sources": store.scope_count("drift_baseline_recorded"),
+                        "drift_sources": store.scope_count("drift_observation_recorded"),
+                        "threshold_rules": store.scope_count("threshold_decision_recorded"),
+                        "remediation_rules": store.scope_count("remediation_outcome_recorded"),
+                        "conflict_scopes": store.scope_count("conflict_reconciled"),
+                        "reliability_sources": store.scope_count("source_reliability_recorded"),
+                    },
+                    "last_updated_at": stats["latest_recorded_at"],
+                    "last_updated_at_iso": self._iso_timestamp(stats["latest_recorded_at"]),
+                }
             return {
                 "enabled": self.enabled,
                 "backend": self.backend,
@@ -894,7 +926,17 @@ class QualityMemory:
     def flush(self) -> None:
         with self._boundary(operation="flush", stage=QualityStage.PERSISTENCE):
             with self._lock:
-                self._persist_state()
+                if self.backend == "sqlite":
+                    self._sqlite().checkpoint("PASSIVE")
+                else:
+                    self._persist_state()
+
+    def close(self) -> None:
+        """Close SQLite connection after writers have stopped."""
+        with self._lock:
+            if self._sqlite_store is not None:
+                self._sqlite_store.close()
+                self._sqlite_store = None
 
     # ---------------------------------------------------------------------
     # Internal helpers
@@ -922,7 +964,7 @@ class QualityMemory:
         )
 
     def _validate_runtime_configuration(self) -> None:
-        if self.backend not in {"memory", "disk", "hybrid"}:
+        if self.backend not in {"memory", "disk", "hybrid", "sqlite"}:
             raise DataQualityError(
                 message=f"Unsupported quality_memory backend '{self.backend}'",
                 error_type=QualityErrorType.CONFIGURATION_INVALID,
@@ -932,8 +974,15 @@ class QualityMemory:
                 domain=QualityDomain.SYSTEM,
                 disposition=QualityDisposition.ESCALATE,
                 context={"backend": self.backend},
-                remediation="Use one of the supported backends: memory, disk, or hybrid.",
+                remediation="Use one of: memory, disk, hybrid, sqlite.",
             )
+
+        if self.backend == "sqlite" and not self.bootstrap_on_start:
+            raise ValueError("SQLite backend requires bootstrap_on_start: true")
+        if self.backend == "sqlite" and not self.auto_persist:
+            raise ValueError("SQLite backend requires auto_persist: true")
+        if self.max_snapshots_by_batch <= 0:
+            raise ValueError("retention.max_snapshots_by_batch must be positive")
 
         if self.persist_every_n_writes <= 0:
             raise DataQualityError(
@@ -1017,6 +1066,13 @@ class QualityMemory:
         if self.backend == "memory":
             return
 
+        if self.backend == "sqlite":
+            self._sqlite_store = SqliteQualityStore(self._sqlite_file)
+            with self._lock:
+                self._load_sqlite_hot_state()
+            logger.info("Quality Memory SQLite WAL restored from %s", self._sqlite_file)
+            return
+
         with self._lock:
             if self._state_file.exists():
                 try:
@@ -1068,6 +1124,23 @@ class QualityMemory:
                     ) from exc
                 self._apply_event(event)
 
+    def _sqlite(self) -> SqliteQualityStore:
+        if self._sqlite_store is None:
+            raise RuntimeError("Quality Memory SQLite connection is not initialized")
+        return self._sqlite_store
+
+    def _load_sqlite_hot_state(self) -> None:
+        """Refresh bounded in-memory compatibility view; database stays authoritative."""
+        self._state = self._empty_state()
+        previous_metadata = self._sqlite().get_meta("legacy_metadata")
+        if previous_metadata:
+            self._state["metadata"] = json.loads(previous_metadata)
+        for event_type, payload in self._sqlite().scan_hot(self.snapshot_limits):
+            self._apply_event({"event_type": event_type, "payload": payload})
+        newest = self._sqlite().statistics()["latest_recorded_at"]
+        if newest is not None:
+            self._state["metadata"]["updated_at"] = newest
+
     def _apply_event(self, event: Mapping[str, Any]) -> None:
         event_type = str(event.get("event_type", "")).strip()
         payload = deepcopy(dict(event.get("payload") or {}))
@@ -1078,7 +1151,13 @@ class QualityMemory:
             source_history = self._state["snapshots_by_source"].setdefault(str(payload["source_id"]), [])
             source_history.append(payload)
             self._trim_history(source_history, self.snapshot_limits["snapshots_per_source"])
-            self._state["snapshots_by_batch"][str(payload["batch_id"])] = payload
+            by_batch = self._state["snapshots_by_batch"]
+            by_batch[str(payload["batch_id"])] = payload
+            if self.backend == "sqlite" and len(by_batch) > self.max_snapshots_by_batch:
+                oldest = min(by_batch, key=lambda key: (
+                    float(by_batch[key]["created_at"]), key
+                ))
+                del by_batch[oldest]
         elif event_type == "schema_version_registered":
             entries = self._state["schema_versions"].setdefault(str(payload["source_id"]), [])
             if payload.get("is_active"):
@@ -1117,8 +1196,28 @@ class QualityMemory:
 
         self._touch_state()
 
+    def _commit_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        if self.backend == "sqlite":
+            self._record_mutation(event_type, payload)
+            self._apply_event({"event_type": event_type, "payload": payload})
+        else:
+            self._apply_event({"event_type": event_type, "payload": payload})
+            self._record_mutation(event_type, payload)
+
     def _record_mutation(self, event_type: str, payload: Mapping[str, Any]) -> None:
         if not self.enabled:
+            return
+
+        if self.backend == "sqlite":
+            try:
+                self._sqlite().append(event_type, payload,
+                    hot_batch_limit=self.max_snapshots_by_batch)
+            except Exception as exc:
+                logger.exception("Quality Memory SQLite transaction failed")
+                raise QualityMemoryError(
+                    "sqlite_append", str(exc),
+                    context={"state_file": str(self._sqlite_file), "event_type": event_type}
+                ) from exc
             return
 
         if self.backend in {"disk", "hybrid"} and self.journaling_enabled:
@@ -1150,10 +1249,15 @@ class QualityMemory:
             ) from exc
 
     def _persist_state(self) -> None:
+        if self.backend == "sqlite":
+            self._sqlite().checkpoint("PASSIVE")
+            return
         if self.backend == "memory":
             return
+
+        temp_path: Optional[Path] = None
+
         try:
-            serialized = json.dumps(self._state, indent=2, sort_keys=True)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -1162,18 +1266,32 @@ class QualityMemory:
                 prefix="quality_memory_",
                 suffix=".tmp",
             ) as temp_handle:
-                temp_handle.write(serialized)
+                temp_path = Path(temp_handle.name)
+                json.dump(self._state, temp_handle, sort_keys=True, separators=(",", ":"))
                 temp_handle.flush()
                 if self.fsync_on_write:
                     os.fsync(temp_handle.fileno())
-                temp_path = Path(temp_handle.name)
+
             os.replace(temp_path, self._state_file)
+            temp_path = None
+
         except Exception as exc:
+            logger.exception("Quality Memory persistence failed | state=%s", self._state_file)
             raise QualityMemoryError(
                 "persist_state",
                 str(exc),
-                context={"state_file": str(self._state_file)},
+                context={
+                    "state_file": str(self._state_file),
+                    "temporary_file": (str(temp_path) if temp_path else None),
+                },
             ) from exc
+
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("Unable to clean temporary memory file: %s", temp_path)
 
     def _window_cutoff(self, window: Optional[str]) -> Optional[float]:
         if window is None:

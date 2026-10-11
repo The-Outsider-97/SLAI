@@ -330,8 +330,8 @@ semantic_quality:
 workflow_control: {}
 
 quality_memory:
+  backend: sqlite # or hybrid
   enabled: true
-  backend: hybrid
   auto_persist: true
   bootstrap_on_start: true
   persist_every_n_writes: 1
@@ -348,6 +348,7 @@ quality_memory:
     state_filename: quality_memory_state.json
     journal_filename: quality_memory_journal.jsonl
     fsync_on_write: true
+    sqlite_filename: quality_memory.sqlite3
   journaling:
     enabled: true
   retention:
@@ -359,6 +360,7 @@ quality_memory:
     max_remediation_outcomes_per_rule: 1000
     max_conflicts_per_scope: 500
     max_source_reliability_events: 1000
+    max_snapshots_by_batch: 2000
   conflict_resolution:
     default_strategy: weighted_consensus
     block_on_critical: true
