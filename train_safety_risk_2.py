@@ -23,8 +23,12 @@ import random
 import re
 
 from collections import Counter
+from contextlib import ExitStack
+from copy import deepcopy
+from importlib import import_module
 from pathlib import Path
 from urllib.parse import urlsplit, unquote, parse_qsl
+from unittest.mock import patch
 
 from train_safety_risk import (
     TrainingCyberSafetyModule,
@@ -203,19 +207,56 @@ def split_diagnostics(data):
 
 
 def quality_audit(subsets, dataset_digest, seed, sample_each=64):
-    """QualityAgent PUBLIC evaluate_batch(): TRAIN-only advisory, no label rewriting.
+    """TRAIN-only advisory using the REAL SLAI QualityAgent with ephemeral memory.
 
-    Uses balanced feature-only records; never persists raw attack strings.
-    QualityAgent might persist records through configured QualityMemory.
-    It is explicitly opt-in and fails visibly instead of hiding an error.
+    SLAI's QualityAgent v2.3 constructs its QualityMemory directly and does
+    not expose constructor injection. We override just that construction,
+    scoped to this single offline QualityAgent initialization. Neither the
+    operational SQLite backend nor its settings/history are modified.
     """
-    from src.agents.quality_agent import QualityAgent
-    agent = QualityAgent(
-        shared_memory=InProcessCoordination(), agent_factory=None,
-        config={"auto_route_via_workflow": False,
-                "publish_to_shared_memory": False,
-                "shared_memory": {"enabled": False, "publish_notifications": False}},
-    )
+    from src.agents import quality_agent as qa_module
+    from src.agents.quality import quality_memory as qm_module
+
+    configured = qm_module.get_config_section("quality_memory") or {}
+    if not isinstance(configured, dict):
+        raise TypeError("SLAI quality_memory config must be a mapping")
+
+    offline_config = deepcopy(configured)
+    offline_config["backend"] = "memory"
+    offline_config["auto_persist"] = False
+    offline_config["bootstrap_on_start"] = False
+    offline_config["journaling"] = {**dict(offline_config.get("journaling") or {}), "enabled": False}
+
+    offline_memory = qm_module.QualityMemory(memory_config_override=offline_config)
+    if getattr(offline_memory, "backend", None) != "memory":
+        raise RuntimeError("Offline QualityMemory must use in-memory backend")
+
+    # QualityAgent plus FOUR of its existing subcomponents independently call
+    # QualityMemory() in their constructors. Patch each module's locally
+    # imported class symbol so they all receive ONE isolated memory instance.
+    # The real class symbols are restored immediately afterwards. This CLI
+    # constructs the agent synchronously; never use this scope across threads.
+    modules = [qa_module] + [
+        import_module("src.agents.quality." + name)
+        for name in ("structural_quality", "statistical_quality", "semantic_quality", "workflow_control")
+    ]
+    with ExitStack() as stack:
+        for module in modules:
+            stack.enter_context(patch.object(module, "QualityMemory", side_effect=lambda: offline_memory))
+        agent = qa_module.QualityAgent(
+            shared_memory=InProcessCoordination(), agent_factory=None,
+            config={"auto_route_via_workflow": False,
+                    "publish_to_shared_memory": False,
+                    "shared_memory": {"enabled": False,
+                                      "publish_notifications": False}},
+        )
+
+    if getattr(agent.quality_memory, "backend", None) != "memory":
+        raise RuntimeError("QualityAgent did not receive isolated offline memory")
+    for child_name in ("structural_quality", "statistical_quality", "semantic_quality", "workflow_control"):
+        child = getattr(agent, child_name)
+        if child.memory is not agent.quality_memory:
+            raise RuntimeError("QualityAgent subsystem memory is not shared: " + child_name)
     rng = random.Random(seed)
     outcome = {}
     for split in ("train",):
@@ -244,6 +285,7 @@ def quality_audit(subsets, dataset_digest, seed, sample_each=64):
             "quarantine_count": result.get("quarantine_count"),
             "flags": list(result.get("flags") or [])[:24],
             "examined": len(rows),
+            "storage": "isolated_in_memory_not_production_sqlite",
         }
     return outcome
 
@@ -378,7 +420,7 @@ def parser():
     p.add_argument("--min-recall", type=float, default=0.95)
     p.add_argument("--max-fpr", type=float, default=0.03)
     p.add_argument("--min-auc", type=float, default=0.90)
-    p.add_argument("--quality-agent", action="store_true", help="Enable actual QualityAgent advisory audit; persists via QualityMemory")
+    p.add_argument("--quality-agent", action="store_true", help="Enable real QualityAgent advisory audit with isolated in-memory QualityMemory")
     p.add_argument("--provenance-agent", action="store_true", help="Enable actual ProvenanceAgent durable lineage")
     p.add_argument("--enforce-quality", action="store_true", help="Abort if QualityAgent issues a blocking verdict")
     return p
@@ -415,7 +457,7 @@ def main(argv=None):
     qa = None
     if a.quality_agent:
         qa = quality_audit(subsets, digest, a.seed)
-        print("QualityAgent verdicts:", {k: v["verdict"] for k, v in qa.items()}, flush=True)
+        print("QualityAgent (isolated memory) verdicts:", {k: v["verdict"] for k, v in qa.items()}, flush=True)
         if a.enforce_quality and any(v["verdict"].lower() in ("block", "quarantine", "fail") for v in qa.values()):
             raise RuntimeError("QualityAgent blocked data. Aborting before training.")
     mean, std = mean_std(subsets["train"])
