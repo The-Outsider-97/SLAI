@@ -171,6 +171,35 @@ issue_handler:
   resource_wait_schedule: [2.0, 5.0, 10.0]
 
 
+failure_taxonomy:
+  treat_sequence_failures_as_failure: false
+  extra_failure_statuses:
+    - market_closed
+    - no_liquidity
+    - slippage_exceeded
+  extra_success_flag_keys:
+    - healthy
+  extra_error_carrier_keys:
+    - broker_reject_reason
+  extra_string_prefixes:
+    - "[broker reject]"
+
+
+success_taxonomy:
+  treat_sequence_successes_as_success: false
+  extra_success_statuses:
+    - shipped
+    - reconciled
+  extra_success_flag_keys:
+    - healthy
+  extra_failure_flag_keys:
+    - underwater
+  extra_error_carrier_keys:
+    - settlement_error
+  extra_string_prefixes:
+    - "[settled]"
+
+
 lazy_agent:
   max_init_attempts: 3
   enable_init_logging: true

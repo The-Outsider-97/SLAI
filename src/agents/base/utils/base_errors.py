@@ -838,3 +838,55 @@ def ensure_schema(
             **kwargs,
         )
     return mapping
+
+
+__all__ = [
+    # Enum
+    "BaseErrorType",
+
+    # Root exception
+    "BaseError",
+
+    # Canonical subclasses
+    "ConfigurationError",
+    "InitializationError",
+    "ValidationError",
+    "StateError",
+    "RuntimeBaseError",
+    "SerializationError",
+    "DependencyError",
+    "TimeoutBaseError",
+    "ResourceError",
+    "ExternalServiceError",
+    "IOErrorBase",
+
+    # Backward-compatible aliases
+    "BaseConfigurationError",
+    "BaseInitializationError",
+    "BaseValidationError",
+    "BaseStateError",
+    "BaseRuntimeError",
+    "BaseSerializationError",
+    "BaseDependencyError",
+    "BaseTimeoutError",
+    "BaseResourceError",
+    "BaseExternalServiceError",
+    "BaseIOError",
+
+    # Validation helpers
+    "raise_if",
+    "ensure_condition",
+    "ensure_not_none",
+    "ensure_type",
+    "ensure_subclass",
+    "ensure_callable",
+    "ensure_mapping",
+    "ensure_sequence",
+    "ensure_non_empty_string",
+    "ensure_one_of",
+    "ensure_keys",
+    "ensure_numeric_range",
+    "ensure_positive",
+    "ensure_state",
+    "ensure_schema",
+]
