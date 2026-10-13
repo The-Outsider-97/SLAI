@@ -4,13 +4,15 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections import defaultdict, deque
+import hashlib
+import numpy as np # type: ignore
+
+from collections import Counter, defaultdict, deque
+from urllib.parse import urlsplit, unquote, parse_qsl
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from threading import RLock
 from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
-
-import numpy as np
 
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.safety_helpers import *
@@ -155,6 +157,82 @@ class ThreatAssessmentResult:
         return sanitize_for_logging(asdict(self))
 
 
+# HTTP v2 lexical feature extraction remains in THIS trainer (not a new module).
+# All features are label-independent. Runtime contract shared with the trained HTTP MLP32 checkpoint.
+HEX = re.compile(r"%[0-9a-fA-F]{2}")
+SQL = re.compile(r"\b(?:union\s+(?:all\s+)?select|select\s+.{0,50}\s+from|drop\s+table|or\s+['\d][^\r\n]{0,20}=|waitfor\s+delay|sleep\s*\()", re.I)
+XSS = re.compile(r"<\s*(?:script|svg|iframe)\b|\bonerror\s*=|javascript\s*:", re.I)
+TRAVERSAL = re.compile(r"(?:^|[/\\])\.\.(?:[/\\]|$)|(?:%2e){2}|%252e", re.I)
+SHELL = re.compile(r"(?:;|\|\||&&)\s*(?:cat|sh|bash|curl|wget|powershell|cmd)(?:\s|$)|\$\(|`[^`]+`", re.I)
+SENSITIVE = re.compile(r"(?:/etc/(?:passwd|shadow)|win\.ini|web\.config|\.env\b|/proc/self/|/\.git/)", re.I)
+HTTP_LINE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)\s+(\S+)(?:\s+HTTP/\d(?:\.\d)?)?", re.I)
+
+
+def http_mlp32_feature_map(request):
+    """Parse actual HTTP request text. Does not depend on dataset labels."""
+    lines = request.splitlines()
+    first = lines[0].strip() if lines else ""
+    match = HTTP_LINE.match(first)
+    if match:
+        method, target = match.group(1).upper(), match.group(2)
+    else:
+        method, target = "OTHER", first.split(" ", 1)[-1][:65536]
+    parts = urlsplit(target)
+    path, query = parts.path or "", parts.query or ""
+    body = request.split("\n\n", 1)[-1] if "\n\n" in request else ""
+    # Use URL and body only; shared benchmark headers (e.g. User-Agent) dominate
+    # the raw text and are not discriminating HTTP-request attack indicators.
+    payload = path + ("?" + query if query else "") + ("\n" + body if body else "")
+    decoded = unquote(payload, errors="replace")
+    decoded_twice = unquote(decoded, errors="replace")
+    pct = HEX.findall(payload)
+    param_pairs = parse_qsl(query, keep_blank_values=True, max_num_fields=1024)
+    all_symbols = sum(ch in "'\"<>;()[]{}\\|`$" for ch in decoded)
+    digits = sum(ch.isdigit() for ch in decoded)
+    nonsafe = sum(not (ch.isalnum() or ch in "-_.~/?:=&%+") for ch in payload)
+    high = sum(ord(ch) > 127 for ch in decoded)
+    segments = [s for s in path.split("/") if s]
+    uncommon_ext = bool(re.search(r"\.(?:bak|old|inc|ini|log|sql|sh|env|config|zip|tar|php\d?|asp|aspx)(?:$|[?;/])", path, re.I))
+    encoded_reserved = sum(int(int(x[1:], 16) in {0x2F, 0x5C, 0x3C, 0x3E, 0x22, 0x27, 0x00, 0x3B, 0x25}) for x in pct)
+    return {
+        "method_post": float(method == "POST"),
+        "method_other": float(method not in {"GET", "POST"}),
+        "request_length": scale(len(request), 2048),
+        "target_length": scale(len(target), 256),
+        "path_length": scale(len(path), 150),
+        "query_length": scale(len(query), 256),
+        "body_length": scale(len(body), 512),
+        "param_count": scale(len(param_pairs), 24),
+        "path_depth": scale(len(segments), 15),
+        "longest_segment": scale(max(map(len, segments), default=0), 100),
+        "percent_count": scale(len(pct), 32),
+        "percent_density": scale(len(pct) / max(1, len(payload)), 0.25),
+        "encoded_reserved_count": scale(encoded_reserved, 8),
+        "double_encoding": float("%" in decoded and "%" in decoded_twice and decoded != decoded_twice),
+        "target_entropy": entropy(target),
+        "query_entropy": entropy(query),
+        "body_entropy": entropy(body),
+        "digit_fraction": scale(digits / max(1, len(decoded)), 0.6),
+        "symbol_fraction": scale(all_symbols / max(1, len(decoded)), 0.4),
+        "non_safe_fraction": scale(nonsafe / max(1, len(payload)), 0.25),
+        "single_quote_count": scale(decoded.count("'"), 12),
+        "double_quote_count": scale(decoded.count('"'), 12),
+        "angle_bracket_count": scale(decoded.count("<") + decoded.count(">"), 8),
+        "semicolon_count": scale(decoded.count(";"), 10),
+        "backslash_count": scale(decoded.count("\\"), 10),
+        "non_ascii_count": scale(high, 16),
+        "path_traversal": float(bool(TRAVERSAL.search(decoded_twice))),
+        "sql_pattern": float(bool(SQL.search(decoded_twice))),
+        "xss_pattern": float(bool(XSS.search(decoded_twice))),
+        "shell_pattern": float(bool(SHELL.search(decoded_twice))),
+        "sensitive_path": float(bool(SENSITIVE.search(decoded_twice))),
+        "uncommon_extension": float(uncommon_ext),
+    }
+
+
+HTTP_MLP32_FEATURE_NAMES = tuple(http_mlp32_feature_map("GET / HTTP/1.1").keys())
+
+
 class CyberSafetyModule:
     """Cyber/system threat analysis, distinct from user-content SafetyGuard policy."""
 
@@ -183,6 +261,7 @@ class CyberSafetyModule:
         self._event_counts: Dict[str, int] = defaultdict(int)
         self._state_lock = RLock()
         self.model: Optional[NeuralNetwork] = self._load_security_model()
+        self._load_http_mlp()
 
     def _cfg(self, path: Union[str, Sequence[str]], default: Any = None) -> Any:
         return get_nested(self.cyber_config or {}, path, default)
@@ -267,7 +346,10 @@ class CyberSafetyModule:
         path = cfg.get("model_path"); expected = coerce_int(cfg.get("num_inputs", 8), 8, minimum=1)
         if path and Path(str(path)).is_file():
             try:
-                model = NeuralNetwork.load_model(str(path), custom_config_override=dict(cfg.get("neural_network_overrides", {}) or {}))
+                model = NeuralNetwork.load_model(
+                    str(Path(str(path)).expanduser().resolve()),
+                    custom_config_override=dict(cfg.get("neural_network_overrides", {}) or {}),
+                )
                 if model.num_inputs != expected:
                     raise SecurityError(SecurityErrorType.MODEL_TAMPERING, "Cyber-safety model input dimension mismatch.", component="cyber_safety")
                 return model
@@ -278,24 +360,179 @@ class CyberSafetyModule:
                 logger.warning("Cyber-safety model unavailable; deterministic degraded mode active.")
         return None
 
+    # SLAI_HTTP_MLP32_RUNTIME_V1: one-time integration; all code stays in CyberSafetyModule.
+    @staticmethod
+    def _is_http_request(text: Any, context: str) -> bool:
+        if context not in {"api_request", "http_request", "web_request"} or not isinstance(text, str):
+            return False
+        first = text.split("\n", 1)[0].strip()
+        return bool(HTTP_LINE.match(first))
+
+    def _load_http_mlp(self) -> None:
+        """Load the trained PyTorch MLP exactly once; never unpickle an nn.Module."""
+        self.http_mlp = None
+        self.http_mlp_threshold = None
+        self.http_mlp_metadata = {}
+        settings = self._cfg("model.http_mlp", {}) or {}
+        if not isinstance(settings, Mapping):
+            raise ConfigurationTamperingError("cyber_safety.model.http_mlp", "Expected a configuration mapping", component="cyber_safety")
+        mode = str(settings.get("mode", "shadow")).strip().lower()
+        if mode not in {"shadow", "assist", "enforce"}:
+            raise ConfigurationTamperingError("cyber_safety.model.http_mlp.mode", "Allowed modes are shadow, assist, enforce", component="cyber_safety")
+        self.http_mlp_mode = mode
+        if not coerce_bool(settings.get("enabled", False), False):
+            return
+        model_path = Path(str(settings.get("model_path", ""))).expanduser()
+        if not model_path.is_file():
+            logger.warning("HTTP risk MLP not found: %s; existing Safety rules remain active", model_path)
+            return
+        try:
+            size_limit = coerce_int(settings.get("max_checkpoint_bytes", 16_777_216), 16_777_216, minimum=1024)
+            if model_path.stat().st_size > size_limit:
+                raise ValueError("HTTP MLP checkpoint exceeds configured file-size limit")
+            expected_sha256 = str(settings.get("sha256", "") or "").strip().lower()
+            if expected_sha256:
+                digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
+                if digest != expected_sha256:
+                    raise ValueError("HTTP MLP checkpoint SHA-256 mismatch")
+            import torch  # type: ignore # Existing SLAI dependency; loaded only for configured model
+            checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=True)
+            if not isinstance(checkpoint, dict) or checkpoint.get("format") != "slai.safety.http_mlp32.pytorch.v1":
+                raise ValueError("Unsupported HTTP MLP checkpoint format")
+            if checkpoint.get("feature_schema") != "slai.cyber.http_32.standardized.v3.experimental":
+                raise ValueError("Unsupported HTTP MLP feature schema")
+            if checkpoint.get("num_inputs") != 32 or checkpoint.get("feature_names") != list(HTTP_MLP32_FEATURE_NAMES):
+                raise ValueError("Checkpoint does not match SLAI HTTP MLP32 feature order")
+            norm = checkpoint.get("normalization")
+            if not isinstance(norm, dict) or norm.get("fit_on") != "train_only" or norm.get("clip") != [-8.0, 8.0]:
+                raise ValueError("Missing or incompatible training-fitted normalization")
+            means, stds = norm.get("mean"), norm.get("std")
+            if not isinstance(means, list) or not isinstance(stds, list) or len(means) != 32 or len(stds) != 32:
+                raise ValueError("Invalid normalization vector dimensions")
+            if not all(isinstance(v, (float, int)) and not isinstance(v, bool) and math.isfinite(v) for v in means + stds):
+                raise ValueError("Nonfinite normalization values")
+            if not all(v > 0 for v in stds):
+                raise ValueError("Normalization standard deviations must be positive")
+            eligible = checkpoint.get("production_eligible") is True
+            if mode == "enforce" and not eligible:
+                raise ValueError("Experimental MLP is not eligible for enforcement")
+            if mode == "assist" and not eligible and not coerce_bool(settings.get("allow_experimental_review_only", False), False):
+                raise ValueError("Experimental review assist requires explicit opt-in")
+            layers = checkpoint.get("architecture")
+            if not isinstance(layers, list) or not 1 <= len(layers) <= 8:
+                raise ValueError("Unsupported HTTP MLP architecture")
+            modules = []
+            prior = 32
+            for index, layer in enumerate(layers):
+                if not isinstance(layer, dict) or layer.get("order") != "linear_activation_batchnorm_dropout":
+                    raise ValueError("Unexpected HTTP MLP layer order")
+                n_in, n_out = layer.get("inputs"), layer.get("neurons")
+                if type(n_in) is not int or type(n_out) is not int or n_in != prior or not 1 <= n_out <= 512:
+                    raise ValueError("Invalid MLP layer dimensions")
+                modules.append(torch.nn.Linear(n_in, n_out, dtype=torch.float64))
+                act = str(layer.get("activation", ""))
+                activations = {"relu": torch.nn.ReLU, "sigmoid": torch.nn.Sigmoid,
+                               "tanh": torch.nn.Tanh, "linear": torch.nn.Identity}
+                if act not in activations:
+                    raise ValueError("Unknown MLP activation")
+                modules.append(activations[act]())
+                if layer.get("batch_norm") is True:
+                    eps = float(layer.get("bn_eps", 1e-5))
+                    momentum = float(layer.get("bn_momentum", 0.9))
+                    if not math.isfinite(eps) or not 0 < eps <= 0.01 or not math.isfinite(momentum) or not 0 <= momentum < 1:
+                        raise ValueError("Invalid MLP batch normalization settings")
+                    modules.append(torch.nn.BatchNorm1d(n_out, eps=eps, momentum=1.0 - momentum, dtype=torch.float64))
+                dropout = float(layer.get("dropout", 0.0))
+                if not math.isfinite(dropout) or not 0 <= dropout < 0.95:
+                    raise ValueError("Invalid MLP dropout")
+                if index < len(layers) - 1 and dropout:
+                    modules.append(torch.nn.Dropout(p=dropout))
+                prior = n_out
+            if prior != 1 or layers[-1].get("activation") != "sigmoid":
+                raise ValueError("HTTP risk MLP must output one sigmoid probability")
+            state = checkpoint.get("state_dict")
+            if not isinstance(state, dict) or not state or any(
+                not isinstance(value, torch.Tensor) or not torch.isfinite(value).all().item()
+                for value in state.values()
+            ):
+                raise ValueError("Invalid or nonfinite MLP state dict")
+            network = torch.nn.Sequential(*modules)
+            network.load_state_dict(state, strict=True)
+            network.eval()
+            threshold = float(checkpoint.get("decision_threshold", 0.5))
+            if not math.isfinite(threshold) or not 0 < threshold < 1:
+                raise ValueError("Invalid MLP threshold")
+            # Publish all fields together ONLY after successful validation.
+            self.http_mlp = network
+            self.http_mlp_mean = tuple(float(v) for v in means)
+            self.http_mlp_std = tuple(float(v) for v in stds)
+            self.http_mlp_threshold = threshold
+            self.http_mlp_metadata = {"format": checkpoint["format"], "production_eligible": eligible,
+                                      "model_path": str(model_path), "mode": mode}
+            logger.info("HTTP risk MLP loaded | mode=%s | features=32 | eligible=%s", mode, eligible)
+        except Exception as exc:
+            if coerce_bool(settings.get("fail_closed_on_load_error", False), False):
+                raise wrap_security_exception(exc, operation="load_http_risk_mlp", component="cyber_safety",
+                                             error_type=SecurityErrorType.MODEL_TAMPERING, severity=SecuritySeverity.HIGH) from exc
+            logger.warning("HTTP risk MLP unavailable (%s); existing Safety rules remain active", type(exc).__name__)
+            self.http_mlp = None
+            self.http_mlp_threshold = None
+            self.http_mlp_metadata = {"error_type": type(exc).__name__}
+
+    def _score_http_mlp(self, raw_http: Any, context: str) -> Optional[float]:
+        if self.http_mlp is None or not self._is_http_request(raw_http, context):
+            return None
+        try:
+            if len(raw_http) > coerce_int(self._cfg("max_input_text_length", 65536), 65536, minimum=1):
+                raise ValueError("HTTP request exceeds max_input_text_length")
+            request = raw_http.replace("\r\n", "\n").replace("\r", "\n")
+            features = http_mlp32_feature_map(request)
+            values = [max(-8.0, min(8.0, (float(features[name]) - mean) / std))
+                      for name, mean, std in zip(HTTP_MLP32_FEATURE_NAMES, self.http_mlp_mean, self.http_mlp_std)]
+            import torch # type: ignore
+            with torch.inference_mode():
+                score = float(self.http_mlp(torch.tensor([values], dtype=torch.float64))[0, 0])
+            if not math.isfinite(score):
+                raise ValueError("Nonfinite HTTP risk model result")
+            return clamp_score(score)
+        except Exception as exc:
+            if coerce_bool(self._cfg("model.http_mlp.fail_closed_on_prediction_error", False), False):
+                raise wrap_security_exception(exc, operation="score_http_risk_mlp", component="cyber_safety",
+                                             error_type=SecurityErrorType.UNSAFE_MODEL_STATE, severity=SecuritySeverity.HIGH) from exc
+            logger.warning("HTTP risk model scoring failed (%s); rules-only fallback", type(exc).__name__)
+            return None
+
     # ------------------------------------------------------------------
     # Input analysis
     # ------------------------------------------------------------------
-    def analyze_input(self, input_data: Any, context: str = "general") -> Dict[str, Any]:
+    def analyze_input(self, input_data: Any, context: str = "general", *, model_input: Optional[str] = None) -> Dict[str, Any]:
         text = self._stringify_input(input_data)
         context_norm = normalize_identifier(context or "general", max_length=80)
         findings = self._detect_rule_findings(text) + self._detect_vulnerability_findings(text, context_norm) + self._detect_contextual_findings(text, context_norm)
         rule_score = combine_risk_scores(*(f.severity * f.confidence for f in findings if f.finding_type in {"pattern", "heuristic", "secret_exposure"}), method="noisy_or") if findings else 0.0
         vulnerability_score = combine_risk_scores(*(f.severity * f.confidence for f in findings if f.finding_type == "vulnerability_signature"), method="noisy_or") if findings else 0.0
         context_score = self._context_risk_score(context_norm, text)
-        model_score = self._score_with_model(text, findings, context_norm)
+        http_model_score = self._score_http_mlp(model_input if model_input is not None else input_data, context_norm)
+        model_score = http_model_score if http_model_score is not None else self._score_with_model(text, findings, context_norm)
         values = {"rules": rule_score, "vulnerabilities": vulnerability_score, "context": context_score}
-        if model_score is not None: values["model"] = model_score
+        # The unvalidated HTTP MLP is never permitted to lower a rules decision.
+        # In assist mode it can independently trigger REVIEW but not BLOCK.
+        use_native_model = http_model_score is None and model_score is not None
+        use_enforcing_http_model = http_model_score is not None and self.http_mlp_mode == "enforce"
+        if (use_native_model or use_enforcing_http_model) and model_score is not None:
+            values["model"] = model_score
         risk = weighted_average(values, self._cfg("risk_weights.input", {}) or {}, default=max(values.values() or [0.0]))
         if findings: risk = max(risk, max(f.severity * f.confidence for f in findings))
+        http_review = bool(http_model_score is not None and self.http_mlp_threshold is not None and self.http_mlp_mode == "assist" and
+                           http_model_score >= self.http_mlp_threshold)
+        if http_review:
+            # The review floor cannot independently produce a BLOCK decision.
+            review_threshold = coerce_float(self._cfg("risk_thresholds.review", 0.5), 0.5)
+            block_threshold = coerce_float(self._cfg("risk_thresholds.block", 0.75), 0.75)
+            risk = max(risk, min(review_threshold, math.nextafter(block_threshold, 0.0)))
         risk = clamp_score(risk)
         decision = threshold_decision(risk, block_threshold=coerce_float(self._cfg("risk_thresholds.block", 0.75), 0.75), review_threshold=coerce_float(self._cfg("risk_thresholds.review", 0.5), 0.5))
-        result = CyberAnalysisResult(ANALYSIS_SCHEMA_VERSION, generate_identifier("cyber_analysis"), utc_iso(), context_norm, fingerprint(text), risk, categorize_risk(risk), decision, findings, self._generate_recommendations([f.to_dict() for f in findings]), model_score, rule_score, vulnerability_score, context_score, {"input_length": len(text), "finding_count": len(findings), "model_available": self.model is not None, "degraded_mode": self.model is None})
+        result = CyberAnalysisResult(ANALYSIS_SCHEMA_VERSION, generate_identifier("cyber_analysis"), utc_iso(), context_norm, fingerprint(text), risk, categorize_risk(risk), decision, findings, self._generate_recommendations([f.to_dict() for f in findings]), model_score, rule_score, vulnerability_score, context_score, {"input_length": len(text), "finding_count": len(findings), "model_available": self.model is not None or self.http_mlp is not None, "degraded_mode": self.model is None and self.http_mlp is None, "http_mlp_mode": self.http_mlp_mode, "http_mlp_used": http_model_score is not None, "http_mlp_review_triggered": http_review, "http_mlp_production_eligible": bool(self.http_mlp_metadata.get("production_eligible", False))})
         self._store_analysis("input_analysis", result.to_dict(), coerce_float(self._cfg("memory.input_analysis_sensitivity", 0.75), 0.75))
         return result.to_dict()
 

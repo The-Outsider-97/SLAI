@@ -439,7 +439,18 @@ cyber_safety:
     max_matches_per_rule: 25
     max_recommendations: 12
   model:
-    enabled: true
+    enabled: false
+    # Trained HTTP-specific anomaly MLP; never used for generic prompt safety.
+    # Experimental checkpoint permits REVIEW suggestions only, not autonomous BLOCK.
+    http_mlp:
+      enabled: true
+      model_path: "src/agents/safety/model/mlp_http_risk_v2.pt"
+      mode: assist
+      max_checkpoint_bytes: 16777216
+      allow_experimental_review_only: true
+      fail_closed_on_load_error: false
+      fail_closed_on_prediction_error: false
+      sha256: ""
     model_path: "src/agents/safety/models/cyber_safety_model.json"
     allow_untrained_fallback: true
     fail_closed_on_prediction_error: false
