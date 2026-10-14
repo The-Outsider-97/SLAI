@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 """
 SLAI Agent Factory
@@ -76,12 +76,13 @@ class AgentCreationRecord:
 
 @dataclass(slots=True)
 class ManagedAgentRecord:
-    """Factory-owned runtime record for one exact definition and scope."""
+    """Factory-owned runtime record for one concrete instance."""
 
     identity: AgentRuntimeIdentity
     instance: Any
     status: RuntimeStatus = field(default_factory=RuntimeStatus)
     implementation: str = "in_process"
+    ephemeral: bool = False
 
     def snapshot(self) -> Dict[str, Any]:
         payload = self.status.snapshot(self.identity)
@@ -308,9 +309,7 @@ class AgentFactory:
                 operation="load_global_config",
             )
 
-        self.agent_factory_config: Dict[str, Any] = dict(
-            _AGENTS_CONFIG.section("agent_factory", config=self.global_config) or {}
-        )
+        self.agent_factory_config: Dict[str, Any] = dict(_AGENTS_CONFIG.section("agent_factory", config=self.global_config) or {})
         if config:
             overrides = normalize_payload(config)
             nested_overrides = normalize_payload(overrides.get("agent_factory")) if isinstance(overrides.get("agent_factory"), Mapping) else overrides
@@ -327,6 +326,7 @@ class AgentFactory:
 
         self._lock = RLock()
         self._runtime_status = RuntimeStatus()
+        self._release_errors: list[Exception] = []
         self.registry = AgentRegistry()
         cache_signature = inspect.signature(FactoryCache)
         if "name" in cache_signature.parameters:
@@ -904,17 +904,25 @@ class AgentFactory:
         scope_id: str,
         exc: BaseException,
         started_ms: float,
+        *,
+        ephemeral: bool = False,
     ) -> OutOfProcessAgentProxy:
         """Create and register a degraded stateless-isolation proxy."""
 
         proxy = self._create_oopa_proxy(agent_type, metadata, exc)
-        record = self._store_instance(
-            metadata,
-            proxy,
-            scope_id,
-            lifecycle=RuntimeLifecycle.DEGRADED,
-            implementation="out_of_process_proxy",
-        )
+        try:
+            record = self._store_instance(
+                metadata,
+                proxy,
+                scope_id,
+                lifecycle=RuntimeLifecycle.DEGRADED,
+                implementation="out_of_process_proxy",
+                ephemeral=ephemeral,
+            )
+        except Exception:
+            self._close_unmanaged_instance(proxy, metadata.identity)
+            raise
+
         record.status.mark_degraded("runtime", "out_of_process_fallback", exc)
         self._record_creation(
             agent_type,
@@ -1008,20 +1016,38 @@ class AgentFactory:
             )
         return constructor_args
 
+
     def _verify_action_surface(self, agent_type: str, instance: Any) -> None:
+        """Require an actual executable capability.
+
+        An inherited BaseAgent dispatcher or execution wrapper alone
+        does not establish that a concrete agent can execute tasks.
+        """
         if not self.settings.required_action_methods:
             return
-        callable_methods = tuple(
-            method
-            for method in self.settings.required_action_methods
-            if callable(getattr(instance, method, None))
-        )
-        if callable_methods:
+
+        base_cls = self._base_agent_class()
+        concrete_methods = []
+        for method_name in self.settings.required_action_methods:
+            method = getattr(instance, method_name, None)
+            if not callable(method):
+                continue
+
+            class_method = getattr(type(instance), method_name, None)
+            base_method = getattr(base_cls, method_name, None)
+
+            if (
+                method_name in {"perform_task", "execute"}
+                and class_method is base_method
+            ):
+                continue
+
+            concrete_methods.append(method_name)
+
+        if concrete_methods:
             return
-        message = (
-            f"Agent '{agent_type}' must expose at least one callable action method "
-            f"({', '.join(self.settings.required_action_methods)})"
-        )
+
+        message = (f"Agent '{agent_type}' has no concrete executable capability. Inherited BaseAgent dispatch alone is insufficient.")
         if self.settings.enforce_runtime_contracts:
             raise AgentConstructionError(
                 message,
@@ -1033,14 +1059,11 @@ class AgentFactory:
                     "required_action_methods": list(self.settings.required_action_methods),
                 },
             )
+
         logger.warning(message)
 
     @staticmethod
-    def _runtime_scope(
-        shared_memory: Any,
-        agent_config: Mapping[str, Any],
-        kwargs: Mapping[str, Any],
-    ) -> str:
+    def _runtime_scope(shared_memory: Any, agent_config: Mapping[str, Any], kwargs: Mapping[str, Any]) -> str:
         scope_kwargs = {key: value for key, value in kwargs.items() if key not in {"config", "version"}}
         return build_runtime_scope_id(
             shared_memory=shared_memory,
@@ -1069,6 +1092,10 @@ class AgentFactory:
         while using the improved registry, cache, error, observability, metrics,
         and isolation subsystems.
         """
+        ephemeral = kwargs.pop("_ephemeral", False)
+        if type(ephemeral) is not bool:
+            raise ValueError("_ephemeral must be a boolean")
+
         started_ms = monotonic_ms()
         normalized = self.normalize_agent_type(agent_type)
         version = kwargs.get("version")
@@ -1088,7 +1115,7 @@ class AgentFactory:
             scope_id = self._runtime_scope(shared_memory, agent_config, kwargs)
             cache_key = f"instance:{metadata.identity}:{scope_id}"
 
-            if self.settings.use_instance_cache:
+            if self.settings.use_instance_cache and not ephemeral:
                 cached_record = self._record_for_cache_key(cache_key)
                 if cached_record is not None:
                     self._record_counter("create.cache_hit")
@@ -1118,7 +1145,12 @@ class AgentFactory:
                 except Exception as exc:
                     if self._should_use_oopa_fallback(normalized, exc):
                         return self._activate_oopa_fallback(
-                            normalized, metadata, scope_id, exc, started_ms
+                            normalized,
+                            metadata,
+                            scope_id,
+                            exc,
+                            started_ms,
+                            ephemeral=ephemeral,
                         )
                     raise
 
@@ -1135,12 +1167,17 @@ class AgentFactory:
                 except Exception as exc:
                     if self._should_use_oopa_fallback(normalized, exc):
                         return self._activate_oopa_fallback(
-                            normalized, metadata, scope_id, exc, started_ms
+                            normalized,
+                            metadata,
+                            scope_id,
+                            exc,
+                            started_ms,
+                            ephemeral=ephemeral,
                         )
                     raise
                 try:
                     self._verify_action_surface(normalized, instance)
-                    record = self._store_instance(metadata, instance, scope_id)
+                    record = self._store_instance(metadata, instance, scope_id, ephemeral=ephemeral)
                 except Exception:
                     self._close_unmanaged_instance(instance, metadata.identity)
                     raise
@@ -1211,6 +1248,7 @@ class AgentFactory:
                 logger.warning("Unable to close rejected agent definition '%s': %s", definition_id, exc)
             break
 
+
     def _store_instance(
         self,
         metadata: AgentMetaData,
@@ -1219,14 +1257,25 @@ class AgentFactory:
         *,
         lifecycle: RuntimeLifecycle = RuntimeLifecycle.ACTIVE,
         implementation: str = "in_process",
+        ephemeral: bool = False,
     ) -> ManagedAgentRecord:
-        instance_id = str(getattr(instance, "agent_id", "") or f"{metadata.name}:{uuid.uuid4().hex[:12]}")
-        if any(record.identity.instance_id == instance_id for record in self._runtime_records.values()):
+        instance_id = str(
+            getattr(instance, "agent_id", "")
+            or f"{metadata.name}:{uuid.uuid4().hex[:12]}"
+        )
+
+        if any(
+            record.identity.instance_id == instance_id
+            for record in self._runtime_records.values()
+        ):
             raise AgentLifecycleError(
                 "Constructed agent instance identity is already active",
                 component="agent_factory",
                 operation="store_instance",
-                context={"definition_id": metadata.identity, "instance_id": instance_id},
+                context={
+                    "definition_id": metadata.identity,
+                    "instance_id": instance_id,
+                },
             )
 
         identity = AgentRuntimeIdentity(
@@ -1239,34 +1288,81 @@ class AgentFactory:
         if bind_identity is not None:
             if not callable(bind_identity):
                 raise AgentLifecycleError(
-                    "Agent bind_runtime_identity attribute must be callable",
+                    "Agent bind_runtime_identity attribute "
+                    "must be callable",
                     component="agent_factory",
                     operation="bind_runtime_identity",
-                    context={"definition_id": metadata.identity, "instance_id": instance_id},
+                    context={
+                        "definition_id": metadata.identity,
+                        "instance_id": instance_id,
+                    },
                 )
+
             bind_identity(identity)
 
-        record = ManagedAgentRecord(identity=identity, instance=instance, implementation=implementation)
+        record = ManagedAgentRecord(
+            identity=identity,
+            instance=instance,
+            implementation=implementation,
+            ephemeral=ephemeral,
+        )
+
         record.status.transition(lifecycle)
         transition_instance = getattr(instance, "transition_runtime_lifecycle", None)
         if transition_instance is not None:
             if not callable(transition_instance):
                 raise AgentLifecycleError(
-                    "Agent transition_runtime_lifecycle attribute must be callable",
+                    "Agent transition_runtime_lifecycle attribute "
+                    "must be callable",
                     component="agent_factory",
                     operation="activate_instance",
-                    context={"definition_id": metadata.identity, "instance_id": instance_id},
+                    context={
+                        "definition_id": metadata.identity,
+                        "instance_id": instance_id,
+                    },
                 )
+
             transition_instance(lifecycle)
 
-        self._runtime_records[identity.cache_key] = record
-        self.active_agents[metadata.name] = instance
-        if self.settings.cache_agent_instances:
-            self._cache_set(
-                identity.cache_key,
-                record,
-                metadata={"definition_id": metadata.identity, "instance_id": instance_id},
+        # Keep the established cache key for reusable instances.
+        storage_key = identity.cache_key
+
+        # Distinct uncached or ephemeral instances require
+        # distinct ownership records, even within the same scope.
+        if ephemeral or not self.settings.use_instance_cache:
+            storage_key = (f"{identity.cache_key}:owned:{instance_id}")
+
+        if storage_key in self._runtime_records:
+            raise AgentLifecycleError(
+                "Factory runtime ownership key already exists",
+                component="agent_factory",
+                operation="store_instance",
+                context={
+                    "storage_key": storage_key,
+                    "instance_id": instance_id,
+                },
             )
+
+        self._runtime_records[storage_key] = record
+        self.active_agents[metadata.name] = instance
+
+        try:
+            if (
+                self.settings.use_instance_cache
+                and self.settings.cache_agent_instances
+                and not ephemeral
+            ):
+                self._cache_set(
+                    identity.cache_key,
+                    record,
+                    metadata={"definition_id": metadata.identity, "instance_id": instance_id},
+                )
+
+        except Exception:
+            self._runtime_records.pop(storage_key, None)
+            self._refresh_legacy_active_agent(metadata.name)
+            raise
+
         return record
 
     # ------------------------------------------------------------------
@@ -1508,6 +1604,7 @@ class AgentFactory:
                     break
             self._transition_managed_record(record, RuntimeLifecycle.STOPPED)
         except Exception as exc:
+            self._release_errors.append(exc)
             record.status.mark_degraded("lifecycle", "release", exc, retryable=False)
             try:
                 record.status.transition(RuntimeLifecycle.FAILED)
@@ -1530,33 +1627,81 @@ class AgentFactory:
         else:
             self.active_agents.pop(agent_type, None)
 
+
+    def release_instance(self, instance: Any, *, ephemeral_only: bool = False) -> bool:
+        """Release precisely one factory-owned live instance.
+
+        Unlike release(agent_type), this never selects another
+        instance merely because it shares the same agent type.
+        """
+        with self._lock:
+            for cache_key, record in list(
+                self._runtime_records.items()
+            ):
+                if record.instance is not instance:
+                    continue
+
+                if ephemeral_only and not record.ephemeral:
+                    return False
+
+                agent_type = record.identity.agent_type
+                instance_id = record.identity.instance_id
+
+                self._release_record(cache_key, record)
+                self._refresh_legacy_active_agent(agent_type)
+                self._record_event(
+                    "agent.released",
+                    {
+                        "agent_type": agent_type,
+                        "released_instances": [instance_id],
+                        "release_mode": "exact_instance",
+                    },
+                )
+
+                return True
+
+            return False
+
+
+
     def release(self, agent_type: str, *, version: Optional[str] = None) -> bool:
+        """Explicit administrative release by type and version."""
         normalized = self.normalize_agent_type(agent_type)
-        selected = [
-            (cache_key, record)
-            for cache_key, record in self._runtime_records.items()
-            if record.identity.agent_type == normalized
-            and (version is None or record.identity.version == str(version))
-        ]
-        for cache_key, record in selected:
-            self._release_record(cache_key, record)
-        self._refresh_legacy_active_agent(normalized)
-        if selected:
-            self._record_event(
-                "agent.released",
-                {
-                    "agent_type": normalized,
-                    "version": version,
-                    "released_instances": [record.identity.instance_id for _, record in selected],
-                },
-            )
-        return bool(selected)
+
+        with self._lock:
+            selected = [
+                (cache_key, record)
+                for cache_key, record
+                in self._runtime_records.items()
+                if record.identity.agent_type == normalized and (version is None or record.identity.version == str(version))
+            ]
+
+            for cache_key, record in selected:
+                self._release_record(cache_key, record)
+
+            self._refresh_legacy_active_agent(normalized)
+            if selected:
+                self._record_event(
+                    "agent.released",
+                    {
+                        "agent_type": normalized,
+                        "version": version,
+                        "released_instances": [
+                            record.identity.instance_id
+                            for _, record in selected
+                        ],
+                    },
+                )
+
+            return bool(selected)
+
 
     def clear_active_agents(self) -> None:
-        for cache_key, record in list(self._runtime_records.items()):
-            self._release_record(cache_key, record)
-        self.active_agents.clear()
-        self._record_event("agent.active_cleared", {})
+        with self._lock:
+            for cache_key, record in list(self._runtime_records.items()):
+                self._release_record(cache_key, record)
+            self.active_agents.clear()
+            self._record_event("agent.active_cleared", {})
 
     def reset_unavailable(self, agent_type: Optional[str] = None, *, version: Optional[str] = None) -> None:
         if agent_type is None:
@@ -1578,13 +1723,43 @@ class AgentFactory:
         self._record_event("agent.unavailable_reset", {"agent_type": normalized, "version": version})
 
     def shutdown(self) -> None:
-        if self._runtime_status.lifecycle == RuntimeLifecycle.STOPPED:
+        if (self._runtime_status.lifecycle == RuntimeLifecycle.STOPPED):
             return
-        self._transition_factory_lifecycle(RuntimeLifecycle.STOPPING)
-        self.clear_active_agents()
-        self._cache_clear()
-        self._record_event("factory.shutdown", {})
-        self._transition_factory_lifecycle(RuntimeLifecycle.STOPPED)
+    
+        self._release_errors.clear()
+        errors = []
+        try:
+            self._transition_factory_lifecycle(RuntimeLifecycle.STOPPING)
+            try:
+                self.clear_active_agents()
+    
+            except Exception as exc:
+                errors.append(exc)
+    
+            finally:
+                try:
+                    self._cache_clear()
+    
+                except Exception as exc:
+                    errors.append(exc)
+    
+        finally:
+            try:
+                self._record_event("factory.shutdown", {})
+    
+            except Exception as exc:
+                errors.append(exc)
+    
+            try:
+                self._transition_factory_lifecycle(RuntimeLifecycle.STOPPED)
+    
+            except Exception as exc:
+                errors.append(exc)
+    
+        errors.extend(self._release_errors)
+        if errors:
+            raise RuntimeError(f"AgentFactory shutdown encountered {len(errors)} error(s)") from errors[0]
+    
         logger.info("Agent Factory shutdown complete")
 
     def _record_creation(

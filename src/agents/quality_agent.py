@@ -1,31 +1,20 @@
 """
+SLAI Data Quality Agent.
+
 The Quality Agent is the agent-level quality gatekeeper between normalized
 inputs and downstream SLAI use (knowledge ingestion, training/replay,
 inference context, and memory updates).
 
-Interfaces and dependencies
-Inputs:
-- Reader outputs (documents/files)
-- Browser outputs (web content)
-- Knowledge ingestion streams
-- Training/replay samples
+Configuration ownership
+-----------------------
+QualityAgent reads ONLY:
+    src/agents/base/configs/agents_config.yaml -> quality_agent
 
-Outputs:
-- Quality verdict (pass, warn, block)
-- Record-level flags and confidence
-- Quarantine queue entries
+It never reads src/agents/quality/configs/quality_config.yaml. Existing
+subsystem components remain responsible for their own subsystem configuration.
 
-KPIs
-- Bad-record escape rate
-- Quarantine precision/recall
-- Drift detection latency
-- Post-quality-gate incident reduction
-- Training stability variance
-
-Failure modes & mitigations
-- Overblocking: adaptive thresholds + manual override channel.
-- Under-detection: combine rule-based + statistical detectors.
-- Source volatility: source-specific reliability scoring and cooldown.
+Intelligence modules are configuration-injected from the QualityAgent section
+of agents_config.yaml. They must not load subsystem configuration themselves.
 """
 
 from __future__ import annotations
@@ -36,6 +25,7 @@ import time
 import uuid
 
 from copy import deepcopy
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -127,10 +117,7 @@ class QualityAgentDecision:
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
-        payload["created_at_iso"] = datetime.fromtimestamp(
-            self.created_at,
-            tz=timezone.utc,
-        ).isoformat()
+        payload["created_at_iso"] = datetime.fromtimestamp(self.created_at, tz=timezone.utc).isoformat()
         return payload
 
 
@@ -165,6 +152,7 @@ class QualityAgent(BaseAgent):
         shared_memory: Any,
         agent_factory: Any,
         config: Optional[Mapping[str, Any]] = None,
+        local_memory: Optional[QualityMemory]=None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -178,10 +166,7 @@ class QualityAgent(BaseAgent):
 
         # Agent configuration source: agents_config.yaml only.
         self.config = load_global_config()
-        self.quality_config = get_config_section(
-            "quality_agent",
-            config=self.config,
-        )
+        self.quality_config = get_config_section("quality_agent", config=self.config)
         if config is not None:
             if not isinstance(config, Mapping):
                 raise DataQualityError(
@@ -218,29 +203,27 @@ class QualityAgent(BaseAgent):
 
         self.handler_bridge = kwargs.get("handler_bridge")
         self.safety_bridge = kwargs.get("safety_bridge")
-        self._results_by_batch: Dict[str, Dict[str, Any]] = {}
-        self._results_by_source: Dict[str, List[Dict[str, Any]]] = {}
+        cache_config = self.quality_config.get("result_cache", {})
+        self.result_cache_enabled = bool(cache_config.get("enabled", True))
+        self.result_cache_max_entries = max(1, int(cache_config.get("max_entries", 128)))
+        self._results_by_batch: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
         # One coherent quality-memory instance per QualityAgent. Existing
         # subsystem constructors require the small optional memory= integration
         # patch documented with this file.
-        self.quality_memory = QualityMemory()
+        self._owns_quality_memory = True
+        self._quality_agent_closed = False
+        self.quality_memory = local_memory
 
-        self.structural_quality = StructuralQuality()
-        self.structural_quality.memory = self.quality_memory
-
-        self.statistical_quality = StatisticalQuality()
-        self.statistical_quality.memory = self.quality_memory
-
-        self.semantic_quality = SemanticQuality()
-        self.semantic_quality.memory = self.quality_memory
-
+        self.structural_quality = StructuralQuality(memory = self.quality_memory)
+        self.statistical_quality = StatisticalQuality(memory = self.quality_memory)
+        self.semantic_quality = SemanticQuality(memory = self.quality_memory)
         self.workflow_control = WorkflowControl(
             shared_memory=self.shared_memory,
             handler_bridge=self.handler_bridge,
             safety_bridge=self.safety_bridge,
+            memory = self.quality_memory
         )
-        self.workflow_control.memory = self.quality_memory
 
         self.fitness_policy: Optional[FitnessPolicyResolver] = None
         self.baseline_governor: Optional[BaselineGovernor] = None
@@ -255,8 +238,7 @@ class QualityAgent(BaseAgent):
         )
 
         logger.info(
-            "Quality Agent initialized | enabled=%s | intelligence=%s | "
-            "auto_route_via_workflow=%s | subsystem_order=%s",
+            "Quality Agent initialized | enabled=%s | intelligence=%s | auto_route_via_workflow=%s | subsystem_order=%s",
             self.enabled,
             self.intelligence_enabled,
             self.auto_route_via_workflow,
@@ -1117,16 +1099,48 @@ class QualityAgent(BaseAgent):
 
     def latest_decision(self, batch_id: str) -> Optional[Dict[str, Any]]:
         batch_key = nonempty_text(batch_id, "batch_id")
-        result = self._results_by_batch.get(batch_key)
-        return None if result is None else deepcopy(result)
+        cached = self._results_by_batch.get(batch_key)
+        if cached is not None:
+            self._results_by_batch.move_to_end(batch_key,last=True)
+            return deepcopy(cached)
+    
+        assert self.quality_memory is not None
+        snapshot = self.quality_memory.get_batch_snapshot(batch_key)
+        if snapshot is None:
+            return None
+    
+        context = snapshot.get("context", {})
+        if not isinstance(context, Mapping):
+            return None
+    
+        result = context.get("quality_agent_final_decision")
+        if not isinstance(result, Mapping):
+            return None
+    
+        return deepcopy(dict(result))
 
     def recent_source_results(self, source_id: str, *, limit: int = 10) -> List[Dict[str, Any]]:
+        assert self.quality_memory is not None
         source_key = nonempty_text(source_id, "source_id")
-        return deepcopy(
-            (self._results_by_source.get(source_key) or [])[
-                -max(int(limit), 1) :
-            ]
-        )
+        requested = max(int(limit), 1)
+        snapshots = self.quality_memory.quality_snapshots(source_key)
+    
+        results = []
+        for snapshot in reversed(snapshots):
+            context = snapshot.get("context", {})
+            if not isinstance(context, Mapping):
+                continue
+    
+            decision = context.get("quality_agent_final_decision")
+            if not isinstance(decision, Mapping):
+                continue
+    
+            results.append(deepcopy(dict(decision)))
+            if len(results) >= requested:
+                break
+    
+        results.reverse()
+        return results
 
     def summary(self) -> Dict[str, Any]:
         all_results = list(self._results_by_batch.values())
@@ -1155,7 +1169,10 @@ class QualityAgent(BaseAgent):
             "enabled": self.enabled,
             "intelligence_enabled": self.intelligence_enabled,
             "results_tracked": len(all_results),
-            "sources_tracked": len(self._results_by_source),
+            "result_cache_capacity": self.result_cache_max_entries,
+            "result_cache_enabled": self.result_cache_enabled,
+            "summary_scope": "in_memory_cache",
+            "sources_tracked": len({str(result.get("source_id")) for result in all_results if result.get("source_id") is not None}),
             "verdict_counts": verdict_counts,
             "evidence_strength_counts": evidence_strength_counts,
             "fitness_policy_counts": policy_counts,
@@ -2374,27 +2391,50 @@ class QualityAgent(BaseAgent):
             self._store_error_marker(normalized.to_dict())
             return shared_keys
 
-    def _persist_local_result(
-        self,
-        decision: Mapping[str, Any],
-    ) -> None:
+    def _persist_local_result(self, decision: Mapping[str, Any]) -> None:
+        """
+        Persist a completed QualityAgent decision.
+
+        The authoritative historical record belongs to
+        QualityMemory.
+
+        The local OrderedDict is only a bounded acceleration cache.
+        """
         batch_key = str(decision["batch_id"])
         source_key = str(decision["source_id"])
-        self._results_by_batch[batch_key] = deepcopy(dict(decision))
-        history = self._results_by_source.setdefault(source_key, [])
-        history.append(deepcopy(dict(decision)))
-        max_history = max(self.max_error_log_size, 10)
-        if len(history) > max_history:
-            del history[: len(history) - max_history]
+        payload = deepcopy(dict(decision))
 
-    def _store_error_marker(
-        self,
-        error_payload: Mapping[str, Any],
-    ) -> None:
-        if (
-            self.shared_memory is None
-            or not self.publish_to_shared_memory
+        assert self.quality_memory is not None
+        self.quality_memory.record_quality_snapshot(
+            source_id=source_key,
+            batch_id=batch_key,
+            batch_score=float(payload.get("batch_score", 0.0)),
+            verdict=str(payload.get("verdict", "warn")),
+            flags=payload.get("flags", []),
+            quarantine_count=int(payload.get("quarantine_count", 0)),
+            remediation_actions=payload.get("remediation_actions", []),
+            checker_findings=payload.get("subsystem_findings", []),
+            window=payload.get("context", {}).get("window"),
+            context={
+                "record_type": "quality_agent_final_decision",
+                "quality_agent_final_decision": payload,
+            },
+        )
+
+        if not self.result_cache_enabled:
+            return
+
+        self._results_by_batch[batch_key] = payload
+        self._results_by_batch.move_to_end(batch_key, last=True)
+
+        while (
+            len(self._results_by_batch)
+            > self.result_cache_max_entries
         ):
+            self._results_by_batch.popitem(last=False)
+
+    def _store_error_marker(self, error_payload: Mapping[str, Any]) -> None:
+        if (self.shared_memory is None or not self.publish_to_shared_memory):
             return
         try:
             key = (
@@ -2439,10 +2479,7 @@ class QualityAgent(BaseAgent):
         )
         for candidate in candidates:
             try:
-                bridge = resolve_factory_candidate(
-                    self.agent_factory,
-                    candidate,
-                )
+                bridge = resolve_factory_candidate(self.agent_factory, candidate)
             except Exception as exc:
                 normalized = normalize_quality_exception(
                     exc,
@@ -2567,12 +2604,7 @@ class QualityAgent(BaseAgent):
         payload["evidence_strength"] = "not_applicable"
         return payload
 
-    def _error_finding(
-        self,
-        *,
-        subsystem: str,
-        error: DataQualityError,
-    ) -> Dict[str, Any]:
+    def _error_finding(self, *, subsystem: str, error: DataQualityError) -> Dict[str, Any]:
         payload = error.to_dict()
         failure_verdict = (
             "block" if self.fail_closed_on_subsystem_error else "warn"
@@ -2602,10 +2634,7 @@ class QualityAgent(BaseAgent):
         }
 
     @staticmethod
-    def _summary_error_type(
-        subsystem: str,
-        verdict: str,
-    ) -> str:
+    def _summary_error_type(subsystem: str, verdict: str) -> str:
         normalized = normalize_verdict(verdict)
         if normalized != "block":
             return ""
@@ -2625,6 +2654,51 @@ class QualityAgent(BaseAgent):
         if normalized == "warn":
             return "medium"
         return "low"
+
+    def shutdown(self) -> None:
+        """
+        Release QualityAgent-owned resources.
+        Subcomponents borrow the authoritative QualityMemory, so they must not close it independently.
+        """
+
+        if self._quality_agent_closed:
+            return
+
+        errors = []
+
+        components = (
+            self.structural_quality,
+            self.statistical_quality,
+            self.semantic_quality,
+            self.workflow_control,
+        )
+
+        for component in components:
+            shutdown = getattr(component, "shutdown", None)
+            if not callable(shutdown):
+                continue
+            try:
+                shutdown()
+            except Exception as exc:
+                errors.append(exc)
+
+        if self._owns_quality_memory:
+            try:
+                assert self.quality_memory is not None
+                self.quality_memory.close()
+            except Exception as exc:
+                errors.append(exc)
+
+        if errors:
+            raise RuntimeError(
+                f"QualityAgent shutdown encountered "
+                f"{len(errors)} error(s)") from errors[0]
+
+        self._quality_agent_closed = True
+
+
+    def close(self) -> None:
+        self.shutdown()
 
 
 __all__ = [
@@ -2737,4 +2811,3 @@ if __name__ == "__main__":
     printer.pretty("SAFETY_CALLS", safety_bridge.calls, "info")
 
     print("\n=== Test ran successfully ===\n")
-
