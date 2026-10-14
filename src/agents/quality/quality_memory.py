@@ -220,9 +220,7 @@ class QualityMemory:
         self.auto_persist = bool(self.memory_config.get("auto_persist", True))
         self.bootstrap_on_start = bool(self.memory_config.get("bootstrap_on_start", True))
         self.persist_every_n_writes = int(self.memory_config.get("persist_every_n_writes", 1))
-        self.max_snapshots_by_batch = int(
-            self.memory_config.get("retention", {}).get("max_snapshots_by_batch", 2000)
-        )
+        self.max_snapshots_by_batch = int(self.memory_config.get("retention", {}).get("max_snapshots_by_batch", 2000))
         self.journaling_enabled = bool(self.memory_config.get("journaling", {}).get("enabled", True))
         self.fsync_on_write = bool(self.memory_config.get("persistence", {}).get("fsync_on_write", False))
 
@@ -273,9 +271,7 @@ class QualityMemory:
         self._storage_dir = self._resolve_storage_path(self.memory_config.get("persistence", {}).get("storage_dir", "quality/storage/quality_memory"))
         self._state_file = self._storage_dir / self.memory_config.get("persistence", {}).get("state_filename", "quality_memory_state.json")
         self._journal_file = self._storage_dir / self.memory_config.get("persistence", {}).get("journal_filename", "quality_memory_journal.jsonl")
-        self._sqlite_file = self._storage_dir / self.memory_config.get("persistence", {}).get(
-            "sqlite_filename", "quality_memory.sqlite3"
-        )
+        self._sqlite_file = self._storage_dir / self.memory_config.get("persistence", {}).get("sqlite_filename", "quality_memory.sqlite3")
 
         self._validate_runtime_configuration()
         self._ensure_storage_paths()
@@ -1487,6 +1483,30 @@ class QualityMemory:
         if timestamp_value is None:
             return None
         return datetime.fromtimestamp(float(timestamp_value), tz=timezone.utc).isoformat()
+
+    def quality_snapshots(self, source_id: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Retrieve available canonical snapshots for a source.
+
+        SQLite:
+            Returns durable historical snapshots, including archived rows.
+
+        Other backends:
+            Returns history retained by the configured memory policy.
+        """
+        source_key = self._nonempty(source_id, "source_id")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be >= 1")
+
+        with self._lock:
+            if self.backend == "sqlite":
+                return self._sqlite().history("quality_snapshot_recorded", source_key, limit=limit)
+
+            history = self._state["snapshots_by_source"].get(source_key, [])
+            if limit is not None:
+                history = history[-limit:]
+
+            return deepcopy(history)
 
 
 __all__ = [

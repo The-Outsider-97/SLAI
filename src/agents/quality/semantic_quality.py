@@ -97,10 +97,10 @@ class SemanticQuality:
     or memory updates?
     """
 
-    def __init__(self) -> None:
+    def __init__(self, memory: Optional[QualityMemory]=None) -> None:
         self.config = load_global_config()
         self.quality_config = get_config_section("semantic_quality")
-        self.memory = QualityMemory()
+        self.memory = memory
 
         self.enabled = bool(self.quality_config.get("enabled", True))
         self.auto_record_to_memory = bool(self.quality_config.get("auto_record_to_memory", True))
@@ -209,6 +209,7 @@ class SemanticQuality:
             )
 
             findings = [leakage, consistency, provenance_finding]
+            assert self.memory is not None
             conflict_resolution = self.memory.reconcile_conflicts(
                 findings=[finding.to_conflict_input() for finding in findings],
                 source_id=source_key,
@@ -817,6 +818,7 @@ class SemanticQuality:
             "lineage": 0.05,
         })
 
+        assert self.memory is not None
         latest_reliability = self.memory.latest_source_reliability(source_id)
         memory_reliability = self._coerce_float(
             (latest_reliability or {}).get("reliability", self.memory.default_source_reliability),
@@ -1588,6 +1590,7 @@ if __name__ == "__main__":
         context={"scenario": "risky_batch"},
     )
 
+    assert semantic.memory is not None
     latest_state = semantic.memory.latest_quality_state("source_semantic_beta")
 
     assert clean_assessment["verdict"] in {"pass", "warn"}, "Clean batch should not hard block"
@@ -1604,6 +1607,7 @@ if __name__ == "__main__":
     printer.pretty("RISKY_ASSESSMENT", risky_assessment, "warning")
     printer.pretty("LATEST_MEMORY_STATE", latest_state, "success")
 
+    assert semantic.memory is not None
     semantic.memory.flush()
     printer.status("TEST", "Semantic Quality test flow completed", "success")
     print("\n=== Test ran successfully ===\n")

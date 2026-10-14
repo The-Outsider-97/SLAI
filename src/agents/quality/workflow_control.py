@@ -126,6 +126,7 @@ class WorkflowControl:
     """
 
     def __init__(self,
+        memory: Optional[QualityMemory]=None,
         shared_memory: Any = None,
         handler_bridge: Any = None,
         safety_bridge: Any = None,
@@ -136,7 +137,7 @@ class WorkflowControl:
         if config:
             self.quality_config.update(dict(config))
 
-        self.memory = QualityMemory()
+        self.memory = memory
         self.shared_memory = shared_memory
         self.handler_bridge = handler_bridge
         self.safety_bridge = safety_bridge
@@ -731,6 +732,7 @@ class WorkflowControl:
                 "context": self._normalized_mapping(context),
             }
         try:
+            assert self.memory is not None
             result = self.memory.reconcile_conflicts(
                 findings=findings,
                 source_id=source_id,
@@ -1026,6 +1028,7 @@ class WorkflowControl:
         try:
             source_reliability = 0.5
             if hasattr(self.memory, "latest_source_reliability"):
+                assert self.memory is not None
                 latest_reliability = self.memory.latest_source_reliability(decision["source_id"])
                 if isinstance(latest_reliability, Mapping):
                     reliability_value = latest_reliability.get("reliability")
@@ -1040,6 +1043,7 @@ class WorkflowControl:
                 if default_reliability is not None:
                     source_reliability = float(default_reliability)
 
+            assert self.memory is not None
             self.memory.record_quality_snapshot(
                 source_id=decision["source_id"],
                 batch_id=decision["batch_id"],

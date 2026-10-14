@@ -84,10 +84,10 @@ class StatisticalQuality:
     are available, while still remaining usable as a stateful runtime component.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, memory: Optional[QualityMemory]=None) -> None:
         self.config = load_global_config()
         self.quality_config = get_config_section("statistical_quality")
-        self.memory = QualityMemory()
+        self.memory = memory
         self._runtime_baselines: Dict[str, Dict[str, Any]] = {}
         self._validate_runtime_configuration()
 
