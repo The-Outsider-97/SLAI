@@ -1149,15 +1149,14 @@ safety_helpers:
   max_recursion_depth: 8
   max_file_bytes: 1048576
   redaction_marker: "[REDACTED]"
-  redaction_patterns:
-    - name: "ssn"
-      pattern: '\b\d{3}-\d{2}-\d{4}\b'
   sensitive_key_patterns:
     - '(?i)(?:^|[_\-.])(api[_\-.]?key|token|secret|password|passwd|pwd|credential|authorization|auth|cookie|session|private[_\-.]?key|access[_\-.]?key|refresh[_\-.]?token|client[_\-.]?secret)(?:$|[_\-.])'
     - '(?i)(?:bearer|oauth|jwt|csrf|xsrf)'
   identifier_key_patterns:
     - '(?i)(?:^|[_\-.])(user[_\-.]?id|subject[_\-.]?id|account[_\-.]?id|actor[_\-.]?id|tenant[_\-.]?id|session[_\-.]?id|request[_\-.]?id|trace[_\-.]?id|correlation[_\-.]?id|email|phone|ip|source[_\-.]?ip)(?:$|[_\-.])'
   redaction_patterns:
+    - name: "ssn"
+      pattern: '\b\d{3}-\d{2}-\d{4}\b'
     - name: "authorization_header"
       pattern: '(?i)authorization\s*:\s*(?:basic|bearer)\s+[A-Za-z0-9._~+/=-]+'
     - name: "bearer_token"
