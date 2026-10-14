@@ -822,6 +822,10 @@ class LearningFactory:
             self.checkpoint_dir / f"{agent_name}_checkpoint.pkl",
             self.checkpoint_dir / f"{agent_name}.pkl",
         ]
+
+        if agent_name == "rl":
+            names.insert(0, Path("src/agents/learning/models/tabularRL.pt"))
+
         return names
 
     def _load_agent_checkpoint(self, agent_name: str, agent: Any) -> bool:
@@ -830,12 +834,33 @@ class LearningFactory:
             getattr(agent, "load", None),
         ]
         loaders = [loader for loader in loaders if callable(loader)]
+
         if not loaders:
             return False
 
         for path in self._checkpoint_candidates(agent_name):
-            if not path.exists():
+            if not path.is_file():
                 continue
+
+            if agent_name == "rl" and path.name == "tabularRL.pt":
+                if self.state_dim != 5 or self.action_dim != 4:
+                    logger.warning(
+                        "Skipping TRL checkpoint: factory environment has state_dim=%s action_dim=%s; expected 5 and 4",
+                        self.state_dim,
+                        self.action_dim,
+                    )
+                    continue
+
+                try:
+                    from train_trl import checked_load # type: ignore
+                    checked_load(agent, path, inference=True)
+                    logger.info("Loaded validated scheduling TRL checkpoint from %s", path)
+                    return True
+
+                except Exception as exc:
+                    logger.warning("Rejected scheduling TRL checkpoint %s: %s", path, exc)
+                    continue
+
             for loader in loaders:
                 try:
                     loader(str(path))
@@ -843,7 +868,8 @@ class LearningFactory:
                     return True
                 except Exception as exc:
                     logger.warning("Failed loading checkpoint for %s from %s: %s", agent_name, path, exc)
-        return False
+
+        return False    
 
     def _save_agent_checkpoint(self, agent_name: str, agent: Any) -> Optional[str]:
         save_path = self.checkpoint_dir / f"{agent_name}_checkpoint.pt"

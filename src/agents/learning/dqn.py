@@ -27,8 +27,8 @@ from collections import deque
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.learning_error import *
-from .utils.learning_calculations import *
 from .utils.learning_helpers import *
+from .utils.learning_calculations import *
 from .learning_memory import LearningMemory, Transition
 from .modules.neural_network import NeuralNetwork
 from src.utils.buffer.distributed_replay_buffer import DistributedReplayBuffer # pyright: ignore[reportMissingImports]
@@ -339,16 +339,13 @@ class DQNAgent:
 
         state_tensor = _state_to_tensor(processed_state, device=self.device)
         if state_tensor.numel() != self.state_dim:
-            raise ValueError(
-                f"State dimension mismatch. Expected {self.state_dim} values, got {state_tensor.numel()}."
-            )
+            raise ValueError(f"State dimension mismatch. Expected {self.state_dim} values, got {state_tensor.numel()}.")
 
         with torch.no_grad():
             q_values = self.policy_net.forward(state_tensor.unsqueeze(0)).squeeze(0)
         return int(torch.argmax(q_values).item())
 
     def store_transition(self, *transition):
-        """Store a transition in the configured replay backend."""
         transition_obj = _coerce_transition(transition if len(transition) != 1 else transition[0])
         stored = Transition(
             _state_to_tensor(transition_obj.state).cpu(),
@@ -357,29 +354,46 @@ class DQNAgent:
             _state_to_tensor(transition_obj.next_state).cpu(),
             bool(transition_obj.done),
         )
-
-        if self.n_step == 1:
-            self._push_to_memory(stored)
-        else:
-            self.n_step_buffer.append(stored)
-            if len(self.n_step_buffer) == self.n_step or stored.done:
-                # Compute n‑step discounted return
-                n_step_reward = 0.0
-                for i, trans in enumerate(self.n_step_buffer):
-                    n_step_reward += (self.gamma ** i) * trans.reward
-                last = self.n_step_buffer[-1]
-                n_step_trans = Transition(
-                    state=self.n_step_buffer[0].state,
-                    action=self.n_step_buffer[0].action,
-                    reward=n_step_reward,
-                    next_state=last.next_state,
-                    done=last.done,
-                )
-                self._push_to_memory(n_step_trans)
-                if stored.done:
-                    self.n_step_buffer.clear()
-                else:
-                    self.n_step_buffer.popleft()
+        
+        self.n_step_buffer.append(stored)
+        
+        # Dynamic horizon based on terminal proximity or buffer capacity
+        max_horizon = self.n_step
+        current_horizon = min(len(self.n_step_buffer), max_horizon)
+        
+        # If terminal state reached or buffer is full enough, compute hybrid/dynamic n-step return
+        if len(self.n_step_buffer) == current_horizon or stored.done:
+            # Hybrid multi-step return blending (e.g., exponential weighting across horizons 1..current_horizon)
+            lambd = 0.8
+            hybrid_reward = 0.0
+            weight_sum = 0.0
+            
+            for k in range(1, current_horizon + 1):
+                w = (1.0 - lambd) * (lambd ** (k - 1))
+                if k == current_horizon:
+                    w /= (1.0 - lambd ** current_horizon) # Normalize weights
+                    
+                partial_reward = sum((self.gamma ** i) * self.n_step_buffer[i].reward for i in range(k))
+                hybrid_reward += w * partial_reward
+                weight_sum += w
+                
+            hybrid_reward = hybrid_reward / max(weight_sum, 1e-8)
+            last_trans = self.n_step_buffer[current_horizon - 1] if current_horizon <= len(self.n_step_buffer) else self.n_step_buffer[-1]
+            
+            dynamic_n_step_trans = Transition(
+                state=self.n_step_buffer[0].state,
+                action=self.n_step_buffer[0].action,
+                reward=hybrid_reward,
+                next_state=last_trans.next_state,
+                done=last_trans.done,
+            )
+            self._push_to_memory(dynamic_n_step_trans)
+            
+            if stored.done:
+                self.n_step_buffer.clear()
+            else:
+                self.n_step_buffer.popleft()
+                
         self.total_env_steps += 1
 
     def _push_to_memory(self, transition):
@@ -611,17 +625,32 @@ class DQNAgent:
         else:
             self.update_target_net(force=False)
 
+        drift_metric = self.compute_policy_target_drift(states)
+        
         metrics = {
             "loss": loss,
             "epsilon": float(self.epsilon),
             "avg_q_value": float(chosen_q.mean().item()),
             "avg_target_q": float(td_target.mean().item()),
             "avg_td_error": float(td_errors.abs().mean().item()),
-            "batch_size": float(states.shape[0]),
-            "replay_size": float(self.replay_size()),
+            "policy_target_js_drift": drift_metric,
+            "policy_gradient_norms": self.policy_net.diagnostics().get("layer_gradient_norms", {}),
+            "target_network_divergence": _weight_distance(self.policy_net, self.target_net),
         }
         self.last_train_metrics = metrics
         return metrics
+
+    def compute_policy_target_drift(self, batch_states: torch.Tensor) -> float:
+        """Compute Jensen-Shannon divergence between policy and target network Q-value distributions."""
+        with torch.no_grad():
+            q_policy = self.policy_net.forward(batch_states).detach().cpu().numpy()
+            q_target = self.target_net.forward(batch_states).detach().cpu().numpy()
+            
+        # Flatten and normalize as probability distributions using LearningCalculations helpers
+        calc = LearningCalculations()
+        p = calc._normalize_probability_vector(q_policy.flatten())
+        q = calc._normalize_probability_vector(q_target.flatten())
+        return calc.calculate_js_divergence(p, q)
 
     def train(self) -> Optional[float]:
         """Backward-compatible alias that returns only the scalar loss."""
