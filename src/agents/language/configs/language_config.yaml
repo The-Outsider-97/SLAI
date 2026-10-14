@@ -54,7 +54,7 @@ templates:
 
 lantra_runtime:
   version: '1.0'
-  checkpoint_path: src/agents/language/checkpoints/lantra/lantra_20260919T142819Z.pt
+  checkpoint_path: src/agents/language/checkpoints/lantra/lantra_20261013T231832Z.pt
   device: auto
   strict_checkpoint_loading: true
   require_trained_tokenizer: true
@@ -122,13 +122,6 @@ language_agent:
   diagnostics_enabled: true
   max_input_chars: 200000
 
-  # Optional semantic transport projection. LSTP does not replace NLU/LANTRA
-  # and never infers execution authority from the language frame.
-  lstp:
-    enabled: false
-    required: false
-    include_packet: true
-
 
 pipeline_contract:
   preserve_source_text: true
@@ -193,7 +186,6 @@ language_tokenizer:
 language_transformer:
   version: '2.0'
   task_type: generation
-  history_limit: 200
   dropout: 0.2
   base_overrides:
     src_vocab_size: 50000
@@ -216,6 +208,7 @@ language_transformer:
     inference_temperature: 1.0
     inference_do_sample: false
     inference_top_k: 0
+  history_limit: 20000
   generation:
     max_length: 100
     min_length: 1
