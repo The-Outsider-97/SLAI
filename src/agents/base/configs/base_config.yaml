@@ -297,12 +297,6 @@ physics_constraints:
   tunneling_probability: 0.05
   barrier_positions: [-8.0, 8.0]
   barrier_width: 0.1
-  enable_relativistic: true
-  relativistic_threshold: 0.1
-  relativistic_safety_factor: 0.999999
-  enable_electromagnetic: false
-  electric_field: [0.0, 10.0]
-  magnetic_field: 0.5
   dt: 0.02
   enable_history: true
   history_limit: 200
@@ -330,7 +324,7 @@ physics_constraints:
   emissivity: 0.9
   specific_heat: 4186.0
 
-  # EM
+  # Electromagnetism
   enable_electromagnetic: true
   electric_field: [0.0, 10.0]
   magnetic_field: 0.5
@@ -338,8 +332,10 @@ physics_constraints:
   other_charges: [[[3.0, 0.0], -1e-6]]
   enable_radiation_pressure: false
 
-  # relativity
+  # Relativity
   enable_relativistic: true
+  relativistic_threshold: 0.1
+  relativistic_safety_factor: 0.999999
   enable_time_dilation: true
   enable_length_contraction: true
 
