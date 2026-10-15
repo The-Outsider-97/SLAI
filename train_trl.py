@@ -360,13 +360,28 @@ def evaluate(agent: Any, profile: str, seeds: list[int], stages: list[int]) -> d
     return report
 
 
+
 def eligible(report: dict, profile: str, updates: int) -> bool:
-    x = report["trl"]
-    heuristics = list(ACTIONS[profile])
-    return (updates > 0 and x["lower95_random"] > 0.0
-            and any(x["lower95_" + h] > 0.0 for h in heuristics)
-            and x["constraint_violation_rate"] == 0.0
-            and x["completion_rate"] >= .95)
+    """Require supported superiority over every tested heuristic."""
+    if updates <= 0:
+        return False
+
+    result = report["trl"]
+    if result["completion_rate"] < 0.95:
+        return False
+
+    if result["constraint_violation_rate"] > 0.0:
+        return False
+
+    if result["lower95_random"] <= 0.0:
+        return False
+
+    for heuristic in ACTIONS[profile]:
+        if result["lower95_" + heuristic] <= 0.0:
+            return False
+
+    return True
+
 
 
 def load_agent(path: Path, args: argparse.Namespace) -> tuple[Any, dict]:
