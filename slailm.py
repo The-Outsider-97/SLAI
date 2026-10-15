@@ -22,6 +22,7 @@ import re
 import sys
 import time
 import uuid
+
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +43,7 @@ from src.agents.language.utils.config_loader import get_config_section as get_la
 from src.agents.language.utils.language_helpers import compact_text, json_safe, stable_hash
 
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 LOGGER = get_logger("SLAI-LM")
 
@@ -400,9 +401,7 @@ def _configured_checkpoint() -> Optional[Path]:
 
 def _discover_checkpoint(directory: Path) -> Optional[Path]:
     """Reuse the trainer's current checkpoint-resume selection semantics."""
-
     from train_lantra import discover_resume_checkpoint
-
     return discover_resume_checkpoint(directory, {})
 
 
@@ -445,9 +444,7 @@ def resolve_checkpoint(explicit: Optional[str]) -> Path:
 
     configured = _configured_checkpoint()
     if configured is None:
-        raise FileNotFoundError(
-            "language_config.yaml does not define lantra_runtime.checkpoint_path; use --checkpoint PATH."
-        )
+        raise FileNotFoundError("language_config.yaml does not define lantra_runtime.checkpoint_path; use --checkpoint PATH.")
     if configured.is_file():
         return configured
 
@@ -524,26 +521,58 @@ class SLAILM:
         return agent
 
     def close(self) -> None:
-        """Persist durable language memory and close initialized runtime resources."""
+        """
+        Persist session state and release root-owned resources.
 
+        Ownership:
+            SLAILM owns LanguageMemory and SharedMemory.
+            AgentFactory owns factory-managed agents.
+
+        All cleanup owners are attempted even if an earlier operation fails.
+        """
+
+        if getattr(self, "_closed", False):
+            return
+
+        self._closed = True
         LOGGER.info("Closing SLAI-LM session %s", self.session_id)
-        self._publish_stats()
-        self.language_memory.save_to_disk(force=True)
+        errors = []
+        try:
+            self._publish_stats()
 
-        for name, agent in list(self._agents.items()):
-            shutdown = getattr(agent, "shutdown", None)
-            close = getattr(agent, "close", None)
-            method = shutdown if callable(shutdown) else close if callable(close) else None
-            if method is None:
-                continue
-            try:
-                method()
-            except Exception as exc:
-                LOGGER.warning("Agent shutdown failed: %s | %s: %s", name, type(exc).__name__, exc)
+        except Exception as exc:
+            errors.append(("publish_stats", exc))
+        try:
+            self.language_memory.save_to_disk(force=True)
 
-        close_shared = getattr(self.shared_memory, "close", None)
-        if callable(close_shared):
-            close_shared()
+        except Exception as exc:
+            errors.append(("language_memory.save", exc))
+
+        try:
+            self.agent_factory.shutdown()
+
+        except Exception as exc:
+            errors.append(("agent_factory.shutdown", exc))
+
+        try:
+            close_shared = getattr(self.shared_memory, "close", None)
+            if callable(close_shared):
+                close_shared()
+
+        except Exception as exc:
+            errors.append(("shared_memory.close", exc))
+        self._agents.clear()
+        for operation, exc in errors:
+            LOGGER.error("SLAI-LM cleanup failure | operation=%s | error=%s: %s", operation, type(exc).__name__, exc)
+
+        if errors:
+            first_error = errors[0][1]
+            raise RuntimeError(
+                f"SLAI-LM shutdown encountered "
+                f"{len(errors)} error(s)"
+            ) from first_error
+
+        LOGGER.info("SLAI-LM session closed: %s", self.session_id)
 
     # ------------------------------------------------------------------
     # Conversation memory
@@ -558,30 +587,105 @@ class SLAILM:
             metadata={"session_id": self.session_id, "turn_id": turn_id},
         )
 
+    def _session_feedback_by_turn(self) -> Dict[str, FeedbackRecord]:
+        """Return the latest explicit feedback for each turn in this session.
+
+        Feedback is applied when rebuilding dialogue history so rejected model
+        answers never become accidental demonstrations and human corrections
+        replace rejected assistant turns immediately.
+        """
+
+        matches = self.language_memory.recall(
+            MemoryQuery(
+                kinds=(MemoryKind.NOTE,),
+                scopes=(MemoryScope.USER,),
+                source=FEEDBACK_SOURCE,
+                top_k=max(1, int(self.language_memory.settings.max_records)),
+                min_score=0.0,
+                metadata_filter=lambda metadata: metadata.get("session_id") == self.session_id,
+            )
+        )
+        feedback_by_turn: Dict[str, FeedbackRecord] = {}
+        for match in matches:
+            value = match.record.value
+            if not isinstance(value, Mapping):
+                continue
+            try:
+                feedback = FeedbackRecord(**dict(value))
+            except TypeError:
+                continue
+            previous = feedback_by_turn.get(feedback.turn_id)
+            if previous is None or feedback.timestamp >= previous.timestamp:
+                feedback_by_turn[feedback.turn_id] = feedback
+        return feedback_by_turn
+
     def _session_history(self, *, limit: Optional[int] = None) -> List[Dict[str, str]]:
+        """Rebuild usable session history with explicit feedback applied.
+
+        Negative feedback removes the rejected exchange from future context.
+        Correction feedback replaces the assistant response with the user's
+        corrected response. Validation keeps the human-approved response.
+        """
+
         effective_limit = limit or self.settings.context_turns
         matches = self.language_memory.recall(
             MemoryQuery(
                 kinds=(MemoryKind.TURN,),
                 scopes=(MemoryScope.SESSION,),
                 source=CONVERSATION_SOURCE,
-                top_k=max(1, effective_limit),
+                top_k=max(2, effective_limit * 2),
                 min_score=0.0,
                 metadata_filter=lambda metadata: metadata.get("session_id") == self.session_id,
             )
         )
         records = sorted((match.record for match in matches), key=lambda item: item.created_at)
-        history: List[Dict[str, str]] = []
+        feedback_by_turn = self._session_feedback_by_turn()
+
+        grouped: Dict[str, List[Any]] = {}
+        order: List[str] = []
         for record in records:
-            if isinstance(record.value, Mapping):
-                role = str(record.value.get("role") or record.role.value)
-                content = str(record.value.get("content") or record.text)
-            else:
-                role = record.role.value
-                content = record.text
-            if content.strip():
-                history.append({"role": role, "content": content})
-        return history
+            metadata = record.metadata if isinstance(record.metadata, Mapping) else {}
+            turn_id = str(metadata.get("turn_id") or f"memory:{record.memory_id}")
+            if turn_id not in grouped:
+                grouped[turn_id] = []
+                order.append(turn_id)
+            grouped[turn_id].append(record)
+
+        history: List[Dict[str, str]] = []
+        for turn_id in order:
+            feedback = feedback_by_turn.get(turn_id)
+            if feedback is not None and feedback.feedback_type == "negative":
+                continue
+
+            user_content: Optional[str] = None
+            assistant_content: Optional[str] = None
+            for record in grouped[turn_id]:
+                if isinstance(record.value, Mapping):
+                    role = str(record.value.get("role") or record.role.value)
+                    content = str(record.value.get("content") or record.text).strip()
+                else:
+                    role = record.role.value
+                    content = record.text.strip()
+                if not content:
+                    continue
+                if role == MemoryRole.USER.value:
+                    user_content = content
+                elif role == MemoryRole.ASSISTANT.value:
+                    assistant_content = content
+
+            if feedback is not None and feedback.feedback_type == "correction" and feedback.validated_response:
+                user_content = feedback.original_user_input or user_content
+                assistant_content = feedback.validated_response
+            elif feedback is not None and feedback.feedback_type == "validation" and feedback.validated_response:
+                assistant_content = feedback.validated_response
+
+            if user_content:
+                history.append({"role": "user", "content": user_content})
+            if assistant_content:
+                history.append({"role": "assistant", "content": assistant_content})
+
+        max_records = max(2, effective_limit * 2)
+        return history[-max_records:]
 
     def clear_session(self) -> str:
         """Start a fresh conversational scope while retaining validated long-term feedback."""
@@ -861,6 +965,7 @@ class SLAILM:
             )
             result = _ensure_mapping(raw)
             decision = result.get("decision") if isinstance(result.get("decision"), Mapping) else {}
+            assert decision is not None
             reasons_raw = decision.get("reasons") or []
             reasons = tuple(str(item) for item in reasons_raw) if isinstance(reasons_raw, Sequence) and not isinstance(reasons_raw, str) else ()
             approved_raw = decision.get("approved")
@@ -924,13 +1029,13 @@ class SLAILM:
         target = record.validated_response or record.original_lantra_response
         if record.feedback_type == "correction":
             adaptation_text = (
-                "Human-validated correction for a prior similar request. "
-                f"Request: {record.original_user_input}\nValidated answer: {target}"
+                f"User: {record.original_user_input}\n"
+                f"Assistant: {target}"
             )
         elif record.feedback_type == "validation":
             adaptation_text = (
-                "Human explicitly validated this prior response for a similar request. "
-                f"Request: {record.original_user_input}\nValidated answer: {target}"
+                f"User: {record.original_user_input}\n"
+                f"Assistant: {target}"
             )
         else:
             adaptation_text = (
@@ -1015,11 +1120,13 @@ class SLAILM:
 
         notes: List[str] = []
         safety_validated = False
+        safety_explicitly_blocked = False
         safe_target = requested_target
         alignment_result: Dict[str, Any] = {}
 
         if requested_target is not None:
             safety = self._safety_assess(requested_target, context_type="slailm_feedback")
+            safety_explicitly_blocked = safety.available and safety.blocked
             notes.append(f"safety:{safety.decision}")
             if safety.available and not safety.blocked:
                 safety_validated = True
@@ -1038,7 +1145,12 @@ class SLAILM:
                     )
 
         human_validated = normalized in {"correction", "validation"}
-        reusable = bool(human_validated and safety_validated and safe_target)
+        runtime_reusable = bool(human_validated and safe_target and not safety_explicitly_blocked)
+        training_reusable = bool(human_validated and safety_validated and safe_target)
+        if runtime_reusable and not safety_validated:
+            notes.append(
+                "human correction/validation enabled for runtime adaptation; offline training remains disabled until SafetyAgent validation succeeds"
+            )
         quality_signal = {
             "positive": "accepted_preference",
             "negative": "rejected_response",
@@ -1078,8 +1190,8 @@ class SLAILM:
             generation_metadata=json_safe(target_turn.generation_metadata),
             human_validated=human_validated,
             safety_validated=safety_validated,
-            runtime_adaptation_eligible=reusable,
-            training_eligible=reusable,
+            runtime_adaptation_eligible=runtime_reusable,
+            training_eligible=training_reusable,
             validation_notes=notes,
         )
         self._store_feedback(feedback)
@@ -1107,7 +1219,6 @@ class SLAILM:
     @staticmethod
     def _default_feedback_export_path() -> Path:
         from train_lantra import DEFAULT_DATA_CANDIDATES
-
         return Path(DEFAULT_DATA_CANDIDATES[0]) / "slailm_feedback" / "validated_dialogue.jsonl"
 
     def _eligible_feedback_records(self) -> List[FeedbackRecord]:
@@ -1307,8 +1418,8 @@ class SLAILM:
 
         if support.validated_feedback:
             sections.append(
-                "Human-validated prior feedback (highest-priority support):\n"
-                + "\n".join(f"- {item}" for item in support.validated_feedback)
+                "Validated dialogue examples:\n"
+                + "\n\n".join(support.validated_feedback)
             )
         if support.knowledge:
             sections.append("Retrieved knowledge:\n" + "\n".join(f"- {item}" for item in support.knowledge))
@@ -1323,8 +1434,9 @@ class SLAILM:
             return ""
 
         preamble = (
-            "SLAI support context for LANTRA. Use only relevant evidence; "
-            "human-validated corrections take priority. Do not mention internal agents unless asked."
+            "Use the following context only when relevant. "
+            "Validated dialogue examples take priority over rejected model behavior. "
+            "Do not mention internal agents unless asked."
         )
         return compact_text(preamble + "\n\n" + "\n\n".join(sections), max_length=self.settings.max_support_chars)
 
