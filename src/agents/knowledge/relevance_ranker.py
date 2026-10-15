@@ -90,22 +90,65 @@ class LocalSemanticEncoder:
         self.model = SentenceTransformer(str(Path(model_path).resolve()))
         self.cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self.lock = threading.RLock()
+        if not isinstance(max_entries, int) or max_entries < 1:
+            raise ValueError("max_entries must be a positive integer")
         self.max_entries = max_entries
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
-        # lock also protects implementations of local encoders that are not
-        # reentrant, and keeps LRU eviction bounded.
+        """Return embeddings in input order, independent of LRU eviction.
+
+        The persistent cache is bounded. Embeddings requested by *this call*
+        are pinned in a temporary dictionary until its output is assembled.
+        Consequently, cached hits cannot disappear while new embeddings are
+        inserted, even when the request is larger than ``max_entries``.
+        """
+        if not texts:
+            return np.empty((0, 0), dtype=np.float32)
+
         with self.lock:
-            missing = list(dict.fromkeys(t for t in texts if t not in self.cache))
-            if missing:
-                encoded = self.model.encode(missing, batch_size=32, show_progress_bar=False,
-                                            normalize_embeddings=True)
-                for text, vector in zip(missing, np.asarray(encoded)):
-                    self.cache[text] = np.asarray(vector, dtype=np.float32)
+            requested = list(texts)
+            unique = list(dict.fromkeys(requested))
+            current: dict[str, np.ndarray] = {}
+            missing: list[str] = []
+
+            for text in unique:
+                vector = self.cache.get(text)
+                if vector is None:
+                    missing.append(text)
+                else:
+                    current[text] = vector
+                    # Cache *reads* must also refresh LRU recency.
+                    self.cache.move_to_end(text)
+
+            # Bound encoder work per call and avoid creating a massive
+            # intermediate embedding array for large candidate sets.
+            for offset in range(0, len(missing), 32):
+                batch = missing[offset:offset + 32]
+                vectors = np.asarray(
+                    self.model.encode(
+                        batch, batch_size=32,
+                        show_progress_bar=False,
+                        normalize_embeddings=True,
+                    ),
+                    dtype=np.float32,
+                )
+                if vectors.ndim == 1 and len(batch) == 1:
+                    vectors = vectors.reshape(1, -1)
+                if (vectors.ndim != 2 or vectors.shape[0] != len(batch)
+                        or vectors.shape[1] == 0 or not np.isfinite(vectors).all()):
+                    raise ValueError("Semantic encoder returned invalid embeddings")
+                for text, vector in zip(batch, vectors):
+                    current[text] = vector
+                    self.cache[text] = vector
+                    self.cache.move_to_end(text)
                 while len(self.cache) > self.max_entries:
                     self.cache.popitem(last=False)
-            output = [self.cache[t] for t in texts]
-            return np.stack(output) if output else np.zeros((0, 0), dtype=np.float32)
+
+            # Use temporary pinned references instead of looking up cache[t]
+            # after pruning: an LRU hit may have been evicted meanwhile.
+            return np.stack([current[text] for text in requested]).astype(
+                np.float32, copy=False
+            )
 
 
 class FeatureExtractor:
@@ -150,7 +193,8 @@ def checkpoint_sha256(path: str | Path) -> str:
 class RelevanceRanker:
     """Thread-safe inference-only wrapper, preserving SLAI candidate metadata."""
 
-    def __init__(self, model_dir: str | Path, *, encoder_path: str | None = None, device: str = "cpu", batch_size: int = 64):
+    def __init__(self, model_dir: str | Path, *, encoder_path: str | None = None,
+                 device: str = "cpu", batch_size: int = 64):
         root = Path(model_dir)
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         if manifest.get("feature_version") != FEATURE_VERSION or tuple(manifest.get("feature_names", [])) != FEATURE_NAMES:
@@ -160,7 +204,7 @@ class RelevanceRanker:
             raise ValueError("RelevanceRanker model checksum mismatch")
         expected = manifest.get("encoder_path") or None
         actual = encoder_path or expected
-        if ((actual is None) != (expected is None) or (actual is not None and expected is not None and Path(actual).resolve() != Path(expected).resolve())):
+        if bool(actual) != bool(expected) or (expected and Path(actual).resolve() != Path(expected).resolve()):
             raise ValueError("Semantic encoder must match the training configuration")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -197,7 +241,8 @@ class RelevanceRanker:
                 output.extend(values)
         return output
 
-    def rank(self, query: str, candidates: Sequence[tuple[float, Mapping[str, Any]]]) -> list[tuple[float, Mapping[str, Any]]]:
+    def rank(self, query: str, candidates: Sequence[tuple[float, Mapping[str, Any]]]
+             ) -> list[tuple[float, Mapping[str, Any]]]:
         """Reorder but retain ORIGINAL retrieval scores and document dictionaries.
 
         Existing KnowledgeAgent consumers also use tuple[0] as a confidence-like
