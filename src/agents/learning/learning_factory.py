@@ -815,6 +815,149 @@ class LearningFactory:
             self._garbage_collect_temporary_agents()
         return selected_agent
 
+    def operational_trl_decision(self, profile: str, features: dict) -> dict:
+        """
+        Get a scheduling or allocation TRL recommendation.
+
+        Specialized models are loaded lazily and cached.
+        No execution or online learning occurs here.
+        """
+        from argparse import Namespace
+        from train_trl import ( # type: ignore
+            ACTIONS,
+            agent_action,
+            encode_operational_state,
+            load_agent,
+        )
+        if profile not in ACTIONS:
+            raise ValueError(f"Unsupported operational TRL profile: {profile}")
+
+        config = get_config_section("operational_trl") or {}
+        profiles = config.get("profiles", {})
+        profile_config = profiles.get(profile, {})
+        default_fallbacks = {
+            "scheduling": "shortest_job",
+            "allocation": "least_loaded",
+        }
+
+        fallback = profile_config.get("fallback", default_fallbacks[profile])
+        if fallback not in ACTIONS[profile]:
+            raise ValueError(f"Invalid fallback for {profile}: {fallback}")
+
+        def reject(reason: str) -> dict:
+            return {
+                "status": "fallback",
+                "profile": profile,
+                "recommended_action": None,
+                "fallback_action": fallback,
+                "apply_policy": False,
+                "reason": reason,
+            }
+
+        if not config.get("enabled", False):
+            return reject("Operational TRL is disabled")
+
+        if not profile_config.get("enabled", False):
+            return reject(f"TRL profile {profile} is disabled")
+
+        mode = profile_config.get("mode", "shadow")
+
+        if mode not in ("disabled", "shadow", "active"):
+            raise ValueError(f"Invalid TRL mode: {mode}")
+
+        if mode == "disabled":
+            return reject("Model profile is disabled")
+
+        if (
+            mode == "active"
+            and not profile_config.get("authorized_active", False)
+        ):
+            return reject("Active deployment is not authorized")
+
+        configured_path = profile_config.get("path")
+        if not configured_path:
+            return reject("No checkpoint configured")
+
+        repository_root = Path(__file__).resolve().parents[3]
+        models_dir = (repository_root
+            / "src/agents/learning/models").resolve()
+
+        checkpoint = (repository_root / configured_path).resolve()
+
+        if not checkpoint.is_relative_to(models_dir):
+            return reject("Checkpoint outside trusted model directory")
+
+        if checkpoint.suffix != ".pt":
+            return reject("Only deployed .pt checkpoints are accepted")
+
+        try:
+            # Validate operational inputs with the SAME encoder
+            # used during training.
+            state = encode_operational_state(profile=profile, **features)
+
+            stat = checkpoint.stat()
+            signature = str(checkpoint), stat.st_mtime_ns, stat.st_size
+            if not hasattr(self, "_operational_trl_cache"):
+                self._operational_trl_cache = {}
+
+            cache = self._operational_trl_cache
+            entry = cache.get(profile)
+            if entry is None or entry["signature"] != signature:
+                agent, metadata = load_agent(checkpoint, Namespace(environment=profile))
+                if metadata.get("status") != "validated":
+                    raise ValueError("Checkpoint is not marked validated")
+
+                if not agent.q_table:
+                    raise ValueError("Empty learned Q-table")
+
+                # Runtime policy selection is deterministic.
+                # Do not explore while servicing real tasks.
+                agent.epsilon = 0.0
+                known_states = {stored_state for stored_state, _ in agent.q_table}
+                entry = {
+                    "agent": agent,
+                    "metadata": metadata,
+                    "signature": signature,
+                    "known_states": known_states,
+                }
+                cache[profile] = entry
+                logger.info("Loaded operational TRL profile=%s path=%s", profile, checkpoint)
+
+            agent = entry["agent"]
+
+            # Do not pretend that an unvisited abstract state
+            # contains an empirically learned policy.
+            if state not in entry["known_states"]:
+                return reject("Unseen operational state")
+
+            action_index = int(agent_action(agent, state))
+            if action_index not in range(len(ACTIONS[profile])):
+                raise ValueError("Invalid model action")
+
+            values = agent.get_action_values(state)
+            q_values = {
+                ACTIONS[profile][int(action)]: float(value)
+                for action, value in values.items()
+            }
+
+            return {
+                "status": "ready",
+                "profile": profile,
+                "mode": mode,
+                "recommended_action": ACTIONS[profile][action_index],
+                "action_index": action_index,
+                "fallback_action": fallback,
+                "apply_policy": mode == "active",
+                "q_values": q_values,
+                "state": state,
+                "model_path": str(checkpoint),
+                "model_version": entry["metadata"].get("version"),
+            }
+
+        except Exception as exc:
+            logger.warning("Operational TRL unavailable | profile=%s | %s", profile, exc)
+            return reject(str(exc))
+
     def _checkpoint_candidates(self, agent_name: str) -> List[Path]:
         names = [
             self.checkpoint_dir / f"{agent_name}_checkpoint.pt",
