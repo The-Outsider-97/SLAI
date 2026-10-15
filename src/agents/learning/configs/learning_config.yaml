@@ -41,6 +41,25 @@ evolutionary:
   step_size_adaptation: true   # enable self-adaptive step size
 
 
+operational_trl:
+  enabled: true
+
+  profiles:
+    scheduling:
+      enabled: true
+      mode: shadow
+      path: "src/agents/learning/models/tabularRL.pt"
+      fallback: shortest_job
+      authorized_active: false
+
+    allocation:
+      enabled: false
+      mode: disabled
+      path: "src/agents/learning/models/tabularRL_allocation.pt"
+      fallback: least_loaded
+      authorized_active: false
+
+
 dqn:
   hidden_size: 128
   gamma: 0.99
