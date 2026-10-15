@@ -1,0 +1,22 @@
+{
+  "target_branch": "SLAI-v.2.3",
+  "model_id": "knowledge_relevance_ranker_v1",
+  "implementation": "software baseline completed in locally built package",
+  "actual_scifact_download": "blocked by execution environment",
+  "real_dataset_training": "not executed",
+  "real_heldout_test_metrics": null,
+  "full_knowledge_agent_runtime_integration": "not executed",
+  "local_unit_tests_passed": 5,
+  "local_unit_tests_failed": 0,
+  "test_fixture_data": "synthetic fixtures, software testing only",
+  "checkpoint_delivered": false,
+  "production_ready": false,
+  "promotion_blockers": [
+    "real dataset",
+    "real training",
+    "held-out baseline comparison",
+    "full runtime integration",
+    "target hardware benchmarks"
+  ],
+  "local_full_runtime_tests_skipped": 1
+}
