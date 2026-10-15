@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 
 """
 SLAI Learning Agent — Orchestration Layer for Lifelong Autonomous Learning
@@ -1143,10 +1143,7 @@ class LearningAgent(BaseAgent):
             raise CheckpointError(
                 "LearningAgent",
                 operation="restore",
-                message=(
-                    "LearningAgent checkpoint is missing: "
-                    f"{sorted(missing)}"
-                ),
+                message=(f"LearningAgent checkpoint is missing: {sorted(missing)}"),
             )
     
         model_state = components["model"]
@@ -1291,6 +1288,14 @@ class LearningAgent(BaseAgent):
         
             result["signal_ingestion"] = inbox_result
             return result
+
+        if mode == "operational_trl":
+            profile = str(task_data.get("profile", ""))
+            features = task_data.get("features")
+            if not isinstance(features, dict):
+                raise InvalidConfigError("operational_trl requires a features dictionary", config_key="features")
+
+            return self.learning_factory.operational_trl_decision(profile=profile, features=features)
 
         raise InvalidConfigError(
             f"Unsupported perform_task mode: {mode!r}. Expected one of: 'train', 'evaluate', 'auto', 'health'.",
