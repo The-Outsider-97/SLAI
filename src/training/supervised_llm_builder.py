@@ -70,14 +70,57 @@ def _sentences(text: str) -> list[str]:
     return [part.strip() for part in parts if len(part.split()) >= 5]
 
 
+def _bounded_normalized_prefix(text: str, maximum: int) -> str:
+    """
+    Normalize only the requested text prefix.
+
+    Avoid allocating normalized copies and word lists for
+    entire multi-gigabyte source documents.
+    """
+    if maximum < 1:
+        raise ValueError("maximum must be positive")
+
+    characters: list[str] = []
+    length = 0
+    pending_space = False
+
+    for char in text:
+        if length >= maximum:
+            break
+
+        if char.isspace():
+            if length > 0:
+                pending_space = True
+            continue
+
+        if pending_space:
+            characters.append(" ")
+            length += 1
+            pending_space = False
+
+            if length >= maximum:
+                break
+
+        characters.append(char)
+        length += 1
+
+    return "".join(characters)
+
+
 def _excerpt(document: SourceDocument, maximum: int) -> str:
-    text = " ".join(document.text.split())
+    """
+    Extract a bounded source excerpt without normalizing the entire document.
+    """
+    text = _bounded_normalized_prefix(document.text, maximum + 1)
     if len(text) <= maximum:
         return text
+
     cut = text[:maximum]
     boundary = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+
     if boundary >= maximum // 2:
-        return cut[: boundary + 1]
+        return cut[:boundary + 1]
+
     return cut.rstrip()
 
 
@@ -664,9 +707,14 @@ def build_supervised_dataset(
 
     split_documents: dict[str, list[SourceDocument]] = defaultdict(list)
     for document in documents:
-        if document.split in VALID_SPLITS and len(_sentences(document.text)) >= 2:
-            split_documents[str(document.split)].append(document)
+        if document.split not in VALID_SPLITS:
+            continue
 
+        excerpt = _excerpt(document, max_source_chars)
+        if len(_sentences(excerpt)) < 2:
+            continue
+
+        split_documents[str(document.split)].append(document)
     minima = {"train": train_min, "validation": validation_min, "test": test_min}
 
     with ProviderPool(
