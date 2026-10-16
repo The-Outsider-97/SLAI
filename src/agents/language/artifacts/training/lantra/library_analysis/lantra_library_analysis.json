@@ -1,0 +1,327 @@
+{
+  "schema": "slai.lantra.library-size-analysis.v1",
+  "created_at": "2026-09-19T14:06:45+00:00",
+  "library": "data\\library",
+  "corpus": {
+    "files_discovered": 878,
+    "source_bytes": 686560773,
+    "files_accepted": 875,
+    "documents_extracted": 875,
+    "unique_documents": 875,
+    "characters": 598529102,
+    "words": 104958686,
+    "tokens": 166884106,
+    "extraction_failures": 2,
+    "duplicate_files": 1,
+    "vocab_size": 49913,
+    "token_count_method": "slai_bpe",
+    "tokenizer_note": null,
+    "by_type": {
+      "docx": {
+        "files": 1,
+        "accepted_files": 1,
+        "documents": 1,
+        "characters": 2703,
+        "words": 356,
+        "tokens": 587
+      },
+      "epub": {
+        "files": 7,
+        "accepted_files": 7,
+        "documents": 7,
+        "characters": 2232537,
+        "words": 383912,
+        "tokens": 568945
+      },
+      "html": {
+        "files": 2,
+        "accepted_files": 2,
+        "documents": 2,
+        "characters": 37905,
+        "words": 5713,
+        "tokens": 11457
+      },
+      "md": {
+        "files": 24,
+        "accepted_files": 24,
+        "documents": 24,
+        "characters": 9926599,
+        "words": 1755015,
+        "tokens": 2661590
+      },
+      "pdf": {
+        "files": 45,
+        "accepted_files": 44,
+        "documents": 44,
+        "characters": 14859623,
+        "words": 2489267,
+        "tokens": 4444819
+      },
+      "txt": {
+        "files": 799,
+        "accepted_files": 797,
+        "documents": 797,
+        "characters": 571469735,
+        "words": 100324423,
+        "tokens": 159196708
+      }
+    },
+    "failures": [
+      {
+        "path": "data\\library\\pdfcoffee.com_fundamentals-of-piano-theory-level-pdf-free.txt",
+        "error": "NoTextExtracted"
+      },
+      {
+        "path": "data\\library\\View of Sustainable Architecture in Context.pdf",
+        "error": "NoTextExtracted"
+      }
+    ],
+    "elapsed_seconds": 5960.801077800104
+  },
+  "heuristic": {
+    "tokens_per_parameter": 20.0,
+    "unique_token_parameter_target": 8344205,
+    "parameter_band_15_to_30_tokens_per_parameter": {
+      "lower": 5562804,
+      "upper": 11125607
+    },
+    "planned_epochs": 1,
+    "token_exposures_if_repeated": 166884106,
+    "note": "Repeated epochs increase optimization exposure but do not create new information, so unique corpus tokens determine the primary recommendation."
+  },
+  "recommendation": {
+    "profile": {
+      "name": "lantra_7m",
+      "d_model": 128,
+      "nhead": 4,
+      "encoder_layers": 2,
+      "decoder_layers": 2,
+      "dim_feedforward": 512,
+      "vocab_size": 49913,
+      "estimated_parameters": 7315072
+    },
+    "note": "The selected profile is the nearest balanced encoder-decoder configuration to the token-derived target. Validate it with held-out loss and scaling experiments.",
+    "config": {
+      "language_transformer": {
+        "task_type": "generation",
+        "dropout": 0.1,
+        "base_overrides": {
+          "src_vocab_size": 49913,
+          "tgt_vocab_size": 49913,
+          "d_model": 128,
+          "nhead": 4,
+          "num_encoder_layers": 2,
+          "num_decoder_layers": 2,
+          "dim_feedforward": 512,
+          "activation": "gelu",
+          "dropout": 0.1,
+          "max_position_embeddings": 512,
+          "batch_first": true,
+          "norm_first": true,
+          "pad_token_id": 0,
+          "bos_token_id": 1,
+          "eos_token_id": 2,
+          "tie_embeddings": true,
+          "tie_output_projection": true
+        }
+      }
+    }
+  },
+  "profile_ladder": [
+    {
+      "name": "lantra_7m",
+      "d_model": 128,
+      "nhead": 4,
+      "encoder_layers": 2,
+      "decoder_layers": 2,
+      "dim_feedforward": 512,
+      "vocab_size": 49913,
+      "estimated_parameters": 7315072
+    },
+    {
+      "name": "lantra_13m",
+      "d_model": 192,
+      "nhead": 3,
+      "encoder_layers": 3,
+      "decoder_layers": 3,
+      "dim_feedforward": 768,
+      "vocab_size": 49913,
+      "estimated_parameters": 12699072
+    },
+    {
+      "name": "lantra_20m",
+      "d_model": 256,
+      "nhead": 8,
+      "encoder_layers": 4,
+      "decoder_layers": 4,
+      "dim_feedforward": 1024,
+      "vocab_size": 49913,
+      "estimated_parameters": 20151552
+    },
+    {
+      "name": "lantra_44m",
+      "d_model": 384,
+      "nhead": 6,
+      "encoder_layers": 6,
+      "decoder_layers": 6,
+      "dim_feedforward": 1536,
+      "vocab_size": 49913,
+      "estimated_parameters": 44014464
+    },
+    {
+      "name": "lantra_84m",
+      "d_model": 512,
+      "nhead": 8,
+      "encoder_layers": 8,
+      "decoder_layers": 8,
+      "dim_feedforward": 2048,
+      "vocab_size": 49913,
+      "estimated_parameters": 84408832
+    },
+    {
+      "name": "lantra_124m",
+      "d_model": 640,
+      "nhead": 10,
+      "encoder_layers": 8,
+      "decoder_layers": 8,
+      "dim_feedforward": 2560,
+      "vocab_size": 49913,
+      "estimated_parameters": 123861120
+    },
+    {
+      "name": "lantra_204m",
+      "d_model": 768,
+      "nhead": 12,
+      "encoder_layers": 10,
+      "decoder_layers": 10,
+      "dim_feedforward": 3072,
+      "vocab_size": 49913,
+      "estimated_parameters": 203732736
+    },
+    {
+      "name": "lantra_315m",
+      "d_model": 896,
+      "nhead": 14,
+      "encoder_layers": 12,
+      "decoder_layers": 12,
+      "dim_feedforward": 3584,
+      "vocab_size": 49913,
+      "estimated_parameters": 314815872
+    },
+    {
+      "name": "lantra_404m",
+      "d_model": 1024,
+      "nhead": 16,
+      "encoder_layers": 12,
+      "decoder_layers": 12,
+      "dim_feedforward": 4096,
+      "vocab_size": 49913,
+      "estimated_parameters": 403829760
+    },
+    {
+      "name": "lantra_707m",
+      "d_model": 1280,
+      "nhead": 20,
+      "encoder_layers": 14,
+      "decoder_layers": 14,
+      "dim_feedforward": 5120,
+      "vocab_size": 49913,
+      "estimated_parameters": 706720000
+    },
+    {
+      "name": "lantra_1b",
+      "d_model": 1536,
+      "nhead": 24,
+      "encoder_layers": 14,
+      "decoder_layers": 14,
+      "dim_feedforward": 6144,
+      "vocab_size": 49913,
+      "estimated_parameters": 1002204672
+    },
+    {
+      "name": "lantra_1_5b",
+      "d_model": 1792,
+      "nhead": 28,
+      "encoder_layers": 16,
+      "decoder_layers": 16,
+      "dim_feedforward": 7168,
+      "vocab_size": 49913,
+      "estimated_parameters": 1529015040
+    },
+    {
+      "name": "lantra_2b",
+      "d_model": 2048,
+      "nhead": 32,
+      "encoder_layers": 16,
+      "decoder_layers": 16,
+      "dim_feedforward": 8192,
+      "vocab_size": 49913,
+      "estimated_parameters": 1982326784
+    },
+    {
+      "name": "lantra_2_5b",
+      "d_model": 2304,
+      "nhead": 36,
+      "encoder_layers": 16,
+      "decoder_layers": 16,
+      "dim_feedforward": 9216,
+      "vocab_size": 49913,
+      "estimated_parameters": 2494358784
+    },
+    {
+      "name": "lantra_3b",
+      "d_model": 2560,
+      "nhead": 40,
+      "encoder_layers": 16,
+      "decoder_layers": 16,
+      "dim_feedforward": 10240,
+      "vocab_size": 49913,
+      "estimated_parameters": 3065111040
+    }
+  ],
+  "model_size_comparison": [
+    {
+      "model": "45M",
+      "parameters": 45000000,
+      "tokens_required": 900000000,
+      "coverage": 0.18542678444444444,
+      "token_shortfall": 733115894
+    },
+    {
+      "model": "150M",
+      "parameters": 150000000,
+      "tokens_required": 3000000000,
+      "coverage": 0.05562803533333333,
+      "token_shortfall": 2833115894
+    },
+    {
+      "model": "350M",
+      "parameters": 350000000,
+      "tokens_required": 7000000000,
+      "coverage": 0.02384058657142857,
+      "token_shortfall": 6833115894
+    },
+    {
+      "model": "1B",
+      "parameters": 1000000000,
+      "tokens_required": 20000000000,
+      "coverage": 0.0083442053,
+      "token_shortfall": 19833115894
+    },
+    {
+      "model": "2B",
+      "parameters": 2000000000,
+      "tokens_required": 40000000000,
+      "coverage": 0.00417210265,
+      "token_shortfall": 39833115894
+    },
+    {
+      "model": "3B",
+      "parameters": 3000000000,
+      "tokens_required": 60000000000,
+      "coverage": 0.0027814017666666665,
+      "token_shortfall": 59833115894
+    }
+  ],
+  "methodology_note": "This is a planning heuristic, not proof of an optimal model size. LANTRA is an encoder-decoder denoising/multitask model, so verify the result empirically before committing large compute."
+}

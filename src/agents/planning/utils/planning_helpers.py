@@ -25,14 +25,18 @@ Design principles
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
 import json
 import math
+from pathlib import Path
 import re
+import tempfile
 import time
 
 from collections import defaultdict, deque
 from typing import (Any, Callable, Dict, FrozenSet, Iterable, Iterator,
-                    List, Optional, Tuple, TypeVar, Union, Set,)
+                    List, Mapping, Optional, Tuple, TypeVar, Union, Set,)
 
 from .planning_errors import *
 from logs.logger import get_logger  # pyright: ignore[reportMissingImports]
@@ -1161,6 +1165,158 @@ def truncate_for_logging(obj: Any, max_chars: int = 256) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"… (truncated, full length={len(text)})"
+
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
+
+
+def _sigmoid(raw: float) -> float:
+    raw = _clamp(raw, -60.0, 60.0)
+    if raw >= 0.0:
+        z = math.exp(-raw)
+        return 1.0 / (1.0 + z)
+    z = math.exp(raw)
+    return z / (1.0 + z)
+
+
+def _logit(probability: float) -> float:
+    p = _clamp(probability, 1e-9, 1.0 - 1e-9)
+    return math.log(p / (1.0 - p))
+
+
+def _stable_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _sha256_payload(value: Any) -> str:
+    return hashlib.sha256(_stable_json_bytes(value)).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+__all__ = [
+    # -------------------------------------------------------------------
+    # Section 1 – Type-checking & validation helpers
+    # -------------------------------------------------------------------
+    "require_type",
+    "require_positive",
+    "require_non_negative",
+    "require_in_range",
+    "require_non_empty",
+    "is_valid_task_id",
+    "validate_task_id",
+    "validate_probability",
+    "clamp",
+
+    # -------------------------------------------------------------------
+    # Section 2 – Task graph helpers
+    # -------------------------------------------------------------------
+    "topological_sort",
+    "detect_cycles",
+    "compute_critical_path",
+    "get_all_predecessors",
+    "get_all_successors",
+    "build_dependency_map",
+    "iter_tasks_in_execution_order",
+
+    # -------------------------------------------------------------------
+    # Section 3 – State helpers
+    # -------------------------------------------------------------------
+    "StateDict",
+    "diff_states",
+    "merge_states",
+    "state_satisfies_goal",
+    "compute_state_distance",
+    "extract_state_subset",
+    "apply_state_effects",
+    "check_preconditions",
+
+    # -------------------------------------------------------------------
+    # Section 4 – Temporal helpers
+    # -------------------------------------------------------------------
+    "seconds_until_deadline",
+    "is_past_deadline",
+    "compute_schedule_window",
+    "estimate_end_time",
+    "compute_temporal_margin",
+    "sort_tasks_by_deadline",
+    "tasks_with_imminent_deadlines",
+
+    # -------------------------------------------------------------------
+    # Section 5 – Resource helpers
+    # -------------------------------------------------------------------
+    "compute_resource_utilisation",
+    "compute_resource_margin",
+    "check_resource_feasibility",
+    "aggregate_resource_requirements",
+    "geometric_mean",
+
+    # -------------------------------------------------------------------
+    # Section 6 – Retry / resilience helpers
+    # -------------------------------------------------------------------
+    "compute_backoff_delay",
+    "should_retry",
+    "DotDict",
+    "CircuitBreaker",
+
+    # -------------------------------------------------------------------
+    # Section 7 – Serialisation helpers
+    # -------------------------------------------------------------------
+    "safe_json_dumps",
+    "safe_json_loads",
+    "flatten_dict",
+    "deep_update",
+    "truncate_for_logging",
+
+    # -------------------------------------------------------------------
+    # Section 8 – JSON / model-artifact persistence helpers
+    # (imported by gradient_boosting_heuristic and other ML heuristics)
+    # -------------------------------------------------------------------
+    "_utc_now_iso",
+    "_clamp",
+    "_sigmoid",
+    "_logit",
+    "_stable_json_bytes",
+    "_sha256_payload",
+    "_sha256_file",
+    "_atomic_write_json",
+]
 
 
 if __name__ == "__main__":

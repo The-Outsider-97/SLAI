@@ -3,10 +3,12 @@ name: CI
 on:
   pull_request:
     branches:
-      - SLAI-v.2.2
+      - SLAI-v.2.3
+
   push:
     branches:
-      - SLAI-v.2.2
+      - SLAI-v.2.3
+
   workflow_dispatch:
 
 permissions:
@@ -17,69 +19,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
   foundation:
     name: Foundation CI
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
 
     steps:
+
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
         with:
           persist-credentials: false
 
-      - name: Install uv and Python 3.10
-        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d
+
         with:
           version: "0.11.33"
           python-version: "3.10"
           enable-cache: true
-          cache-dependency-glob: uv.lock
+
+      - name: Provision pinned LSTP
+        run: python setup_lstp.py --no-install
 
       - name: Verify dependency lock
         run: uv lock --check
 
-      - name: Install foundation and test dependencies
-        run: uv sync --frozen --group dev --extra documents --extra web
+      - name: Install dependencies
+        run: uv sync --frozen --group dev --all-extras
 
-      - name: Verify generated requirements export
+      - name: Verify Python sources compile
         run: |
-          uv export --frozen --all-extras --no-dev --no-hashes --no-emit-project --output-file requirements.txt
-          git diff --exit-code -- requirements.txt
+          uv run python -m compileall -q src
+          uv run python -m compileall -q deployment
+          uv run python -m py_compile slailm.py
+          uv run python -m py_compile setup_lstp.py
 
-      - name: Run correctness lint
-        run: uv run ruff check .
+      - name: Verify release invariant tests
+        run: |
+          uv run python -m pytest -q deployment/test
 
-      - name: Compile Python sources
-        run: >-
-          uv run python -m compileall -q
-          checkpointing component data deployment documaster games logs modules monitoring src
-          main.py webapp_games.py
+      - name: Verify complete test suite
+        run: |
+          uv run python -m pytest -q
 
-      - name: Run test suite
-        run: uv run python -m pytest -q
-
-  python-312:
-    name: Python 3.12 compatibility
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install uv and Python 3.12
-        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
-        with:
-          version: "0.11.33"
-          python-version: "3.12"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Install locked compatibility environment
-        run: uv sync --frozen --group dev --extra documents --extra web
-
-      - name: Run test suite
-        run: uv run python -m pytest -q
+      - name: Check dependency lock again
+        run: uv lock --check

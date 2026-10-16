@@ -1,0 +1,2590 @@
+{
+  "completed_at": "2026-09-18T08:18:58.107437Z",
+  "config": {
+    "balance_tasks": true,
+    "checkpoint_every_steps": 500,
+    "clip_grad": 1.0,
+    "data_paths": [
+      "data\\processed\\lantra\\supervised"
+    ],
+    "device": "auto",
+    "embedding_margin": 0.2,
+    "embedding_max_length": 192,
+    "epochs": 12,
+    "generation_eval_records": 8,
+    "glove_batch_size": 128,
+    "glove_bootstrap": false,
+    "glove_epochs": 1,
+    "glove_learning_rate": 0.0001,
+    "glove_max_tokens": 0,
+    "glove_path": null,
+    "gradient_accumulation": 8,
+    "init_from": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260917T162402Z.pt",
+    "label_smoothing": 0.05,
+    "learning_rate": 0.0003,
+    "log_every": 100,
+    "max_eval_records": 2000,
+    "min_delta": 0.0001,
+    "min_learning_rate": 3e-06,
+    "min_task_samples": 8,
+    "output_dir": "src/agents/language/checkpoints/lantra",
+    "patience": 3,
+    "raw_chunk_chars": 2000,
+    "raw_corruption_probability": 0.15,
+    "raw_max_length": 256,
+    "raw_max_segments": 100000,
+    "raw_min_chars": 40,
+    "raw_pretrain_epochs": 2,
+    "raw_segments_per_epoch": 20000,
+    "raw_test_fraction": 0.02,
+    "raw_text_paths": [],
+    "raw_validation_fraction": 0.02,
+    "report_dir": "src/agents/language/artifacts/training/lantra",
+    "require_all_supervised_tasks": true,
+    "reranking_margin": 0.15,
+    "retrain_tokenizer": false,
+    "seed": 42,
+    "source_max_length": 384,
+    "target_max_length": 160,
+    "test_fraction": 0.05,
+    "tokenizer_min_frequency": 2,
+    "tokenizer_vocab_size": 50000,
+    "validation_fraction": 0.05,
+    "warmup_steps": 1000,
+    "weight_decay": 0.0001
+  },
+  "elapsed_seconds": 39297.83378529991,
+  "environment": {
+    "device": "cpu",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.10.11 (tags/v3.10.11:7d4cc5a, Apr  5 2023, 00:38:17) [MSC v.1929 64 bit (AMD64)]"
+  },
+  "glove": null,
+  "objective_contract": {
+    "classification": {
+      "mode": "seq2seq",
+      "source_prefix": "task: classification\ntext:",
+      "target": "label text"
+    },
+    "dialogue": {
+      "mode": "seq2seq",
+      "source_prefix": "task: dialogue\nconversation:",
+      "target": "assistant response"
+    },
+    "embedding": {
+      "inference": "mean-pool encoder memory over non-padding tokens, then L2-normalize",
+      "mode": "triplet_cosine_margin",
+      "text_prefix": "task: embedding\ntext:"
+    },
+    "generation": {
+      "mode": "seq2seq",
+      "source_prefix": "task: generation\nprompt:",
+      "target": "completion"
+    },
+    "reranking": {
+      "document_prefix": "task: reranking\ndocument:",
+      "inference": "rank candidate documents by cosine(query_embedding, document_embedding)",
+      "mode": "pairwise_cosine_margin",
+      "query_prefix": "task: reranking\nquery:"
+    },
+    "summarization": {
+      "mode": "seq2seq",
+      "source_prefix": "task: summarization\ndocument:",
+      "target": "summary"
+    },
+    "translation": {
+      "mode": "seq2seq",
+      "source_prefix": "task: translation",
+      "target": "translated text"
+    }
+  },
+  "raw_corpus": {
+    "deduplication": {
+      "duplicate_documents_exact": 0,
+      "duplicate_documents_normalized": 0,
+      "duplicate_files_exact": 0,
+      "duplicate_segments": 707
+    },
+    "documents": 303,
+    "documents_by_split": {
+      "test": 6,
+      "train": 291,
+      "validation": 6
+    },
+    "documents_by_type": {
+      "docx": 1,
+      "epub": 2,
+      "html": 1,
+      "md": 17,
+      "pdf": 119,
+      "txt": 163
+    },
+    "extraction_failures": [
+      {
+        "error_type": "NoTextExtracted",
+        "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+        "source_path": "data\\library\\View of Sustainable Architecture in Context.pdf",
+        "source_type": "pdf"
+      },
+      {
+        "error_type": "NoTextExtracted",
+        "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+        "source_path": "data\\library\\pdfcoffee.com_fundamentals-of-piano-theory-level-pdf-free.pdf",
+        "source_type": "pdf"
+      },
+      {
+        "error_type": "NoTextExtracted",
+        "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+        "source_path": "data\\library\\the-four-loves.pdf",
+        "source_type": "pdf"
+      }
+    ],
+    "files": [
+      "data\\library\\00016357.2011.568959.pdf",
+      "data\\library\\1366_keynestheoryofemployment.pdf",
+      "data\\library\\20230223_20minSuburbs-1677186785.pdf",
+      "data\\library\\21162-readme.txt",
+      "data\\library\\3.5_ The Trans-Saharan Slave Trade - Humanities LibreTexts.html",
+      "data\\library\\900-13-082-US-liquid-hydrogen-safetygram-9.pdf",
+      "data\\library\\9789264301085-en.pdf",
+      "data\\library\\A Discourse Presented to the Most Serene Don Cosimo II..txt",
+      "data\\library\\A Guide to Health.txt",
+      "data\\library\\A Model of Growth Through Creative Destruction.pdf",
+      "data\\library\\A Sea Queen's Sailing.txt",
+      "data\\library\\AN10441.pdf",
+      "data\\library\\ARIANE 6 – TANKS & STRUCTURES FOR THE NEW EUROPEAN.pdf",
+      "data\\library\\ATALA.md",
+      "data\\library\\Alfred the Great.txt",
+      "data\\library\\All The Light We Cannot See - Anthony Doerr.epub",
+      "data\\library\\All_the_Light_We_Cannot_See_1x01.pdf",
+      "data\\library\\Apology, Crito, and Phaedo of Socrates.txt",
+      "data\\library\\Ardath.txt",
+      "data\\library\\Around the End.txt",
+      "data\\library\\As a Matter of Course.txt",
+      "data\\library\\Atomic Physics.pdf",
+      "data\\library\\Atomic Theory.pdf",
+      "data\\library\\Avalanche.pdf",
+      "data\\library\\BEYOND THE STARS.md",
+      "data\\library\\Bad Memory.txt",
+      "data\\library\\Barbara Blomberg.txt",
+      "data\\library\\Barry Locke, half-back.txt",
+      "data\\library\\Basic Attention Token.pdf",
+      "data\\library\\Behind the Line.txt",
+      "data\\library\\Ben, the Trapper.txt",
+      "data\\library\\Big Bang Theory; Origin of Our Universe.pdf",
+      "data\\library\\Billy To-morrow.txt",
+      "data\\library\\Bitcoin.pdf",
+      "data\\library\\Black Holes.pdf",
+      "data\\library\\Brazilian Tales.txt",
+      "data\\library\\Caps and Capers.txt",
+      "data\\library\\Captain Chub.txt",
+      "data\\library\\Captain of the Crew.txt",
+      "data\\library\\Cassell's Natural History, Vol. 1 (of 6).txt",
+      "data\\library\\Cassell's Natural History, Vol. 2 (of 6).txt",
+      "data\\library\\Cassell's Natural History, Vol. 3 (of 6).txt",
+      "data\\library\\Change Signals.txt",
+      "data\\library\\Christianity and Modern Thought.txt",
+      "data\\library\\Civics and Health.txt",
+      "data\\library\\Comparative-Economic-Systems.pdf",
+      "data\\library\\Continuous Vaudeville.txt",
+      "data\\library\\Cosmos.pdf",
+      "data\\library\\Covey - The 7 habits of highly effective people.pdf",
+      "data\\library\\Criminal Behavior and Learning Theory.pdf",
+      "data\\library\\Crofton Chums.txt",
+      "data\\library\\Cronos.pdf",
+      "data\\library\\DAO Governance.pdf",
+      "data\\library\\DEAD SHOT.txt",
+      "data\\library\\DESIGN AND DEVELOPMENT OF DELTA WING WITH LOITERING Capability.pdf",
+      "data\\library\\DRV5023 Digital-Switch Hall Effect Sensor.pdf",
+      "data\\library\\Danes, Saxons and Normans; or, Stories of our ancestors.txt",
+      "data\\library\\Day of the Druid.txt",
+      "data\\library\\Desert.txt",
+      "data\\library\\Desiring God.pdf",
+      "data\\library\\Dif-MAML_Decentralized_Multi-Agent_Meta-Learning.pdf",
+      "data\\library\\Dr. Paull's Theory.txt",
+      "data\\library\\Dynamic population-based meta-learning for multi-agent communication with natural language.pdf",
+      "data\\library\\ENHANCING EFFECTIVE DECISION-MAKING THROUGH LEADERSHIP intelligence.pdf",
+      "data\\library\\EUROPEAN_CONFERENCE_FOR_AEROSPACE_SCIENC.pdf",
+      "data\\library\\Early Lives of Charlemagne.txt",
+      "data\\library\\Economic Freedom of the World, 2024 Annual Report.pdf",
+      "data\\library\\Economic-mobility-and-the-rise-of-the-Latin-American-middle-class.pdf",
+      "data\\library\\Empathic_LivingLabs_TUe_Boekje_maart_2018.pdf",
+      "data\\library\\Eric Brighteyes.txt",
+      "data\\library\\Erling the Bold.txt",
+      "data\\library\\Ethereum.pdf",
+      "data\\library\\Exploring Artificial Gravity.pdf",
+      "data\\library\\Extract Silicate Rocks' Oxygen by Electrowinning.pdf",
+      "data\\library\\Fighting Without a War.txt",
+      "data\\library\\Finn_Aslaksen__Steinar_Bergh__Olav_Rand_Bringa__Edel_Kristin_Heggem___Universal_Design__Planning_and_Design_for_All.pdf",
+      "data\\library\\Five Lectures on Reincarnation.txt",
+      "data\\library\\For Yardley.txt",
+      "data\\library\\For the Honor of the School.txt",
+      "data\\library\\Four Afoot.txt",
+      "data\\library\\Four in Camp.txt",
+      "data\\library\\Frank Herbert - Dune 1 - Dune.pdf",
+      "data\\library\\From Lifespan to Healthspan.pdf",
+      "data\\library\\From Memory's Shrine.txt",
+      "data\\library\\From_ice_to_space_a_greenhouse_design_for_Moon_or_.pdf",
+      "data\\library\\Fundamentals of Piano Practice.pdf",
+      "data\\library\\George_R__R__Martin_-_A_Song_Of_Ice_And_Fire_1b_-_.pdf",
+      "data\\library\\Gibbon.txt",
+      "data\\library\\Global mineral distributions on Mars - J.L. Bandfield.pdf",
+      "data\\library\\Gold of the Gods.txt",
+      "data\\library\\Gospel of Thomas Lambdin.pdf",
+      "data\\library\\Greenmantle.txt",
+      "data\\library\\Happy Ending.txt",
+      "data\\library\\Harry Escombe.txt",
+      "data\\library\\Harry's Island.txt",
+      "data\\library\\Hedera.pdf",
+      "data\\library\\History of the Incas.txt",
+      "data\\library\\Hygiene des Geschlechtslebens.txt",
+      "data\\library\\I am a Nucleus.md",
+      "data\\library\\IN ANCIENT ALBEMARLE.txt",
+      "data\\library\\In pastures new.txt",
+      "data\\library\\In the land of the gods.txt",
+      "data\\library\\Inca Land.txt",
+      "data\\library\\Interplanetary Transport Network.pdf",
+      "data\\library\\It Happened in Japan.txt",
+      "data\\library\\Ivar the Viking.txt",
+      "data\\library\\Jack and the Check Book.txt",
+      "data\\library\\Jesus Calling.pdf",
+      "data\\library\\Joseph II. and His Court.txt",
+      "data\\library\\Kingsford, Quarter.txt",
+      "data\\library\\Laches.txt",
+      "data\\library\\Lectures on Dark Matter.pdf",
+      "data\\library\\Left End Edwards.txt",
+      "data\\library\\Left Tackle Thayer.txt",
+      "data\\library\\Legends from River & Mountain.txt",
+      "data\\library\\Letters from an American Farmer.txt",
+      "data\\library\\Like Another Helen.txt",
+      "data\\library\\Lost Island.txt",
+      "data\\library\\MT6835_Rev.1.3.pdf",
+      "data\\library\\Malazan 2 - Deadhouse Gates.pdf",
+      "data\\library\\Malazan 3 - Memories of Ice.pdf",
+      "data\\library\\Malazan 4 - House of Chains.pdf",
+      "data\\library\\Malazan 5 - Midnight Tides.pdf",
+      "data\\library\\Martian lava tubes.pdf",
+      "data\\library\\Measuring Global Crypto Users.pdf",
+      "data\\library\\Mechanical and Tribological Properties of Aluminum-Based Metal-Metrix Composites.pdf",
+      "data\\library\\Meditations by Emperor of Rome Marcus Aurelius.txt",
+      "data\\library\\Men Like Gods.pdf",
+      "data\\library\\Meta-Learning Representations for Continual Learning.pdf",
+      "data\\library\\Mollie and the Unwiseman.txt",
+      "data\\library\\Mr. Standfast.txt",
+      "data\\library\\Music Theory for the.pdf",
+      "data\\library\\Musical Studies.txt",
+      "data\\library\\Muslims in Spain, 1492 - 1814.pdf",
+      "data\\library\\NEAR.pdf",
+      "data\\library\\Narnia_3_The_horse_and_his_boy.md",
+      "data\\library\\Nerves and Common Sense.txt",
+      "data\\library\\Nid and Nod.txt",
+      "data\\library\\Nova Scotia's Part in the Great War.txt",
+      "data\\library\\ON UNION WITH GOD.txt",
+      "data\\library\\On Your Mark! A Story of College Life and Athletics.txt",
+      "data\\library\\Online Meta-Learning.pdf",
+      "data\\library\\Oppositions of Mars - Numerical Calculation.pdf",
+      "data\\library\\PCA9685.pdf",
+      "data\\library\\PHANTOM DUEL.md",
+      "data\\library\\Palladio_s architectural orders from practice to theory.pdf",
+      "data\\library\\Partners Three.txt",
+      "data\\library\\Pelle the Conqueror.txt",
+      "data\\library\\Personality theory.pdf",
+      "data\\library\\Pilgrim Sorrow.txt",
+      "data\\library\\Plot & Strcucture.pdf",
+      "data\\library\\PoS_Utility_Consensus.pdf",
+      "data\\library\\Power Through Repose.txt",
+      "data\\library\\Protagoras.txt",
+      "data\\library\\README.md",
+      "data\\library\\RESEARCH IN KINEMATICS OF TURN FOR VEHICLES AND SEMITRAILERS.pdf",
+      "data\\library\\RICH MEN’S CHILDREN.txt",
+      "data\\library\\RP2040 Datasheet_A microcontroller by Raspberry Pi.pdf",
+      "data\\library\\Real Gold.txt",
+      "data\\library\\Render.pdf",
+      "data\\library\\Returned Empty.txt",
+      "data\\library\\Ripley_1x01.pdf",
+      "data\\library\\Robot Programming  A Guide to Controlling Autonomous Robots ( PDFDrive.com ).pdf",
+      "data\\library\\Rollo's Philosophy.txt",
+      "data\\library\\Rp2350-datasheet.pdf",
+      "data\\library\\SARA_A PRINCESS.md",
+      "data\\library\\SERMONS BY THE LATE Rev.md",
+      "data\\library\\Science and Health, with Key to the Scriptures.txt",
+      "data\\library\\Self-instructor in the art of hair work.txt",
+      "data\\library\\Sex in Education.txt",
+      "data\\library\\She.txt",
+      "data\\library\\Shogun_1x01_-_Anjin.pdf",
+      "data\\library\\Simulating Martian Gravity.pdf",
+      "data\\library\\Situating universal design architecture  designing with whom .pdf",
+      "data\\library\\Smart Materials Innovative Technologies in Architecture; Towards innovative design paradigm.pdf",
+      "data\\library\\Solana.pdf",
+      "data\\library\\Space Programs in Latin America - Joseph Guzman.pdf",
+      "data\\library\\Stories by Foreign Authors.txt",
+      "data\\library\\Sui.pdf",
+      "data\\library\\Sweet Hours.txt",
+      "data\\library\\THE FOUNDATION TRILOGY.md",
+      "data\\library\\THE ODYSSEY.txt",
+      "data\\library\\THE SKELETON SCOUT.txt",
+      "data\\library\\THE STINGY RECEIVER.md",
+      "data\\library\\THE WIND BLOWETH.md",
+      "data\\library\\THE WOLF DEMON; OR, The Queen of the Kanawha.txt",
+      "data\\library\\THE WORLD OF WATERS.md",
+      "data\\library\\Team-Mates.txt",
+      "data\\library\\Texas Instruments TMP117 High-Precision Digital Temperature Sensor.pdf",
+      "data\\library\\The Annual Report on the Health.txt",
+      "data\\library\\The Atomic Theory.pdf",
+      "data\\library\\The Book of Jubilees.pdf",
+      "data\\library\\The Border Riflemen.txt",
+      "data\\library\\The Brother of a Hero.txt",
+      "data\\library\\The Crimson Sweater.txt",
+      "data\\library\\The Cross and the Hammer.txt",
+      "data\\library\\The Double Life.txt",
+      "data\\library\\The Dove in the Eagle's Nest.txt",
+      "data\\library\\The Economy of Growth.pdf",
+      "data\\library\\The Effect of Intellectual Intelligence (IQ) and Emotional Intelligence (EQ).pdf",
+      "data\\library\\The Egyptian Book of the dead.txt",
+      "data\\library\\The Empire and the Papacy.txt",
+      "data\\library\\The Epic of Gilgamesh_by Maureen Gallery Kovacs_Electronic edition by Wolf Carnahan_1998.pdf",
+      "data\\library\\The Feeling.md",
+      "data\\library\\The Freedom of Life.txt",
+      "data\\library\\The Golden Asse.txt",
+      "data\\library\\The Gospel According To Peter.pdf",
+      "data\\library\\The Gospel Of The Lord.pdf",
+      "data\\library\\The Gospel of Pseudo-Matthew.pdf",
+      "data\\library\\The Gospel of the Prophet Mani.pdf",
+      "data\\library\\The Health Master.txt",
+      "data\\library\\The Healthy Life, Vol. V, Nos. 24-28.txt",
+      "data\\library\\The Holy Roman Empire.txt",
+      "data\\library\\The Idiot.txt",
+      "data\\library\\The Innovators Dilemma.pdf",
+      "data\\library\\The Jacket (The Star-Rover).txt",
+      "data\\library\\The Lady of Lynn.txt",
+      "data\\library\\The Life of the Venerable Mother Mary of the Incarnation.txt",
+      "data\\library\\The Multiverse.pdf",
+      "data\\library\\The Nursery _Alice_.txt",
+      "data\\library\\The Peacemaker.txt",
+      "data\\library\\The Physical Training of Children.txt",
+      "data\\library\\The Poetical Works of Mark Akenside.txt",
+      "data\\library\\The Provinces of the Roman Empire, from Caesar to Diocletian. v. 2.txt",
+      "data\\library\\The Provinces of the Roman Empire, from Caesar to Diocletian.txt",
+      "data\\library\\The Republic.txt",
+      "data\\library\\The Rival Trappers_or, Old Pegs, The Mountaineer.txt",
+      "data\\library\\The Romance of an Old Fool.txt",
+      "data\\library\\The Romantic Composers.txt",
+      "data\\library\\The Sorceress of Rome.txt",
+      "data\\library\\The Story of Rolf and the Viking's Bow.txt",
+      "data\\library\\The Story of the Mind.txt",
+      "data\\library\\The Sworn Brothers.txt",
+      "data\\library\\The Thirty-Nine Steps.txt",
+      "data\\library\\The Turner Twins.txt",
+      "data\\library\\The Untroubled Mind.txt",
+      "data\\library\\The Viking Age. Volume 1 (of 2).txt",
+      "data\\library\\The Viking Age. Volume 2 (of 2).txt",
+      "data\\library\\The Virgin of the Sun.txt",
+      "data\\library\\The War of Chupas.txt",
+      "data\\library\\The War of Quito.txt",
+      "data\\library\\The Web of the Golden Spider.txt",
+      "data\\library\\The Young Mother.txt",
+      "data\\library\\The art of preserving health.txt",
+      "data\\library\\The city without Jews.txt",
+      "data\\library\\The eternal savage.txt",
+      "data\\library\\The fair Mississippian.txt",
+      "data\\library\\The life of Hector Berlioz.txt",
+      "data\\library\\The metal horde.txt",
+      "data\\library\\The mystery of the Sea-Lark.txt",
+      "data\\library\\The physics of neutron stars.pdf",
+      "data\\library\\The programmed people.txt",
+      "data\\library\\The public library.txt",
+      "data\\library\\The radio gun-runners.txt",
+      "data\\library\\The romantic story of the Mayflower pilgrims, and its place in the life of to-day.epub",
+      "data\\library\\The romantic story of the Mayflower pilgrims, and its place in the life of to-day.txt",
+      "data\\library\\The trans-saharan slave trade.pdf",
+      "data\\library\\The travels of Pedro de Cieza de Léon.txt",
+      "data\\library\\The treatise of Lorenzo Valla on the Donation of Constantine.txt",
+      "data\\library\\The truce of God.txt",
+      "data\\library\\The_Ice_Maiden.md",
+      "data\\library\\The_Multiverse.pdf",
+      "data\\library\\Tom, Dick and Harriet.txt",
+      "data\\library\\Under the Andes.txt",
+      "data\\library\\Under the periscope.txt",
+      "data\\library\\VL53L0X.pdf",
+      "data\\library\\Vandrad the Viking.txt",
+      "data\\library\\Vanishing Point.txt",
+      "data\\library\\Viking Tales.txt",
+      "data\\library\\Viva la pay day.txt",
+      "data\\library\\WAR AND PEACE.md",
+      "data\\library\\Ways of Nature.txt",
+      "data\\library\\What a Young Wife Ought to Know.txt",
+      "data\\library\\White Slaves.txt",
+      "data\\library\\Whitepaper v1.docx",
+      "data\\library\\Whitepaper_v1.pdf",
+      "data\\library\\Wisdom's Daughter.txt",
+      "data\\library\\With my regiment.txt",
+      "data\\library\\World Development Report 2024.pdf",
+      "data\\library\\Ziska.txt",
+      "data\\library\\a3144 hall effect sensor.pdf",
+      "data\\library\\ads1115.pdf",
+      "data\\library\\ai-05-00070.pdf",
+      "data\\library\\business_innovaTion_Design_Thinking.pdf",
+      "data\\library\\cardano.pdf",
+      "data\\library\\dTao_whitepaper.pdf",
+      "data\\library\\distance-to-frontier-selection-econ-growth.pdf",
+      "data\\library\\ecap-100016v-1016-105c (1).pdf",
+      "data\\library\\economic-freedom-of-the-world-2021.pdf",
+      "data\\library\\economic-freedom-what-is-it-how-is-it-measured.pdf",
+      "data\\library\\good_to_great.pdf",
+      "data\\library\\music-theory.pdf",
+      "data\\library\\nRF24L01P_Product_Specification_1_0.pdf",
+      "data\\library\\orwellanimalfarm.pdf",
+      "data\\library\\pico_python_sdk.pdf",
+      "data\\library\\rapp_mars_2006_0005.pdf",
+      "data\\library\\raspberry-pi-zero-2-w-product-brief.pdf",
+      "data\\library\\report-for-the-norwegian-ministry-of-finance_april-2024-002.pdf",
+      "data\\library\\running_on_mainnet.md",
+      "data\\library\\running_on_testnet.md",
+      "data\\library\\string theory.pdf",
+      "data\\library\\vl53l1.pdf",
+      "data\\library\\vl53l1x.pdf"
+    ],
+    "fingerprint_sha256": "9397101268b4ca6d7509b82baf52fa4016d0e21efd118700b2ffc7a1e2857852",
+    "provenance_manifest": "src\\agents\\language\\artifacts\\training\\lantra\\lantra_corpus_manifest_20260917T212400Z.json",
+    "segments": {
+      "test": 1951,
+      "total": 56939,
+      "train": 54033,
+      "validation": 955
+    }
+  },
+  "run_id": "20260917T212400Z",
+  "schema": "slai.lantra.training-report.v3",
+  "started_at": "2026-09-17T21:24:00.295122Z",
+  "status": "completed",
+  "supervised_dataset": {
+    "counts": {
+      "test": {
+        "tasks": {
+          "classification": 12,
+          "dialogue": 12,
+          "embedding": 12,
+          "generation": 12,
+          "reranking": 12,
+          "summarization": 12,
+          "translation": 12
+        },
+        "total": 84
+      },
+      "train": {
+        "tasks": {
+          "classification": 96,
+          "dialogue": 96,
+          "embedding": 96,
+          "generation": 96,
+          "reranking": 96,
+          "summarization": 96,
+          "translation": 96
+        },
+        "total": 672
+      },
+      "validation": {
+        "tasks": {
+          "classification": 12,
+          "dialogue": 12,
+          "embedding": 12,
+          "generation": 12,
+          "reranking": 12,
+          "summarization": 12,
+          "translation": 12
+        },
+        "total": 84
+      }
+    },
+    "coverage": {
+      "active_tasks": [
+        "generation",
+        "classification",
+        "translation",
+        "summarization",
+        "dialogue",
+        "embedding",
+        "reranking"
+      ],
+      "counts": {
+        "test": {
+          "classification": 12,
+          "dialogue": 12,
+          "embedding": 12,
+          "generation": 12,
+          "reranking": 12,
+          "summarization": 12,
+          "translation": 12
+        },
+        "train": {
+          "classification": 96,
+          "dialogue": 96,
+          "embedding": 96,
+          "generation": 96,
+          "reranking": 96,
+          "summarization": 96,
+          "translation": 96
+        },
+        "validation": {
+          "classification": 12,
+          "dialogue": 12,
+          "embedding": 12,
+          "generation": 12,
+          "reranking": 12,
+          "summarization": 12,
+          "translation": 12
+        }
+      },
+      "missing_tasks": []
+    },
+    "duplicates_removed": 0,
+    "files": [
+      "data\\processed\\lantra\\supervised\\classification.jsonl",
+      "data\\processed\\lantra\\supervised\\dialogue.jsonl",
+      "data\\processed\\lantra\\supervised\\embedding.jsonl",
+      "data\\processed\\lantra\\supervised\\generation.jsonl",
+      "data\\processed\\lantra\\supervised\\reranking.jsonl",
+      "data\\processed\\lantra\\supervised\\summarization.jsonl",
+      "data\\processed\\lantra\\supervised\\translation.jsonl"
+    ],
+    "fingerprint_sha256": "5a80d02d00dd21cf88d6abc7bc608680b1b99e7bac314dc17901b9c12c085e3c"
+  },
+  "tokenizer": {
+    "algorithm": "bpe",
+    "decode_calls": 40,
+    "diagnostics_count": 0,
+    "encode_calls": 63878,
+    "history_length": 200,
+    "merge_count": 50000,
+    "model_path": "data\\bpe_200d_50k_model.json",
+    "request_id": "tokenizer_20260917T213510Z_68ef1e2f8a60",
+    "special_token_count": 9,
+    "token_counts_size": 0,
+    "tokenize_calls": 63878,
+    "trained": true,
+    "training_runs": 0,
+    "unknown_token_count": 1256589,
+    "version": "2.1",
+    "vocab_path": "data\\bpe_200d_50k_vocab.json",
+    "vocab_size": 49913
+  },
+  "trainer": {
+    "direct_third_party_imports": [],
+    "module": "train_lantra",
+    "slai_components": [
+      "src.agents.language.modules.language_tokenizer.LanguageTokenizer",
+      "src.agents.language.modules.language_transformer.LanguageTransformer",
+      "logs.logger"
+    ],
+    "training_pipeline": [
+      "bpe_tokenizer_bootstrap",
+      "glove_semantic_bootstrap",
+      "raw_text_denoising_pretraining",
+      "supervised_multitask_specialization"
+    ],
+    "transitive_runtime_note": "LanguageTransformer/LanguageTokenizer retain SLAI's own PyTorch/regex dependencies; this trainer does not import those packages directly."
+  },
+  "training": {
+    "final_checkpoint": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260917T212400Z.pt",
+    "mode": "staged_with_supervised_specialization",
+    "model_stats": {
+      "base_stats": {
+        "created_at": "2026-09-18T08:16:51+00:00",
+        "d_model": 256,
+        "decoder_layers": 4,
+        "device": "cpu",
+        "encoder_layers": 4,
+        "history_length": 165,
+        "memory_enabled": false,
+        "nhead": 8,
+        "request_id": "transformer_20260918T081651Z_8c5fbc22a142",
+        "total_parameters": 45707008,
+        "trainable_parameters": 45707008
+      },
+      "beam_width": 5,
+      "current_device": "cpu",
+      "diagnostics_count": 0,
+      "history_length": 64,
+      "length_penalty": 0.6,
+      "max_generation_length": 100,
+      "request_id": "transformer_20260918T081651Z_8c5fbc22a142",
+      "task_type": "generation",
+      "temperature": 1.0,
+      "version": "2.0"
+    },
+    "phases": {
+      "bpe": {
+        "status": "completed",
+        "tokenizer_stats": {
+          "algorithm": "bpe",
+          "decode_calls": 0,
+          "diagnostics_count": 0,
+          "encode_calls": 0,
+          "history_length": 0,
+          "merge_count": 50000,
+          "model_path": "data\\bpe_200d_50k_model.json",
+          "request_id": "tokenizer_20260917T213510Z_68ef1e2f8a60",
+          "special_token_count": 9,
+          "token_counts_size": 0,
+          "tokenize_calls": 0,
+          "trained": true,
+          "training_runs": 0,
+          "unknown_token_count": 0,
+          "version": "2.1",
+          "vocab_path": "data\\bpe_200d_50k_vocab.json",
+          "vocab_size": 49913
+        },
+        "vocab_size": 49913
+      },
+      "glove": {
+        "reason": "no compatible/configured GloVe resource",
+        "status": "skipped"
+      },
+      "raw_text": {
+        "best_objective": 4.9368062992994695,
+        "checkpoint": "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_best.pt",
+        "checkpoint_every_steps": 500,
+        "corpus": {
+          "deduplication": {
+            "duplicate_documents_exact": 0,
+            "duplicate_documents_normalized": 0,
+            "duplicate_files_exact": 0,
+            "duplicate_segments": 707
+          },
+          "documents": 303,
+          "documents_by_split": {
+            "test": 6,
+            "train": 291,
+            "validation": 6
+          },
+          "documents_by_type": {
+            "docx": 1,
+            "epub": 2,
+            "html": 1,
+            "md": 17,
+            "pdf": 119,
+            "txt": 163
+          },
+          "extraction_failures": [
+            {
+              "error_type": "NoTextExtracted",
+              "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+              "source_path": "data\\library\\View of Sustainable Architecture in Context.pdf",
+              "source_type": "pdf"
+            },
+            {
+              "error_type": "NoTextExtracted",
+              "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+              "source_path": "data\\library\\pdfcoffee.com_fundamentals-of-piano-theory-level-pdf-free.pdf",
+              "source_type": "pdf"
+            },
+            {
+              "error_type": "NoTextExtracted",
+              "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+              "source_path": "data\\library\\the-four-loves.pdf",
+              "source_type": "pdf"
+            }
+          ],
+          "files": [
+            "data\\library\\00016357.2011.568959.pdf",
+            "data\\library\\1366_keynestheoryofemployment.pdf",
+            "data\\library\\20230223_20minSuburbs-1677186785.pdf",
+            "data\\library\\21162-readme.txt",
+            "data\\library\\3.5_ The Trans-Saharan Slave Trade - Humanities LibreTexts.html",
+            "data\\library\\900-13-082-US-liquid-hydrogen-safetygram-9.pdf",
+            "data\\library\\9789264301085-en.pdf",
+            "data\\library\\A Discourse Presented to the Most Serene Don Cosimo II..txt",
+            "data\\library\\A Guide to Health.txt",
+            "data\\library\\A Model of Growth Through Creative Destruction.pdf",
+            "data\\library\\A Sea Queen's Sailing.txt",
+            "data\\library\\AN10441.pdf",
+            "data\\library\\ARIANE 6 – TANKS & STRUCTURES FOR THE NEW EUROPEAN.pdf",
+            "data\\library\\ATALA.md",
+            "data\\library\\Alfred the Great.txt",
+            "data\\library\\All The Light We Cannot See - Anthony Doerr.epub",
+            "data\\library\\All_the_Light_We_Cannot_See_1x01.pdf",
+            "data\\library\\Apology, Crito, and Phaedo of Socrates.txt",
+            "data\\library\\Ardath.txt",
+            "data\\library\\Around the End.txt",
+            "data\\library\\As a Matter of Course.txt",
+            "data\\library\\Atomic Physics.pdf",
+            "data\\library\\Atomic Theory.pdf",
+            "data\\library\\Avalanche.pdf",
+            "data\\library\\BEYOND THE STARS.md",
+            "data\\library\\Bad Memory.txt",
+            "data\\library\\Barbara Blomberg.txt",
+            "data\\library\\Barry Locke, half-back.txt",
+            "data\\library\\Basic Attention Token.pdf",
+            "data\\library\\Behind the Line.txt",
+            "data\\library\\Ben, the Trapper.txt",
+            "data\\library\\Big Bang Theory; Origin of Our Universe.pdf",
+            "data\\library\\Billy To-morrow.txt",
+            "data\\library\\Bitcoin.pdf",
+            "data\\library\\Black Holes.pdf",
+            "data\\library\\Brazilian Tales.txt",
+            "data\\library\\Caps and Capers.txt",
+            "data\\library\\Captain Chub.txt",
+            "data\\library\\Captain of the Crew.txt",
+            "data\\library\\Cassell's Natural History, Vol. 1 (of 6).txt",
+            "data\\library\\Cassell's Natural History, Vol. 2 (of 6).txt",
+            "data\\library\\Cassell's Natural History, Vol. 3 (of 6).txt",
+            "data\\library\\Change Signals.txt",
+            "data\\library\\Christianity and Modern Thought.txt",
+            "data\\library\\Civics and Health.txt",
+            "data\\library\\Comparative-Economic-Systems.pdf",
+            "data\\library\\Continuous Vaudeville.txt",
+            "data\\library\\Cosmos.pdf",
+            "data\\library\\Covey - The 7 habits of highly effective people.pdf",
+            "data\\library\\Criminal Behavior and Learning Theory.pdf",
+            "data\\library\\Crofton Chums.txt",
+            "data\\library\\Cronos.pdf",
+            "data\\library\\DAO Governance.pdf",
+            "data\\library\\DEAD SHOT.txt",
+            "data\\library\\DESIGN AND DEVELOPMENT OF DELTA WING WITH LOITERING Capability.pdf",
+            "data\\library\\DRV5023 Digital-Switch Hall Effect Sensor.pdf",
+            "data\\library\\Danes, Saxons and Normans; or, Stories of our ancestors.txt",
+            "data\\library\\Day of the Druid.txt",
+            "data\\library\\Desert.txt",
+            "data\\library\\Desiring God.pdf",
+            "data\\library\\Dif-MAML_Decentralized_Multi-Agent_Meta-Learning.pdf",
+            "data\\library\\Dr. Paull's Theory.txt",
+            "data\\library\\Dynamic population-based meta-learning for multi-agent communication with natural language.pdf",
+            "data\\library\\ENHANCING EFFECTIVE DECISION-MAKING THROUGH LEADERSHIP intelligence.pdf",
+            "data\\library\\EUROPEAN_CONFERENCE_FOR_AEROSPACE_SCIENC.pdf",
+            "data\\library\\Early Lives of Charlemagne.txt",
+            "data\\library\\Economic Freedom of the World, 2024 Annual Report.pdf",
+            "data\\library\\Economic-mobility-and-the-rise-of-the-Latin-American-middle-class.pdf",
+            "data\\library\\Empathic_LivingLabs_TUe_Boekje_maart_2018.pdf",
+            "data\\library\\Eric Brighteyes.txt",
+            "data\\library\\Erling the Bold.txt",
+            "data\\library\\Ethereum.pdf",
+            "data\\library\\Exploring Artificial Gravity.pdf",
+            "data\\library\\Extract Silicate Rocks' Oxygen by Electrowinning.pdf",
+            "data\\library\\Fighting Without a War.txt",
+            "data\\library\\Finn_Aslaksen__Steinar_Bergh__Olav_Rand_Bringa__Edel_Kristin_Heggem___Universal_Design__Planning_and_Design_for_All.pdf",
+            "data\\library\\Five Lectures on Reincarnation.txt",
+            "data\\library\\For Yardley.txt",
+            "data\\library\\For the Honor of the School.txt",
+            "data\\library\\Four Afoot.txt",
+            "data\\library\\Four in Camp.txt",
+            "data\\library\\Frank Herbert - Dune 1 - Dune.pdf",
+            "data\\library\\From Lifespan to Healthspan.pdf",
+            "data\\library\\From Memory's Shrine.txt",
+            "data\\library\\From_ice_to_space_a_greenhouse_design_for_Moon_or_.pdf",
+            "data\\library\\Fundamentals of Piano Practice.pdf",
+            "data\\library\\George_R__R__Martin_-_A_Song_Of_Ice_And_Fire_1b_-_.pdf",
+            "data\\library\\Gibbon.txt",
+            "data\\library\\Global mineral distributions on Mars - J.L. Bandfield.pdf",
+            "data\\library\\Gold of the Gods.txt",
+            "data\\library\\Gospel of Thomas Lambdin.pdf",
+            "data\\library\\Greenmantle.txt",
+            "data\\library\\Happy Ending.txt",
+            "data\\library\\Harry Escombe.txt",
+            "data\\library\\Harry's Island.txt",
+            "data\\library\\Hedera.pdf",
+            "data\\library\\History of the Incas.txt",
+            "data\\library\\Hygiene des Geschlechtslebens.txt",
+            "data\\library\\I am a Nucleus.md",
+            "data\\library\\IN ANCIENT ALBEMARLE.txt",
+            "data\\library\\In pastures new.txt",
+            "data\\library\\In the land of the gods.txt",
+            "data\\library\\Inca Land.txt",
+            "data\\library\\Interplanetary Transport Network.pdf",
+            "data\\library\\It Happened in Japan.txt",
+            "data\\library\\Ivar the Viking.txt",
+            "data\\library\\Jack and the Check Book.txt",
+            "data\\library\\Jesus Calling.pdf",
+            "data\\library\\Joseph II. and His Court.txt",
+            "data\\library\\Kingsford, Quarter.txt",
+            "data\\library\\Laches.txt",
+            "data\\library\\Lectures on Dark Matter.pdf",
+            "data\\library\\Left End Edwards.txt",
+            "data\\library\\Left Tackle Thayer.txt",
+            "data\\library\\Legends from River & Mountain.txt",
+            "data\\library\\Letters from an American Farmer.txt",
+            "data\\library\\Like Another Helen.txt",
+            "data\\library\\Lost Island.txt",
+            "data\\library\\MT6835_Rev.1.3.pdf",
+            "data\\library\\Malazan 2 - Deadhouse Gates.pdf",
+            "data\\library\\Malazan 3 - Memories of Ice.pdf",
+            "data\\library\\Malazan 4 - House of Chains.pdf",
+            "data\\library\\Malazan 5 - Midnight Tides.pdf",
+            "data\\library\\Martian lava tubes.pdf",
+            "data\\library\\Measuring Global Crypto Users.pdf",
+            "data\\library\\Mechanical and Tribological Properties of Aluminum-Based Metal-Metrix Composites.pdf",
+            "data\\library\\Meditations by Emperor of Rome Marcus Aurelius.txt",
+            "data\\library\\Men Like Gods.pdf",
+            "data\\library\\Meta-Learning Representations for Continual Learning.pdf",
+            "data\\library\\Mollie and the Unwiseman.txt",
+            "data\\library\\Mr. Standfast.txt",
+            "data\\library\\Music Theory for the.pdf",
+            "data\\library\\Musical Studies.txt",
+            "data\\library\\Muslims in Spain, 1492 - 1814.pdf",
+            "data\\library\\NEAR.pdf",
+            "data\\library\\Narnia_3_The_horse_and_his_boy.md",
+            "data\\library\\Nerves and Common Sense.txt",
+            "data\\library\\Nid and Nod.txt",
+            "data\\library\\Nova Scotia's Part in the Great War.txt",
+            "data\\library\\ON UNION WITH GOD.txt",
+            "data\\library\\On Your Mark! A Story of College Life and Athletics.txt",
+            "data\\library\\Online Meta-Learning.pdf",
+            "data\\library\\Oppositions of Mars - Numerical Calculation.pdf",
+            "data\\library\\PCA9685.pdf",
+            "data\\library\\PHANTOM DUEL.md",
+            "data\\library\\Palladio_s architectural orders from practice to theory.pdf",
+            "data\\library\\Partners Three.txt",
+            "data\\library\\Pelle the Conqueror.txt",
+            "data\\library\\Personality theory.pdf",
+            "data\\library\\Pilgrim Sorrow.txt",
+            "data\\library\\Plot & Strcucture.pdf",
+            "data\\library\\PoS_Utility_Consensus.pdf",
+            "data\\library\\Power Through Repose.txt",
+            "data\\library\\Protagoras.txt",
+            "data\\library\\README.md",
+            "data\\library\\RESEARCH IN KINEMATICS OF TURN FOR VEHICLES AND SEMITRAILERS.pdf",
+            "data\\library\\RICH MEN’S CHILDREN.txt",
+            "data\\library\\RP2040 Datasheet_A microcontroller by Raspberry Pi.pdf",
+            "data\\library\\Real Gold.txt",
+            "data\\library\\Render.pdf",
+            "data\\library\\Returned Empty.txt",
+            "data\\library\\Ripley_1x01.pdf",
+            "data\\library\\Robot Programming  A Guide to Controlling Autonomous Robots ( PDFDrive.com ).pdf",
+            "data\\library\\Rollo's Philosophy.txt",
+            "data\\library\\Rp2350-datasheet.pdf",
+            "data\\library\\SARA_A PRINCESS.md",
+            "data\\library\\SERMONS BY THE LATE Rev.md",
+            "data\\library\\Science and Health, with Key to the Scriptures.txt",
+            "data\\library\\Self-instructor in the art of hair work.txt",
+            "data\\library\\Sex in Education.txt",
+            "data\\library\\She.txt",
+            "data\\library\\Shogun_1x01_-_Anjin.pdf",
+            "data\\library\\Simulating Martian Gravity.pdf",
+            "data\\library\\Situating universal design architecture  designing with whom .pdf",
+            "data\\library\\Smart Materials Innovative Technologies in Architecture; Towards innovative design paradigm.pdf",
+            "data\\library\\Solana.pdf",
+            "data\\library\\Space Programs in Latin America - Joseph Guzman.pdf",
+            "data\\library\\Stories by Foreign Authors.txt",
+            "data\\library\\Sui.pdf",
+            "data\\library\\Sweet Hours.txt",
+            "data\\library\\THE FOUNDATION TRILOGY.md",
+            "data\\library\\THE ODYSSEY.txt",
+            "data\\library\\THE SKELETON SCOUT.txt",
+            "data\\library\\THE STINGY RECEIVER.md",
+            "data\\library\\THE WIND BLOWETH.md",
+            "data\\library\\THE WOLF DEMON; OR, The Queen of the Kanawha.txt",
+            "data\\library\\THE WORLD OF WATERS.md",
+            "data\\library\\Team-Mates.txt",
+            "data\\library\\Texas Instruments TMP117 High-Precision Digital Temperature Sensor.pdf",
+            "data\\library\\The Annual Report on the Health.txt",
+            "data\\library\\The Atomic Theory.pdf",
+            "data\\library\\The Book of Jubilees.pdf",
+            "data\\library\\The Border Riflemen.txt",
+            "data\\library\\The Brother of a Hero.txt",
+            "data\\library\\The Crimson Sweater.txt",
+            "data\\library\\The Cross and the Hammer.txt",
+            "data\\library\\The Double Life.txt",
+            "data\\library\\The Dove in the Eagle's Nest.txt",
+            "data\\library\\The Economy of Growth.pdf",
+            "data\\library\\The Effect of Intellectual Intelligence (IQ) and Emotional Intelligence (EQ).pdf",
+            "data\\library\\The Egyptian Book of the dead.txt",
+            "data\\library\\The Empire and the Papacy.txt",
+            "data\\library\\The Epic of Gilgamesh_by Maureen Gallery Kovacs_Electronic edition by Wolf Carnahan_1998.pdf",
+            "data\\library\\The Feeling.md",
+            "data\\library\\The Freedom of Life.txt",
+            "data\\library\\The Golden Asse.txt",
+            "data\\library\\The Gospel According To Peter.pdf",
+            "data\\library\\The Gospel Of The Lord.pdf",
+            "data\\library\\The Gospel of Pseudo-Matthew.pdf",
+            "data\\library\\The Gospel of the Prophet Mani.pdf",
+            "data\\library\\The Health Master.txt",
+            "data\\library\\The Healthy Life, Vol. V, Nos. 24-28.txt",
+            "data\\library\\The Holy Roman Empire.txt",
+            "data\\library\\The Idiot.txt",
+            "data\\library\\The Innovators Dilemma.pdf",
+            "data\\library\\The Jacket (The Star-Rover).txt",
+            "data\\library\\The Lady of Lynn.txt",
+            "data\\library\\The Life of the Venerable Mother Mary of the Incarnation.txt",
+            "data\\library\\The Multiverse.pdf",
+            "data\\library\\The Nursery _Alice_.txt",
+            "data\\library\\The Peacemaker.txt",
+            "data\\library\\The Physical Training of Children.txt",
+            "data\\library\\The Poetical Works of Mark Akenside.txt",
+            "data\\library\\The Provinces of the Roman Empire, from Caesar to Diocletian. v. 2.txt",
+            "data\\library\\The Provinces of the Roman Empire, from Caesar to Diocletian.txt",
+            "data\\library\\The Republic.txt",
+            "data\\library\\The Rival Trappers_or, Old Pegs, The Mountaineer.txt",
+            "data\\library\\The Romance of an Old Fool.txt",
+            "data\\library\\The Romantic Composers.txt",
+            "data\\library\\The Sorceress of Rome.txt",
+            "data\\library\\The Story of Rolf and the Viking's Bow.txt",
+            "data\\library\\The Story of the Mind.txt",
+            "data\\library\\The Sworn Brothers.txt",
+            "data\\library\\The Thirty-Nine Steps.txt",
+            "data\\library\\The Turner Twins.txt",
+            "data\\library\\The Untroubled Mind.txt",
+            "data\\library\\The Viking Age. Volume 1 (of 2).txt",
+            "data\\library\\The Viking Age. Volume 2 (of 2).txt",
+            "data\\library\\The Virgin of the Sun.txt",
+            "data\\library\\The War of Chupas.txt",
+            "data\\library\\The War of Quito.txt",
+            "data\\library\\The Web of the Golden Spider.txt",
+            "data\\library\\The Young Mother.txt",
+            "data\\library\\The art of preserving health.txt",
+            "data\\library\\The city without Jews.txt",
+            "data\\library\\The eternal savage.txt",
+            "data\\library\\The fair Mississippian.txt",
+            "data\\library\\The life of Hector Berlioz.txt",
+            "data\\library\\The metal horde.txt",
+            "data\\library\\The mystery of the Sea-Lark.txt",
+            "data\\library\\The physics of neutron stars.pdf",
+            "data\\library\\The programmed people.txt",
+            "data\\library\\The public library.txt",
+            "data\\library\\The radio gun-runners.txt",
+            "data\\library\\The romantic story of the Mayflower pilgrims, and its place in the life of to-day.epub",
+            "data\\library\\The romantic story of the Mayflower pilgrims, and its place in the life of to-day.txt",
+            "data\\library\\The trans-saharan slave trade.pdf",
+            "data\\library\\The travels of Pedro de Cieza de Léon.txt",
+            "data\\library\\The treatise of Lorenzo Valla on the Donation of Constantine.txt",
+            "data\\library\\The truce of God.txt",
+            "data\\library\\The_Ice_Maiden.md",
+            "data\\library\\The_Multiverse.pdf",
+            "data\\library\\Tom, Dick and Harriet.txt",
+            "data\\library\\Under the Andes.txt",
+            "data\\library\\Under the periscope.txt",
+            "data\\library\\VL53L0X.pdf",
+            "data\\library\\Vandrad the Viking.txt",
+            "data\\library\\Vanishing Point.txt",
+            "data\\library\\Viking Tales.txt",
+            "data\\library\\Viva la pay day.txt",
+            "data\\library\\WAR AND PEACE.md",
+            "data\\library\\Ways of Nature.txt",
+            "data\\library\\What a Young Wife Ought to Know.txt",
+            "data\\library\\White Slaves.txt",
+            "data\\library\\Whitepaper v1.docx",
+            "data\\library\\Whitepaper_v1.pdf",
+            "data\\library\\Wisdom's Daughter.txt",
+            "data\\library\\With my regiment.txt",
+            "data\\library\\World Development Report 2024.pdf",
+            "data\\library\\Ziska.txt",
+            "data\\library\\a3144 hall effect sensor.pdf",
+            "data\\library\\ads1115.pdf",
+            "data\\library\\ai-05-00070.pdf",
+            "data\\library\\business_innovaTion_Design_Thinking.pdf",
+            "data\\library\\cardano.pdf",
+            "data\\library\\dTao_whitepaper.pdf",
+            "data\\library\\distance-to-frontier-selection-econ-growth.pdf",
+            "data\\library\\ecap-100016v-1016-105c (1).pdf",
+            "data\\library\\economic-freedom-of-the-world-2021.pdf",
+            "data\\library\\economic-freedom-what-is-it-how-is-it-measured.pdf",
+            "data\\library\\good_to_great.pdf",
+            "data\\library\\music-theory.pdf",
+            "data\\library\\nRF24L01P_Product_Specification_1_0.pdf",
+            "data\\library\\orwellanimalfarm.pdf",
+            "data\\library\\pico_python_sdk.pdf",
+            "data\\library\\rapp_mars_2006_0005.pdf",
+            "data\\library\\raspberry-pi-zero-2-w-product-brief.pdf",
+            "data\\library\\report-for-the-norwegian-ministry-of-finance_april-2024-002.pdf",
+            "data\\library\\running_on_mainnet.md",
+            "data\\library\\running_on_testnet.md",
+            "data\\library\\string theory.pdf",
+            "data\\library\\vl53l1.pdf",
+            "data\\library\\vl53l1x.pdf"
+          ],
+          "fingerprint_sha256": "9397101268b4ca6d7509b82baf52fa4016d0e21efd118700b2ffc7a1e2857852",
+          "provenance_manifest": "src\\agents\\language\\artifacts\\training\\lantra\\lantra_corpus_manifest_20260917T212400Z.json",
+          "segments": {
+            "test": 1951,
+            "total": 56939,
+            "train": 54033,
+            "validation": 955
+          }
+        },
+        "heldout_test_loss": 4.929318208932877,
+        "history": [
+          {
+            "epoch": 1,
+            "examples": 20000,
+            "global_optimizer_step": 2500,
+            "mean_train_loss": 5.041751964884996,
+            "optimizer_steps": 2500,
+            "validation_loss": 5.009055522848798
+          },
+          {
+            "epoch": 2,
+            "examples": 20000,
+            "global_optimizer_step": 5000,
+            "mean_train_loss": 4.854725481975079,
+            "optimizer_steps": 2500,
+            "validation_loss": 4.9368062992994695
+          }
+        ],
+        "interval_checkpoints": [
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00000500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00001000.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00001500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00002000.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00002500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00003000.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00003500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00004000.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00004500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260917T212400Z_step_00005000.pt"
+        ],
+        "status": "completed",
+        "test_segments": 1951,
+        "train_segments": 54033,
+        "validation_segments": 955
+      },
+      "supervised": {
+        "best_epoch": 11,
+        "best_global_optimizer_step": 924,
+        "best_validation_objective": 0.07295247452189398,
+        "checkpoint_every_steps": 500,
+        "checkpoints": {
+          "best": "src\\agents\\language\\checkpoints\\lantra\\lantra_best.pt",
+          "final": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260917T212400Z.pt",
+          "latest": "src\\agents\\language\\checkpoints\\lantra\\lantra_latest.pt"
+        },
+        "epochs_completed": 12,
+        "global_optimizer_steps": 1008,
+        "history": [
+          {
+            "epoch": 1,
+            "global_optimizer_step": 84,
+            "learning_rate": 0.00025199999999999995,
+            "seconds": 109.29699710011482,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 3.2072432466915677,
+              "mean_raw_loss": 3.6220273302779313,
+              "mean_weighted_loss": 3.6220273302779313,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 3.6772948801517487,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 5.107792777319749,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.15441044109563032,
+                  "pairwise_accuracy": 0.7395833333333334
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 5.121763723591964,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.12822842535873255,
+                  "pairwise_accuracy": 0.7708333333333334
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 4.461216889321804,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 6.703484175105889,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.46581158728051625,
+              "mean_loss": 2.718624337088494,
+              "seq2seq_mean_task_loss": 3.748355652888616,
+              "seq2seq_task_perplexity": 42.4512200361039,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 2.0729643404483795,
+                  "normalized_loss": 0.19162112171933063,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 4.780039111773173,
+                  "normalized_loss": 0.44185827927079924,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.23743362228075662,
+                  "normalized_loss": 1.187168111403783,
+                  "pairwise_accuracy": 0.25
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 4.303353687127431,
+                  "normalized_loss": 0.39779432988413727,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.05115847289562225,
+                  "normalized_loss": 0.34105648597081506,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 2.7101664543151855,
+                  "normalized_loss": 0.2505229472059551,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 4.875254670778911,
+                  "normalized_loss": 0.45065983550879324,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 2,
+            "global_optimizer_step": 168,
+            "learning_rate": 0.00029590891885874414,
+            "seconds": 110.44733490003273,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 2.417171823126929,
+              "mean_raw_loss": 2.146508808957324,
+              "mean_weighted_loss": 2.146508808957324,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 1.6786390195290248,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 3.1469906494021416,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.013934424767891565,
+                  "pairwise_accuracy": 0.9791666666666666
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 3.25454052289327,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.01234630091736714,
+                  "pairwise_accuracy": 0.9791666666666666
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 1.9040909657875698,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 5.015019779404004,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.17156797512507987,
+              "mean_loss": 1.8560286632605962,
+              "seq2seq_mean_task_loss": 2.5984401285648344,
+              "seq2seq_task_perplexity": 13.442752706093023,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 1.4466261665026348,
+                  "normalized_loss": 0.1337235394381223,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 3.164758841196696,
+                  "normalized_loss": 0.2925446556355662,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 2.967510441939036,
+                  "normalized_loss": 0.2743113658555212,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.736726572116216,
+                  "normalized_loss": 0.16053990287005826,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 3.67657862106959,
+                  "normalized_loss": 0.3398563620762912,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 3,
+            "global_optimizer_step": 252,
+            "learning_rate": 0.0002799331652603371,
+            "seconds": 111.1110561999958,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 2.1863865611099063,
+              "mean_raw_loss": 1.5936995466195403,
+              "mean_weighted_loss": 1.5936995466195403,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 1.3503871063391368,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 2.130032361795505,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0013044656564791997,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 2.2333881308635077,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0006185118108987808,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 1.3728556012113888,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 4.067310648659865,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.1397414445452217,
+              "mean_loss": 1.5117280852226984,
+              "seq2seq_mean_task_loss": 2.116419319311778,
+              "seq2seq_task_perplexity": 8.30135968878511,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 1.2395196755727131,
+                  "normalized_loss": 0.11457898526853057,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 2.3866157134373984,
+                  "normalized_loss": 0.22061449451799822,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 2.250658551851908,
+                  "normalized_loss": 0.2080468572941216,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.4499696095784504,
+                  "normalized_loss": 0.1340326013453107,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 3.2553330461184182,
+                  "normalized_loss": 0.3009171733905908,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 4,
+            "global_optimizer_step": 336,
+            "learning_rate": 0.00025318520461248186,
+            "seconds": 110.28156120004132,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 2.054421045950481,
+              "mean_raw_loss": 1.3169087933686872,
+              "mean_weighted_loss": 1.3169087933686872,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 1.2325910553336143,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 1.6402834492425125,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0009341382731993993,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 1.691286896665891,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0016401312313973904,
+                  "pairwise_accuracy": 0.9895833333333334
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 1.187201974292596,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 3.4644239085415998,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.10750766928633906,
+              "mean_loss": 1.1630219192731948,
+              "seq2seq_mean_task_loss": 1.628230686982473,
+              "seq2seq_task_perplexity": 5.094852350607591,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 1.1673437356948853,
+                  "normalized_loss": 0.10790717027843535,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 1.569988985856374,
+                  "normalized_loss": 0.14512697815714512,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 1.551617334286372,
+                  "normalized_loss": 0.14342873549421584,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.2517392138640087,
+                  "normalized_loss": 0.11570853756645572,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 2.600464165210724,
+                  "normalized_loss": 0.24038226350812147,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 5,
+            "global_optimizer_step": 420,
+            "learning_rate": 0.00021790849614679626,
+            "seconds": 110.9521151999943,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.9464647003582545,
+              "mean_raw_loss": 1.1259918350371576,
+              "mean_weighted_loss": 1.1259918350371576,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 1.1259399615228176,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 1.3362447967131932,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0013158389677604039,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 1.3550623965760071,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.000532777359088262,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 1.084152851253748,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 2.978694222867489,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.09912691337911363,
+              "mean_loss": 1.0101484393789655,
+              "seq2seq_mean_task_loss": 1.4125673194726307,
+              "seq2seq_task_perplexity": 4.106484540183921,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 1.1271027326583862,
+                  "normalized_loss": 0.10418736382035752,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 1.295161505540212,
+                  "normalized_loss": 0.11972241666522415,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.008202478289604187,
+                  "normalized_loss": 0.041012391448020935,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 1.2472385962804158,
+                  "normalized_loss": 0.11529250851425733,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.1780842244625092,
+                  "normalized_loss": 0.1089000018796875,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 2.215249538421631,
+                  "normalized_loss": 0.2047737113262479,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 6,
+            "global_optimizer_step": 504,
+            "learning_rate": 0.0001770618395381547,
+            "seconds": 110.11475379997864,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.846092937957673,
+              "mean_raw_loss": 1.0040390015180622,
+              "mean_weighted_loss": 1.0040390015180622,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 1.0357610676437616,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 1.1593437654276688,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0004753619432449341,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 1.1843752451241016,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.00016725746293862662,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 1.0231556501239538,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 2.624994662900766,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.0900575682608072,
+              "mean_loss": 0.9280782668363481,
+              "seq2seq_mean_task_loss": 1.2980921179056168,
+              "seq2seq_task_perplexity": 3.6623027561088786,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 1.0068448632955551,
+                  "normalized_loss": 0.09307094113365658,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 1.1518252392609913,
+                  "normalized_loss": 0.10647266818110696,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.006087278326352437,
+                  "normalized_loss": 0.030436391631762184,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 1.1253968675931294,
+                  "normalized_loss": 0.1040296767000689,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.1460786958535512,
+                  "normalized_loss": 0.10594146797073366,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 2.0603149235248566,
+                  "normalized_loss": 0.19045183220832212,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 7,
+            "global_optimizer_step": 588,
+            "learning_rate": 0.00013407120845444968,
+            "seconds": 109.87205300014466,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.749552812604677,
+              "mean_raw_loss": 0.9168347683291704,
+              "mean_weighted_loss": 0.9168347683291704,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.9562357384711504,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 1.0544595271348953,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.001687161469211181,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 1.0722847618162632,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0006674503286679586,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.9902457681794962,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 2.342262970904509,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07961838837626044,
+              "mean_loss": 0.8613146529311225,
+              "seq2seq_mean_task_loss": 1.2058405141035715,
+              "seq2seq_task_perplexity": 3.3395648501130575,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.9955874731143316,
+                  "normalized_loss": 0.09203032808881682,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 1.0470943103233974,
+                  "normalized_loss": 0.09679152813921485,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 1.0042776763439178,
+                  "normalized_loss": 0.09283363495634454,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0782389144102733,
+                  "normalized_loss": 0.09967047972279142,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.904004196325938,
+                  "normalized_loss": 0.17600274772665545,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 8,
+            "global_optimizer_step": 672,
+            "learning_rate": 9.254240034123492e-05,
+            "seconds": 109.620519899996,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.5473101337750752,
+              "mean_raw_loss": 0.8597672520471471,
+              "mean_weighted_loss": 0.8597672520471471,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.8796272197117408,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.995402131229639,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0005443276216586431,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 1.0180911148587863,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.9642822612076998,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 2.160423709700505,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07594456561006067,
+              "mean_loss": 0.8215711031641278,
+              "seq2seq_mean_task_loss": 1.150199544429779,
+              "seq2seq_task_perplexity": 3.1588231723736766,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8711337894201279,
+                  "normalized_loss": 0.08052605181823332,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9934520373741785,
+                  "normalized_loss": 0.09183293222247058,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 1.0039745370546977,
+                  "normalized_loss": 0.09280561330179694,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0746227502822876,
+                  "normalized_loss": 0.09933620796856725,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.8078146080176036,
+                  "normalized_loss": 0.16711115395935658,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 9,
+            "global_optimizer_step": 756,
+            "learning_rate": 5.595860366159594e-05,
+            "seconds": 109.40405350015499,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.4698508757920492,
+              "mean_raw_loss": 0.8190684998851447,
+              "mean_weighted_loss": 0.8190684998851447,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.8608426190912724,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.9579468928277493,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.9698795322328806,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.9484884887933731,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.9963219662507374,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07505798616440908,
+              "mean_loss": 0.807381998924982,
+              "seq2seq_mean_task_loss": 1.1302135467529295,
+              "seq2seq_task_perplexity": 3.0963176381079207,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8597671737273535,
+                  "normalized_loss": 0.07947534216216134,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.982008084654808,
+                  "normalized_loss": 0.09077507366976897,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0006062587102254232,
+                  "normalized_loss": 0.0030312935511271157,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9872513810793558,
+                  "normalized_loss": 0.09125975462774506,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0610865652561188,
+                  "normalized_loss": 0.09808494719774577,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.7609545290470123,
+                  "normalized_loss": 0.16277949194231536,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 10,
+            "global_optimizer_step": 840,
+            "learning_rate": 2.7388248845392144e-05,
+            "seconds": 109.8642718999181,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.3888002357312612,
+              "mean_raw_loss": 0.7967395978491931,
+              "mean_weighted_loss": 0.7967395978491931,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.8480911571532488,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.9369898190100988,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 8.217493693033855e-05,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.9517994349201521,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.933521476884683,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.9066931220392387,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07383279833727736,
+              "mean_loss": 0.7987259271598998,
+              "seq2seq_mean_task_loss": 1.1182162980238597,
+              "seq2seq_task_perplexity": 3.059392289455391,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8727758576472601,
+                  "normalized_loss": 0.08067784167273447,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9812964697678884,
+                  "normalized_loss": 0.0907092932604281,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9791426708300909,
+                  "normalized_loss": 0.09051019993288471,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0523986121018727,
+                  "normalized_loss": 0.09728184832316429,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.7054678797721863,
+                  "normalized_loss": 0.15765040517172987,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 11,
+            "global_optimizer_step": 924,
+            "learning_rate": 9.227646665876668e-06,
+            "seconds": 110.62850039987825,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.3397504978236698,
+              "mean_raw_loss": 0.78248310745472,
+              "mean_weighted_loss": 0.78248310745472,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.8403720688074827,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.9256449236224095,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.003057535116871198,
+                  "pairwise_accuracy": 0.9895833333333334
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.9443281646817923,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.001102987676858902,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.9254254543532928,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.8374506179243326,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07295247452189398,
+              "mean_loss": 0.7892025517565864,
+              "seq2seq_mean_task_loss": 1.104883572459221,
+              "seq2seq_task_perplexity": 3.018872968389167,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.85452368358771,
+                  "normalized_loss": 0.07899064329750774,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9700540254513422,
+                  "normalized_loss": 0.0896700617846287,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.972191666563352,
+                  "normalized_loss": 0.08986766151161102,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0497967600822449,
+                  "normalized_loss": 0.09704133776887229,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.6778517266114552,
+                  "normalized_loss": 0.15509761729063806,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 12,
+            "global_optimizer_step": 1008,
+            "learning_rate": 3e-06,
+            "seconds": 110.19787759985775,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.2665340900421143,
+              "mean_raw_loss": 0.7763948510179207,
+              "mean_weighted_loss": 0.7763948510179207,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.824312087148428,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.9220232727626959,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0002732931946714719,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.9371753111481667,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.9217588131626447,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.8292211797088385,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07312732351995725,
+              "mean_loss": 0.7910940746466318,
+              "seq2seq_mean_task_loss": 1.1075317045052846,
+              "seq2seq_task_perplexity": 3.026877937068826,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8522102187077204,
+                  "normalized_loss": 0.07877679073540048,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9739001442988714,
+                  "normalized_loss": 0.09002559014247301,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9753521283467611,
+                  "normalized_loss": 0.09015980895489842,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.047802855571111,
+                  "normalized_loss": 0.0968570247965893,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.6883931756019592,
+                  "normalized_loss": 0.15607205001033964,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          }
+        ],
+        "interval_checkpoints": [
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_supervised_20260917T212400Z_step_00000500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_supervised_20260917T212400Z_step_00001000.pt"
+        ],
+        "model_stats": {
+          "base_stats": {
+            "created_at": "2026-09-18T08:16:51+00:00",
+            "d_model": 256,
+            "decoder_layers": 4,
+            "device": "cpu",
+            "encoder_layers": 4,
+            "history_length": 165,
+            "memory_enabled": false,
+            "nhead": 8,
+            "request_id": "transformer_20260918T081651Z_8c5fbc22a142",
+            "total_parameters": 45707008,
+            "trainable_parameters": 45707008
+          },
+          "beam_width": 5,
+          "current_device": "cpu",
+          "diagnostics_count": 0,
+          "history_length": 64,
+          "length_penalty": 0.6,
+          "max_generation_length": 100,
+          "request_id": "transformer_20260918T081651Z_8c5fbc22a142",
+          "task_type": "generation",
+          "temperature": 1.0,
+          "version": "2.0"
+        },
+        "selection_metric": "macro_normalized_task_loss",
+        "test": {
+          "examples": 84,
+          "generation_quality": {
+            "classification": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "classification-0109",
+                  "prediction": "",
+                  "reference": "configuration_error"
+                },
+                {
+                  "id": "classification-0110",
+                  "prediction": "",
+                  "reference": "dependency_error"
+                },
+                {
+                  "id": "classification-0111",
+                  "prediction": "",
+                  "reference": "authentication_error"
+                },
+                {
+                  "id": "classification-0112",
+                  "prediction": "",
+                  "reference": "authorization_error"
+                },
+                {
+                  "id": "classification-0113",
+                  "prediction": "",
+                  "reference": "data_validation_error"
+                },
+                {
+                  "id": "classification-0114",
+                  "prediction": "",
+                  "reference": "network_error"
+                },
+                {
+                  "id": "classification-0115",
+                  "prediction": "",
+                  "reference": "storage_error"
+                },
+                {
+                  "id": "classification-0116",
+                  "prediction": "",
+                  "reference": "software_error"
+                }
+              ],
+              "token_f1": 0.0
+            },
+            "dialogue": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "dialogue-0109",
+                  "prediction": "",
+                  "reference": "Fault tolerance allows a system to continue operating when individual components fail. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0110",
+                  "prediction": "",
+                  "reference": "Data provenance records where information originated, how it was transformed, and which processing steps produced the current result. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0111",
+                  "prediction": "",
+                  "reference": "Deduplication identifies repeated data and removes unnecessary copies while preserving required information. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0112",
+                  "prediction": "",
+                  "reference": "Retrieval augmented generation combines a language model with external retrieval so responses can use relevant context. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0113",
+                  "prediction": "",
+                  "reference": "Vector embeddings encode items as numeric representations so semantic relationships can be measured geometrically. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0114",
+                  "prediction": "",
+                  "reference": "Cosine similarity compares vector direction and is commonly used to measure similarity between embeddings. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0115",
+                  "prediction": "",
+                  "reference": "Regularization constrains model learning to reduce overfitting and improve generalization. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0116",
+                  "prediction": "",
+                  "reference": "Cross validation estimates model performance by evaluating it on held-out partitions of available data. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                }
+              ],
+              "token_f1": 0.0
+            },
+            "generation": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "generation-0109",
+                  "prediction": "",
+                  "reference": "Fault tolerance allows a system to continue operating when individual components fail. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0110",
+                  "prediction": "",
+                  "reference": "Data provenance records where information originated, how it was transformed, and which processing steps produced the current result. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0111",
+                  "prediction": "",
+                  "reference": "Deduplication identifies repeated data and removes unnecessary copies while preserving required information. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0112",
+                  "prediction": "",
+                  "reference": "Retrieval augmented generation combines a language model with external retrieval so responses can use relevant context. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0113",
+                  "prediction": "",
+                  "reference": "Vector embeddings encode items as numeric representations so semantic relationships can be measured geometrically. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0114",
+                  "prediction": "",
+                  "reference": "Cosine similarity compares vector direction and is commonly used to measure similarity between embeddings. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0115",
+                  "prediction": "",
+                  "reference": "Regularization constrains model learning to reduce overfitting and improve generalization. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0116",
+                  "prediction": "",
+                  "reference": "Cross validation estimates model performance by evaluating it on held-out partitions of available data. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                }
+              ],
+              "token_f1": 0.0
+            },
+            "summarization": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "summarization-0109",
+                  "prediction": "",
+                  "reference": "When reviewing fault tolerance together with encryption in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0110",
+                  "prediction": "",
+                  "reference": "When reviewing data provenance together with fault tolerance in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0111",
+                  "prediction": "",
+                  "reference": "When reviewing deduplication together with cross validation in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0112",
+                  "prediction": "",
+                  "reference": "When reviewing retrieval augmented generation together with Building Information Modeling in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0113",
+                  "prediction": "",
+                  "reference": "When reviewing vector embeddings together with thermal insulation in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0114",
+                  "prediction": "",
+                  "reference": "When reviewing cosine similarity together with load balancing in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0115",
+                  "prediction": "",
+                  "reference": "When reviewing regularization together with cosine similarity in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0116",
+                  "prediction": "",
+                  "reference": "When reviewing cross validation together with transformer neural networks in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                }
+              ],
+              "token_f1": 0.0
+            },
+            "translation": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "translation-0109",
+                  "prediction": "",
+                  "reference": "Technische notitie: De server gaf een succesvolle respons terug."
+                },
+                {
+                  "id": "translation-0110",
+                  "prediction": "",
+                  "reference": "Engineering note: The server returned a successful response."
+                },
+                {
+                  "id": "translation-0111",
+                  "prediction": "",
+                  "reference": "Nota técnica: El servidor devolvió una respuesta correcta."
+                },
+                {
+                  "id": "translation-0112",
+                  "prediction": "",
+                  "reference": "Engineering note: The server returned a successful response."
+                },
+                {
+                  "id": "translation-0113",
+                  "prediction": "",
+                  "reference": "Technische notitie: Het verzoek is mislukt omdat het token is verlopen."
+                },
+                {
+                  "id": "translation-0114",
+                  "prediction": "",
+                  "reference": "Engineering note: The request failed because the token expired."
+                },
+                {
+                  "id": "translation-0115",
+                  "prediction": "",
+                  "reference": "Nota técnica: La solicitud falló porque el token expiró."
+                },
+                {
+                  "id": "translation-0116",
+                  "prediction": "",
+                  "reference": "Engineering note: The request failed because the token expired."
+                }
+              ],
+              "token_f1": 0.0
+            }
+          },
+          "macro_normalized_task_loss": 0.0751948487712195,
+          "mean_loss": 0.8134606388353166,
+          "seq2seq_mean_task_loss": 1.1388448943694434,
+          "seq2seq_task_perplexity": 3.1231587026142185,
+          "tasks": {
+            "classification": {
+              "examples": 12,
+              "mean_loss": 0.8605492015679678,
+              "normalized_loss": 0.07954763141919788,
+              "pairwise_accuracy": null
+            },
+            "dialogue": {
+              "examples": 12,
+              "mean_loss": 0.9558141231536865,
+              "normalized_loss": 0.08835375064593336,
+              "pairwise_accuracy": null
+            },
+            "embedding": {
+              "examples": 12,
+              "mean_loss": 0.0,
+              "normalized_loss": 0.0,
+              "pairwise_accuracy": 1.0
+            },
+            "generation": {
+              "examples": 12,
+              "mean_loss": 0.9440025091171265,
+              "normalized_loss": 0.08726190613764247,
+              "pairwise_accuracy": null
+            },
+            "reranking": {
+              "examples": 12,
+              "mean_loss": 0.0,
+              "normalized_loss": 0.0,
+              "pairwise_accuracy": 1.0
+            },
+            "summarization": {
+              "examples": 12,
+              "mean_loss": 1.0280217478672664,
+              "normalized_loss": 0.09502849452566253,
+              "pairwise_accuracy": null
+            },
+            "translation": {
+              "examples": 12,
+              "mean_loss": 1.9058368901411693,
+              "normalized_loss": 0.17617215867010022,
+              "pairwise_accuracy": null
+            }
+          }
+        }
+      }
+    }
+  }
+}

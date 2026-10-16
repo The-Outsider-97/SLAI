@@ -259,14 +259,26 @@ _atexit_registered = False
 _HANDLER_MARKER = "_slai_managed_handler"
 
 
+def _default_process_log_path() -> Path:
+    """
+    Return a process-owned runtime log path.
+
+    RotatingFileHandler keeps its file descriptor open. On Windows a second
+    process cannot rename that file during rollover while another process has
+    it open. A process-owned file therefore provides deterministic rotation
+    without introducing a second logging implementation or dependency.
+    """
+    return default_log_path(LogDomain.RUNTIME, f"app_{os.getpid()}.log")
+
+
 @dataclass(frozen=True)
 class LoggingSettings:
     level: int = logging.INFO
     console: bool = True
     file: bool = True
     queue: bool = True
-    log_path: Path = field(default_factory=lambda: default_log_path(LogDomain.RUNTIME, "app.log"))
-    max_bytes: int = 1_000_000
+    log_path: Path = field(default_factory=_default_process_log_path)
+    max_bytes: int = 10_000_000
     backup_count: int = 5
 
 
@@ -441,7 +453,6 @@ def shutdown_logging() -> None:
 
 def exit_handler() -> None:
     """Backward-compatible alias for explicit logging shutdown."""
-
     shutdown_logging()
 
 class RotatingHandler(RotatingFileHandler):
@@ -452,68 +463,90 @@ class RotatingHandler(RotatingFileHandler):
         self.last_rollover_time = 0
         self.rollover_cooldown = 60
 
-    def doRollover(self):
+    def doRollover(self) -> None:
         current_time = time.time()
-        if current_time - self.last_rollover_time < self.rollover_cooldown:
+
+        if (
+            current_time - self.last_rollover_time
+            < self.rollover_cooldown
+        ):
             return
 
-        self.last_rollover_time = current_time
-        errors = []
-        
-        # Only close this handler's stream
-        self.close()
-        
-        # Generate backup filename
-        timestamp = int(time.time())
-        unique_id = uuid.uuid4().hex[:6]
-        dfn = self.rotation_filename(f"{self.baseFilename}.{timestamp}_{unique_id}")
+        self.acquire()
+        try:
+            # ----------------------------------------------------------
+            # Close our own descriptor before attempting the rename.
+            # ----------------------------------------------------------
+            if self.stream is not None:
+                try:
+                    self.stream.flush()
+                finally:
+                    self.stream.close()
+                    self.stream = None
 
-        # Remove existing backup if needed
-        if os.path.exists(dfn):
-            try:
-                os.remove(dfn)
-            except OSError as e:
-                errors.append(f"Failed to remove existing backup {dfn}: {e}")
+            timestamp = int(current_time)
+            suffix = uuid.uuid4().hex[:8]
 
-        # Rotate current log to backup
-        if os.path.exists(self.baseFilename):
+            rotated_path = (
+                f"{self.baseFilename}."
+                f"{timestamp}_{suffix}"
+            )
+
+            renamed = False
+            last_error: Exception | None = None
+
             for attempt in range(5):
                 try:
-                    os.rename(self.baseFilename, dfn)
+                    if os.path.exists(self.baseFilename):
+                        os.replace(self.baseFilename, rotated_path)
+
+                    renamed = True
                     break
-                except OSError as e:
-                    if attempt == 4:
-                        errors.append(f"Failed to rename log file: {e}")
-                    else:
-                        time.sleep(0.5)
 
-        # Reopen current log
-        if not self.delay:
-            try:
-                self.stream = self._open()
-            except Exception as e:
-                errors.append(f"Failed to reopen log: {e}")
+                except PermissionError as exc:
+                    last_error = exc
 
-        # Enforce log limits and compression
-        try:
-            self._enforce_log_limits(max_total_gb=40, max_files=300)
-        except Exception as e:
-            errors.append(f"Log limits enforcement failed: {e}")
-            
-        try:
-            self._compress_queue.append(dfn)
-            self._manage_compression()
-        except Exception as e:
-            errors.append(f"Compression failed: {e}")
+                    # Windows may temporarily retain a handle after another
+                    # application releases it.
+                    time.sleep(0.05 * (attempt + 1))
 
-        # Log any errors
-        if errors:
-            try:
-                logger = logging.getLogger("RotatingHandler")
-                for error in errors:
-                    logger.error(error)
-            except Exception:
-                pass  # Fallback if logging unavailable
+                except OSError as exc:
+                    last_error = exc
+                    break
+
+            if renamed:
+                self.last_rollover_time = current_time
+
+                try:
+                    self._compress_queue.append(rotated_path)
+                except Exception:
+                    pass
+
+            else:
+                # Logging rollover must never terminate application work.
+                sys.stderr.write(
+                    "WARNING | RotatingHandler | Log rollover skipped because the file is busy: "
+                    f"{self.baseFilename}"
+                )
+
+                if last_error is not None:
+                    sys.stderr.write(f" ({last_error})")
+                sys.stderr.write("\n")
+
+        finally:
+            # ----------------------------------------------------------
+            # The active log must always be reopened.
+            # ----------------------------------------------------------
+            if self.stream is None:
+                try:
+                    self.stream = self._open()
+                except Exception as exc:
+                    sys.stderr.write(
+                        "ERROR | RotatingHandler | "
+                        f"Failed to reopen log file: {exc}\n"
+                    )
+
+            self.release()
 
     def _enforce_log_limits(self, max_total_gb=40, max_files=300):
         max_total_bytes = max_total_gb * (1024**3)

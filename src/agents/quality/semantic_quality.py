@@ -19,14 +19,13 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.quality_error import ( ProvenanceTrustError, DataQualityError, QualityDomain,
-                                  QualityDisposition, QualityErrorType, QualitySeverity,
-                                  QualityStage, quality_error_boundary)
+from .utils.quality_error import *
+from .utils.quality_helpers import *
 from .quality_memory import QualityMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Semantic Quality")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass(slots=True)
@@ -98,10 +97,10 @@ class SemanticQuality:
     or memory updates?
     """
 
-    def __init__(self) -> None:
+    def __init__(self, memory: Optional[QualityMemory]=None) -> None:
         self.config = load_global_config()
         self.quality_config = get_config_section("semantic_quality")
-        self.memory = QualityMemory()
+        self.memory = memory
 
         self.enabled = bool(self.quality_config.get("enabled", True))
         self.auto_record_to_memory = bool(self.quality_config.get("auto_record_to_memory", True))
@@ -210,6 +209,7 @@ class SemanticQuality:
             )
 
             findings = [leakage, consistency, provenance_finding]
+            assert self.memory is not None
             conflict_resolution = self.memory.reconcile_conflicts(
                 findings=[finding.to_conflict_input() for finding in findings],
                 source_id=source_key,
@@ -818,6 +818,7 @@ class SemanticQuality:
             "lineage": 0.05,
         })
 
+        assert self.memory is not None
         latest_reliability = self.memory.latest_source_reliability(source_id)
         memory_reliability = self._coerce_float(
             (latest_reliability or {}).get("reliability", self.memory.default_source_reliability),
@@ -985,8 +986,10 @@ class SemanticQuality:
         record_payload = dict(record)
 
         if rule_type == "temporal_order":
-            earlier = self._parse_datetime(record_payload.get(rule.get("earlier_field")))
-            later = self._parse_datetime(record_payload.get(rule.get("later_field")))
+            earlier_field = self._nonempty(rule.get("earlier_field"), "earlier_field")
+            later_field = self._nonempty(rule.get("later_field"), "later_field")
+            earlier = self._parse_datetime(record_payload.get(earlier_field))
+            later = self._parse_datetime(record_payload.get(later_field))
             if earlier is None or later is None or earlier <= later:
                 return None
             return {
@@ -994,17 +997,17 @@ class SemanticQuality:
                 "rule_type": rule_type,
                 "severity": severity,
                 "message": message,
-                "fields": [rule.get("earlier_field"), rule.get("later_field")],
+                "fields": [earlier_field, later_field],
                 "observed": {
-                    str(rule.get("earlier_field")): record_payload.get(rule.get("earlier_field")),
-                    str(rule.get("later_field")): record_payload.get(rule.get("later_field")),
+                    earlier_field: record_payload.get(earlier_field),
+                    later_field: record_payload.get(later_field),
                 },
             }
 
         if rule_type == "required_if":
-            if_field = rule.get("if_field")
+            if_field = self._nonempty(rule.get("if_field"), "if_field")
             expected = self._normalize_value(rule.get("if_equals"))
-            required_field = rule.get("required_field")
+            required_field = self._nonempty(rule.get("required_field"), "required_field")
             current = self._normalize_value(record_payload.get(if_field))
             if current != expected or self._is_present(record_payload.get(required_field)):
                 return None
@@ -1014,11 +1017,11 @@ class SemanticQuality:
                 "severity": severity,
                 "message": message,
                 "fields": [if_field, required_field],
-                "observed": {str(if_field): record_payload.get(if_field), str(required_field): record_payload.get(required_field)},
+                "observed": {if_field: record_payload.get(if_field), required_field: record_payload.get(required_field)},
             }
 
         if rule_type == "equals_if_present":
-            field_name = rule.get("field")
+            field_name = self._nonempty(rule.get("field"), "field")
             value = record_payload.get(field_name)
             if not self._is_present(value):
                 return None
@@ -1031,11 +1034,11 @@ class SemanticQuality:
                 "severity": severity,
                 "message": message,
                 "fields": [field_name],
-                "observed": {str(field_name): value, "expected": expected},
+                "observed": {field_name: value, "expected": expected},
             }
 
         if rule_type == "not_equals_if_present":
-            field_name = rule.get("field")
+            field_name = self._nonempty(rule.get("field"), "field")
             value = record_payload.get(field_name)
             if not self._is_present(value):
                 return None
@@ -1048,11 +1051,11 @@ class SemanticQuality:
                 "severity": severity,
                 "message": message,
                 "fields": [field_name],
-                "observed": {str(field_name): value, "disallowed": disallowed},
+                "observed": {field_name: value, "disallowed": disallowed},
             }
 
         if rule_type == "allowed_values":
-            field_name = rule.get("field")
+            field_name = self._nonempty(rule.get("field"), "field")
             value = record_payload.get(field_name)
             if not self._is_present(value):
                 return None
@@ -1065,7 +1068,7 @@ class SemanticQuality:
                 "severity": severity,
                 "message": message,
                 "fields": [field_name],
-                "observed": {str(field_name): value, "allowed_values": sorted(allowed_values)},
+                "observed": {field_name: value, "allowed_values": sorted(allowed_values)},
             }
 
         if rule_type == "one_of_present":
@@ -1082,7 +1085,7 @@ class SemanticQuality:
             }
 
         if rule_type == "regex":
-            field_name = rule.get("field")
+            field_name = self._nonempty(rule.get("field"), "field")
             value = record_payload.get(field_name)
             pattern = str(rule.get("pattern", ""))
             if not self._is_present(value) or not pattern:
@@ -1095,7 +1098,7 @@ class SemanticQuality:
                 "severity": severity,
                 "message": message,
                 "fields": [field_name],
-                "observed": {str(field_name): value, "pattern": pattern},
+                "observed": {field_name: value, "pattern": pattern},
             }
 
         raise DataQualityError(
@@ -1117,11 +1120,17 @@ class SemanticQuality:
         input_refs: Mapping[str, Any],
     ) -> Any:
         if "compare_to_field" in rule:
-            return record.get(rule.get("compare_to_field"))
+            compare_to_field = rule.get("compare_to_field")
+            if compare_to_field is None:
+                return None
+            return record.get(str(compare_to_field))
         if "compare_to_value" in rule:
             return rule.get("compare_to_value")
         if "compare_to_value_ref" in rule:
-            return input_refs.get(str(rule.get("compare_to_value_ref")))
+            compare_to_value_ref = rule.get("compare_to_value_ref")
+            if compare_to_value_ref is None:
+                return None
+            return input_refs.get(str(compare_to_value_ref))
         return None
 
     def _aggregate_batch_score(self, findings: Sequence[SemanticFinding]) -> float:
@@ -1455,6 +1464,13 @@ class SemanticQuality:
         return f"{prefix}_{int(time.time() * 1000)}_{os.urandom(4).hex()}"
 
 
+__all__ = [
+    "SemanticQuality",
+    "SemanticFinding",
+    "SemanticAssessment",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Semantic Quality ===\n")
     printer.status("TEST", "Semantic Quality initialized", "info")
@@ -1574,6 +1590,7 @@ if __name__ == "__main__":
         context={"scenario": "risky_batch"},
     )
 
+    assert semantic.memory is not None
     latest_state = semantic.memory.latest_quality_state("source_semantic_beta")
 
     assert clean_assessment["verdict"] in {"pass", "warn"}, "Clean batch should not hard block"
@@ -1590,6 +1607,7 @@ if __name__ == "__main__":
     printer.pretty("RISKY_ASSESSMENT", risky_assessment, "warning")
     printer.pretty("LATEST_MEMORY_STATE", latest_state, "success")
 
+    assert semantic.memory is not None
     semantic.memory.flush()
     printer.status("TEST", "Semantic Quality test flow completed", "success")
     print("\n=== Test ran successfully ===\n")

@@ -87,11 +87,14 @@ def create_and_push_tag(version: str, message: str = "Release"):
 
 
 def bump_version_and_tag(level: str = "patch", message: str = "Auto bump") -> str:
-    """Bump version and create/push tag."""
+    """
+    Increment the latest Git tag and create/push the new tag.
+    Return the new version only after the tag operation succeeds.
+    """
     latest = get_latest_git_tag()
-    new_ver = increment_version(latest, level)
-    create_tag(new_ver, message)
-    return new_ver
+    new_version = increment_version(latest, level)
+    create_and_push_tag(new_version, message)
+    return new_version
 
 # Added version validation inspired by semantic versioning research
 def validate_semver(version: str) -> bool:

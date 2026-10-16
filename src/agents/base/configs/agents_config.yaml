@@ -123,8 +123,12 @@ agent_factory:
       quality_agent: quality
       safety_agent: safety
       observability_agent: observability
+      optimization_agent: optimization
       reasoning_agent: reasoning
       evaluation_agent: evaluation
+      simulation_agent: simulation
+      verification_agent: verification
+      stem_agent: stem
     out_of_process_fallback_agents:
       - adaptive
       - alignment
@@ -161,6 +165,9 @@ agent_factory:
       observability:
         torch_required: false
         notes: "Observability orchestration is telemetry-first and torch-free."
+      optimization:
+        torch_required: false
+        notes: "OptimizationAgent orchestration is torch-free; numerical backends are owned by the Optimization subsystem."
       network:
         torch_required: false
         notes: "Network transport/routing/reliability stack is torch-free."
@@ -185,6 +192,16 @@ agent_factory:
       perception:
         torch_required: true
         notes: "Perception encoder/decoder stack is torch-based."
+      simulation:
+        torch_required: false
+        notes: "Simulation orchestration and numerical execution are torch-free by default; externally supplied learned world models may carry their own optional dependencies."
+      verification:
+        torch_required: false
+        notes: "Formal verification/model-checking orchestration is torch-free; SAT/SMT backends remain optional dependencies of the Verification subsystem."
+      stem:
+        torch_required: false
+        notes: "Deterministic scientific-computing orchestration is torch-free; numerical dependencies are provided by the existing STEM subsystem."
+
     agent_specs:
       adaptive:
         module_path: src.agents.adaptive_agent
@@ -240,6 +257,19 @@ agent_factory:
         module_path: src.agents.observability_agent
         class_name: ObservabilityAgent
         capabilities: [observability, telemetry, monitoring]
+      optimization:
+        module_path: src.agents.optimization_agent
+        class_name: OptimizationAgent
+        capabilities: [mathematical_optimization, single_objective_optimization, multi_objective_optimization, pareto_analysis]
+      orchestrator:
+        module_path: src.agents.orchestrator_agent
+        class_name: OrchestratorAgent
+        capabilities: [orchestration, dynamic_delegation, agent_factory]
+        constraints:
+          orchestration_scope: global_meta
+          factory_authority: true
+        metadata:
+          orchestration_role: meta_controller
       perception:
         module_path: src.agents.perception_agent
         class_name: PerceptionAgent
@@ -272,6 +302,35 @@ agent_factory:
         module_path: src.agents.safety_agent
         class_name: SafetyAgent
         capabilities: [safety, risk_assessment, policy_enforcement]
+      simulation:
+        module_path: src.agents.simulation_agent
+        class_name: SimulationAgent
+        capabilities:
+          - simulation
+          - deterministic_rollout
+          - stochastic_rollout
+          - monte_carlo
+          - scenario_simulation
+          - counterfactual_rollout
+          - sensitivity_analysis
+          - synthetic_environment_simulation
+      verification:
+        module_path: src.agents.verification_agent
+        class_name: VerificationAgent
+        capabilities:
+          - formal_verification
+          - satisfiability
+          - model_checking
+          - invariant_verification
+      stem:
+        module_path: src.agents.stem_agent
+        class_name: STEMAgent
+        capabilities:
+          - deterministic_scientific_computing
+          - numerical_methods
+          - symbolic_math
+          - unit_aware_computation
+          - measurement_uncertainty
 
 
 base_agent:
@@ -312,20 +371,16 @@ adaptive_agent:
   num_actions: 2
   num_handlers: 3
   max_episode_steps: 100
-
   base_learning_interval: 10
   skill_max_steps: 10
   skill_batch_size: 32
   manager_batch_size: 32
   tuning_window: 100
   performance_window: 50
-
   max_task_history: 200
   max_route_history: 200
   max_feedback_history: 200
-
   random_seed: 42
-
   explore_skills: true
   explore_actions: true
   learn_after_task: true
@@ -337,7 +392,6 @@ adaptive_agent:
   sync_tuner_to_skills: true
   use_global_rl_engine: true
   share_meta_registry: true
-
   recovery_reward_threshold: -10.0
   success_reward_threshold: 0.0
   correction_bonus: 1.0
@@ -360,20 +414,39 @@ adaptive_agent:
   skills: {}
   handlers: {}
   env: {}
+  # Learning Agent integration
+  learning_signal_inbox_key: "learning:signals:inbox"
+  learning_guidance_prefix: "learning:guidance"
+  consume_learning_guidance: true
+  learning_guidance_min_evidence: 3
 
 
 alignment_agent:
+  enabled: true
+
+  # Existing v2.3 agent-level compatibility controls.
   safety_buffer: 0.10
   learning_rate: 0.01
   momentum: 0.90
   risk_threshold: 0.50
   alignment_ttl: 604800
 
+  strict_subsystem_failures: false
+  enable_bias_detection: true
+  enable_individual_fairness: true
+  enable_counterfactual_audit: false
+  enable_value_alignment: true
+  enable_ethics_check: true
+
   operation_limiter:
     max_requests: 10
-    interval: 60
+    interval_seconds: 60
+    cooldown_seconds: 60
     penalty: "cool_down"
 
+  # Retained for compatibility with existing v2.3 deployments. The structured
+  # assessor below does not collapse heterogeneous evidence into this legacy
+  # weighting scheme.
   weight:
     stat_parity: 0.40
     equal_opp: 0.40
@@ -384,11 +457,67 @@ alignment_agent:
       - threshold: 0.80
         action: "human_intervention"
       - threshold: 0.50
-        action: "automatic_adjustment"
+        action: "review_required"
       - threshold: 0.30
         action: "alert_only"
 
   fail_safe_action_space: []
+
+  # Agent-owned assessment policy. The agent injects this into
+  # src/agents/alignment/assessment.py; the assessment module does not load the
+  # central agent config itself.
+  assessment:
+    aligned_threshold: 0.75
+    misaligned_threshold: 0.35
+    min_confidence: 0.50
+    min_coverage: 0.50
+    conflict_confidence: 0.60
+    drift_threshold: 0.15
+    trajectory_window: 8
+    trajectory_history_limit: 120
+
+    required_dimensions:
+      - user_intent
+      - task_objective
+      - constraint
+
+    dimension_weights:
+      user_intent: 1.00
+      task_objective: 1.00
+      constraint: 1.00
+      environment: 0.75
+      preference: 0.75
+      trajectory: 0.75
+      self_constraint: 0.50
+      multi_agent: 0.50
+
+  # Agent-owned orchestration switches consumed by AlignmentSubsystem through
+  # constructor injection. Private specialist modules continue to load their
+  # own algorithmic settings from alignment_config.yaml.
+  runtime:
+    memory_logging_enabled: true
+    strict_memory_integration: false
+    run_statistical_diagnostics: true
+    use_statistical_diagnostics_as_alignment_evidence: false
+    value_model_requires_ready_marker: true
+    value_model_ready: false
+    value_model_provenance: null
+
+  # SLAI SharedMemory is the cross-agent/runtime coordination layer.
+  # alignment_memory.py remains private evidence/history memory for the
+  # Alignment subsystem itself.
+  shared_memory:
+    enabled: true
+    publish_events: true
+    log_interventions: true
+    fail_closed_on_write_error: false
+    ttl_seconds: 604800
+    result_key_prefix: "alignment_agent.result"
+    summary_key_prefix: "alignment_agent.summary"
+    feedback_key_prefix: "alignment_agent.feedback"
+    state_key: "alignment_agent.runtime_state"
+    latest_key: "alignment_agent.latest"
+    event_channel: "alignment.events"
 
 
 browser_agent:
@@ -438,9 +567,6 @@ evaluation_agent:
           energy_consumed: 100
           collisions: 0
           success: true
-
-
-execution_agent: {}
 
 
 handler_agent:
@@ -513,7 +639,10 @@ knowledge_agent:
     max_workers: 8
 
 
-language_agent: {}
+language_agent:
+  lantra:
+    enabled: true
+    required: true
 
 
 learning_agent:
@@ -544,6 +673,16 @@ learning_agent:
         max_network_size: 256
         max_task_pool: 50
         max_history: 500
+    # Cross-agent learning
+    signal_inbox_key: "learning:signals:inbox"
+    guidance_prefix: "learning:guidance"
+    signal_query_limit: 100
+    # Only validated supervision above this confidence may train
+    # StrategySelector.
+    policy_supervision_min_confidence: 0.80
+    # Minimum same-context observations before historical outcomes may produce
+    # adaptive guidance.
+    context_min_evidence: 3
 
 
 network_agent:
@@ -615,6 +754,34 @@ observability_agent:
         evaluation_agent_names: ["evaluation", "evaluation_agent", "EvaluationAgent"]
 
 
+optimization_agent:
+  enabled: true
+  strict_validation: true
+
+  shared_memory_enabled: true
+  publish_shared_results: true
+  shared_result_key_prefix: "optimization_agent.result"
+  shared_latest_key: "optimization_agent.latest"
+  shared_event_topic: "optimization.events"
+  shared_memory_ttl_seconds: 86400
+
+  include_decision_variables_in_shared_memory: true
+  max_shared_pareto_points: 32
+  max_shared_warnings: 16
+
+  max_batch_size: 16
+  metrics_enabled: true
+  local_reference_limit: 32
+
+
+orchestrator_agent:
+    enabled: true
+    default_specialty: "reasoning"
+    ttl_recycling: true
+    max_delegation_retries: 2
+    shared_memory_coordination_prefix: "orchestrator"
+
+
 perception_agent:
     device: "cpu"
     embed_dim: 512
@@ -631,10 +798,76 @@ perception_agent:
     contrastive_weight: 1.0  # for hybrid loss
 
 
-planning_agent: {}
+planning_agent: 
+  enabled: true
+
+  # SharedMemory remains BaseAgent-owned. Publish only bounded cross-agent summaries.
+  shared_memory_enabled: true
+  publish_shared_results: true
 
 
-privacy_agent: {}
+privacy_agent:
+  enabled: true
+  fail_closed_on_subsystem_error: true
+  include_evidence_bundle: true
+  include_sanitized_payload_on_block: false
+
+  default_policy_id: "privacy-runtime-policy"
+  default_policy_version: "v1"
+  default_source_context: "runtime"
+  default_destination_context: "runtime"
+  default_action: "process"
+  default_purpose: "general_processing"
+  default_retention_days: 30
+
+  # Agent-owned orchestration labels. Subsystem stage labels stay in
+  # privacy_config.yaml and are not duplicated here.
+  post_minimization_stage: "privacy_agent.post_minimization_identification"
+  runtime_gate_stage: "privacy_agent.runtime_gate"
+  evidence_bundle_name: "privacy_runtime_bundle"
+
+  # SLAI SharedMemory publication. This is NOT privacy_memory.py.
+  shared_memory:
+    enabled: true
+    publish_notifications: true
+    ttl_seconds: 86400
+
+    # Detailed stage evidence can contain detector previews/path metadata and is
+    # therefore excluded from SharedMemory by default.
+    include_stage_evidence: false
+    include_sanitized_payload: false
+    include_evidence_bundle: false
+
+    result_key_prefix: "privacy_agent.result"
+    summary_key_prefix: "privacy_agent.summary"
+    error_key_prefix: "privacy_agent.error"
+    event_channel: "privacy.events"
+
+
+provenance_agent:
+  enabled: true
+  publish_shared_memory: true
+  publish_state_updates: true
+  fail_on_shared_memory_error: false
+  strict_event_validation: true
+  shared_memory_ttl_seconds: 86400
+
+  # Bounds apply only at the orchestration/query boundary; graph semantics and
+  # persistence remain owned by the Provenance subsystem.
+  max_query_depth: 64
+  max_query_results: 2048
+  max_subgraph_depth: 16
+
+  # Bounded ProvenanceMemory checkpoint-reference index. Durable checkpoint
+  # facts stay authoritative in ProvenanceStore.
+  local_memory_max_checkpoints: 1000
+  event_cache_size: 256
+  record_agent_checkpoints: true
+
+  # SharedMemory carries only lightweight references/state notifications.
+  event_channel: "provenance.events"
+  state_key: "provenance_agent.state"
+  latest_reference_key: "provenance_agent.latest_reference"
 
 
 qnn_agent:
@@ -650,48 +883,323 @@ qnn_agent:
 
 
 quality_agent:
+  enabled: true
+  default_window: latest
+
+  # Core orchestration
+  stop_on_blocking_structural: true
+  fail_closed_on_subsystem_error: true
+  auto_route_via_workflow: true
+  prefer_workflow_verdict: true
+  allow_workflow_verdict_relaxation: false
+  include_workflow_findings_in_summary: true
+  include_record_previews_in_shared_memory: false
+  max_shared_record_preview: 5
+
+  # Fallback agent-level policy. When intelligence.use_fitness_policy=true,
+  # the active fitness profile supplies thresholds/weights per evaluation.
+  pass_threshold: 0.90
+  warn_threshold: 0.75
+
+  # Aggregation/reporting order. Structural still executes first. With quality
+  # intelligence enabled, SemanticQuality runs before StatisticalQuality because
+  # trusted-baseline promotion needs provenance/source-reliability evidence.
+  subsystem_order:
+    - structural
+    - statistical
+    - semantic
+
+  subsystem_weights:
+    structural: 0.34
+    statistical: 0.33
+    semantic: 0.33
+
+  bridge_resolution:
+    resolve_handler_from_factory: false
+    resolve_safety_from_factory: false
+    handler_factory_names:
+      - handler_agent
+      - handler
+      - HandlerAgent
+    safety_factory_names:
+      - safety_agent
+      - safety
+      - SafetyAgent
+
+  shared_memory:
     enabled: true
-    default_window: latest
-    stop_on_blocking_structural: true
-    fail_closed_on_subsystem_error: true
-    auto_route_via_workflow: true
-    prefer_workflow_verdict: true
-    include_workflow_findings_in_summary: true
-    include_record_previews_in_shared_memory: false
-    max_shared_record_preview: 5
-    pass_threshold: 0.90
-    warn_threshold: 0.75
+    ttl_seconds: 86400
+    publish_notifications: true
+    result_key_prefix: quality_agent.result
+    summary_key_prefix: quality_agent.summary
+    error_key_prefix: quality_agent.error
+    event_channel: quality.events
 
-    subsystem_order:
-        - structural
-        - statistical
-        - semantic
+  # -----------------------------------------------------------------------
+  # Agent-owned intelligence configuration.
+  # These sections are injected into src/agents/quality/modules/*.py.
+  # The intelligence modules MUST NOT read quality_config.yaml themselves.
+  # -----------------------------------------------------------------------
+  intelligence:
+    enabled: true
+    use_fitness_policy: true
 
-    subsystem_weights:
-        structural: 0.34
-        statistical: 0.33
-        semantic: 0.33
+    relationship_integration:
+      enabled: true
+      weight: 0.15
+      apply_score_when_baseline_unavailable: false
+      fail_closed_on_error: false
 
-    bridge_resolution:
-        resolve_handler_from_factory: false
-        resolve_safety_from_factory: false
-        handler_factory_names:
-            - handler_agent
-            - handler
-            - HandlerAgent
-        safety_factory_names:
-            - safety_agent
-            - safety
-            - SafetyAgent
+    # Monotonic dispositions: these can only make the final QualityAgent
+    # posture more conservative, never less conservative.
+    policy_enforcement:
+      source_reliability_failure: warn
+      trusted_baseline_missing: warn
+      required_check_missing: warn
+      insufficient_evidence: warn
 
-    shared_memory:
-        enabled: true
-        ttl_seconds: 86400
-        publish_notifications: true
-        result_key_prefix: quality_agent.result
-        summary_key_prefix: quality_agent.summary
-        error_key_prefix: quality_agent.error
-        event_channel: quality.events
+    fitness_policy:
+      enabled: true
+      default_profile: general
+      allow_runtime_overrides: false
+      allow_runtime_relaxation: false
+      allow_weight_overrides: false
+
+      use_case_profiles:
+        general: general
+        knowledge_ingestion: knowledge_ingestion
+        training: training
+        replay: replay
+        inference_context: inference_context
+        memory_write: memory_write
+
+      profiles:
+        general:
+          use_case: general
+          pass_threshold: 0.90
+          warn_threshold: 0.75
+          subsystem_weights:
+            structural: 0.34
+            statistical: 0.33
+            semantic: 0.33
+          required_checks:
+            - schema
+            - provenance
+          hard_block_error_types:
+            - privacy_policy_conflict
+          min_source_reliability: 0.50
+          require_trusted_baseline: false
+          baseline_bootstrap_allowed: true
+          minimum_evidence_strength: moderate
+
+        knowledge_ingestion:
+          use_case: knowledge_ingestion
+          pass_threshold: 0.91
+          warn_threshold: 0.78
+          subsystem_weights:
+            structural: 0.34
+            statistical: 0.26
+            semantic: 0.40
+          required_checks:
+            - schema
+            - provenance
+            - consistency
+          hard_block_error_types:
+            - provenance_untrusted
+            - privacy_policy_conflict
+          min_source_reliability: 0.65
+          require_trusted_baseline: false
+          baseline_bootstrap_allowed: true
+          minimum_evidence_strength: moderate
+
+        training:
+          use_case: training
+          pass_threshold: 0.94
+          warn_threshold: 0.82
+          subsystem_weights:
+            structural: 0.30
+            statistical: 0.30
+            semantic: 0.40
+          required_checks:
+            - schema
+            - leakage
+            - provenance
+            - drift
+            - relationship_drift
+          hard_block_error_types:
+            - leakage_detected
+            - provenance_untrusted
+            - privacy_policy_conflict
+          min_source_reliability: 0.75
+          require_trusted_baseline: true
+          baseline_bootstrap_allowed: false
+          minimum_evidence_strength: strong
+
+        replay:
+          use_case: replay
+          pass_threshold: 0.92
+          warn_threshold: 0.80
+          subsystem_weights:
+            structural: 0.32
+            statistical: 0.34
+            semantic: 0.34
+          required_checks:
+            - schema
+            - duplicates
+            - drift
+            - provenance
+          hard_block_error_types:
+            - leakage_detected
+            - privacy_policy_conflict
+          min_source_reliability: 0.70
+          require_trusted_baseline: true
+          baseline_bootstrap_allowed: false
+          minimum_evidence_strength: strong
+
+        inference_context:
+          use_case: inference_context
+          pass_threshold: 0.92
+          warn_threshold: 0.80
+          subsystem_weights:
+            structural: 0.32
+            statistical: 0.25
+            semantic: 0.43
+          required_checks:
+            - schema
+            - provenance
+            - consistency
+          hard_block_error_types:
+            - provenance_untrusted
+            - privacy_policy_conflict
+          min_source_reliability: 0.70
+          require_trusted_baseline: false
+          baseline_bootstrap_allowed: false
+          minimum_evidence_strength: strong
+
+        memory_write:
+          use_case: memory_write
+          pass_threshold: 0.93
+          warn_threshold: 0.82
+          subsystem_weights:
+            structural: 0.35
+            statistical: 0.25
+            semantic: 0.40
+          required_checks:
+            - schema
+            - provenance
+            - consistency
+          hard_block_error_types:
+            - provenance_untrusted
+            - privacy_policy_conflict
+          min_source_reliability: 0.75
+          require_trusted_baseline: false
+          baseline_bootstrap_allowed: false
+          minimum_evidence_strength: strong
+
+    baseline_governance:
+      enabled: true
+      metric_name: dataset_profile
+      min_stable_batches: 3
+      min_source_reliability: 0.70
+      allowed_structural_verdicts:
+        - pass
+      allowed_semantic_verdicts:
+        - pass
+        - warn
+      max_quality_score_delta: 0.08
+      max_baseline_age_seconds: 2592000
+      trust_explicit_baseline: false
+      require_schema_match: true
+      persist_trusted_baselines: true
+
+      # Compatibility with the current QualityMemory public API.
+      allow_export_state_fallback: true
+
+      # Do not silently trust baselines created by the old auto-register path.
+      accept_legacy_baselines: false
+
+      # Required if min_stable_batches > 1 and QualityMemory is expected to
+      # supply historical evidence for candidate promotion.
+      use_memory_snapshot_history: true
+      history_limit: 12
+
+    relationship_quality:
+      enabled: true
+      profile_metric_name: relationship_profile
+
+      # Bounds O(p^2) relationship evaluation.
+      max_numeric_fields: 30
+      min_pair_observations: 20
+
+      # Effect-size thresholds.
+      min_absolute_baseline_correlation: 0.20
+      warn_correlation_delta: 0.20
+      block_correlation_delta: 0.40
+      warn_missingness_delta: 0.20
+      block_missingness_delta: 0.40
+
+      # Significance supports an effect-size decision; significance alone
+      # never creates a block.
+      significance_alpha: 0.05
+      require_statistical_support_for_block: true
+
+      pass_threshold: 0.90
+      warn_threshold: 0.75
+
+      exclude_fields:
+        - record_id
+        - id
+        - row_id
+        - sample_id
+        - uuid
+        - created_at
+        - updated_at
+        - timestamp
+        - batch_id
+        - source_id
+
+      remediation_actions:
+        warn:
+          - review_feature_relationships
+          - compare_recent_batches
+          - review_upstream_transformations
+        block:
+          - quarantine_relationship_shifted_batch
+          - revalidate_upstream_transformations
+          - rebuild_trusted_baseline
+          - review_feature_engineering
+
+    evidence_calibration:
+      enabled: true
+      confidence_level: 0.95
+      sample_support_scale: 50.0
+
+      component_weights:
+        sample_support: 0.30
+        coverage: 0.20
+        baseline_trust: 0.20
+        source_reliability: 0.15
+        detector_agreement: 0.15
+
+      strength_thresholds:
+        weak: 0.35
+        moderate: 0.55
+        strong: 0.75
+        very_strong: 0.90
+
+      baseline_trust_scores:
+        not_applicable: 1.00
+        unestablished: 0.00
+        rejected: 0.00
+        candidate: 0.35
+        stale: 0.30
+        superseded: 0.20
+        trusted: 0.90
+        active: 1.00
+
+      batch_aggregation:
+        mean_weight: 0.70
+        minimum_weight: 0.30
 
 
 reader_agent:
@@ -744,191 +1252,282 @@ reader_agent:
 
 
 reasoning_agent:
-  learning_rate: 0.05
-  exploration_rate: 0.1
-  tuple_key:
-  - subject
-  - predicate
-  - object
-  hypothesis_graph:
-    nodes: {}
-    edges: {}
-    confidence: 0.0
-  decay: 0.95
-  knowledge_db: src/agents/knowledge/templates/knowledge_db.json
-  glove_path: data/embeddings/glove.6B.200d.json
-  ner_tag: None
-  embedding: None
-  max_iterations: 20
-  contradiction_threshold: 0.25
-  redundancy_margin: 0.05
+  # -------------------------------------------------------------------------
+  # Request / orchestration bounds
+  # -------------------------------------------------------------------------
   large_kb_threshold: 500
   low_confidence_threshold: 0.4
   max_action_results: 20
   max_chain_depth: 4
   max_react_steps: 5
   max_trace_items: 250
+
+  # -------------------------------------------------------------------------
+  # Runtime behaviour
+  # -------------------------------------------------------------------------
   enable_shared_memory_publish: true
-  enable_knowledge_persistence: true
   enable_memory_logging: true
   enable_probabilistic_fallback: true
-  auto_register_builtin_rules: true
   strict_fact_validation: true
-  human_intervention_key: human_intervention_requests
-  knowledge_memory_key: reasoning_agent:knowledge_base
-  last_validation_key: reasoning_agent:last_validated_fact
-  reasoning_trace_topic: reasoning_trace
-  memory_event_tag: reasoning_agent
+
+  # -------------------------------------------------------------------------
+  # Shared runtime contracts
+  # -------------------------------------------------------------------------
+  working_knowledge_key: "reasoning_agent:working_knowledge"
+  knowledge_candidate_topic: "reasoning_agent:knowledge_candidates"
+  human_intervention_key: "human_intervention_requests"
+  last_validation_key: "reasoning_agent:last_validated_fact"
+  reasoning_trace_topic: "reasoning_trace"
+  memory_event_tag: "reasoning_agent"
   memory_event_priority: 0.75
-  strategy_default: deduction
+
+  # -------------------------------------------------------------------------
+  # Agent-level strategy policy
+  # -------------------------------------------------------------------------
+  strategy_default: "deduction"
   reasoning_type_aliases:
-    deductive: deduction
-    inductive: induction
-    abductive: abduction
-    causal: cause_effect
-    cause-and-effect: cause_effect
-    decomposition: decompositional
-    analytical: analogical
-    analitical: analogical
-  builtin_rule_weights:
-    identity_rule: 1.0
-    transitive_rule: 0.8
+    abductive: "abduction"
+    deductive: "deduction"
+    inductive: "induction"
+    analogy: "analogical"
+    decomposition: "decompositional"
+    causal: "cause_effect"
+    cause-and-effect: "cause_effect"
 
 
 safety_agent:
   enabled: true
-  schema_version: safety_agent.v3
-  constitutional_rules_path: src/agents/safety/templates/constitutional_rules.json
-  max_constitution_bytes: 1048576
+  schema_version: safety_agent.v4
+
   max_input_text_length: 12000
+  max_output_text_length: 12000
   audit_level: 2
   collect_feedback: true
   enable_learnable_aggregation: false
   fail_closed_on_component_error: true
   sanitization_depth: full
-  empty_assessment_risk: 0.5
+  empty_assessment_risk: 0.50
   assessment_history_limit: 500
   audit_trail_limit: 1000
+  verbose_console: false
+
+  output:
+    max_collection_items: 250
+
   components:
     safety_guard:
       enabled: true
+      required: true
+      authority: enforcing
     cyber_safety:
       enabled: true
+      required: true
+      authority: enforcing
     adaptive_security:
       enabled: true
-    reward_model:
-      enabled: true
+      required: false
+      authority: enforcing
     attention_monitor:
       enabled: true
+      required: false
+      authority: advisory
+    reward_model:
+      enabled: true
+      required: true
+      authority: corroborating
     compliance_checker:
       enabled: true
+      required: false
+      authority: enforcing
     secure_stpa:
       enabled: true
+      required: true
+      authority: enforcing
+    secure_hacker:
+      enabled: true
+      required: false
+      authority: corroborating
+
+  orchestration:
+    fail_startup_on_required_component_error: true
+    review_on_required_component_degraded: false
+    required_error_risk: 1.00
+    optional_error_risk: 0.55
+
+  performance:
+    max_assessment_ms: 5000
+    slow_component_ms: 750
+    review_on_budget_exceeded: false
+
   risk_thresholds:
     overall_safety: 0.85
-    cyber_risk: 0.7
+    cyber_risk: 0.70
     review_threshold: 0.45
     block_threshold: 0.75
     compliance_failure_is_blocker: true
+    mandatory_compliance_failure_risk: 0.95
+
+  # Retained as the agent-level component weighting contract. Final content
+  # assessment uses the family-level weights below to avoid double-counting
+  # correlated detectors.
   aggregation_weights:
-    safety_guard: 0.3
-    cyber_safety: 0.2
+    safety_guard: 0.30
+    cyber_safety: 0.20
     adaptive_security: 0.15
-    reward_model: 0.2
+    reward_model: 0.20
     attention_monitor: 0.05
     compliance: 0.05
     constitutional: 0.05
-    secure_stpa: 0.1
+    secure_hacker: 0.05
+    secure_stpa: 0.10
+
+  correlation:
+    enabled: true
+    corroboration_factor: 0.20
+    degraded_uncertainty_uplift: 0.08
+    max_degraded_uplift_components: 3
+
+    component_families:
+      safety_guard: content
+      reward_model: content
+      cyber_safety: cyber
+      adaptive_security: phishing
+      attention_monitor: telemetry
+      compliance: governance
+      constitutional: constitutional
+      secure_hacker: adversarial_regression
+      secure_stpa: systems
+
+    family_weights:
+      content: 0.30
+      cyber: 0.18
+      phishing: 0.12
+      telemetry: 0.04
+      governance: 0.08
+      constitutional: 0.12
+      adversarial_regression: 0.06
+      systems: 0.10
+
   task_thresholds:
     general: 0.75
-    cyber_security: 0.8
+    cyber_security: 0.80
     privacy: 0.85
     execution: 0.85
-    user_creation: 0.8
+    user_creation: 0.80
+
   shared_memory:
     enabled: true
     key_prefix: safety_agent
     store_assessments: true
     store_audit_events: true
+    fail_closed_on_write_error: false
     assessment_ttl_seconds: 604800
     validation_ttl_seconds: 604800
     audit_ttl_seconds: 2592000
     feedback_ttl_seconds: 2592000
     posture_ttl_seconds: 604800
+
   compliance:
     evaluate_on_task: false
     evaluate_every_n_calls: 0
+    evaluate_contexts:
+      - compliance
+      - governance
+
   posture:
     include_compliance: true
     assessment_sample_size: 25
+    required_component_failure_risk: 0.80
+
   action_validation:
-    stpa_match_threshold: 0.7
+    stpa_match_threshold: 0.70
     require_human_review_above: 0.45
     block_above: 0.75
+
+  adversarial_validation:
+    enabled: true
+    auto_run_on_risk: true
+    trigger_risk: 0.55
+    techniques:
+      - case_variation
+      - whitespace_variation
+      - punctuation_separation
+      - unicode_normalization
+      - zero_width_obfuscation
+      - line_break_variation
+
   constitutional:
     block_on_violation: true
     redact_on_violation: true
-    block_message: '[SAFETY_BLOCK] Output violates constitutional safety policy.'
-    default_keywords:
-    - self-harm
-    - credential
-    - pii
-    - unauthorized
-    - discriminate
-    - violence
-    - harassment
-    - malware
-    - secret
+    block_message: "[SAFETY_BLOCK] Output violates configured safety policy."
+
+    severity_risk:
+      low: 0.35
+      medium: 0.55
+      high: 0.75
+      critical: 0.95
+
     checks:
-    - rule_id: SAFETY-SELF-HARM
-      category: safety
-      severity: critical
-      description: Blocks explicit self-harm encouragement or facilitation.
-      patterns:
-      - \bkill yourself\b
-      - \bend my life\b
-      - \bsuicide instructions\b
-    - rule_id: PRIVACY-CREDENTIALS
-      category: privacy_security
-      severity: high
-      description: Flags raw credential or secret disclosure in agent output/action
-        text.
-      patterns:
-      - (?i)\b(api[_-]?key|password|secret|token)\s*[:=]
-    - rule_id: SECURITY-BYPASS
-      category: security
-      severity: high
-      description: Flags requests or actions attempting to bypass safety/security
-        controls.
-      patterns:
-      - (?i)ignore\s+(all\s+)?previous\s+instructions
-      - (?i)jailbreak
-      - (?i)disable\s+safety
+      - rule_id: SAFETY-SELF-HARM
+        category: safety
+        severity: critical
+        description: Blocks explicit self-harm encouragement or facilitation.
+        patterns:
+          - '\bkill yourself\b'
+          - '\bend my life\b'
+          - '\bsuicide instructions\b'
+
+      - rule_id: PRIVACY-CREDENTIALS
+        category: privacy_security
+        severity: high
+        description: Flags raw credential or secret disclosure in agent output or action text.
+        patterns:
+          - '(?i)\b(api[_-]?key|password|secret|token)\s*[:=]'
+
+      - rule_id: SECURITY-BYPASS
+        category: security
+        severity: high
+        description: Flags requests or actions attempting to bypass safety or security controls.
+        patterns:
+          - '(?i)ignore\s+(all\s+)?previous\s+instructions'
+          - '(?i)\bjailbreak\b'
+          - '(?i)disable\s+safety'
+
   incident_response:
     default:
-    - Contain operation
-    - Preserve audit evidence
-    - Route for human review
+      - Contain operation
+      - Preserve audit evidence
+      - Route for human review
     privacy:
-    - Isolate affected data path
-    - Notify privacy owner
-    - Preserve redacted audit evidence
+      - Isolate affected data path
+      - Notify privacy owner
+      - Preserve redacted audit evidence
     safety:
-    - Block unsafe operation
-    - Escalate to safety owner
-    - Review related prompts/actions
+      - Block unsafe operation
+      - Escalate to safety owner
+      - Review related prompts or actions
     cyber_security:
-    - Quarantine suspicious artifact
-    - Correlate cyber findings
-    - Escalate to security owner
+      - Quarantine suspicious artifact
+      - Correlate cyber findings
+      - Escalate to security owner
+
   feedback:
     min_samples_for_retrain: 25
     store_feedback: true
+    local_buffer_limit: 1000
+
+  compatibility:
+    pii_count_for_max_risk: 5
+    adversarial_match_risk: 0.75
+
   adversarial_patterns:
-  - (?i)ignore\s+(all\s+)?previous\s+instructions
-  - (?i)developer\s+mode
-  - (?i)jailbreak
-  - (?i)system\s+prompt
+    - '(?i)ignore\s+(all\s+)?previous\s+instructions'
+    - '(?i)developer\s+mode'
+    - '(?i)\bjailbreak\b'
+    - '(?i)system\s+prompt'
+
+  # Agent-owned STPA orchestration inputs. SecureSTPA remains responsible for
+  # its own subsystem-internal implementation/configuration.
   system_boundary: Safety Agent orchestration boundary
   architecture_map: {}
   system_models: {}
@@ -937,3 +1536,87 @@ safety_agent:
   safety_policies: []
   formal_specs: {}
   fault_tree_config: {}
+
+
+simulation_agent:
+  enabled: true
+  default_operation: rollout
+
+  # Cross-agent publication policy only; numerical settings remain subsystem-owned.
+  publish_lifecycle_events: true
+  publish_results: true
+  publish_errors: true
+  shared_memory_ttl_seconds: 86400
+  event_channel: "simulation.events"
+  result_key_prefix: "simulation_agent.result"
+  summary_key_prefix: "simulation_agent.summary"
+  error_key_prefix: "simulation_agent.error"
+  latest_result_key: "simulation_agent.latest"
+
+  # SimulationMemory retention is Agent orchestration policy, not numerical policy.
+  max_recent_runs: 256
+  store_request_payloads: true
+  retain_full_results_in_sim_memory: false
+
+  # Full trajectories remain outside SharedMemory by default.
+  include_trajectory_in_shared_memory: false
+  max_shared_trajectory_steps: 64
+  max_shared_list_items: 128
+  max_shared_string_length: 4096
+
+
+stem_agent:
+  enabled: true
+  supported_domains:
+    - algebra
+    - calculus
+    - numerical_methods
+    - statistics
+    - units
+    - dimensions
+    - uncertainty
+    - biology
+    - physics
+    - engineering
+    - computing
+  default_domain: numerical_methods
+
+  # Dual-memory orchestration policy. SharedMemory remains BaseAgent-owned;
+  # STEMMemory remains the local deterministic calculation cache.
+  shared_memory_enabled: true
+  publish_shared_results: false
+  shared_result_key_prefix: "stem:result"
+  shared_result_topic: "stem.results"
+  local_memory_enabled: true
+  cache_enabled: true
+
+  template_loading_enabled: true
+  diagnostics_enabled: true
+  strict_validation: true
+
+  # Only Agent-owned/local state participates in the central checkpoint.
+  checkpoint_local_memory: true
+  restore_local_memory: true
+
+  max_batch_size: 32
+  metrics_enabled: true
+
+
+verification_agent:
+  enabled: true
+  publish_shared_memory: true
+  fail_on_shared_memory_error: false
+  publish_evidence_metadata: true
+  shared_memory_ttl_seconds: 604800
+
+  max_shared_trace_steps: 64
+  max_shared_model_entries: 128
+  max_shared_list_items: 128
+  max_prior_references: 32
+
+  request_key_prefix: "verification_agent.request"
+  result_key_prefix: "verification_agent.result"
+  summary_key_prefix: "verification_agent.summary"
+  error_key_prefix: "verification_agent.error"
+  event_key_prefix: "verification_agent.event"
+  latest_result_key: "verification_agent.latest"

@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import time
 import threading
+import math
+
 from typing import Optional, Callable, Any
 from dataclasses import dataclass, field
 
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Loader")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass
@@ -62,8 +64,13 @@ class Loader:
             on_update: Callback invoked when state changes (e.g., update UI).
             on_complete: Callback invoked when loading finishes.
         """
+        if total_steps is not None:
+            if isinstance(total_steps, bool) or not isinstance(total_steps, int) or total_steps <= 0:
+                raise ValueError("total_steps must be a positive integer or None")
+        if not isinstance(smoothing_factor, (int, float)) or not math.isfinite(float(smoothing_factor)):
+            raise ValueError("smoothing_factor must be finite")
         self.total_steps = total_steps
-        self.smoothing_factor = min(max(smoothing_factor, 0.05), 1.0)
+        self.smoothing_factor = min(max(float(smoothing_factor), 0.05), 1.0)
         self.on_update = on_update
         self.on_complete = on_complete
 
@@ -118,22 +125,31 @@ class Loader:
             now = time.time()
             if self.total_steps is not None:
                 if steps_done is not None:
-                    self._state.completed_steps = steps_done
+                    if isinstance(steps_done, bool) or not isinstance(steps_done, int):
+                        raise TypeError("steps_done must be an integer")
+                    self._state.completed_steps = max(0, min(self.total_steps, steps_done))
                 elif progress is not None:
-                    self._state.completed_steps = int(progress * self.total_steps)
+                    normalized = self._validate_progress(progress)
+                    self._state.completed_steps = int(normalized * self.total_steps)
                 self._state.progress = self._state.completed_steps / self.total_steps
             else:
                 if progress is not None:
-                    self._state.progress = max(0.0, min(1.0, progress))
+                    self._state.progress = self._validate_progress(progress)
                 elif steps_done is not None:
-                    self._state.progress = steps_done / max(self.total_steps or 1, 1)
+                    raise ValueError("progress is required when total_steps is None")
 
             if message is not None:
                 self._state.message = message
 
             # Compute ETA based on rate of progress
             if self._state.progress > 0:
-                elapsed = now - self._state.start_time
+                start_time = self._state.start_time
+                if start_time is None:
+                    self._state.eta = None
+                    self._last_eta_update = now
+                    self._notify_update()
+                    return
+                elapsed = now - start_time
                 remaining_time = (elapsed / self._state.progress) - elapsed
                 self._state.eta = max(0.0, remaining_time)
                 # For indefinite, we also update the filter
@@ -173,9 +189,16 @@ class Loader:
 
     def cancel(self) -> None:
         """Cancel the loader (same as complete but with a different message)."""
-        with self._lock:
-            if self._state.is_running:
-                self.complete("Cancelled")
+        self.complete("Cancelled")
+
+    @staticmethod
+    def _validate_progress(progress: float) -> float:
+        if isinstance(progress, bool) or not isinstance(progress, (int, float)):
+            raise TypeError("progress must be numeric")
+        value = float(progress)
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("progress must be finite and within [0, 1]")
+        return value
 
     def get_state(self) -> LoaderState:
         """Return a copy of the current state."""
@@ -213,6 +236,10 @@ class LoaderContext:
         self.total_steps = total_steps
 
     def __enter__(self) -> Loader:
+        if self.total_steps is not None:
+            if isinstance(self.total_steps, bool) or not isinstance(self.total_steps, int) or self.total_steps <= 0:
+                raise ValueError("total_steps must be a positive integer or None")
+            self.loader.total_steps = self.total_steps
         self.loader.start(self.message)
         return self.loader
 
@@ -221,6 +248,13 @@ class LoaderContext:
             self.loader.complete()
         else:
             self.loader.cancel()
+
+
+__all__ = [
+    "LoaderState",
+    "Loader",
+    "LoaderContext",
+]
 
 
 if __name__ == "__main__":
@@ -243,30 +277,30 @@ if __name__ == "__main__":
     import tkinter as tk
     from tkinter import ttk
     import time
-    
+
     def run_gui_test():
         root = tk.Tk()
         root.title("Loader Demo")
         root.geometry("1440x150")
         root.resizable(False, False)
-    
+
         # Widgets
         label = ttk.Label(root, text="Starting...", font=("Arial", 10))
         label.pack(pady=5)
-    
+
         progress = ttk.Progressbar(root, orient="horizontal", length=720, mode="determinate")
         progress.pack(pady=5)
-    
+
         eta_label = ttk.Label(root, text="ETA: --", font=("Arial", 9))
         eta_label.pack(pady=2)
-    
+
         # Loader instance
         loader = Loader(
             total_steps=100,
             on_update=lambda state: root.after(0, lambda: update_ui(state)),
             on_complete=lambda: root.after(0, root.destroy)
         )
-    
+
         def update_ui(state):
             progress["value"] = state.progress * 100
             label.config(text=state.message if state.message else "Loading...")
@@ -274,15 +308,15 @@ if __name__ == "__main__":
                 eta_label.config(text=f"ETA: {state.eta:.1f}s")
             else:
                 eta_label.config(text="ETA: --")
-    
+
         # Start loader
         loader.start("Loading...")
-    
+
         # Simulate progress over 10 seconds (100 steps)
         step_count = 0
         total_steps = 100
         interval = 100  # ms per step (10s total)
-    
+
         def step():
             nonlocal step_count
             if step_count < total_steps:
@@ -291,7 +325,7 @@ if __name__ == "__main__":
                 root.after(interval, step)
             else:
                 loader.complete("Done!")
-    
+
         root.after(0, step)  # start simulation
         root.mainloop()
 

@@ -525,6 +525,24 @@ class DeliveryError(NetworkError):
     default_severity = NetworkErrorSeverity.ERROR
 
 
+class QueueBackpressureError(DeliveryError):
+    """
+    Raised when a queue-backed transport cannot safely accept or requeue
+    additional inbound work.
+
+    Backpressure is treated as a transient throttling condition rather than
+    message corruption or a permanent delivery failure. A retry is therefore
+    permissible only after the caller has allowed capacity to recover.
+    """
+
+    default_code = "QUEUE_BACKPRESSURE"
+    default_category = NetworkErrorCategory.THROTTLING
+    default_severity = NetworkErrorSeverity.WARNING
+    default_retryable = True
+    default_transient = True
+    default_retry_disposition = RetryDisposition.CONDITIONAL
+
+
 class DeliveryTimeoutError(DeliveryError):
     default_code = "DELIVERY_TIMEOUT"
     default_retryable = True
@@ -974,3 +992,72 @@ def _json_safe(value: Any, *, max_depth: int = 5, _depth: int = 0) -> Any:
         return value
     except TypeError:
         return repr(value)
+
+
+__all__ = [
+    "NetworkErrorSeverity",
+    "NetworkErrorCategory",
+    "RetryDisposition",
+    "PrimitiveJSON",
+    "JSONLike",
+    "NetworkErrorContext",
+    "NetworkError",
+    "NetworkConfigurationError",
+    "AdapterError",
+    "AdapterNotFoundError",
+    "AdapterInitializationError",
+    "AdapterCapabilityError",
+    "NetworkConnectionError",
+    "DNSResolutionError",
+    "ConnectionTimeoutError",
+    "ConnectionRejectedError",
+    "TLSHandshakeError",
+    "SessionUnavailableError",
+    "SessionClosedError",
+    "NetworkTransportError",
+    "SendFailureError",
+    "ReceiveFailureError",
+    "AcknowledgementError",
+    "NegativeAcknowledgementError",
+    "PayloadError",
+    "PayloadValidationError",
+    "PayloadSerializationError",
+    "PayloadDeserializationError",
+    "PayloadTooLargeError",
+    "RoutingError",
+    "NoRouteAvailableError",
+    "EndpointUnavailableError",
+    "EndpointDegradedError",
+    "ProtocolNegotiationError",
+    "ReliabilityError",
+    "CircuitBreakerOpenError",
+    "RetryExhaustedError",
+    "FailoverExhaustedError",
+    "DeliveryError",
+    "QueueBackpressureError",
+    "DeliveryTimeoutError",
+    "DeliveryExpiredError",
+    "DeliveryStateError",
+    "DeadLetterQueueError",
+    "IdempotencyViolationError",
+    "DuplicateMessageError",
+    "PolicyViolationError",
+    "DestinationDeniedError",
+    "ProtocolDeniedError",
+    "PortDeniedError",
+    "TLSRequiredError",
+    "CertificateValidationError",
+    "AuthenticationFailedError",
+    "AuthorizationFailedError",
+    "RateLimitExceededError",
+    "is_network_error",
+    "TRANSIENT_ERROR_TYPES",
+    "RETRYABLE_NETWORK_TYPES",
+    "is_retryable_exception",
+    "is_transient_exception",
+    "network_error_from_http_status",
+    "normalize_network_exception",
+    "build_error_snapshot",
+    "raise_normalized_network_error",
+    "network_error_boundary",
+]

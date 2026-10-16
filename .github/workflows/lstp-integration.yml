@@ -1,0 +1,46 @@
+name: LSTP integration
+
+on:
+  push:
+    branches: [SLAI-v.2.3]
+    paths:
+      - 'run_lstp.py'
+      - 'setup_lstp.py'
+      - 'model/**'
+      - 'src/integrations/**'
+      - 'src/agents/language_agent.py'
+      - 'src/agents/language/configs/language_config.yaml'
+      - 'deployment/test/test_lstp_*.py'
+      - '.github/workflows/lstp-integration.yml'
+  pull_request:
+    paths:
+      - 'run_lstp.py'
+      - 'setup_lstp.py'
+      - 'model/**'
+      - 'src/integrations/**'
+      - 'src/agents/language_agent.py'
+      - 'src/agents/language/configs/language_config.yaml'
+      - 'deployment/test/test_lstp_*.py'
+      - '.github/workflows/lstp-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lstp:
+    name: Pinned LSTP v0.1 / Python 3.12
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest
+      - run: python setup_lstp.py
+      - run: python run_lstp.py doctor
+      - run: >
+          python -m pytest
+          deployment/test/test_lstp_contract.py
+          deployment/test/test_lstp_runtime_integration.py
+          -q

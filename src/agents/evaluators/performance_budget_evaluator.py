@@ -6,13 +6,14 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from .evaluators_memory import EvaluatorsMemory
 from .utils.config_loader import get_config_section, load_global_config
-from .utils.evaluation_errors import ConfigLoadError, ValidationFailureError
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Performance Budget Evaluator")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "2.3.0"
 
 
 @dataclass(slots=True)
@@ -179,3 +180,10 @@ class PerformanceBudgetEvaluator:
     @staticmethod
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+
+__all__ = [
+    "BudgetContract",
+    "ContractCheckResult",
+    "PerformanceBudgetEvaluator",
+]

@@ -3,7 +3,6 @@ boto3
 botocore
 beautifulsoup4  # provides bs4
 cryptography
-deepmerge
 einops
 elasticsearch
 fastapi
@@ -24,6 +23,7 @@ opencv-python  # provides cv2
 packaging
 pandas
 pgmpy
+phonenumbers
 Pillow  # provides PIL
 portalocker
 prometheus-client  # provides prometheus_client
@@ -37,6 +37,7 @@ pynvml
 pypdf
 pyperclip
 pytest
+pytest-cov>=5  # pytest coverage reporting for v2.3 stabilization
 PyQt5
 pyyaml>=6.0
 rdflib

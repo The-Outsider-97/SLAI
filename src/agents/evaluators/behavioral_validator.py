@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-import yaml
+import yaml # type: ignore
 import json
 import inspect
 import hashlib
@@ -10,21 +10,20 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from statistics import mean, median
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
-from PyQt5.QtCore import QSize, QBuffer
+from PyQt5.QtCore import QSize, QBuffer # type: ignore
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.evaluation_errors import (ConfigLoadError, ReportGenerationError, ValidationFailureError,
-                                      MemoryAccessError, MetricCalculationError, OperationalError,
-                                      ThresholdViolationError, SerializationError)
-from .utils.evaluators_calculations import EvaluatorsCalculations
-from .modules.report import get_visualizer
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
+from .modules.evaluators_calculations import EvaluatorsCalculations
+from .documentation.report import get_visualizer
 from .evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Behavioral Validator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
-MODULE_VERSION = "2.0.0"
+MODULE_VERSION = "2.3.0"
 
 
 @dataclass(slots=True)
@@ -1287,8 +1286,12 @@ class BehavioralValidator:
         return numeric
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+__all__ = [
+    "BehavioralTestCase",
+    "FailureMode",
+    "TestExecutionRecord",
+    "BehavioralValidator",
+]
 
 
 if __name__ == "__main__":

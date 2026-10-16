@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,12 +13,14 @@ from collections import defaultdict, OrderedDict
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.evaluation_errors import (ConfigLoadError, EvaluationError, OperationalError,
-                                      MemoryAccessError, ValidationFailureError)
-from logs.logger import get_logger, PrettyPrinter
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Evaluators Memory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
+MODULE_VERSION = "2.3.0"
 
 
 @dataclass(slots=True)
@@ -1004,30 +1007,11 @@ class EvaluatorsMemory:
             raise ConfigLoadError(self.config_path, field_name, "must be a non-negative integer")
         return integer
 
-
-# ----------------------------------------------------------------------
-# Time helpers
-# ----------------------------------------------------------------------
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _parse_timestamp(value: str) -> datetime:
-    if not isinstance(value, str) or not value.strip():
-        raise ValidationFailureError("timestamp", value, "ISO-8601 string")
-
-    normalized = value.strip().replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise ValidationFailureError("timestamp", value, "valid ISO-8601 string") from exc
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
+__all__ = [
+    "MemoryEntryMetadata",
+    "MemoryEntry",
+    "EvaluatorsMemory",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Evaluators Memory ===\n")

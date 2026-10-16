@@ -29,6 +29,8 @@ Design principles
 4. Config-backed behavior: registry tuning belongs in collaborative_config.yaml.
 5. Defensive runtime boundaries: import/initialization failures are recorded and
    surfaced through snapshots instead of silently corrupting registry state.
+
+collaboration discovery + capability index + routing metadata
 """
 
 import importlib
@@ -44,6 +46,7 @@ from enum import Enum
 from types import ModuleType
 from typing import Any, Dict, List, Optional, Tuple, Type
 
+from ..base.utils.main_config_loader import get_config_section as get_agent_config_section
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.collaboration_error import *
 from .utils.collaborative_helpers import *
@@ -133,11 +136,10 @@ class AgentRegistry:
     lifecycle, validation, audit, and snapshot helpers around them.
     """
 
-    _module_failures: Dict[str, str] = {}
     _torch_runtime_checked: bool = False
     _torch_available: bool = True
 
-    def __init__(self, shared_memory: Optional[Any] = None, auto_discover: bool = True):
+    def __init__(self, shared_memory: Optional[Any] = None, auto_discover: bool = True, *, agent_factory: Optional[Any] = None):
         self.config = load_global_config()
         self.registry_config = get_config_section("registry") or {}
         agent_discovery_config = self.registry_config.get("agent_discovery", {}) or {}
@@ -149,6 +151,7 @@ class AgentRegistry:
         self._capability_index: Dict[str, set[str]] = defaultdict(set)
         self._registration_records: Dict[str, AgentRegistrationRecord] = {}
         self._module_discovery_records: Dict[str, ModuleDiscoveryRecord] = {}
+        self._module_failures: Dict[str, str] = {}
 
         self.shared_memory = shared_memory
         self._version = coerce_float(self.registry_config.get("version"), default=1.8, minimum=0.0)
@@ -186,7 +189,23 @@ class AgentRegistry:
         self.cache_instances = coerce_bool(instantiation_config.get("cache_instances"), default=True)
         self.pass_shared_memory = coerce_bool(instantiation_config.get("pass_shared_memory"), default=True)
         self.pass_agent_factory = coerce_bool(instantiation_config.get("pass_agent_factory"), default=True)
-        self.agent_factory = instantiation_config.get("agent_factory")
+        self.agent_factory = (
+            agent_factory
+            if agent_factory is not None
+            else instantiation_config.get("agent_factory")
+        )
+
+        factory_config = get_agent_config_section("agent_factory") or {}
+        raw_agent_specs = factory_config.get("agent_specs", {})
+        self._canonical_agent_specs: Dict[str, Mapping[str, Any]] = (
+            {
+                str(name): dict(spec)
+                for name, spec in raw_agent_specs.items()
+                if isinstance(spec, Mapping)
+            }
+            if isinstance(raw_agent_specs, Mapping)
+            else {}
+        )
         self.default_constructor_kwargs = normalize_metadata(instantiation_config.get("default_constructor_kwargs") or {}, drop_none=True)
         self.audit_enabled = coerce_bool(audit_config.get("enabled", self.registry_config.get("audit_enabled")), default=True)
         self.audit_key = str(audit_config.get("key", self.registry_config.get("audit_key", "collaboration:registry_events")))
@@ -338,37 +357,133 @@ class AgentRegistry:
         self._module_failures[module_name] = "Skipped: torch runtime unavailable"
         return True
 
+    def _resolve_discovery_definition(self, module_name: str, class_name: str, agent_class: Type[Any]) -> Tuple[str, Tuple[str, ...], Any, str]:
+        """
+        Resolve the canonical factory identity and routing capabilities for a
+        discovered agent class.
+
+        Resolution order:
+        1. injected AgentFactory registry;
+        2. canonical agent_specs configuration;
+        3. non-callable class-level capability declaration.
+
+        Instance methods named ``capabilities`` are deliberately not interpreted
+        as static routing metadata.
+        """
+
+        # 1. Runtime factory metadata is authoritative when available.
+        factory_registry = getattr(self.agent_factory, "registry", None)
+        registered_agents = getattr(factory_registry, "agents", None)
+
+        if isinstance(registered_agents, Mapping):
+            for registered_name, metadata in registered_agents.items():
+                if (
+                    str(getattr(metadata, "module_path", "")) == module_name
+                    and str(getattr(metadata, "class_name", "")) == class_name
+                ):
+                    capabilities = tuple(
+                        normalize_capabilities(
+                            getattr(metadata, "capabilities", ())
+                        )
+                    )
+                    version = getattr(metadata, "version", self._version)
+
+                    return (
+                        normalize_agent_name(registered_name),
+                        capabilities,
+                        version,
+                        "factory_registry",
+                    )
+
+        # 2. Fall back to the same canonical agent_specs used by AgentFactory.
+        for registered_name, spec in self._canonical_agent_specs.items():
+            if (
+                str(spec.get("module_path", "")) == module_name
+                and str(spec.get("class_name", "")) == class_name
+            ):
+                capabilities = tuple(
+                    normalize_capabilities(spec.get("capabilities", ()))
+                )
+                version = spec.get("version", self._version)
+
+                return (
+                    normalize_agent_name(registered_name),
+                    capabilities,
+                    version,
+                    "agent_specs",
+                )
+
+        # 3. Standalone/custom agents may declare static class capabilities.
+        declared_capabilities = getattr(agent_class, "capabilities", ())
+
+        if callable(declared_capabilities):
+            capabilities: Tuple[str, ...] = ()
+        else:
+            capabilities = tuple(
+                normalize_capabilities(declared_capabilities)
+            )
+
+        return (
+            normalize_agent_name(class_name),
+            capabilities,
+            self._version,
+            "class_declaration",
+        )
+
     def _load_agent_module(self, module_name: str) -> None:
-        """Internal method to load and validate agent modules."""
+        """Load and validate one discoverable SLAI agent module."""
+
         module_name = require_non_empty_string(module_name, "module_name")
+
         if module_name in self._module_failures:
-            logger.debug("Skipping module %s after cached import failure: %s", module_name, self._module_failures[module_name])
+            logger.debug(
+                "Skipping module %s after cached import failure: %s",
+                module_name,
+                self._module_failures[module_name],
+            )
             return
 
         started_ms = monotonic_ms()
         loaded: List[str] = []
+
         try:
             module = importlib.import_module(module_name)
-            for name, obj in inspect.getmembers(module, inspect.isclass):
-                if not self._is_discoverable_agent_class(module, name, obj):
+
+            for class_name, obj in inspect.getmembers(module, inspect.isclass):
+                if not self._is_discoverable_agent_class(module, class_name, obj):
                     continue
-                caps = normalize_capabilities(getattr(obj, "capabilities", []))
-                if self.require_capabilities and not caps:
-                    logger.debug("Skipping class %s from %s: no capabilities declared.", name, module_name)
+
+                (
+                    agent_name,
+                    capabilities,
+                    version,
+                    definition_source,
+                ) = self._resolve_discovery_definition(module_name, class_name, obj)
+
+                if self.require_capabilities and not capabilities:
+                    logger.debug(
+                        "Skipping class %s from %s: no canonical capabilities declared.",
+                        class_name,
+                        module_name,
+                    )
                     continue
+
                 meta = {
                     "class": obj,
                     "instance": None,
-                    "capabilities": list(caps),
-                    "version": self._version,
+                    "capabilities": list(capabilities),
+                    "version": version,
                     "metadata": {
                         "source": "discovery",
+                        "definition_source": definition_source,
                         "module": module_name,
-                        "class_name": name,
+                        "class_name": class_name,
+                        "canonical_name": agent_name,
                     },
                 }
-                self._register_agent(obj.__name__, meta)
-                loaded.append(obj.__name__)
+
+                self._register_agent(agent_name, meta)
+                loaded.append(agent_name)
 
             record = ModuleDiscoveryRecord(
                 module_name=module_name,
@@ -376,21 +491,28 @@ class AgentRegistry:
                 loaded_agents=tuple(loaded),
                 duration_ms=elapsed_ms(started_ms),
             )
+
             self._module_discovery_records[module_name] = record
+            self._module_failures.pop(module_name, None)
+
             self._record_registry_event(
                 RegistryEventType.MODULE_LOADED.value,
                 f"Loaded registry module '{module_name}'.",
                 metadata=record.to_dict(),
             )
+
         except Exception as exc:
-            self._module_failures[module_name] = f"{type(exc).__name__}: {exc}"
+            self._module_failures[module_name] = (f"{type(exc).__name__}: {exc}")
+
             record = ModuleDiscoveryRecord(
                 module_name=module_name,
                 status="failed",
                 reason=str(exc),
                 duration_ms=elapsed_ms(started_ms),
             )
+
             self._module_discovery_records[module_name] = record
+
             self._record_registry_event(
                 RegistryEventType.MODULE_FAILED.value,
                 f"Failed to load registry module '{module_name}'.",
@@ -398,6 +520,7 @@ class AgentRegistry:
                 error=exc,
                 metadata=record.to_dict(),
             )
+
             logger.error("Failed to load module %s: %s", module_name, exc)
 
     def _is_discoverable_agent_class(self, module: ModuleType, name: str, obj: Type[Any]) -> bool:
@@ -726,30 +849,79 @@ class AgentRegistry:
             return None
 
     def _instantiate_agent(self, name: str, cls: Type[Any], meta: Mapping[str, Any]) -> Any:
+        # AgentFactory remains the canonical lifecycle/constructor owner when
+        # this registry is embedded in the SLAI runtime.
+        factory = self.agent_factory
+
+        if factory is not None:
+            factory_getter = getattr(factory, "get_agent", None)
+
+            if not callable(factory_getter):
+                factory_getter = getattr(factory, "create_agent", None)
+
+            if not callable(factory_getter):
+                factory_getter = getattr(factory, "create", None)
+
+            if callable(factory_getter):
+                signature = inspect.signature(factory_getter)
+                factory_kwargs: Dict[str, Any] = {}
+
+                if "shared_memory" in signature.parameters:
+                    factory_kwargs["shared_memory"] = self.shared_memory
+
+                return factory_getter(name, **factory_kwargs)
+
+        # Standalone registry fallback.
         signature = inspect.signature(cls.__init__)
         parameters = signature.parameters
         kwargs: Dict[str, Any] = {}
+
         kwargs.update(dict(self.default_constructor_kwargs))
-        constructor_kwargs = ensure_mapping(meta.get("constructor_kwargs"), field_name="constructor_kwargs", allow_none=True)
+
+        constructor_kwargs = ensure_mapping(
+            meta.get("constructor_kwargs"),
+            field_name="constructor_kwargs",
+            allow_none=True,
+        )
         kwargs.update(constructor_kwargs)
 
         if self.pass_shared_memory and "shared_memory" in parameters:
             kwargs.setdefault("shared_memory", self.shared_memory)
+
         if self.pass_agent_factory and "agent_factory" in parameters:
             kwargs.setdefault("agent_factory", self.agent_factory)
+
         if "config" in parameters and "config" not in kwargs:
-            agent_config = ensure_mapping(meta.get("config"), field_name="config", allow_none=True)
+            agent_config = ensure_mapping(
+                meta.get("config"),
+                field_name="config",
+                allow_none=True,
+            )
             if agent_config:
                 kwargs["config"] = agent_config
 
-        # Drop kwargs unsupported by constructors that do not accept **kwargs.
-        accepts_var_kw = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+        accepts_var_kw = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
         if not accepts_var_kw:
             allowed = {
-                key for key, param in parameters.items()
-                if key != "self" and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+                key
+                for key, parameter in parameters.items()
+                if key != "self"
+                and parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
             }
-            kwargs = {key: value for key, value in kwargs.items() if key in allowed}
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in allowed
+            }
+
         return cls(**kwargs)
 
     def _check_agent_health(self, name: str) -> bool:

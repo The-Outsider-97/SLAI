@@ -32,11 +32,13 @@ import json
 import re
 import time
 import yaml # type: ignore
- 
+import random
+
+from types import MappingProxyType
 from collections import defaultdict
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Set, Tuple, Union, cast
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.reasoning_errors import *
@@ -50,7 +52,7 @@ printer = PrettyPrinter()
 # ---------------------------------------------------------------------------
 # Internal type aliases
 # ---------------------------------------------------------------------------
-_RuleFunc = Callable[[Dict[Fact, float]], Dict[Fact, float]]
+_RuleFunc = Callable[[Mapping[Fact, float]], Mapping[Fact, float],]
 _RuleRegistry = Dict[str, _RuleFunc]
  
  
@@ -76,74 +78,115 @@ class RuleEngine:
     # Construction
     # ------------------------------------------------------------------
  
-    def __init__(self) -> None:
+    def __init__(self, *, config: Optional[Mapping[str, Any]] = None,
+                 knowledge_base: Optional[MutableMapping[Fact, float]] = None,
+                 memory: Optional[ReasoningMemory] = None) -> None:
         self._lock: RLock = RLock()
  
         # ---- Configuration --------------------------------------------------
-        self.config: Dict[str, Any] = load_global_config()
-        self.rules_config: Dict[str, Any]   = get_config_section("rules",   self.config)
-        self.storage_config: Dict[str, Any] = get_config_section("storage", self.config)
- 
-        # Scalar config values — read once, stored as typed attributes
-        self.enable_learning: bool        = bool(self.rules_config.get("enable_learning", True))
-        self.min_support: float           = clamp_confidence(self.rules_config.get("min_support", 0.3))
-        self.min_confidence: float        = clamp_confidence(self.rules_config.get("min_confidence", 0.7))
-        self.auto_weight_adjustment: bool = bool(self.rules_config.get("auto_weight_adjustment", True))
-        self._max_circular_depth: int     = bounded_iterations(
-            self.rules_config.get("max_circular_depth", 3), minimum=1, maximum=32
+        self.config: Dict[str, Any] = dict(config or load_global_config())
+        self.rules_config: Dict[str, Any] = dict(get_config_section("rules", self.config, default={}) or {})
+        self.runtime_config: Dict[str, Any] = dict(get_config_section("symbolic_runtime", self.config, default={}) or {})
+        raw_seed = self.runtime_config.get("seed")
+
+        if (isinstance(raw_seed, str) and raw_seed.strip().lower() in {"", "none", "null"}):
+            raw_seed = None
+        try:
+            resolved_seed = (
+                None
+                if raw_seed is None
+                else int(raw_seed)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReasoningConfigurationError("symbolic_runtime.seed must be an integer or null", cause=exc, context={"seed": raw_seed}) from exc
+
+        self._rng = random.Random(resolved_seed)
+        self.max_commit_retries = bounded_iterations(self.runtime_config.get("max_commit_retries", 3), minimum=1, maximum=100)
+
+        # Monotonic local revision for optimistic inference snapshots.
+        #
+        # This is NOT persistence versioning and NOT a checkpoint counter.
+        # It exists solely to prevent unlocked rule evaluation from committing
+        # against a KB/rule state that changed concurrently.
+        self._state_revision = 0
+        self.storage_config: Dict[str, Any] = dict(get_config_section("storage", self.config, default={}) or {})
+        validation_config = dict(get_config_section("validation", self.config, default={}) or {})
+        self.enable_learning = bool(self.rules_config.get("enable_learning", True))
+        self.min_support = clamp_confidence(self.rules_config.get("min_support", 0.3))
+        self.min_confidence = clamp_confidence(self.rules_config.get("min_confidence", 0.7))
+        self.auto_weight_adjustment = bool(self.rules_config.get("auto_weight_adjustment", True))
+        self._max_circular_depth = bounded_iterations(self.rules_config.get("max_circular_depth", 3),
+            minimum=1,
+            maximum=32,
         )
-        self.max_utterance_length: int    = bounded_iterations(
-            self.rules_config.get("max_utterance_length", 50), minimum=1, maximum=10_000
+        self.max_utterance_length = bounded_iterations(self.rules_config.get("max_utterance_length", 50),
+            minimum=1,
+            maximum=10_000,
         )
-        self.contradiction_threshold: float = clamp_confidence(
-            self.config.get("contradiction_threshold", 0.25)
+        self.learning_rate = clamp_confidence(self.runtime_config.get("learning_rate", 0.05))
+        if self.learning_rate <= 0.0:
+            raise ReasoningConfigurationError("symbolic_runtime.learning_rate must be > 0")
+
+        self.decay = clamp_confidence(self.runtime_config.get("decay", 0.95))
+        self.exploration_rate = clamp_confidence(self.runtime_config.get("exploration_rate", 0.1))
+        self.max_iterations = bounded_iterations(self.runtime_config.get("max_iterations", 20),
+            minimum=1,
+            maximum=100_000,
         )
-        self._redundancy_margin: float    = clamp_confidence(
-            get_config_section("validation", self.config).get("redundancy_margin", 0.05)
-        )
-        self._rule_backup_path: Path = Path(
-            self.storage_config.get("rule_backup", "src/agents/knowledge/discovered_rules.json")
-        )
- 
-        # Resource file paths
-        self._kb_path: Path             = Path(self.storage_config.get("knowledge_db", ""))
-        self._lexicon_path: Path        = Path(self.storage_config.get("lexicon_path", ""))
-        self._syntax_path: Path         = Path(self.storage_config.get("dependency_rules_path", ""))
-        self._discourse_path: Path      = Path(self.rules_config.get("discourse_markers_path", ""))
-        self._politeness_path: Path     = Path(self.rules_config.get("politeness_strategies_path", ""))
- 
-        # ---- Core data structures -------------------------------------------
-        # KB: Fact → confidence (float in [0, 1])
-        self.knowledge_base: Dict[Fact, float] = {}
-        # Rule registry: name → callable
+        self.contradiction_threshold = clamp_confidence(self.config.get("contradiction_threshold", 0.25))
+        self._redundancy_margin = clamp_confidence(validation_config.get("redundancy_margin", 0.05))
+
+        # ------------------------------------------------------------------
+        # Resource paths ONLY.
+        #
+        # No knowledge_db and no rule_backup ownership here.
+        # ------------------------------------------------------------------
+        self._lexicon_path = Path(self.storage_config.get("lexicon_path", ""))
+        self._syntax_path = Path(self.storage_config.get("dependency_rules_path", ""))
+        self._discourse_path = Path(self.rules_config.get("discourse_markers_path", ""))
+        self._politeness_path = Path(self.rules_config.get("politeness_strategies_path", ""))
+
+        # ------------------------------------------------------------------
+        # Canonical symbolic state
+        # ------------------------------------------------------------------
+        self.knowledge_base = self._bind_knowledge_base(knowledge_base)
         self._rule_registry: _RuleRegistry = {}
-        # Weights for registered rules
         self.rule_weights: RuleWeightMap = {}
-        # Antecedents / consequents for circular-dependency and conflict analysis
         self.rule_antecedents: Dict[str, List[Any]] = {}
         self.rule_consequents: Dict[str, List[Any]] = {}
- 
-        # ---- Load resources -------------------------------------------------
-        self.knowledge_base    = self._load_knowledge_base(self._kb_path)
-        self.sentiment_lexicon = self._load_sentiment_lexicon(self._lexicon_path)
-        self.pos_patterns      = self._load_pos_patterns(self._syntax_path)
-        self.dependency_rules  = self._build_dependency_rules()
-        self.pragmatic_heuristics = self._build_pragmatic_heuristics()
- 
-        # ---- Bootstrap built-in rules ---------------------------------------
+        self.last_inference_rounds = 0
+
+        # ------------------------------------------------------------------
+        # Non-KB resources
+        # ------------------------------------------------------------------
+        self.sentiment_lexicon = (self._load_sentiment_lexicon(self._lexicon_path))
+        self.pos_patterns = (self._load_pos_patterns(self._syntax_path))
+        self.dependency_rules = (self._build_dependency_rules())
+        self.pragmatic_heuristics = (self._build_pragmatic_heuristics())
         self._register_builtin_rules()
- 
-        # ---- Shared memory --------------------------------------------------
-        self.reasoning_memory: ReasoningMemory = ReasoningMemory()
- 
+
+        # Shared transient memory; RuleEngine does not construct another one.
+        self.reasoning_memory = memory
+
         logger.info(
-            "Rule Engine initialized | kb_facts=%d | rules=%d | sentiment_terms=%d "
-            "| dependency_rules=%d",
+            "Rule Engine initialized | kb_facts=%d | rules=%d",
             len(self.knowledge_base),
             len(self._rule_registry),
-            len(self.sentiment_lexicon.get("positive", {})),
-            len(self.dependency_rules),
         )
+
+    def _bind_knowledge_base(self, knowledge_base: Optional[MutableMapping[Fact, float]]) -> MutableMapping[Fact, float]:
+        if knowledge_base is None:
+            return {}
+
+        normalized: Dict[Fact, float] = {}
+
+        for raw_fact, confidence in knowledge_base.items():
+            normalized[normalize_fact(raw_fact)] = clamp_confidence(confidence)
+
+        knowledge_base.clear()
+        knowledge_base.update(normalized)
+
+        return knowledge_base
  
     # ------------------------------------------------------------------
     # Public properties
@@ -163,7 +206,7 @@ class RuleEngine:
     def kb_size(self) -> int:
         """Number of facts currently in the knowledge base."""
         return len(self.knowledge_base)
- 
+
     # ------------------------------------------------------------------
     # Config reload
     # ------------------------------------------------------------------
@@ -228,103 +271,7 @@ class RuleEngine:
                 context={"path": str(path), "type": type(data).__name__},
             )
         return data
- 
-    def _load_knowledge_base(self, kb_path: Path) -> Dict[Fact, float]:
-        """Load and normalise the knowledge base from ``knowledge_db.json``.
- 
-        Supported shapes inside the ``"knowledge"`` key:
-        - ``{"s||p||o": confidence, ...}``           (dict, pipe-delimited keys)
-        - ``[[s, p, o, confidence], ...]``            (list of 4-element lists)
-        - ``[{"subject": s, "predicate": p, ...}, ...]`` (list of record dicts)
- 
-        Falls back to root-level pipe-delimited dict when ``"knowledge"`` key is
-        absent.  Unknown / malformed entries are skipped with a warning.
-        """
-        if not kb_path.exists():
-            logger.warning("Knowledge base not found at %s — starting empty", kb_path)
-            return {}
- 
-        logger.info("Loading knowledge base from %s", kb_path)
-        try:
-            with open(kb_path, "r", encoding="utf-8") as fh:
-                raw = json.load(fh)
-        except json.JSONDecodeError as exc:
-            raise KnowledgePersistenceError(
-                f"Invalid JSON in knowledge base: {kb_path}",
-                cause=exc,
-                context={"path": str(kb_path)},
-            ) from exc
- 
-        facts_source = raw.get("knowledge") if isinstance(raw, dict) else None
-        if facts_source is None:
-            # Fallback: treat the whole dict as a pipe-delimited fact map
-            facts_source = raw if isinstance(raw, dict) else {}
-            if facts_source:
-                logger.warning(
-                    "'knowledge' key absent in %s — falling back to root-level dict", kb_path
-                )
- 
-        parsed: Dict[Fact, float] = {}
- 
-        if isinstance(facts_source, dict):
-            for key, conf in facts_source.items():
-                parts = str(key).split("||")
-                if len(parts) != 3:
-                    logger.warning("Skipping malformed KB key (expected s||p||o): %r", key)
-                    continue
-                try:
-                    fact = normalize_fact(tuple(parts))  # type: ignore[arg-type]
-                    parsed[fact] = clamp_confidence(conf)
-                except Exception as exc:
-                    logger.warning("Skipping invalid KB entry %r: %s", key, exc)
- 
-        elif isinstance(facts_source, list):
-            for item in facts_source:
-                try:
-                    if isinstance(item, (list, tuple)) and len(item) == 4:
-                        s, p, o, conf = item
-                        fact = normalize_fact((str(s), str(p), str(o)))
-                        parsed[fact] = clamp_confidence(conf)
-                    elif isinstance(item, dict):
-                        s = item.get("subject")
-                        p = item.get("predicate")
-                        o = item.get("object")
-                        if s is None or p is None or o is None:
-                            logger.warning("Skipping incomplete KB record: %s", item)
-                            continue
-                        fact = normalize_fact((str(s), str(p), str(o)))
-                        parsed[fact] = clamp_confidence(item.get("confidence", 0.5))
-                    else:
-                        logger.warning("Unsupported KB item type %s: %r", type(item).__name__, item)
-                except Exception as exc:
-                    logger.warning("Skipping KB item %r: %s", item, exc)
- 
-        # Also load any rules recorded in the KB file into the rule registry
-        if isinstance(raw, dict):
-            self._bootstrap_rules_from_kb(raw.get("rules", []))
- 
-        logger.info("Loaded %d facts from %s", len(parsed), kb_path)
-        return parsed
- 
-    def _bootstrap_rules_from_kb(self, rules_list: List[Dict[str, Any]]) -> None:
-        """Register named rules found in the KB JSON (built-ins by callable name)."""
-        _builtin_map: Dict[str, _RuleFunc] = {
-            "identity_rule":    self._builtin_identity_rule,
-            "transitive_rule":  self._builtin_transitive_rule,
-        }
-        for entry in rules_list:
-            if not isinstance(entry, dict):
-                continue
-            name     = str(entry.get("name", ""))
-            callable_name = str(entry.get("callable", name))
-            weight   = clamp_confidence(entry.get("weight", 1.0))
-            func     = _builtin_map.get(callable_name)
-            if func is None:
-                logger.debug("KB rule '%s' has no built-in callable — skipped", callable_name)
-                continue
-            if name not in self._rule_registry:
-                self._add_rule_internal(func, name, weight, antecedents=[], consequents=[])
- 
+
     def _load_sentiment_lexicon(self, lexicon_path: Path) -> Dict[str, Any]:
         """Load the sentiment lexicon from a sentiment_pack YAML or legacy JSON.
  
@@ -373,15 +320,9 @@ class RuleEngine:
         modifiers_node = data.get("modifiers") or {}
         negation_node  = data.get("negation")  or {}
  
-        positive    = _extract_scored_dict(
-            lexicons_node.get("positive")  or data.get("positive",     {})
-        )
-        negative    = _extract_scored_dict(
-            lexicons_node.get("negative")  or data.get("negative",     {})
-        )
-        intensifiers = _extract_scored_dict(
-            modifiers_node.get("intensifiers") or data.get("intensifiers", {})
-        )
+        positive    = _extract_scored_dict(lexicons_node.get("positive")  or data.get("positive",     {}))
+        negative    = _extract_scored_dict(lexicons_node.get("negative")  or data.get("negative",     {}))
+        intensifiers = _extract_scored_dict( modifiers_node.get("intensifiers") or data.get("intensifiers", {}))
         negators_raw = (
             negation_node.get("negators")
             or negation_node.get("words")
@@ -570,38 +511,59 @@ class RuleEngine:
     # Built-in symbolic rules
     # ------------------------------------------------------------------
  
-    def _builtin_identity_rule(self, kb: Dict[Fact, float]) -> Dict[Fact, float]:
+    def _builtin_identity_rule(self, kb: Mapping[Fact, float]) -> Dict[Fact, float]:
         """Identity rule: assert each fact with its own confidence (no-op baseline)."""
         return {fact: conf for fact, conf in kb.items()}
  
-    def _builtin_transitive_rule(self, kb: Dict[Fact, float]) -> Dict[Fact, float]:
-        """Transitive closure: if (A, R, B) and (B, R, C) infer (A, R, C).
- 
-        Inferred confidence = product of the two supporting confidences,
-        ensuring derived facts are always weaker than their premises.
+    def _builtin_transitive_rule(self, kb: Mapping[Fact, float]) -> Dict[Fact, float]:
+        """
+        Infer ``A-R-C`` from ``A-R-B`` and ``B-R-C``.
+
+        Uses an ephemeral relation/subject index instead of an N² full-KB scan.
+        The index belongs only to this immutable inference snapshot and therefore
+        requires no invalidation lifecycle.
         """
         inferred: Dict[Fact, float] = {}
-        facts = list(kb.keys())
-        for f1 in facts:
-            s1, r1, o1 = f1
-            for f2 in facts:
-                s2, r2, o2 = f2
-                if r1 == r2 and o1 == s2 and s1 != o2:
-                    new_fact: Fact = (s1, r1, o2)
-                    derived_conf   = clamp_confidence(kb[f1] * kb[f2])
-                    existing       = inferred.get(new_fact, 0.0)
-                    inferred[new_fact] = merge_confidence(existing, derived_conf)
+
+        # (predicate, subject) -> [(object, confidence), ...]
+        outgoing: Dict[Tuple[str, str], List[Tuple[str, float]]] = defaultdict(list)
+
+        for (subject, predicate, obj), confidence in kb.items():
+            outgoing[(predicate, subject)].append((obj, clamp_confidence(confidence)))
+
+        for (source, relation, intermediate), first_confidence in kb.items():
+            second_hops = outgoing.get((relation, intermediate), ())
+
+            for target, second_confidence in second_hops:
+                if source == target:
+                    continue
+
+                fact: Fact = (source, relation, target)
+                derived_confidence = clamp_confidence(clamp_confidence(first_confidence) * second_confidence)
+                previous = inferred.get(fact, 0.0)
+                inferred[fact] = merge_confidence(previous, derived_confidence)
+
         return inferred
  
     def _register_builtin_rules(self) -> None:
-        """Register hard-coded built-in rules at construction time."""
+        configured_weights = dict(self.rules_config.get("builtin_rule_weights", {}) or {})
+
+        identity_weight = clamp_confidence(configured_weights.get("identity_rule", 1.0))
+        transitive_weight = clamp_confidence(configured_weights.get("transitive_rule", 0.8))
         self._add_rule_internal(
-            self._builtin_identity_rule,   "identity_rule",   weight=1.0,
-            antecedents=[], consequents=[],
+            self._builtin_identity_rule,
+            "identity_rule",
+            weight=identity_weight,
+            antecedents=[],
+            consequents=[],
         )
+
         self._add_rule_internal(
-            self._builtin_transitive_rule, "transitive_rule", weight=0.8,
-            antecedents=[], consequents=[],
+            self._builtin_transitive_rule,
+            "transitive_rule",
+            weight=transitive_weight,
+            antecedents=[],
+            consequents=[],
         )
  
     # ------------------------------------------------------------------
@@ -664,6 +626,7 @@ class RuleEngine:
                     context={"antecedents": ants, "consequents": cons},
                 )
             self._add_rule_internal(rule_func, safe_name, safe_weight, antecedents=ants, consequents=cons)
+            self._touch_state_locked()
             logger.debug("Registered rule '%s' (weight=%.3f)", safe_name, safe_weight)
             return True
  
@@ -705,46 +668,143 @@ class RuleEngine:
                 }
                 for name in self._rule_registry
             ]
+
+    def rule_entries(self) -> List[Tuple[str, _RuleFunc, float]]:
+        """Return an immutable-style snapshot of executable rule entries.
+
+        This is the supported bridge for ValidationEngine and agent-facing
+        orchestration.  External callers no longer need to read the private
+        ``_rule_registry`` or hold a mutable reference to ``rule_weights``.
+        """
+        with self._lock:
+            return [
+                (
+                    name,
+                    rule_func,
+                    clamp_confidence(self.rule_weights.get(name, 0.0)),
+                )
+                for name, rule_func in self._rule_registry.items()
+            ]
+
+    def rule_weight_snapshot(self) -> Dict[str, float]:
+        """Return a defensive snapshot of current adaptive rule weights."""
+        with self._lock:
+            return {
+                str(name): clamp_confidence(weight)
+                for name, weight in self.rule_weights.items()
+            }
+
+    def restore_rule_weights(self, weights: Mapping[str, Any]) -> None:
+        """Restore adaptive weights for rules present in the active runtime.
+
+        Checkpoints persist numeric adaptive state, not executable callables.
+        Consequently every restored rule must already be registered by the
+        current code/configuration.  This prevents a checkpoint from silently
+        manufacturing a rule implementation that no longer exists.
+        """
+        if not isinstance(weights, Mapping):
+            raise ReasoningValidationError(
+                "weights must be a mapping",
+                context={"actual_type": type(weights).__name__},
+            )
+
+        normalized = {
+            str(name): clamp_confidence(value)
+            for name, value in weights.items()
+        }
+
+        with self._lock:
+            unknown = sorted(set(normalized) - set(self._rule_registry))
+            if unknown:
+                raise ReasoningValidationError(
+                    "Cannot restore weights for rules absent from the active RuleEngine",
+                    context={"unknown_rules": unknown},
+                )
+
+            changed = False
+            for name, value in normalized.items():
+                if self.rule_weights.get(name) != value:
+                    self.rule_weights[name] = value
+                    changed = True
+
+            if changed:
+                self._touch_state_locked()
+
+    def replace_knowledge(
+        self,
+        facts: Mapping[Union[Fact, Any], float],
+        *,
+        allow_contradiction: bool = False,
+    ) -> int:
+        """Atomically replace the canonical working KB through RuleEngine.
+
+        This is primarily for controlled runtime reload/checkpoint restore.  It
+        preserves the identity of ``self.knowledge_base`` so ValidationEngine
+        and ProbabilisticModels can continue sharing the same mapping object.
+        """
+        if not isinstance(facts, Mapping):
+            raise ReasoningValidationError(
+                "facts must be a mapping",
+                context={"actual_type": type(facts).__name__},
+            )
+
+        normalized: Dict[Fact, float] = {
+            normalize_fact(raw_fact): clamp_confidence(raw_confidence)
+            for raw_fact, raw_confidence in facts.items()
+        }
+
+        if not allow_contradiction:
+            checked: Dict[Fact, float] = {}
+            for fact, confidence in normalized.items():
+                ensure_non_contradictory(
+                    fact,
+                    checked,
+                    threshold=self.contradiction_threshold,
+                    source="replace_knowledge",
+                )
+                checked[fact] = confidence
+
+        with self._lock:
+            if dict(self.knowledge_base) == normalized:
+                return len(normalized)
+
+            self.knowledge_base.clear()
+            self.knowledge_base.update(normalized)
+            self._touch_state_locked()
+
+        return len(normalized)
  
     # ------------------------------------------------------------------
     # Knowledge base mutation
     # ------------------------------------------------------------------
-    def assert_fact(self, fact: Union[Fact, Any], confidence: float, *,
-                    allow_contradiction: bool = False) -> None:
-        """Assert a new fact into the KB with the given confidence.
- 
-        Args:
-            fact:                 A ``(subject, predicate, object)`` triple or anything
-                                  acceptable by ``normalize_fact``.
-            confidence:           Belief strength in ``[0, 1]``.
-            allow_contradiction:  When ``False`` (default), raises ``ContradictionError``
-                                  if the inverse of this fact already exists above
-                                  ``contradiction_threshold``.
- 
-        Raises:
-            ContradictionError: If a contradictory fact exists and
-                ``allow_contradiction`` is ``False``.
-        """
+    def assert_fact(self, fact: Union[Fact, Any], confidence: float, *, allow_contradiction: bool = False) -> None:
+        """Assert one confidence-weighted fact into the working KB."""
         canon = normalize_fact(fact)
-        conf  = clamp_confidence(confidence)
+        conf = clamp_confidence(confidence)
+
         with self._lock:
             if not allow_contradiction:
-                ensure_non_contradictory(
-                    canon,
-                    self.knowledge_base,
-                    threshold=self.contradiction_threshold,
-                )
-            existing = self.knowledge_base.get(canon, 0.0)
-            self.knowledge_base[canon] = merge_confidence(existing, conf)
+                ensure_non_contradictory(canon, self.knowledge_base, threshold=self.contradiction_threshold)
+
+            existing = self.knowledge_base.get(canon, 0.0,)
+            merged = merge_confidence(existing, conf)
+
+            if merged != existing:
+                self.knowledge_base[canon] = merged
+                self._touch_state_locked()
  
     def retract_fact(self, fact: Union[Fact, Any]) -> bool:
         """Remove a fact from the KB.  Returns ``True`` if it existed."""
         canon = normalize_fact(fact)
+
         with self._lock:
-            if canon in self.knowledge_base:
-                del self.knowledge_base[canon]
-                return True
-            return False
+            if canon not in self.knowledge_base:
+                return False
+
+            del self.knowledge_base[canon]
+            self._touch_state_locked()
+
+            return True
  
     def query_fact(self, fact: Union[Fact, Any]) -> Optional[float]:
         """Return the confidence of a fact, or ``None`` if not in the KB."""
@@ -756,132 +816,475 @@ class RuleEngine:
         s = str(subject).strip()
         return {f: c for f, c in self.knowledge_base.items() if f[0] == s}
  
-    def bulk_assert(self, facts: Dict[Union[Fact, Any], float], *,
-                    allow_contradiction: bool = False) -> Tuple[int, int]:
-        """Assert multiple facts at once.
- 
-        Returns:
-            ``(inserted, skipped)`` counts.
+    def bulk_assert(self, facts: Mapping[Union[Fact, Any], float], *, allow_contradiction: bool = False) -> Tuple[int, int]:
         """
-        inserted = skipped = 0
-        for raw_fact, conf in facts.items():
-            try:
-                self.assert_fact(raw_fact, conf, allow_contradiction=allow_contradiction)
-                inserted += 1
-            except ContradictionError as exc:
-                logger.warning("Skipping contradictory fact during bulk_assert: %s", exc)
-                skipped += 1
-        return inserted, skipped
+        Assert a batch of facts using one symbolic-state transaction.
+
+        Returns
+        -------
+        Tuple[int, int]
+            ``(accepted, skipped)``.
+
+        Notes
+        -----
+        State revision is advanced only once for the whole batch.
+        """
+        if not isinstance(facts, Mapping):
+            raise ReasoningValidationError(
+                "facts must be a mapping",
+                context={"actual_type": type(facts).__name__},
+            )
+
+        normalized: List[Tuple[Fact, float]] = []
+
+        for raw_fact, raw_confidence in facts.items():
+            normalized.append((normalize_fact(raw_fact), clamp_confidence(raw_confidence)))
+
+        accepted = 0
+        skipped = 0
+        changed = False
+
+        with self._lock:
+            for fact, confidence in normalized:
+                try:
+                    if not allow_contradiction:
+                        ensure_non_contradictory(fact, self.knowledge_base, threshold=self.contradiction_threshold)
+
+                    existing = self.knowledge_base.get(fact, 0.0)
+                    merged = merge_confidence(existing, confidence)
+
+                    if merged != existing:
+                        self.knowledge_base[fact] = merged
+                        changed = True
+
+                    accepted += 1
+
+                except ContradictionError as exc:
+                    logger.warning("Skipping contradictory fact during bulk_assert: %s", exc)
+
+                    skipped += 1
+
+            if changed:
+                self._touch_state_locked()
+
+        return accepted, skipped
  
     # ------------------------------------------------------------------
     # Inference execution
     # ------------------------------------------------------------------
  
-    def run_inference(self, *,min_confidence_filter: Optional[float] = None,
-                      max_rounds: Optional[int] = None) -> Dict[Fact, float]:
-        """Apply all registered rules to the KB until convergence.
- 
-        Uses the frozen KB signature to detect convergence so the loop
-        terminates even when rules generate circular derivations.
- 
-        Args:
-            min_confidence_filter: If set, only return inferred facts above
-                                   this confidence threshold.
-            max_rounds:            Override the configured max learning cycles.
- 
-        Returns:
-            Dict of newly inferred facts (not already in the KB) with their
-            confidence values.
+    def run_inference(
+        self,
+        *,
+        min_confidence_filter: Optional[float] = None,
+        max_rounds: Optional[int] = None,
+        lease_guard: Optional[Callable[[], None]] = None,
+    ) -> Dict[Fact, float]:
+        """
+        Execute symbolic forward chaining using optimistic read snapshots.
+
+        Expensive user/rule execution occurs outside ``self._lock``.
+
+        The lock protects only:
+        - snapshot capture;
+        - concurrency revision checks;
+        - final KB/rule-weight commit.
+
+        A changed state revision invalidates the prepared round and causes a
+        bounded retry against a fresh snapshot.
         """
         rounds = bounded_iterations(
-            max_rounds or get_config_section("inference", self.config).get("max_learning_cycles", 100),
-            minimum=1, maximum=10_000,
+            max_rounds
+            if max_rounds is not None
+            else self.max_iterations,
+            minimum=1,
+            maximum=self.max_iterations,
         )
-        prev_sig: Optional[tuple] = None
+
         all_inferred: Dict[Fact, float] = {}
- 
-        with self._lock:
-            rules_ordered = rank_rules_by_weight(
-                [(name, func, self.rule_weights.get(name, 0.0))
-                 for name, func in self._rule_registry.items()],
-                self.rule_weights,
-            )
- 
-            for _round in range(rounds):
+        self.last_inference_rounds = 0
+
+        for _ in range(rounds):
+            retries = 0
+            applied_this_round: Dict[Fact, float] = {}
+
+            while True:
+                if lease_guard is not None:
+                    lease_guard()
+
+                # ----------------------------------------------------------
+                # Snapshot: short lock only.
+                # ----------------------------------------------------------
+                with self._lock:
+                    start_revision = self._state_revision
+                    kb_snapshot = dict(self.knowledge_base)
+                    rule_snapshot = [
+                        (
+                            name, rule_func, self.rule_weights.get(name, 0.0))
+                            for name, rule_func
+                            in self._rule_registry.items()
+                    ]
+                    weight_snapshot = dict(self.rule_weights)
+
+                # Enforce the rule purity contract.
+                kb_view = MappingProxyType(kb_snapshot)
+
+                # The helper's legacy RuleEntry type uses a mutable-Dict
+                # callback, while registered rules intentionally accept any
+                # Mapping.  Keep the registry's stricter, read-only contract
+                # and bridge the helper's narrower annotation here.
+                ranked_rules = rank_rules_by_weight(
+                    cast(Any, rule_snapshot),
+                    weight_snapshot,
+                )
+
+                if (
+                    self.exploration_rate > 0.0
+                    and len(ranked_rules) > 1
+                ):
+                    sampled = sample_rules(ranked_rules, weight_snapshot, k=max(1, min(len(ranked_rules), 3)), rng=self._rng)
+                    sampled_names = {
+                        name
+                        for name, _, _
+                        in sampled
+                    }
+
+                    ranked_rules = (
+                        sampled
+                        + [
+                            entry
+                            for entry in ranked_rules
+                            if entry[0]
+                            not in sampled_names
+                        ]
+                    )
+
+                # ----------------------------------------------------------
+                # Compute: deliberately outside lock.
+                # ----------------------------------------------------------
                 round_inferred: Dict[Fact, float] = {}
-                for name, func, _w in rules_ordered:
+                next_weights = dict(weight_snapshot)
+
+                for (
+                    name,
+                    rule_func,
+                    default_weight,
+                ) in ranked_rules:
+
+                    if lease_guard is not None:
+                        lease_guard()
+
                     try:
-                        new_facts = func(dict(self.knowledge_base))
-                    except Exception as exc:
-                        raise RuleExecutionError(
-                            f"Rule '{name}' raised an exception during inference",
-                            cause=exc,
-                            context={"rule": name},
-                        ) from exc
- 
-                    if not isinstance(new_facts, dict):
-                        logger.warning("Rule '%s' returned non-dict — skipping", name)
-                        continue
- 
-                    for raw_fact, raw_conf in new_facts.items():
-                        try:
-                            fact = normalize_fact(raw_fact)
-                            conf = clamp_confidence(raw_conf)
-                        except Exception:
-                            continue
-                        if fact not in self.knowledge_base:
-                            existing = round_inferred.get(fact, 0.0)
-                            round_inferred[fact] = merge_confidence(existing, conf)
- 
-                    # Adaptive weight update if learning is enabled
-                    if self.auto_weight_adjustment and round_inferred:
-                        self.rule_weights[name] = update_rule_weight(
-                            self.rule_weights.get(name, 0.5), success=bool(new_facts)
+                        result = (
+                            rule_func(dict(kb_view))
+                            or {}
                         )
- 
-                # Merge this round's inferences into the working KB
-                for fact, conf in round_inferred.items():
-                    self.knowledge_base[fact] = merge_confidence(
-                        self.knowledge_base.get(fact, 0.0), conf
+
+                    except ReasoningError:
+                        self._record_rule_failure(
+                            name,
+                            default_weight,
+                        )
+                        raise
+
+                    except Exception as exc:
+                        self._record_rule_failure(
+                            name,
+                            default_weight,
+                        )
+
+                        raise RuleExecutionError(
+                            "Symbolic rule execution failed",
+                            cause=exc,
+                            context={
+                                "rule": name,
+                            },
+                        ) from exc
+
+                    if not isinstance(
+                        result,
+                        Mapping,
+                    ):
+                        self._record_rule_failure(
+                            name,
+                            default_weight,
+                        )
+
+                        raise RuleExecutionError(
+                            "Rule must return a mapping",
+                            context={
+                                "rule": name,
+                                "returned_type":
+                                    type(result).__name__,
+                            },
+                        )
+
+                    effective_weight = clamp_confidence(
+                        next_weights.get(
+                            name,
+                            default_weight,
+                        )
                     )
-                    all_inferred[fact] = merge_confidence(
-                        all_inferred.get(fact, 0.0), conf
-                    )
- 
-                # Convergence check via KB signature
-                current_sig = freeze_kb_signature(self.knowledge_base)
-                if current_sig == prev_sig:
-                    logger.debug("Inference converged after %d round(s)", _round + 1)
-                    break
-                prev_sig = current_sig
- 
+
+                    rule_added = False
+
+                    for (
+                        raw_fact,
+                        raw_confidence,
+                    ) in result.items():
+
+                        try:
+                            fact = normalize_fact(
+                                raw_fact
+                            )
+
+                            confidence = (
+                                clamp_confidence(
+                                    raw_confidence
+                                )
+                            )
+
+                            ensure_non_contradictory(
+                                fact,
+                                kb_snapshot,
+                                threshold=(
+                                    self.contradiction_threshold
+                                ),
+                                source=name,
+                            )
+
+                        except ContradictionError:
+                            continue
+
+                        weighted = (
+                            confidence
+                            * effective_weight
+                        )
+
+                        existing = max(
+                            kb_snapshot.get(
+                                fact,
+                                0.0,
+                            ),
+                            round_inferred.get(
+                                fact,
+                                0.0,
+                            ),
+                        )
+
+                        if weighted > existing:
+                            round_inferred[
+                                fact
+                            ] = weighted
+
+                            rule_added = True
+
+                    if self.auto_weight_adjustment:
+                        next_weights[
+                            name
+                        ] = update_rule_weight(
+                            next_weights.get(
+                                name,
+                                default_weight,
+                            ),
+                            success=rule_added,
+                            learning_rate=(
+                                self.learning_rate
+                            ),
+                            decay=self.decay,
+                        )
+
+                if lease_guard is not None:
+                    lease_guard()
+
+                # ----------------------------------------------------------
+                # Commit: short lock again.
+                # ----------------------------------------------------------
+                with self._lock:
+                    if (
+                        self._state_revision
+                        != start_revision
+                    ):
+                        retries += 1
+
+                        if (
+                            retries
+                            > self.max_commit_retries
+                        ):
+                            raise InferenceExecutionError(
+                                "Symbolic inference could not commit "
+                                "because state changed repeatedly",
+                                context={
+                                    "start_revision":
+                                        start_revision,
+                                    "current_revision":
+                                        self._state_revision,
+                                    "retries":
+                                        retries,
+                                    "max_commit_retries":
+                                        self.max_commit_retries,
+                                },
+                            )
+
+                        # Re-run this logical inference round against
+                        # a fresh snapshot.
+                        continue
+
+                    applied_this_round = {}
+
+                    for (
+                        fact,
+                        confidence,
+                    ) in round_inferred.items():
+
+                        try:
+                            # Defensive recheck against the actual
+                            # canonical KB before mutation.
+                            ensure_non_contradictory(
+                                fact,
+                                self.knowledge_base,
+                                threshold=(
+                                    self.contradiction_threshold
+                                ),
+                                source="inference_commit",
+                            )
+
+                        except ContradictionError:
+                            continue
+
+                        current = self.knowledge_base.get(
+                            fact,
+                            0.0,
+                        )
+
+                        if confidence <= current:
+                            continue
+
+                        self.knowledge_base[
+                            fact
+                        ] = confidence
+
+                        applied_this_round[
+                            fact
+                        ] = confidence
+
+                    weights_changed = False
+
+                    if self.auto_weight_adjustment:
+                        for (
+                            name,
+                            updated_weight,
+                        ) in next_weights.items():
+
+                            if (
+                                name
+                                not in self.rule_weights
+                            ):
+                                continue
+
+                            current_weight = (
+                                self.rule_weights[
+                                    name
+                                ]
+                            )
+
+                            updated_weight = (
+                                clamp_confidence(
+                                    updated_weight
+                                )
+                            )
+
+                            if (
+                                updated_weight
+                                != current_weight
+                            ):
+                                self.rule_weights[
+                                    name
+                                ] = updated_weight
+
+                                weights_changed = True
+
+                    if (
+                        applied_this_round
+                        or weights_changed
+                    ):
+                        self._touch_state_locked()
+
+                # Commit succeeded.
+                break
+
+            self.last_inference_rounds += 1
+
+            if not applied_this_round:
+                break
+
+            for fact, confidence in (
+                applied_this_round.items()
+            ):
+                all_inferred[fact] = max(
+                    all_inferred.get(
+                        fact,
+                        0.0,
+                    ),
+                    confidence,
+                )
+
         if min_confidence_filter is not None:
-            floor = clamp_confidence(min_confidence_filter)
-            all_inferred = {f: c for f, c in all_inferred.items() if c >= floor}
- 
-        if all_inferred:
-            self._log_memory_event("inference_run", {"inferred_count": len(all_inferred)})
- 
+            floor = clamp_confidence(
+                min_confidence_filter
+            )
+
+            all_inferred = {
+                fact: confidence
+                for fact, confidence
+                in all_inferred.items()
+                if confidence >= floor
+            }
+
+        if (
+            all_inferred
+            and self.reasoning_memory is not None
+        ):
+            self._log_memory_event(
+                "inference_run",
+                {
+                    "inferred_count": len(all_inferred),
+                    "rounds": self.last_inference_rounds,
+                },
+            )
+
         return all_inferred
  
     def _apply_all_rules(self) -> Dict[Fact, float]:
-        """Apply all rules once and return the merged result (no KB mutation)."""
+        """Apply all rules once without mutating the canonical KB."""
+        with self._lock:
+            kb_snapshot = dict(self.knowledge_base)
+            rules = list(self._rule_registry.items())
+
+        kb_view = MappingProxyType(kb_snapshot)
+
         inferred: Dict[Fact, float] = {}
-        for name, func in self._rule_registry.items():
+
+        for name, func in rules:
             try:
-                new_facts = func(dict(self.knowledge_base))
+                new_facts = (func(kb_view) or {})
+
             except Exception as exc:
                 logger.warning("Rule '%s' raised during _apply_all_rules: %s", name, exc)
                 continue
-            if not isinstance(new_facts, dict):
+
+            if not isinstance(new_facts, Mapping):
                 continue
-            for raw_fact, raw_conf in new_facts.items():
+
+            for (raw_fact, raw_confidence) in new_facts.items():
                 try:
                     fact = normalize_fact(raw_fact)
-                    conf = clamp_confidence(raw_conf)
-                    inferred[fact] = merge_confidence(inferred.get(fact, 0.0), conf)
+                    confidence = (clamp_confidence(raw_confidence))
+                    inferred[fact] = merge_confidence(inferred.get(fact, 0.0), confidence)
+
                 except Exception:
                     continue
+
         return inferred
  
     # ------------------------------------------------------------------
@@ -960,7 +1363,7 @@ class RuleEngine:
                 def _make_rule(
                     antecedents: tuple, consequents: tuple, conf: float
                 ) -> _RuleFunc:
-                    def rule_func(kb: Dict[Fact, float]) -> Dict[Fact, float]:
+                    def rule_func(kb: Mapping[Fact, float]) -> Mapping[Fact, float]:
                         matches = [f for f in kb if all(e in f for e in antecedents)]
                         if not matches:
                             return {}
@@ -999,11 +1402,7 @@ class RuleEngine:
     # Circular dependency detection
     # ------------------------------------------------------------------
  
-    def _would_create_circular_dependency(
-        self,
-        antecedents: Iterable[Any],
-        consequents: Iterable[Any],
-    ) -> bool:
+    def _would_create_circular_dependency(self, antecedents: Iterable[Any], consequents: Iterable[Any]) -> bool:
         """Fast pre-registration check: would adding this rule form a cycle?
  
         Returns ``True`` if any consequent element appears in the antecedents
@@ -1132,12 +1531,7 @@ class RuleEngine:
             logger.warning("Detected %d fact conflict(s)", len(conflicts))
         return conflicts
  
-    def _are_contradictory(
-        self,
-        obj1: str,
-        obj2: str,
-        antonyms: Optional[Dict[str, Any]] = None,
-    ) -> bool:
+    def _are_contradictory(self, obj1: str, obj2: str, antonyms: Optional[Dict[str, Any]] = None) -> bool:
         """Return ``True`` if ``obj1`` and ``obj2`` are known antonyms.
  
         Checks:
@@ -1157,9 +1551,7 @@ class RuleEngine:
             return True
         return False
  
-    def redundant_fact_check(
-        self, confidence_margin: Optional[float] = None
-    ) -> List[Tuple[Fact, float, float]]:
+    def redundant_fact_check(self, confidence_margin: Optional[float] = None) -> List[Tuple[Fact, float, float]]:
         """Find KB facts that are inferrable from existing rules within a margin.
  
         A fact is redundant when the inferred confidence is within
@@ -1168,9 +1560,7 @@ class RuleEngine:
         Returns:
             List of ``(fact, kb_confidence, inferred_confidence)`` triples.
         """
-        margin = clamp_confidence(
-            self._redundancy_margin if confidence_margin is None else confidence_margin
-        )
+        margin = clamp_confidence(self._redundancy_margin if confidence_margin is None else confidence_margin)
         inferred = self._apply_all_rules()
         return [
             (fact, kb_conf, inferred.get(fact, 0.0))
@@ -1548,7 +1938,8 @@ class RuleEngine:
         Returns:
             The resolved output path.
         """
-        out = Path(path or self._kb_path)
+        configured_path = self.storage_config.get("knowledge_db", "knowledge_db.json")
+        out = Path(path) if path is not None else Path(str(configured_path))
         records = [
             {"subject": s, "predicate": p, "object": str(o), "confidence": round(float(c), 8)}
             for (s, p, o), c in sorted(self.knowledge_base.items())
@@ -1576,7 +1967,8 @@ class RuleEngine:
  
     def save_discovered_rules(self, path: Optional[Union[str, Path]] = None) -> Path:
         """Persist only the discovered (non-built-in) rules to the rule backup file."""
-        out = Path(path or self._rule_backup_path)
+        configured_path = self.storage_config.get("rule_backup", "discovered_rules.json")
+        out = Path(path) if path is not None else Path(str(configured_path))
         builtin_names = {"identity_rule", "transitive_rule"}
         entries = [
             {
@@ -1622,14 +2014,73 @@ class RuleEngine:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _record_rule_failure(self, rule_name: str, fallback_weight: float) -> None:
+        if not self.auto_weight_adjustment:
+            return
+
+        with self._lock:
+            if rule_name not in self._rule_registry:
+                return
+
+            current = self.rule_weights.get(rule_name, fallback_weight)
+            updated = update_rule_weight(
+                current,
+                success=False,
+                learning_rate=self.learning_rate,
+                decay=self.decay,
+            )
+
+            if updated != current:
+                self.rule_weights[rule_name] = updated
+                self._touch_state_locked()
+
+    def _touch_state_locked(self) -> int:
+        """
+        Advance the in-process symbolic-state revision.
+        Caller must hold ``self._lock``.
+        """
+        self._state_revision += 1
+        return self._state_revision
  
     def _log_memory_event(self, event_type: str, payload: Dict[str, Any], tag: Optional[str] = None) -> None:
         """Log an experience to ReasoningMemory, swallowing any errors."""
         try:
             experience = {"type": event_type, **payload}
+            assert self.reasoning_memory is not None
             self.reasoning_memory.add(experience=experience, **({"tag": tag} if tag else {}))
         except Exception as exc:
             logger.debug("ReasoningMemory.add failed for '%s': %s", event_type, exc)
+
+    # ------------------------------------------------------------------
+    # RuleEngine state API
+    # ------------------------------------------------------------------
+
+    def set_fact_confidence(self, fact: Any, confidence: float) -> None:
+        """Set one fact confidence exactly, rather than merge upward."""
+        normalized = normalize_fact(fact)
+        safe_confidence = clamp_confidence(confidence)
+
+        with self._lock:
+            self.knowledge_base[normalized] = safe_confidence
+
+
+    def replace_rule_weights(self, weights: Mapping[str, Any]) -> None:
+        """
+        Restore adaptive rule weights while preserving the active rule registry.
+        """
+        with self._lock:
+            unknown = (set(weights) - set(self._rule_registry))
+
+            if unknown:
+                raise RuleDefinitionError(
+                    "Cannot restore weights for unregistered rules",
+                    context={"unknown_rules": sorted(unknown)},
+                )
+
+            for name in self._rule_registry:
+                if name in weights:
+                    self.rule_weights[name] = clamp_confidence(weights[name])
  
  
 # ---------------------------------------------------------------------------

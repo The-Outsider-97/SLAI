@@ -26,7 +26,7 @@ import joblib # type: ignore
 from sklearn.gaussian_process import GaussianProcessRegressor # type: ignore
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel # type: ignore
 from sklearn.preprocessing import StandardScaler # type: ignore
-from typing import List, Any, Dict, Tuple, Optional
+from typing import List, Any, Dict, Tuple, Optional, cast
 
 import numpy as np # type: ignore
 def sigmoid(x):
@@ -34,6 +34,8 @@ def sigmoid(x):
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_heuristic import BaseHeuristics
+from ..utils.planning_errors import *
+from ..utils.planning_helpers import clamp, require_non_empty, require_type
 from ....tuning.networks.bayesian_neural_network import BayesianNeuralNetwork
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
@@ -45,10 +47,29 @@ class DotDict(dict):
         return self.get(item)
 
 class UncertaintyAwareHeuristic(BaseHeuristics):
-    def __init__(self):
-        self.config = load_global_config()
-        self.heuristics_config = get_config_section('global_heuristic')
-        self.ua_config = get_config_section('uncertainty_aware_heuristic')
+    def __init__(self) -> None:
+        # BaseHeuristics owns shared heuristic configuration/state.
+        # Initialise it before any subclass-specific configuration.
+        super().__init__()
+
+        self.heuristics_config = get_config_section(
+            "global_heuristic",
+            config=self.config,
+            default={},
+        )
+        self.ua_config = get_config_section(
+            "uncertainty_aware_heuristic",
+            config=self.config,
+            default={},
+        )
+
+        if not hasattr(self, "bh_cfg"):
+            raise PlanningConfigError(
+                "BaseHeuristics failed to initialise 'bh_cfg'.",
+                config_key="base_heuristics",
+                config_section="base_heuristics",
+                expected_type="dict",
+            )
 
         self.model_type = self.ua_config.get('model_type', 'GP')
         self.uncertainty_threshold = self.ua_config.get('uncertainty_threshold', 0.15)
@@ -57,7 +78,15 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
 
         # Paths
         self.planning_db_path = self.heuristics_config.get('planning_db_path')
-        self.heuristic_model_path = self.heuristics_config.get('heuristic_model_path')
+        heuristic_model_path = self.heuristics_config.get('heuristic_model_path')
+        if not isinstance(heuristic_model_path, (str, os.PathLike)):
+            raise PlanningConfigError(
+                "Missing or invalid 'heuristic_model_path' configuration.",
+                config_key="heuristic_model_path",
+                config_section="heuristics",
+                expected_type="str or os.PathLike",
+            )
+        self.heuristic_model_path = heuristic_model_path
         self.random_state = self.heuristics_config.get('random_state', 42)
         os.makedirs(self.heuristic_model_path, exist_ok=True)
         self.model_path = os.path.join(self.heuristic_model_path, 'uah_model.pkl')
@@ -98,10 +127,10 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
                             bnn_params['learning_rate'],
                             random_state=self.random_state
                         )
-                        self.model.weights_mu = [np.array(w) for w in bnn_params['weights_mu']]
-                        self.model.weights_logvar = [np.array(w) for w in bnn_params['weights_logvar']]
-                        self.model.biases_mu = [np.array(b) for b in bnn_params['biases_mu']]
-                        self.model.biases_logvar = [np.array(b) for b in bnn_params['biases_logvar']]
+                        setattr(self.model, 'weights_mu', [np.array(w) for w in bnn_params['weights_mu']])
+                        setattr(self.model, 'weights_logvar', [np.array(w) for w in bnn_params['weights_logvar']])
+                        setattr(self.model, 'biases_mu', [np.array(b) for b in bnn_params['biases_mu']])
+                        setattr(self.model, 'biases_logvar', [np.array(b) for b in bnn_params['biases_logvar']])
                     self.trained = True
                     logger.info("Loaded pre-trained Uncertainty-Aware model")
                 except Exception as e:
@@ -178,11 +207,15 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
             scaled = self.scaler.transform(features.reshape(1, -1))
 
             if self.model_type == 'GP':
-                pred, std = self.model.predict(scaled, return_std=True)
+                assert self.model is not None
+                gp_model = cast(Any, self.model)
+                pred, std = gp_model.predict(scaled, return_std=True)
                 prob = np.clip(pred[0], 0, 1)
                 uncertainty = std[0]
             elif self.model_type == 'BNN':
-                mean, std = self.model.predict(scaled, num_samples=100)
+                assert self.model is not None
+                bnn_model = cast(Any, self.model)
+                mean, std = bnn_model.predict(scaled, num_samples=100)
                 prob = np.clip(sigmoid(mean[0, 0]), 0, 1)   # apply sigmoid
                 uncertainty = std[0, 0]                     # keep raw uncertainty
             else:
@@ -267,9 +300,10 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
             idx += 1
 
         if self.feature_config.get("use_temporal_features"):
-            features[idx] = self._time_since_creation(task)
+            temporal = self.extract_temporal_features(task)
+            features[idx] = clamp(float(temporal.get("time_since_creation", 0.0)), 0.0, 1.0)
             idx += 1
-            features[idx] = self._deadline_proximity(task)
+            features[idx] = clamp(float(temporal.get("deadline_proximity", 0.0)), 0.0, 1.0)
             idx += 1
 
         return features
@@ -309,7 +343,8 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
                         batch_idx = indices[start:end]
                         x_batch = X_scaled[batch_idx]
                         y_batch = y[batch_idx].reshape(-1, 1)
-                        elbo, _ = self.model.train_step(x_batch, y_batch, num_samples=5)
+                        bnn = cast(Any, self.model)
+                        elbo, _ = bnn.train_step(x_batch, y_batch, num_samples=5)
                         total_elbo += elbo
                     if epoch % 10 == 0:
                         logger.info(f"Epoch {epoch}: ELBO {total_elbo/n_batches:.4f}")
@@ -329,13 +364,17 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
             if self.model_type == 'GP':
                 data['gp_model'] = self.model
             elif self.model_type == 'BNN':
+                assert self.model is not None
+                # BayesianNeuralNetwork's parameter arrays are populated at
+                # runtime and are not part of its declared public interface.
+                bnn = cast(Any, self.model)
                 data['bnn_params'] = {
-                    'layer_sizes': self.model.layer_sizes,
-                    'learning_rate': self.model.learning_rate,
-                    'weights_mu': [w.tolist() for w in self.model.weights_mu],
-                    'weights_logvar': [w.tolist() for w in self.model.weights_logvar],
-                    'biases_mu': [b.tolist() for b in self.model.biases_mu],
-                    'biases_logvar': [b.tolist() for b in self.model.biases_logvar],
+                    'layer_sizes': bnn.layer_sizes,
+                    'learning_rate': bnn.learning_rate,
+                    'weights_mu': [w.tolist() for w in bnn.weights_mu],
+                    'weights_logvar': [w.tolist() for w in bnn.weights_logvar],
+                    'biases_mu': [b.tolist() for b in bnn.biases_mu],
+                    'biases_logvar': [b.tolist() for b in bnn.biases_logvar],
                 }
             joblib.dump(data, self.model_path)
             logger.info("Uncertainty-Aware model saved")
@@ -359,11 +398,18 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
             y.append(1 if outcome == "success" else 0)
         return np.array(X), np.array(y)
 
-    def load_planning_db(self, path: str = None):
+    def load_planning_db(self, path: Optional[str] = None):
         """Load task, world state, and method statistics from the planning database."""
         if path is None:
+            if not isinstance(self.planning_db_path, (str, os.PathLike)):
+                raise PlanningConfigError(
+                    "Missing or invalid 'planning_db_path' configuration.",
+                    config_key="planning_db_path",
+                    config_section="heuristics",
+                    expected_type="str or os.PathLike",
+                )
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            path = os.path.join(base_dir, self.planning_db_path)
+            path = os.path.join(base_dir, os.fspath(self.planning_db_path))
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         tasks = data["tasks"]
@@ -393,10 +439,10 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
                     bnn_params['layer_sizes'],
                     bnn_params['learning_rate']
                 )
-                self.bnn.weights_mu = [np.array(w) for w in bnn_params['weights_mu']]
-                self.bnn.weights_logvar = [np.array(w) for w in bnn_params['weights_logvar']]
-                self.bnn.biases_mu = [np.array(b) for b in bnn_params['biases_mu']]
-                self.bnn.biases_logvar = [np.array(b) for b in bnn_params['biases_logvar']]
+                setattr(self.bnn, 'weights_mu', [np.array(w) for w in bnn_params['weights_mu']])
+                setattr(self.bnn, 'weights_logvar', [np.array(w) for w in bnn_params['weights_logvar']])
+                setattr(self.bnn, 'biases_mu', [np.array(b) for b in bnn_params['biases_mu']])
+                setattr(self.bnn, 'biases_logvar', [np.array(b) for b in bnn_params['biases_logvar']])
                 self.model = self.bnn
             
             logger.info(f"Loaded pre-trained {self.model_type} model")
@@ -436,8 +482,8 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
             logger.info("New data available - scheduling model retraining")
         elif self.model_type == 'BNN':
             try:
-                # Use self.model, not self.bnn
-                self.model.train_step(
+                bnn_model = cast(Any, self.model)
+                bnn_model.train_step(
                     scaled_features,
                     np.array([[label]]),
                     num_samples=5
@@ -445,6 +491,111 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
                 logger.info("BNN updated with new execution data")
             except Exception as e:
                 logger.error(f"BNN update failed: {str(e)}")
+
+    def _calculate_method_failure_rate(
+        self,
+        task: Any,
+        method_stats: Dict[Any, Dict[str, Any]],
+        method_id: str,
+    ) -> float:
+        """
+        Return the normalised failure rate for ``method_id`` on ``task``.
+
+        The failure rate is derived from the shared ``BaseHeuristics`` method
+        statistics resolver, which already handles:
+
+        * tuple keys like ``(task_name, method_id)``
+        * string keys like ``"task_name:method_id"``
+        * plain ``method_id`` keys
+        * explicit ``failure`` / ``success`` / ``total`` fields
+        * list‑based outcome histories
+
+        The result is clamped to ``[0.0, 1.0]`` so it can be used directly as
+        a heuristic feature.
+
+        Raises
+        ------
+        PlanningConfigError
+            If the statistics cannot be interpreted or an unexpected type is
+            encountered.  ``PlanningError`` subclasses raised by the base
+            resolver are re‑raised unchanged so callers see the original
+            structured error.
+        """
+        require_type(method_stats, dict, "method_stats")
+        require_non_empty(method_id, "method_id")
+
+        try:
+            stats = self._resolve_method_stats(task, method_stats, method_id)
+            failure_rate = float(stats.get("failure_rate", 0.0))
+            return clamp(failure_rate, 0.0, 1.0)
+        except PlanningError:
+            # Preserve the original structured planning error.
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute method failure rate for '{method_id}': {exc}",
+                config_key="method_stats",
+                config_section="uncertainty_aware_heuristic",
+                expected_type="mapping with success/total or failure keys",
+                context={"method_id": method_id, "error": repr(exc)},
+            ) from exc
+
+    def _time_since_creation(self, task: Any) -> float:
+        """
+        Return the normalised age of ``task`` since its creation in ``[0, 1]``.
+
+        Delegates to ``BaseHeuristics.extract_temporal_features``, which already
+        handles ISO‑8601 strings, POSIX timestamps, timezone normalisation, and
+        configuration‑driven normalisation (``max_age_hours``).
+
+        Raises
+        ------
+        PlanningConfigError
+            If the creation time is present but cannot be parsed, or if an
+            unexpected type is encountered.
+        """
+        try:
+            temporal = self.extract_temporal_features(task)
+            return clamp(float(temporal.get("time_since_creation", 0.0)), 0.0, 1.0)
+        except PlanningError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute time since creation: {exc}",
+                config_key="creation_time",
+                config_section="uncertainty_aware_heuristic",
+                expected_type="ISO-8601 datetime or POSIX timestamp",
+                context={"error": repr(exc)},
+            ) from exc
+
+    def _deadline_proximity(self, task: Any) -> float:
+        """
+        Return the normalised deadline proximity of ``task`` in ``[0, 1]``.
+
+        ``0.0`` means the deadline is far away or not set; ``1.0`` means the
+        deadline has already passed.  This uses the shared temporal feature
+        extraction from ``BaseHeuristics``, so deadline horizon configuration
+        and urgency calculations remain consistent across all heuristics.
+
+        Raises
+        ------
+        PlanningConfigError
+            If the deadline is present but cannot be parsed, or if an
+            unexpected type is encountered.
+        """
+        try:
+            temporal = self.extract_temporal_features(task)
+            return clamp(float(temporal.get("deadline_proximity", 0.0)), 0.0, 1.0)
+        except PlanningError:
+            raise
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            raise PlanningConfigError(
+                f"Failed to compute deadline proximity: {exc}",
+                config_key="deadline",
+                config_section="uncertainty_aware_heuristic",
+                expected_type="ISO-8601 datetime or POSIX timestamp",
+                context={"error": repr(exc)},
+            ) from exc
 
 
 if __name__ == "__main__":

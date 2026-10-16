@@ -495,7 +495,7 @@ def normalize_memory_tag(tag: Any) -> str:
 
 def normalize_memory_tags(tags: Optional[Iterable[Any]]) -> Tuple[str, ...]:
     normalized = [normalize_memory_tag(tag) for tag in ensure_list(tags) if normalize_memory_tag(tag)]
-    return tuple(dedupe_preserve_order(normalized))
+    return tuple(dedupe_preserve_order(normalized)) # type: ignore
 
 
 def normalize_optional_tuple(values: Optional[Iterable[Any]], normalizer: Any) -> Optional[Tuple[str, ...]]:
@@ -1720,6 +1720,44 @@ class BrowserMemory:
 
     def __repr__(self) -> str:
         return f"BrowserMemory(entries={self.total_entries()}, namespaces={self.namespaces()})"
+
+
+__all__ = [
+    # Constants / defaults
+    "DEFAULT_MEMORY_NAMESPACE",
+    "DEFAULT_MEMORY_KIND",
+    "MEMORY_SCHEMA_VERSION",
+    "ENTRY_REF_SEPARATOR",
+    "SUPPORTED_MERGE_STRATEGIES",
+    "SORTABLE_FIELDS",
+    "DEFAULT_BROWSER_MEMORY_CONFIG",
+    # Enum
+    "MemoryKind",
+    # Dataclasses
+    "MemoryEntry",
+    "MemoryStats",
+    "MemoryQuery",
+    # Normalization helpers
+    "normalize_memory_namespace",
+    "normalize_memory_key",
+    "normalize_memory_kind",
+    "normalize_memory_tag",
+    "normalize_memory_tags",
+    "normalize_optional_tuple",
+    # Ref / datetime helpers
+    "build_entry_ref",
+    "split_entry_ref",
+    "parse_memory_datetime",
+    "memory_datetime_to_iso",
+    "expiry_from_ttl",
+    # Content/URL helpers
+    "safe_domain_from_url",
+    "estimate_payload_bytes",
+    "extract_browser_url_from_payload",
+    "entry_text_blob",
+    # Main class
+    "BrowserMemory",
+]
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
   "template_name": "browser_security_indicators",
   "description": "Protective detection indicators for the browser agent security layer. These indicators identify states where the agent should warn, pause, block, or request human oversight. They are not bypass instructions.",
   "project_path": "scr/agents/browser/templates/indicators.json",
-  "last_reviewed": "2026-04-25",
+  "last_reviewed": "2026-09-22",
   "owner": "browser.security",
   "defaults": {
     "enabled": true,
@@ -94,7 +94,12 @@
           "verification required",
           "verify that you are human",
           "verify you are human",
-          "verify you're human"
+          "verify you're human",
+          "Arkose Labs",
+          "FunCaptcha",
+          "GeeTest",
+          "slide to verify",
+          "tap the button in order"
         ],
         "css_selectors": [
           "#challenge-form",
@@ -117,7 +122,10 @@
           "iframe[title*='recaptcha' i]",
           "input[name='cf-turnstile-response']",
           "textarea[name='g-recaptcha-response']",
-          "textarea[name='h-captcha-response']"
+          "textarea[name='h-captcha-response']",
+          "[class*='arkose' i]",
+          "[class*='geetest' i]",
+          "iframe[src*='arkoselabs.com']"
         ],
         "url_contains": [
           "/captcha",
@@ -125,10 +133,15 @@
           "challenges.cloudflare.com",
           "hcaptcha",
           "recaptcha",
-          "turnstile"
+          "turnstile",
+          "arkoselabs.com",
+          "geetest.com"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "A page that only mentions 'captcha' in a blog post, FAQ, or documentation body is not itself a challenge; require a matching selector/URL or an active challenge widget.",
+        "Some sites embed a captcha widget on every page load (e.g. comment forms) without it being an active blocking challenge; check widget visibility/state, not just presence in the DOM."
+      ],
       "notes": [
         "Detection is protective only; do not automate challenge solving or evasion."
       ]
@@ -187,7 +200,12 @@
           "we have detected unusual behavior",
           "we've detected unusual behavior",
           "web application firewall",
-          "your request has been blocked"
+          "your request has been blocked",
+          "Arkose Labs",
+          "F5 Shape",
+          "human-verified traffic only",
+          "Radware Bot Manager",
+          "this request has been identified as automated"
         ],
         "css_selectors": [
           "#px-captcha",
@@ -209,7 +227,9 @@
           "datadome",
           "incapsula",
           "kasada",
-          "perimeterx"
+          "perimeterx",
+          "arkoselabs",
+          "shieldsquare"
         ],
         "headers": {
           "server_contains": [
@@ -239,7 +259,10 @@
           503
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Generic 403/'forbidden' text can also come from misconfigured routes, expired links, or normal auth failures unrelated to bot detection; corroborate with a vendor-specific selector, header, or cookie before treating as bot detection.",
+        "Server headers like 'cloudflare' are extremely common (most sites sit behind Cloudflare CDN) and are not themselves a block signal; only weight them when combined with a challenge cookie or block-page text."
+      ],
       "notes": [
         "Treat as a site-protection signal, not as a prompt to evade controls."
       ]
@@ -280,7 +303,10 @@
           "too many requests",
           "try again later",
           "usage limit exceeded",
-          "you are being throttled"
+          "you are being throttled",
+          "API rate limit exceeded",
+          "concurrent request limit",
+          "daily quota reached"
         ],
         "headers": {
           "names": [
@@ -298,7 +324,10 @@
           503
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "A one-off 503 during a deploy or a transient network blip is not sustained rate limiting; treat isolated occurrences as low-confidence and re-check after a short backoff.",
+        "Some apps show 'please try again later' for unrelated validation errors; corroborate with a 429 status or rate-limit headers when possible."
+      ],
       "notes": [
         "Use configured backoff rather than repeated immediate retries."
       ]
@@ -348,7 +377,11 @@
           "verification code",
           "verify your email",
           "verify your identity",
-          "your session has expired"
+          "your session has expired",
+          "confirm it's you",
+          "enter the 6-digit code",
+          "passkey required",
+          "sign in with passkey"
         ],
         "css_selectors": [
           "[data-testid*='login' i]",
@@ -377,7 +410,10 @@
           403
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "A visible 'sign in' link in a site's global navigation is normal and not itself a wall; only treat as a wall when it blocks the requested content/action.",
+        "Marketing pages that mention 'create an account' as a call-to-action (not a gate) should not trigger this on their own."
+      ],
       "notes": [
         "Warn because credentials or user-specific authorization may be required."
       ]
@@ -420,7 +456,10 @@
           451
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "A 403 on a single sub-resource (e.g. an analytics beacon) while the main page loads fine is not the same as the page itself being restricted.",
+        "Some sites return 401/403 briefly during session refresh; treat single transient occurrences as low-confidence."
+      ],
       "notes": [
         "Do not attempt to bypass access controls; surface the state to the caller."
       ]
@@ -455,7 +494,10 @@
           "view-source"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "'data:' URIs used only for inline images/fonts within otherwise normal navigation are lower risk than a top-level navigation to a data: URI; weight navigation target higher than embedded resource usage.",
+        "'view-source:' or 'about:' pages the user explicitly opened themselves (not agent-initiated navigation) may be expected in some debugging workflows; confirm navigation origin."
+      ],
       "notes": [
         "http and https are the default allowed navigation schemes."
       ]
@@ -501,7 +543,10 @@
           "metadata.google.internal"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Legitimate developer/test workflows may intentionally target localhost or a private IP; if the task explicitly requests local/dev testing under an approved policy, this may be an expected allowlisted exception rather than a true positive.",
+        "A string like '127.0.0.1' appearing only in page text/documentation (not as a navigation or request target) is informational, not a navigation risk."
+      ],
       "notes": [
         "Protects against SSRF-style browsing and accidental access to local/internal services."
       ]
@@ -590,7 +635,10 @@
           "application/x-sh"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Legitimate software vendor download pages (official installers from a known, verified domain) are expected in some workflows; combine with domain reputation/allowlists before blocking outright.",
+        "A file extension like '.js' appearing as a static asset reference (e.g. a script tag) is not the same as an offered download; scope this matcher to download/attachment contexts."
+      ],
       "notes": [
         "Warn or block depending on product policy; do not execute downloaded content automatically."
       ]
@@ -668,7 +716,10 @@
           ]
         }
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Placeholder or example values in documentation (e.g. 'sk-xxxxxxxx', 'YOUR_API_KEY_HERE') are not real secrets; require a plausible entropy/format match, not just the surrounding label text.",
+        "Autofill password fields on a login form the user is legitimately signing into are expected UI, not exposure; this matcher is about secrets appearing in visible text/URLs/logs, not normal password input fields."
+      ],
       "notes": [
         "Evidence should be redacted by default. Prefer detection metadata over raw secret values."
       ]
@@ -710,7 +761,10 @@
           "(?i)swift\\s*[:=]?\\s*[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Generic references to 'billing address' or 'tax id' in a privacy policy or terms page are informational text, not actual data entry/exposure.",
+        "A masked card number display (e.g. '**** **** **** 1234') is lower risk than a fully exposed PAN; weight partial/masked matches lower than full-number regex hits."
+      ],
       "notes": [
         "Do not store raw financial identifiers in memory, logs, or test fixtures."
       ]
@@ -751,7 +805,10 @@
           "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Generic form labels like 'email address' or 'phone number' on an ordinary signup form are expected UI text, not an exposure event; this is most useful when actual values (not just field labels) are matched.",
+        "Public business contact information (e.g. a company's published support email) is not sensitive personal data in the same way a user's own PII is."
+      ],
       "notes": [
         "PII detection can be noisy; treat as warning unless policy requires blocking."
       ]
@@ -802,7 +859,10 @@
           "(?i)urgent action required"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Legitimate account-security emails/pages from known providers may use similar urgency language ('unusual sign-in attempt', 'verify your account'); corroborate with sender/domain reputation before treating as phishing.",
+        "Customer support tools that legitimately need remote-access software (TeamViewer, AnyDesk) in an enterprise IT context are a normal use case; context (unsolicited pop-up vs. requested support session) matters."
+      ],
       "notes": [
         "Warn the caller; avoid entering credentials or payment data into suspicious flows."
       ]
@@ -849,7 +909,10 @@
           "(?i)sign (this )?message"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "A news article or educational page that discusses seed phrases or wallet security conceptually (without an active connect/sign prompt) should not trigger a block.",
+        "A user knowingly using a legitimate, expected DeFi/exchange workflow under explicit human direction may be a policy-approved exception rather than a true positive."
+      ],
       "notes": [
         "Block automated entry or signing actions. Human review required."
       ]
@@ -889,7 +952,10 @@
           "http://"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Some internal/dev/staging environments intentionally use self-signed certificates or http; this may be an expected exception under an approved policy rather than a genuine risk.",
+        "A page merely mentioning 'SSL' or 'TLS' in help documentation is not itself an insecure-transport event."
+      ],
       "notes": [
         "Combine with current page scheme and form action before blocking."
       ]
@@ -938,7 +1004,10 @@
           "button[type='submit']"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Buttons like 'submit' or 'place order' are extremely common UI text; only elevate confidence when combined with a clearly destructive/financial context (e.g. near a total, a delete confirmation dialog, or an account-closure flow).",
+        "A disabled or greyed-out destructive button is not an actionable state."
+      ],
       "notes": [
         "This is a protective confirmation signal; downstream policy decides whether to pause."
       ]
@@ -974,7 +1043,10 @@
           "input[type='file']"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "A generic 'upload file' control for non-sensitive content (e.g. a profile picture) is lower risk than an explicit request for an ID, passport, or financial document; weight by the specific document type requested.",
+        "File-upload UI present on the page but not actively being engaged by the agent is informational, not an action in progress."
+      ],
       "notes": [
         "Avoid automatic local file selection unless explicitly requested and policy-approved."
       ]
@@ -1013,7 +1085,9 @@
           "button[id*='accept' i]"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "This category is intentionally low-risk/informational; it should rarely if ever block a workflow on its own."
+      ],
       "notes": [
         "Privacy banner detection is informational unless the product policy requires a specific choice."
       ]
@@ -1058,7 +1132,10 @@
           "button[name*='age' i]"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Words like 'casino' or 'firearms' appearing in unrelated news coverage, historical content, or regulatory text are not the same as an active age-gated or transactional page; weight page context (age-gate UI, purchase flow) over a single keyword hit.",
+        "Review/rating sites, news articles, and educational content about these topics are lower risk than a direct storefront or gambling transaction page."
+      ],
       "notes": [
         "Signal for product policy evaluation; do not infer illegality from a single weak match."
       ]
@@ -1097,7 +1174,10 @@
           "[class*='permission' i]"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "A page merely explaining why it might ask for a permission (help text) is not the same as an active native permission prompt.",
+        "Permission requests the human user directly and intentionally triggered themselves (not the agent) may be expected in some assisted workflows."
+      ],
       "notes": [
         "Automation should not grant sensitive device permissions by default."
       ]
@@ -1149,7 +1229,10 @@
           "onload="
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "Normal, legitimate JavaScript on nearly every modern site uses 'localStorage', 'sessionStorage', 'eval(' (rarely but sometimes), or event handler attributes; this matcher is best scoped to reflected/URL-borne payloads or injection contexts rather than ordinary inline site JavaScript.",
+        "Security research, documentation, or educational pages that display example XSS payloads as inert text are not themselves an active injection attempt."
+      ],
       "notes": [
         "Primarily protective for navigation/action payloads and reflected content diagnostics."
       ]
@@ -1183,9 +1266,236 @@
           "terms of service"
         ]
       },
-      "false_positive_hints": [],
+      "false_positive_hints": [
+        "A simple footer link to a 'privacy policy' or 'terms of service' page, present on virtually every site, is not itself a wall; only elevate when it actively blocks progress (e.g. a modal requiring 'I agree' before continuing)."
+      ],
       "notes": [
         "Usually a warning; product policy determines whether automated acknowledgement is allowed."
+      ]
+    },
+    "geo_or_region_block": {
+      "enabled": true,
+      "description": "Geographic or region-based access restrictions, including region-locked content and VPN/proxy detection notices.",
+      "decision": "warn",
+      "severity": "low",
+      "risk_score": 0.3,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "status_code"
+      ],
+      "matchers": {
+        "text": [
+          "available in select countries",
+          "content is not available in your country",
+          "content not available in your region",
+          "GDPR restricted",
+          "geo-restricted",
+          "not available in your region",
+          "not licensed to stream in your country",
+          "please disable your VPN",
+          "region locked",
+          "service is unavailable in your area",
+          "this content is not available in your location",
+          "unavailable due to your location",
+          "VPN or proxy detected"
+        ],
+        "css_selectors": [
+          "[class*='geoblock' i]",
+          "[id*='geo-restrict' i]"
+        ],
+        "status_codes": [
+          451
+        ]
+      },
+      "false_positive_hints": [
+        "Some sites show a soft regional preference banner (e.g. 'switch to your local store') without actually blocking access; only elevate when content or navigation is actually prevented."
+      ],
+      "notes": [
+        "Informational for most workflows; do not attempt to spoof location or use VPNs/proxies to bypass regional restrictions."
+      ]
+    },
+    "maintenance_or_outage_page": {
+      "enabled": true,
+      "description": "Planned maintenance, scheduled downtime, or service-outage pages indicating the site is temporarily unavailable for reasons unrelated to rate limiting or blocking.",
+      "decision": "allow",
+      "severity": "info",
+      "risk_score": 0.1,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "status_code"
+      ],
+      "matchers": {
+        "text": [
+          "back online shortly",
+          "currently undergoing maintenance",
+          "down for maintenance",
+          "experiencing technical difficulties",
+          "planned maintenance",
+          "scheduled maintenance",
+          "site is temporarily down",
+          "site is temporarily unavailable",
+          "we'll be back soon",
+          "we're currently performing maintenance",
+          "we're down for scheduled maintenance"
+        ],
+        "css_selectors": [
+          "[class*='maintenance' i]",
+          "[id*='maintenance' i]"
+        ],
+        "status_codes": [
+          502,
+          503,
+          504
+        ]
+      },
+      "false_positive_hints": [
+        "A single slow-loading request is not the same as a maintenance page; require matching page text/selectors rather than status code alone, since 503 overlaps with rate_limit and bot_detection_block."
+      ],
+      "notes": [
+        "Distinct from rate_limit: this indicates planned/expected downtime rather than a signal to back off request volume. Retry later rather than repeatedly polling."
+      ]
+    },
+    "oauth_third_party_consent_grant": {
+      "enabled": true,
+      "description": "Third-party OAuth/consent screens requesting the user grant an application access to account data or scopes. Distinct from a plain login wall because it involves authorizing a specific app's permissions.",
+      "decision": "warn",
+      "severity": "high",
+      "risk_score": 0.6,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom",
+        "url"
+      ],
+      "matchers": {
+        "text": [
+          "allow access to your account",
+          "authorize this application",
+          "grant access to your Google Account",
+          "has requested permission to access your account",
+          "this app would like to",
+          "this will allow",
+          "wants to access your",
+          "will be able to"
+        ],
+        "css_selectors": [
+          "[data-testid*='consent' i]",
+          "[data-testid*='oauth' i]"
+        ],
+        "url_contains": [
+          "/authorize",
+          "/oauth/authorize",
+          "consent.google.com",
+          "oauth2/auth"
+        ]
+      },
+      "false_positive_hints": [
+        "A user's own first-party login to a site they already use is not the same as a third-party app requesting a scope grant; require an explicit 'authorize'/'grant access' consent UI, not just any OAuth-flavored URL."
+      ],
+      "notes": [
+        "Review requested scopes carefully before approving; do not grant broad or unnecessary permissions on the user's behalf without explicit human confirmation."
+      ]
+    },
+    "fake_system_alert_or_tech_support_scam": {
+      "enabled": true,
+      "description": "Fake virus/security alerts, fraudulent tech-support pop-ups, and scareware pages designed to pressure the user into calling a number, downloading software, or granting remote access.",
+      "decision": "block",
+      "severity": "critical",
+      "risk_score": 0.93,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom"
+      ],
+      "matchers": {
+        "text": [
+          "call microsoft support",
+          "call this number immediately",
+          "do not close this window",
+          "do not turn off your computer",
+          "your computer has been locked",
+          "your computer has been infected",
+          "your device is infected with a virus",
+          "your ip address has been flagged",
+          "windows security alert",
+          "critical security warning",
+          "system has detected a virus",
+          "technical support scam"
+        ],
+        "css_selectors": [
+          "[class*='fake-alert' i]",
+          "[class*='scareware' i]"
+        ]
+      },
+      "false_positive_hints": [
+        "Legitimate OS/browser security warnings (e.g. a real browser's own malware-download interstitial) use standard browser chrome, not in-page content; verify whether the alert is native browser UI versus page-rendered content mimicking one."
+      ],
+      "notes": [
+        "These pages are designed to induce panic; never call listed numbers, download 'fixes', or grant remote access. Always block and surface for human review."
+      ]
+    },
+    "unexpected_domain_redirect_or_typosquat": {
+      "enabled": true,
+      "description": "Navigation that lands on a domain different from the one requested/expected, including punycode/IDN homograph patterns and common typosquatting indicators.",
+      "decision": "warn",
+      "severity": "high",
+      "risk_score": 0.65,
+      "match_policy": "any",
+      "evidence_types": [
+        "url",
+        "domain",
+        "regex"
+      ],
+      "matchers": {
+        "regex": [
+          "(?i)^https?://xn--",
+          "(?i)[0-9]+\\.(com|net|org)/(login|signin|secure|verify)"
+        ],
+        "url_contains": [
+          "xn--"
+        ]
+      },
+      "false_positive_hints": [
+        "Many legitimate flows redirect across domains on purpose (payment processors, SSO providers, CDN-hosted assets, link shorteners); this is most useful when combined with a known expected-destination allowlist rather than flagging every cross-domain redirect."
+      ],
+      "notes": [
+        "Best used by comparing the final navigation target against the originally requested/linked domain rather than in isolation (domain_compare: flag when the final landing domain differs from the originally requested/linked domain and is not a known, expected redirect such as shortener-to-destination)."
+      ]
+    },
+    "ad_or_popup_interstitial": {
+      "enabled": true,
+      "description": "Advertising interstitials, pop-ups, pop-unders, and 'you have won' style promotional overlays that interrupt the primary task.",
+      "decision": "warn",
+      "severity": "low",
+      "risk_score": 0.2,
+      "match_policy": "any",
+      "evidence_types": [
+        "text",
+        "dom"
+      ],
+      "matchers": {
+        "text": [
+          "click here to claim your prize",
+          "congratulations you have won",
+          "complete a survey to continue",
+          "spin to win",
+          "you have been selected",
+          "you're our lucky visitor"
+        ],
+        "css_selectors": [
+          "[class*='interstitial' i]",
+          "[class*='popunder' i]",
+          "[id*='popup-ad' i]",
+          "iframe[id*='google_ads']"
+        ]
+      },
+      "false_positive_hints": [
+        "Ordinary, non-deceptive display advertising (e.g. a banner ad) is lower risk than a prize/reward-claim overlay; this matcher is aimed at deceptive/scammy interstitials rather than routine ad content."
+      ],
+      "notes": [
+        "Usually safe to dismiss/close rather than block outright, but avoid clicking through prize-claim style overlays."
       ]
     }
   },
@@ -1228,7 +1538,12 @@
       "unsafe_url_scheme_blocks_javascript_scheme",
       "private_network_detects_localhost_and_metadata_endpoint",
       "sensitive_regex_redacts_detected_evidence",
-      "rate_limit_detects_429_and_retry_after_header"
+      "rate_limit_detects_429_and_retry_after_header",
+      "geo_or_region_block_detects_region_restriction_text",
+      "maintenance_or_outage_page_does_not_trigger_rate_limit_backoff",
+      "oauth_third_party_consent_grant_detects_scope_authorization_prompt",
+      "fake_system_alert_blocks_tech_support_scam_text",
+      "ad_or_popup_interstitial_detects_prize_claim_overlay"
     ]
   }
 }

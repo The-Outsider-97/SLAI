@@ -3,7 +3,7 @@
 Uses lazy loading to avoid importing optional heavy dependencies at package import time.
 """
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 _EXPORTS = {
     "AgentFactory": (".agent_factory", "AgentFactory"),
@@ -26,21 +26,27 @@ _EXPORTS = {
     "CollaborativeAgent": (".collaborative_agent", "CollaborativeAgent"),
     "EvaluationAgent": (".evaluation_agent", "EvaluationAgent"),
     "ExecutionAgent": (".execution_agent", "ExecutionAgent"),
-    "HandlerAgent": (".handler_agent", "HandlerAgent"), # done for 2.1.0 needs to be updated and expanded for 2.3.0
+    "HandlerAgent": (".handler_agent", "HandlerAgent"), # done for 2.1.0 needs to be updated and expanded for 2.4.0
     "KnowledgeAgent": (".knowledge_agent", "KnowledgeAgent"),
     "LanguageAgent": (".language_agent", "LanguageAgent"),
     "LearningAgent": (".learning_agent", "LearningAgent"),
     "NetworkAgent": (".network_agent", "NetworkAgent"),
     "ObservabilityAgent": (".observability_agent", "ObservabilityAgent"),
-    "PerceptionAgent": (".perception_agent", "PerceptionAgent"), # done for 2.1.0. Maybe split into multiple agents for 2.3.0 (e.g., vision agent, audio agent, encoder agent, etc.)
+    "OptimizationAgent": (".optimization_agent", "OptimizationAgent"),
+    "OrchestratorAgent": (".orchestrator_agent", "OrchestratorAgent"),
+    "PerceptionAgent": (".perception_agent", "PerceptionAgent"),
     "PlanningAgent": (".planning_agent", "PlanningAgent"),
     "PrivacyAgent": (".privacy_agent", "PrivacyAgent"),
+    "ProvenanceAgent": (".provenance_agent", "ProvenanceAgent"),
     "QNNAgent": (".qnn_agent", "QNNAgent"),
     "QualityAgent": (".quality_agent", "QualityAgent"),
-    "ReaderAgent": (".reader_agent", "ReaderAgent"), # done for 2.1.0 needs to be updated and expanded for 2.3.0
+    "ReaderAgent": (".reader_agent", "ReaderAgent"),
     "ReasoningAgent": (".reasoning_agent", "ReasoningAgent"),
     "SafetyAgent": (".safety_agent", "SafetyAgent"),
-    # For later: add more agents like social agent, emotional agent, gamer agent, simulation agent, etc.
+    "SimulationAgent": (".simulation_agent", "SimulationAgent"),
+    "SpatialAgent": (".spatial_agent", "SpatialAgent"),
+    "STEMAgent": (".stem_agent", "STEMAgent"),
+    "VerificationAgent": (".verification_agent", "VerificationAgent"),
 }
 
 __all__ = sorted(_EXPORTS.keys()) # pyright: ignore[reportUnsupportedDunderAll]

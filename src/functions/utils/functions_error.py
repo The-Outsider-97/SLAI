@@ -1,10 +1,48 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+class FunctionsError(Exception):
+    """Stable base exception for the reusable functions package."""
+
+    default_code = "functions_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code or self.default_code
+        self.details = details or {}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "error": self.message,
+            "type": self.__class__.__name__,
+            "code": self.error_code,
+            "details": _json_safe(self.details),
+        }
+
 # ============================================================================
 # Authentication exceptions (production-ready)
 # ============================================================================
-class AuthError(Exception):
+class AuthError(FunctionsError):
     """Base exception for all authentication and authorisation errors."""
 
     def __init__(
@@ -14,21 +52,14 @@ class AuthError(Exception):
         details: Optional[Dict[str, Any]] = None,
         username: Optional[str] = None,
     ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.error_code = error_code
-        self.details = details or {}
+        super().__init__(message, error_code=error_code or "authentication_error", details=details)
         self.username = username
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, *, include_sensitive: bool = False) -> Dict[str, Any]:
         """Convert to dictionary for API error responses."""
-        result: Dict[str, Any] = {"error": self.message, "type": self.__class__.__name__}
-        if self.error_code:
-            result["code"] = self.error_code
-        if self.username:
+        result = super().to_dict()
+        if include_sensitive and self.username:
             result["username"] = self.username
-        if self.details:
-            result["details"] = self.details
         return result
 
 
@@ -119,7 +150,7 @@ class InvalidTokenError(AuthError):
 # ============================================================================
 # Base exception for shared memory / security helpers
 # ============================================================================
-class FunctionsMemoryError(Exception):
+class FunctionsMemoryError(FunctionsError):
     """Base exception for shared memory/security helpers."""
     pass
 
@@ -201,7 +232,7 @@ class StoreSaveError(StoreError):
 # ============================================================================
 # Base exception for rate limiting
 # ============================================================================
-class RateLimitError(Exception):
+class RateLimitError(FunctionsError):
     """Base exception for rate limiting errors."""
     pass
 
@@ -225,7 +256,7 @@ class RateLimitConfigurationError(RateLimitError):
 # ============================================================================
 # Base exception for email services
 # ============================================================================
-class EmailError(Exception):
+class EmailError(FunctionsError):
     """Base exception for email sending failures."""
     pass
 
@@ -257,9 +288,188 @@ class EmailConfigurationError(EmailError):
 
 
 # ============================================================================
+# Base exception for phone verification services
+# ============================================================================
+class PhoneVerificationError(FunctionsError):
+    """Base exception for phone number verification failures."""
+
+    default_code = "phone_verification_error"
+
+
+class PhoneConfigurationError(PhoneVerificationError):
+    """Raised when phone verification service configuration is invalid."""
+
+    default_code = "phone_configuration_error"
+
+
+class InvalidPhoneNumberError(PhoneVerificationError):
+    """Raised when a phone number fails validation or normalization."""
+
+    default_code = "invalid_phone_number"
+
+    def __init__(self, phone_number: str, reason: str = "Invalid phone number"):
+        self.phone_number = phone_number
+        self.reason = reason
+        super().__init__(
+            f"{reason}: {phone_number!r}",
+            error_code=self.default_code,
+            details={"phone_number": phone_number, "reason": reason},
+        )
+
+
+class InvalidCountryCodeError(PhoneVerificationError):
+    """Raised when a supplied country calling code or ISO region is invalid."""
+
+    default_code = "invalid_country_code"
+
+    def __init__(self, country_code: str, reason: str = "Invalid country code"):
+        self.country_code = country_code
+        self.reason = reason
+        super().__init__(
+            f"{reason}: {country_code!r}",
+            error_code=self.default_code,
+            details={
+                "country_code": country_code,
+                "reason": reason,
+            },
+        )
+
+
+class PhoneCountryMismatchError(PhoneVerificationError):
+    """Raised when a phone number does not belong to the expected country/region."""
+
+    default_code = "phone_country_mismatch"
+
+    def __init__(
+        self,
+        phone_number: str,
+        *,
+        expected_country_code: str,
+        actual_country_code: str,
+        expected_region: Optional[str] = None,
+        actual_region: Optional[str] = None,
+    ):
+        self.phone_number = phone_number
+        self.expected_country_code = expected_country_code
+        self.actual_country_code = actual_country_code
+        self.expected_region = expected_region
+        self.actual_region = actual_region
+
+        expected = expected_country_code
+        if expected_region:
+            expected = f"{expected_country_code} ({expected_region})"
+
+        actual = actual_country_code
+        if actual_region:
+            actual = f"{actual_country_code} ({actual_region})"
+
+        super().__init__(
+            f"Phone number country mismatch: expected {expected}, got {actual}",
+            error_code=self.default_code,
+            details={
+                "phone_number": phone_number,
+                "expected_country_code": expected_country_code,
+                "actual_country_code": actual_country_code,
+                "expected_region": expected_region,
+                "actual_region": actual_region,
+            },
+        )
+
+
+class SMSError(PhoneVerificationError):
+    """Base exception for SMS transport failures."""
+
+    default_code = "sms_error"
+
+
+class SMSSendError(SMSError):
+    """Raised when sending an SMS fails (network, provider, etc.)."""
+
+    default_code = "sms_send_error"
+
+    def __init__(self, recipient: str, reason: str):
+        self.recipient = recipient
+        self.reason = reason
+        super().__init__(
+            f"Failed to send SMS to {recipient}: {reason}",
+            error_code=self.default_code,
+            details={"recipient": recipient, "reason": reason},
+        )
+
+
+class SMSAuthError(SMSError):
+    """Raised when authentication with the SMS provider fails."""
+
+    default_code = "sms_auth_error"
+
+
+class VerificationNotFoundError(PhoneVerificationError):
+    """Raised when verifying a phone number with no pending verification record."""
+
+    default_code = "verification_not_found"
+
+    def __init__(self, phone_number: str):
+        self.phone_number = phone_number
+        super().__init__(
+            f"No pending verification found for {phone_number}",
+            error_code=self.default_code,
+            details={"phone_number": phone_number},
+        )
+
+
+class VerificationCodeExpiredError(PhoneVerificationError):
+    """Raised when the stored verification code has passed its TTL."""
+
+    default_code = "verification_code_expired"
+
+    def __init__(self, phone_number: str):
+        self.phone_number = phone_number
+        super().__init__(
+            f"Verification code for {phone_number} has expired",
+            error_code=self.default_code,
+            details={"phone_number": phone_number},
+        )
+
+
+class VerificationAttemptsExceededError(PhoneVerificationError):
+    """Raised when the maximum number of verification attempts has been used."""
+
+    default_code = "verification_attempts_exceeded"
+
+    def __init__(self, phone_number: str, max_attempts: int):
+        self.phone_number = phone_number
+        self.max_attempts = max_attempts
+        super().__init__(
+            f"Maximum verification attempts ({max_attempts}) exceeded for {phone_number}",
+            error_code=self.default_code,
+            details={"phone_number": phone_number, "max_attempts": max_attempts},
+        )
+
+
+class VerificationRateLimitError(PhoneVerificationError):
+    """Raised when a resend cooldown or send-window limit blocks a new code."""
+
+    default_code = "verification_rate_limited"
+
+    def __init__(self, phone_number: str, retry_after_seconds: float, reason: str = "Rate limit exceeded"):
+        self.phone_number = phone_number
+        self.retry_after_seconds = retry_after_seconds
+        self.reason = reason
+        super().__init__(
+            f"{reason} for {phone_number}; retry after {retry_after_seconds:.1f}s",
+            error_code=self.default_code,
+            details={
+                "phone_number": phone_number,
+                "retry_after_seconds": retry_after_seconds,
+                "reason": reason,
+            },
+        )
+
+
+# ============================================================================
 # Base exception for storage operations
 # ============================================================================
-class StorageError(Exception):
+class StorageError(FunctionsError):
     """Base exception for storage operations."""
     pass
 
@@ -317,81 +527,9 @@ class StorageBackendError(StorageError):
 
 
 # ============================================================================
-# Base exception for transport operations
-# ============================================================================
-class TransportError(Exception):
-    """Base exception for all transport layer communications."""
-
-    def __init__(
-        self,
-        message: str = "Transport error",
-        adapter_name: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.adapter_name = adapter_name
-        self.details = details or {}
-
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"error": self.message, "type": self.__class__.__name__}
-        if self.adapter_name:
-            result["adapter"] = self.adapter_name
-        if self.details:
-            result["details"] = self.details
-        return result
-
-
-class TransportChannelError(TransportError):
-    """Raised when an adapter/channel cannot connect or becomes unavailable."""
-
-    def __init__(
-        self,
-        adapter_name: str,
-        reason: str = "Channel unavailable",
-        channel_state: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        self.reason = reason
-        self.channel_state = channel_state
-        msg = f"Channel error on '{adapter_name}': {reason}"
-        if channel_state:
-            msg += f" (state={channel_state})"
-        extra_details = {"reason": reason, "state": channel_state}
-        if details:
-            extra_details.update(details)
-        super().__init__(msg, adapter_name=adapter_name, details=extra_details)
-
-
-class TransportRetryExhausted(TransportError):
-    """Raised when all retry attempts for a transmission have failed."""
-
-    def __init__(
-        self,
-        adapter_name: str,
-        attempts: int,
-        last_error: Optional[str] = None,
-        message: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        self.attempts = attempts
-        self.last_error = last_error
-        if not message:
-            msg = f"Adapter '{adapter_name}' exhausted {attempts} retries"
-            if last_error:
-                msg += f": {last_error}"
-        else:
-            msg = message
-        extra_details = {"attempts": attempts, "last_error": last_error}
-        if details:
-            extra_details.update(details)
-        super().__init__(msg, adapter_name=adapter_name, details=extra_details)
-
-
-# ============================================================================
 # Search engine exceptions
 # ============================================================================
-class SearchError(Exception):
+class SearchError(FunctionsError):
     """Base exception for search engine errors."""
     pass
 
@@ -437,3 +575,500 @@ class InconsistentFieldsError(SearchError):
         self.expected = expected
         self.got = got
         super().__init__(f"Field mismatch: expected {expected}, got {got}")
+
+
+# ============================================================================
+# Transport exceptions
+# ============================================================================
+class TransportError(FunctionsError):
+    """Base exception for transport-layer operations."""
+
+    default_code = "transport_error"
+
+    def __init__(
+        self,
+        message: str = "Transport operation failed",
+        *,
+        adapter_name: Optional[str] = None,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.adapter_name = adapter_name
+
+        error_details = dict(details or {})
+        if adapter_name is not None:
+            error_details.setdefault("adapter_name", adapter_name)
+
+        super().__init__(
+            message,
+            error_code=error_code or self.default_code,
+            details=error_details,
+        )
+
+
+class TransportChannelError(TransportError):
+    """Raised when a transport channel cannot connect or becomes unavailable."""
+
+    default_code = "transport_channel_error"
+
+    def __init__(
+        self,
+        adapter_name: str,
+        reason: str = "Channel unavailable",
+        *,
+        channel_state: Optional[str] = None,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not isinstance(adapter_name, str) or not adapter_name.strip():
+            raise ValueError("adapter_name must be a non-empty string")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be a non-empty string")
+
+        self.reason = reason
+        self.channel_state = channel_state
+
+        error_details = dict(details or {})
+        error_details.setdefault("reason", reason)
+        if channel_state is not None:
+            error_details.setdefault("channel_state", channel_state)
+
+        message = f"Channel error on '{adapter_name}': {reason}"
+        if channel_state is not None:
+            message += f" (state={channel_state})"
+
+        super().__init__(
+            message,
+            adapter_name=adapter_name,
+            error_code=error_code or self.default_code,
+            details=error_details,
+        )
+
+
+class TransportRetryExhausted(TransportError):
+    """Raised after every permitted transport attempt has failed."""
+
+    default_code = "transport_retry_exhausted"
+
+    def __init__(
+        self,
+        adapter_name: str,
+        attempts: int,
+        *,
+        last_error: Optional[str] = None,
+        message: Optional[str] = None,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not isinstance(adapter_name, str) or not adapter_name.strip():
+            raise ValueError("adapter_name must be a non-empty string")
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("attempts must be a positive integer")
+
+        self.attempts = attempts
+        self.last_error = last_error
+
+        error_details = dict(details or {})
+        error_details.setdefault("attempts", attempts)
+        if last_error is not None:
+            error_details.setdefault("last_error", last_error)
+
+        resolved_message = message or (
+            f"Adapter '{adapter_name}' exhausted {attempts} transport attempts"
+        )
+        if message is None and last_error:
+            resolved_message += f": {last_error}"
+
+        super().__init__(
+            resolved_message,
+            adapter_name=adapter_name,
+            error_code=error_code or self.default_code,
+            details=error_details,
+        )
+
+
+# ============================================================================
+# Webhook exceptions
+# ============================================================================
+
+class WebhookError(FunctionsError):
+    """Base exception for webhook operations."""
+
+    default_code = "webhook_error"
+
+    def __init__(
+        self,
+        message: str = "Webhook operation failed",
+        *,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            error_code=error_code or self.default_code,
+            details=details,
+        )
+
+
+class WebhookConfigurationError(WebhookError):
+    """Raised when webhook configuration is invalid."""
+
+    default_code = "webhook_configuration_error"
+
+
+class WebhookSerializationError(WebhookError):
+    """Raised when a webhook event cannot be serialized to canonical JSON."""
+
+    default_code = "webhook_serialization_error"
+
+    def __init__(
+        self,
+        reason: str,
+    ) -> None:
+        self.reason = reason
+
+        super().__init__(
+            f"Webhook serialization failed: {reason}",
+            error_code=self.default_code,
+            details={
+                "reason": reason,
+            },
+        )
+
+
+class WebhookSecurityError(WebhookError):
+    """Raised when a webhook destination violates security policy."""
+
+    default_code = "webhook_security_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        endpoint: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.endpoint = endpoint
+
+        error_details = dict(
+            details or {}
+        )
+
+        if endpoint is not None:
+            error_details.setdefault(
+                "endpoint",
+                endpoint,
+            )
+
+        super().__init__(
+            message,
+            error_code=self.default_code,
+            details=error_details,
+        )
+
+
+class WebhookSignatureError(WebhookError):
+    """Raised when webhook signature validation fails."""
+
+    default_code = "webhook_signature_error"
+
+
+class WebhookPayloadTooLargeError(WebhookError):
+    """Raised when a webhook payload exceeds its configured size limit."""
+
+    default_code = "webhook_payload_too_large"
+
+    def __init__(
+        self,
+        actual_bytes: int,
+        max_bytes: int,
+    ) -> None:
+        self.actual_bytes = actual_bytes
+        self.max_bytes = max_bytes
+
+        super().__init__(
+            (
+                f"Webhook payload is {actual_bytes} bytes; "
+                f"maximum is {max_bytes} bytes"
+            ),
+            error_code=self.default_code,
+            details={
+                "actual_bytes": actual_bytes,
+                "max_bytes": max_bytes,
+            },
+        )
+
+
+class WebhookDeliveryError(WebhookError):
+    """Raised when delivery to a webhook endpoint fails."""
+
+    default_code = "webhook_delivery_error"
+
+    def __init__(
+        self,
+        endpoint: str,
+        reason: str,
+        *,
+        status_code: Optional[int] = None,
+        retryable: bool = False,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.endpoint = endpoint
+        self.reason = reason
+        self.status_code = status_code
+        self.retryable = retryable
+
+        error_details = dict(
+            details or {}
+        )
+
+        error_details.setdefault(
+            "endpoint",
+            endpoint,
+        )
+
+        error_details.setdefault(
+            "reason",
+            reason,
+        )
+
+        error_details.setdefault(
+            "retryable",
+            retryable,
+        )
+
+        if status_code is not None:
+            error_details.setdefault(
+                "status_code",
+                status_code,
+            )
+
+        super().__init__(
+            f"Webhook delivery to {endpoint} failed: {reason}",
+            error_code=self.default_code,
+            details=error_details,
+        )
+
+
+class WebhookRetryExhausted(WebhookDeliveryError):
+    """Raised after all permitted webhook delivery attempts fail."""
+
+    default_code = "webhook_retry_exhausted"
+
+    def __init__(
+        self,
+        endpoint: str,
+        event_id: str,
+        attempts: int,
+        *,
+        last_error: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ) -> None:
+        self.event_id = event_id
+        self.attempts = attempts
+        self.last_error = last_error
+
+        reason = (
+            f"delivery exhausted after {attempts} attempt(s)"
+        )
+
+        if last_error:
+            reason += f": {last_error}"
+
+        super().__init__(
+            endpoint=endpoint,
+            reason=reason,
+            status_code=status_code,
+            retryable=False,
+            details={
+                "event_id": event_id,
+                "attempts": attempts,
+                "last_error": last_error,
+            },
+        )
+
+        self.error_code = self.default_code
+
+
+# -------------------------------------------------------------------------
+# Payment Exceptions
+# -------------------------------------------------------------------------
+class PaymentError(Exception):
+    """Base exception for payment operations."""
+
+
+class PaymentValidationError(PaymentError):
+    """Raised when a payment request is invalid."""
+
+
+class PaymentProviderError(PaymentError):
+    """Raised when the configured payment provider fails."""
+
+    def __init__(self, operation: str, reason: str) -> None:
+        self.operation = operation
+        self.reason = reason
+        super().__init__(f"Payment provider failed during {operation}: {reason}")
+
+
+class PaymentStateError(PaymentError):
+    """Raised when an operation is incompatible with payment state."""
+
+
+class PaymentNotFoundError(PaymentError):
+    """Raised when a local payment record cannot be found."""
+
+    def __init__(self, payment_id: str) -> None:
+        self.payment_id = payment_id
+        super().__init__(f"Payment not found: {payment_id}")
+
+
+class IdempotencyConflictError(PaymentError):
+    """Raised when an idempotency key is reused for different input."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(
+            f"Idempotency key '{key}' was already used for a different request"
+        )
+
+
+# -------------------------------------------------------------------------
+# File transfer Exceptions
+# -------------------------------------------------------------------------
+
+class FileTransferError(Exception):
+    """Base exception for transfer-layer failures."""
+
+
+class TransferValidationError(FileTransferError):
+    """Raised when transfer input or policy validation fails."""
+
+
+class TransferSizeError(FileTransferError):
+    """Raised when a transfer exceeds its configured size limit."""
+
+    def __init__(self, size: int, maximum: int) -> None:
+        self.size = size
+        self.maximum = maximum
+        super().__init__(
+            f"Transfer size {size} bytes exceeds maximum {maximum} bytes"
+        )
+
+
+class TransferIntegrityError(FileTransferError):
+    """Raised when an expected digest does not match actual content."""
+
+    def __init__(self, expected: str, actual: str) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"SHA-256 mismatch: expected {expected}, actual {actual}"
+        )
+
+
+class TransferDestinationError(FileTransferError):
+    """Raised when a local download destination is unsafe or unavailable."""
+
+
+# -------------------------------------------------------------------------
+# Query Exceptions
+# -------------------------------------------------------------------------
+
+
+class QueryError(Exception):
+    """Base exception for structured query operations."""
+
+
+class QueryValidationError(QueryError):
+    """Raised when a query specification is invalid."""
+
+
+class QueryExecutionError(QueryError):
+    """Raised when SQLite cannot execute a validated query."""
+
+    def __init__(self, reason: str, *, fingerprint: Optional[str] = None) -> None:
+        self.reason = reason
+        self.fingerprint = fingerprint
+        message = f"Query execution failed: {reason}"
+        if fingerprint:
+            message += f" (fingerprint={fingerprint})"
+        super().__init__(message)
+
+
+__all__ =[
+    "AccountLockedError",
+    "AuthError",
+    "CacheConfigurationError",
+    "CredentialPolicyError",
+    "EmailAuthError",
+    "EmailConfigurationError",
+    "EmailError",
+    "EmailSendError",
+    "EmailTemplateError",
+    "FunctionsMemoryError",
+    "FunctionsError",
+    "DocumentNotFoundError",
+    "InconsistentFieldsError",
+    "IndexBuildError",
+    "IndexLoadError",
+    "IndexSaveError",
+    "InvalidAnalyzerError",
+    "InvalidCountryCodeError",
+    "InvalidCredentialsError",
+    "InvalidPhoneNumberError",
+    "InvalidTokenError",
+    "PasswordHashingError",
+    "PhoneConfigurationError",
+    "PhoneCountryMismatchError",
+    "PhoneVerificationError",
+    "RateLimitConfigurationError",
+    "RateLimitError",
+    "RateLimitExceeded",
+    "SearchError",
+    "SMSAuthError",
+    "SMSError",
+    "SMSSendError",
+    "StorageBackendError",
+    "StorageDeleteError",
+    "StorageDownloadError",
+    "StorageError",
+    "StorageNotFoundError",
+    "StoragePermissionError",
+    "StorageQuotaError",
+    "StorageUploadError",
+    "StoreError",
+    "StoreLoadError",
+    "StoreLockError",
+    "StoreSaveError",
+    "StoreSerializationError",
+    "PaymentError",
+    "PaymentValidationError",
+    "PaymentProviderError",
+    "PaymentStateError",
+    "PaymentNotFoundError",
+    "IdempotencyConflictError",
+    "QueryError",
+    "QueryValidationError",
+    "QueryExecutionError",
+    "TransportChannelError",
+    "TransportError",
+    "TransportRetryExhausted",
+    "FileTransferError",
+    "TransferValidationError",
+    "TransferSizeError",
+    "TransferIntegrityError",
+    "TransferDestinationError",
+    "UserAlreadyExistsError",
+    "VerificationAttemptsExceededError",
+    "VerificationCodeExpiredError",
+    "VerificationNotFoundError",
+    "VerificationRateLimitError",
+    "WebhookConfigurationError",
+    "WebhookDeliveryError",
+    "WebhookError",
+    "WebhookPayloadTooLargeError",
+    "WebhookRetryExhausted",
+    "WebhookSecurityError",
+    "WebhookSerializationError",
+    "WebhookSignatureError",
+]

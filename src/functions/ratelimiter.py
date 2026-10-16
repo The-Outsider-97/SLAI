@@ -11,15 +11,17 @@ import math
 import threading
 import time
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from .utils.config_loader import get_config_section
-from .utils.functions_error import (RateLimitConfigurationError, RateLimitError, RateLimitExceeded)
-from logs.logger import get_logger, PrettyPrinter
+from .utils.config_loader import *
+from .utils.functions_error import *
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Rate Limiter")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
 
 @dataclass(frozen=True)
 class RateLimitDecision:
@@ -80,20 +82,40 @@ class _TokenBucket:
                 retry_after=retry_after,
             )
 
+    def is_fully_refilled(self) -> bool:
+        with self._lock:
+            self._refill(time.monotonic())
+            return self.tokens >= self.capacity
+
 
 class InMemoryStore:
     """In-memory bucket store suitable for single-process deployments."""
 
-    def __init__(self):
-        self._buckets: Dict[str, _TokenBucket] = {}
+    def __init__(self, max_buckets: int = 10_000):
+        if isinstance(max_buckets, bool) or not isinstance(max_buckets, int) or max_buckets <= 0:
+            raise RateLimitConfigurationError("max_buckets must be a positive integer")
+        self.max_buckets = max_buckets
+        self._buckets: "OrderedDict[str, _TokenBucket]" = OrderedDict()
         self._lock = threading.RLock()
 
     def get_or_create(self, key: str, capacity: int, refill_rate: float) -> _TokenBucket:
         with self._lock:
             bucket = self._buckets.get(key)
             if bucket is None:
+                if len(self._buckets) >= self.max_buckets:
+                    for candidate_key, candidate in tuple(self._buckets.items()):
+                        if candidate.is_fully_refilled():
+                            self._buckets.pop(candidate_key, None)
+                            break
+                if len(self._buckets) >= self.max_buckets:
+                    raise RateLimitError(
+                        "in-memory rate-limit bucket capacity exhausted; "
+                        "use Redis or increase max_in_memory_buckets"
+                    )
                 bucket = _TokenBucket(capacity=capacity, refill_rate=refill_rate)
                 self._buckets[key] = bucket
+            else:
+                self._buckets.move_to_end(key)
             return bucket
 
     def delete(self, key: str) -> None:
@@ -113,7 +135,8 @@ class RedisStore:
     local capacity = tonumber(ARGV[1])
     local refill_rate = tonumber(ARGV[2])
     local requested = tonumber(ARGV[3])
-    local now = tonumber(ARGV[4])
+    local redis_time = redis.call('TIME')
+    local now = tonumber(redis_time[1]) + (tonumber(redis_time[2]) / 1000000)
 
     local data = redis.call('HMGET', key, 'tokens', 'last_refill')
     local tokens = tonumber(data[1])
@@ -187,11 +210,10 @@ class _RedisTokenBucket:
         self.refill_rate = float(refill_rate)
 
     def consume(self, requested: int = 1) -> RateLimitDecision:
-        now = time.time()
         try:
             result = self._script(
                 keys=[self.key],
-                args=[self.capacity, self.refill_rate, requested, now],
+                args=[self.capacity, self.refill_rate, requested],
             )
         except Exception as exc:  # pragma: no cover - depends on redis client implementation
             raise RateLimitError(f"Redis rate-limit evaluation failed for key '{self.key}': {exc}") from exc
@@ -220,7 +242,7 @@ class RateLimiter:
         self._store = self._validate_store(store)
 
     @classmethod
-    def from_config(cls, backend: str = "memory", redis_client: Any = None) -> "RateLimiter":
+    def from_config(cls, backend: Optional[str] = None, redis_client: Any = None) -> "RateLimiter":
         """Create a ``RateLimiter`` from the ``rate_limiter`` config section."""
         try:
             raw_config = get_config_section("rate_limiter") or {}
@@ -234,10 +256,10 @@ class RateLimiter:
         capacity = raw_config.get("capacity", 100)
         refill_rate = raw_config.get("refill_rate", 10.0)
         key_prefix = raw_config.get("redis_key_prefix", "ratelimit:")
-        normalized_backend = str(backend).strip().lower()
+        normalized_backend = str(backend or raw_config.get("backend", "memory")).strip().lower()
 
         if normalized_backend == "memory":
-            store = InMemoryStore()
+            store = InMemoryStore(max_buckets=int(raw_config.get("max_in_memory_buckets", 10_000)))
         elif normalized_backend == "redis":
             store = RedisStore(redis_client=redis_client, key_prefix=key_prefix)
         else:
@@ -280,14 +302,23 @@ class RateLimiter:
 
     @staticmethod
     def _validate_capacity(capacity: int) -> int:
-        if isinstance(capacity, bool) or int(capacity) <= 0:
+        if isinstance(capacity, bool):
             raise RateLimitConfigurationError("capacity must be a positive integer")
-        return int(capacity)
+        try:
+            value = float(capacity)
+        except (TypeError, ValueError) as exc:
+            raise RateLimitConfigurationError("capacity must be a positive integer") from exc
+        if not math.isfinite(value) or value <= 0 or not value.is_integer():
+            raise RateLimitConfigurationError("capacity must be a positive integer")
+        return int(value)
 
     @staticmethod
     def _validate_refill_rate(refill_rate: float) -> float:
-        value = float(refill_rate)
-        if value <= 0:
+        try:
+            value = float(refill_rate)
+        except (TypeError, ValueError) as exc:
+            raise RateLimitConfigurationError("refill_rate must be finite and greater than 0") from exc
+        if not math.isfinite(value) or value <= 0:
             raise RateLimitConfigurationError("refill_rate must be greater than 0")
         return value
 
@@ -301,7 +332,9 @@ class RateLimiter:
 
     @staticmethod
     def _validate_key(key: str) -> str:
-        normalized = str(key).strip()
+        if not isinstance(key, str):
+            raise TypeError("key must be a string")
+        normalized = key.strip()
         if not normalized:
             raise ValueError("key must be a non-empty string")
         return normalized
@@ -310,9 +343,13 @@ class RateLimiter:
     def _validate_requested_tokens(tokens: int, capacity: int) -> int:
         if isinstance(tokens, bool):
             raise ValueError("tokens must be a positive integer")
-        requested = int(tokens)
-        if requested <= 0:
+        try:
+            value = float(tokens)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("tokens must be a positive integer") from exc
+        if not math.isfinite(value) or value <= 0 or not value.is_integer():
             raise ValueError("tokens must be a positive integer")
+        requested = int(value)
         if requested > capacity:
             raise ValueError("tokens requested cannot exceed bucket capacity")
         return requested

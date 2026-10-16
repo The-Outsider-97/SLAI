@@ -88,6 +88,8 @@ class NetworkAgent(BaseAgent):
         self.policy = NetworkPolicy(memory=self.network_memory)
         self.metrics = NetworkMetrics(memory=self.network_memory)
 
+        self._network_agent_closed = False
+
     def perform_task(self, task_data: Any) -> Dict[str, Any]:
         """Dispatch supported network operations in a consistent agent-facing interface."""
         if isinstance(task_data, Mapping):
@@ -807,6 +809,40 @@ class NetworkAgent(BaseAgent):
             return default
         resolved = str(raw_value).strip()
         return resolved or default
+
+    def shutdown(self) -> None:
+        """
+        Close NetworkAgent-owned communication resources.
+    
+        NetworkStream manages stream sessions and delegates adapter
+        shutdown to the injected NetworkAdapters manager.
+    
+        NetworkMemory and external SharedMemory are not closed here.
+        """
+        if self._network_agent_closed:
+            return
+    
+        errors = []
+        try:
+            self.stream.close_stream(reason="network_agent_shutdown")
+    
+        except Exception as exc:
+            errors.append(exc)
+    
+            # Fallback only when stream-level cleanup fails.
+            try:
+                self.adapters.close_all(reason="network_agent_shutdown_fallback")
+    
+            except Exception as adapter_exc:
+                errors.append(adapter_exc)
+    
+        if errors:
+            raise RuntimeError("NetworkAgent shutdown failed") from errors[0]
+    
+        self._network_agent_closed = True
+    
+    def close(self) -> None:
+        self.shutdown()
 
 
 if __name__ == "__main__":

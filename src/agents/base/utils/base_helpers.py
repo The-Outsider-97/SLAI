@@ -811,3 +811,76 @@ def omit(mapping: Mapping[K, V], *keys: K) -> Dict[K, V]:
     """Return a new mapping excluding the requested keys."""
     excluded = set(keys)
     return {key: value for key, value in mapping.items() if key not in excluded}
+
+
+def _normalize_token(raw: Any) -> str:
+    """Normalize a status/flag token for taxonomy lookup."""
+    if raw is None:
+        return ""
+    text = normalize_text(raw, lowercase=True, strip=True, collapse_whitespace=True)
+    if not text:
+        return ""
+    return text.replace("-", "_").replace(" ", "_")
+
+
+__all__ = [
+    # Backoff / timing
+    "BackoffPolicy",
+    "Stopwatch",
+    "utc_now",
+    "utc_now_iso",
+    "monotonic_seconds",
+    "monotonic_ms",
+    "compute_backoff_delay",
+
+    # Coercion
+    "coerce_bool",
+    "coerce_int",
+    "coerce_float",
+
+    # Dictionary / collection helpers
+    "deep_merge_dicts",
+    "drop_none_values",
+    "flatten_mapping",
+    "chunked",
+    "ensure_list",
+    "pick",
+    "omit",
+
+    # Text / parsing
+    "ensure_text",
+    "normalize_text",
+    "slugify",
+    "normalize_identifier",
+    "parse_delimited_text",
+    "parse_json_if_needed",
+    "safe_getattr_path",
+
+    # Serialization
+    "is_json_serializable",
+    "to_json_safe",
+    "json_dumps",
+    "json_loads",
+    "stable_fingerprint",
+    "safe_repr",
+
+    # Redaction
+    "redact_text",
+    "redact_mapping",
+    "redact_headers",
+
+    # Endpoint / networking
+    "normalize_endpoint",
+    "join_endpoint",
+    "split_host_port",
+    "is_probably_url",
+    "is_port_open",
+
+    # Identifiers
+    "generate_request_id",
+    "generate_deterministic_id",
+
+    # Misc
+    "truncate_string",
+    "_normalize_token",
+]

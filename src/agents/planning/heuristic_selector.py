@@ -129,6 +129,7 @@ class HeuristicSelector:
         "RL": ReinforcementLearningHeuristic,
         "UA": UncertaintyAwareHeuristic,
         "CBR": CaseBasedReasoningHeuristic,
+        "FC": FeasibilityConstraintHeuristic,
     }
 
     def __init__(self, memory: Optional[PlanningMemory] = None) -> None:
@@ -620,8 +621,9 @@ class HeuristicSelector:
         if name in self._performance_state:
             self.update_performance(name, self._performance_state[name].speed, accuracy)
 
-        if hasattr(self.memory, "record_task_outcome"):
-            self.memory.record_task_outcome(
+        record_task_outcome = getattr(self.memory, "record_task_outcome", None)
+        if callable(record_task_outcome):
+            record_task_outcome(
                 task_id=str(task.get("id", task.get("name", "unknown"))),
                 status="success" if success else "failure",
                 metadata={

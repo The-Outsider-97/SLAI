@@ -64,3 +64,10 @@ class Sidebar:
             raise ValueError(f"Unknown section: {section_name}")
         section.expanded = not section.expanded
         return section.expanded
+
+
+__all__ = [
+    "SidebarSection",
+    "SidebarAnimation",
+    "Sidebar",
+]
