@@ -33,13 +33,17 @@ This is a conceptual map; exact execution paths depend on the entry point and ta
 flowchart TD
     UserTask[Incoming task / event] --> Factory[AgentFactory]
 
+    Factory --> SA[STEMAgent]
+    Factory --> V[VerificationAgent]
+    Factory --> SP[SpatialAgent]
+    Factory --> SI[SimulationAgent]
     Factory --> P[PlanningAgent]
     Factory --> R[ReasoningAgent]
     Factory --> L[LanguageAgent]
     Factory --> S[SafetyAgent]
     Factory --> E[ExecutionAgent]
     Factory --> K[KnowledgeAgent]
-    Factory --> V[EvaluationAgent]
+    Factory --> EA[EvaluationAgent]
     Factory --> A[AlignmentAgent]
     Factory --> C[CollaborativeAgent]
     Factory --> PE[PerceptionAgent]
@@ -72,9 +76,13 @@ flowchart TD
     Q <--> Shared
     PR <--> Shared
     N <--> Shared
+    SA <--> Shared
+    SP <--> Shared
+    SI <--> Shared
+    EA <--> Shared
 
     E --> Actions[Execution actions]
-    V --> Reports[Evaluation outputs]
+    EA --> Reports[Evaluation outputs]
     S --> Guardrails[Safety decisions]
 ```
 
