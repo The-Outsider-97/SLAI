@@ -26,6 +26,7 @@ import re
 import secrets
 import unicodedata
 
+from collections import Counter
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
@@ -950,7 +951,26 @@ def validate_config_shape(config: Optional[Mapping[str, Any]] = None) -> HelperO
     return HelperOperationResult(True, "validate_config_shape", {"required_keys": required, "config_fingerprint": fingerprint(config)}, timestamp=utc_iso())
 
 
+def clamp(x, cap=1.0):
+    return max(0.0, min(float(x), cap))
+
+
+def scale(x, divisor):
+    return clamp(x / divisor)
+
+
+def entropy(s):
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    n = len(s)
+    return -sum((v / n) * math.log2(v / n) for v in counts.values()) / 8.0
+
+
 __all__ = [
+    "clamp",
+    "scale",
+    "entropy",
     "DEFAULT_MAX_TEXT_LENGTH",
     "DEFAULT_MAX_COLLECTION_ITEMS",
     "DEFAULT_MAX_RECURSION_DEPTH",
