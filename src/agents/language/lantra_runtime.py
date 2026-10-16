@@ -13,12 +13,12 @@ normal deterministic intent analysis reports ambiguity or low confidence.
 
 import threading
 import time as time_module
+import torch # type: ignore
+
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
-
-import torch
 
 from ..model_hub import resolve_model_file
 from .modules.language_tokenizer import LanguageTokenizer
@@ -132,7 +132,7 @@ class LantraRuntime:
         self.checkpoint_path = ensure_text(
             self.config.get(
                 "checkpoint_path",
-                "src/agents/language/checkpoints/lantra/lantra_20260919T142819Z.pt",
+                "src/agents/language/checkpoints/lantra/lantra_20260929T103932Z.pt",
             )
         )
         self.device_policy = ensure_text(self.config.get("device", "auto")).strip().lower()
@@ -210,7 +210,7 @@ class LantraRuntime:
         return device
 
     def _load_runtime(self) -> None:
-        checkpoint = resolve_model_file(self.checkpoint_path, "language/lantra/lantra_20261013T231832Z.pt")
+        checkpoint = resolve_model_file(self.checkpoint_path, "language/lantra/lantra_20260929T103932Z.pt")
         self.checkpoint_path = str(checkpoint)
         if not checkpoint.exists():
             self._raise_model(
@@ -435,7 +435,10 @@ class LantraRuntime:
                 top_k=self.top_k,
                 return_dict=False,
             )
-            if not isinstance(generated, torch.Tensor):
+            sequence_tensor: Optional[torch.Tensor]
+            if isinstance(generated, torch.Tensor):
+                sequence_tensor = generated
+            else:
                 sequences = getattr(generated, "sequences", None)
                 if not isinstance(sequences, torch.Tensor):
                     self._raise_model(
@@ -443,15 +446,16 @@ class LantraRuntime:
                         code=LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH,
                         details={"type": type(generated).__name__},
                     )
-                generated = sequences
-            if not isinstance(generated, torch.Tensor) or generated.dim() != 2 or generated.size(0) < 1:
+                sequence_tensor = cast(torch.Tensor, sequences)
+            if sequence_tensor is None or sequence_tensor.dim() != 2 or sequence_tensor.size(0) < 1:
                 self._raise_model(
                     "LanguageTransformer.generate returned an invalid sequence shape.",
                     code=LanguageErrorCode.PIPELINE_CONTRACT_MISMATCH,
                 )
-            assert isinstance(generated, torch.Tensor)
             text = self.tokenizer.decode(
-                generated[0], skip_special_tokens=True, clean_up_tokenization_spaces=True
+                cast(torch.Tensor, sequence_tensor)[0],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
             ).strip()
         latency_ms = (time_module.perf_counter() - started) * 1000.0
         self._generation_calls += 1
