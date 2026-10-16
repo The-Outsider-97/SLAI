@@ -34,6 +34,8 @@ flowchart TD
     UserTask[Incoming task / event] --> Factory[AgentFactory]
 
     Factory --> SA[STEMAgent]
+    Factory --> OR[OrchestrationAgent]
+    Factory --> OA[OptimizationAgent]
     Factory --> V[VerificationAgent]
     Factory --> SP[SpatialAgent]
     Factory --> SI[SimulationAgent]
@@ -80,10 +82,13 @@ flowchart TD
     SP <--> Shared
     SI <--> Shared
     EA <--> Shared
+    OA <--> Shared
+    OR <--> Shared
 
     E --> Actions[Execution actions]
     EA --> Reports[Evaluation outputs]
     S --> Guardrails[Safety decisions]
+    OR --> Subagents[subagents output]
 ```
 
 ## Environment and installation
