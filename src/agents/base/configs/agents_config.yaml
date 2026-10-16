@@ -1200,6 +1200,9 @@ quality_agent:
       batch_aggregation:
         mean_weight: 0.70
         minimum_weight: 0.30
+  result_cache:
+    enabled: true
+    max_entries: 128
 
 
 reader_agent:
