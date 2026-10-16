@@ -70,7 +70,6 @@ The identifiers below are the canonical keys in `AgentFactory.DEFAULT_AGENT_SPEC
 | `stem` / `stem/` | `STEMAgent`, scientific domain classes | Explicitly dispatched mathematical, scientific and engineering calculations | Base scientific engines, units, numerical methods, local cache | [STEM](stem/README.md) |
 | `verification` / `verification/` | `VerificationAgent`, formal verification components | Formal contracts, solver-backed checks and finite-state model checking | Backend registry, verification results/memory, optional SMT backend | [Verification](verification/README.md) |
 
-[software/](software/) is present as package scaffolding, with analysis, semantics, refactoring, memory, module, and configuration paths. Its four top-level capability implementation files are empty. It has no `SoftwareAgent` entry in the factory defaults or package facade exports. Its presence must not be interpreted as a registered executable agent. `base/` and `factory/` are infrastructure packages rather than capability-agent registrations.
 
 ## Construction and Runtime Identity
 
@@ -166,4 +165,3 @@ This checkout has no dedicated `tests/` suite for the four quantitative facades 
 - [Factory construction and lifecycle](factory/README.md)
 - [Base runtime](base/README.md)
 - [Collaboration](collaborative/README.md)
-- [STEM](stem/README.md), [Spatial](spatial/README.md), [Simulation](simulation/README.md), [Optimization](optimization/README.md)
