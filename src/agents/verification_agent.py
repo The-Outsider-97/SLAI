@@ -676,25 +676,102 @@ class VerificationAgent(BaseAgent):
             raise MalformedSpecificationError("request_id must be a non-empty string")
         return f"{prefix}:{request_id}"
 
+    _SENSITIVE_KEY_TOKENS: tuple[str, ...] = (
+        "authorization",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "cookie",
+        "session",
+        "csrf",
+        "xsrf",
+        "bearer",
+        "private_key",
+        "client_secret",
+    )
+    _REDACTION_PLACEHOLDER = "[REDACTED]"
+    _MAX_DEPTH_SENTINEL = "[MAX_DEPTH_REACHED]"
+
+    @classmethod
+    def _is_sensitive_key(cls, key: str) -> bool:
+        lowered = key.lower()
+        return any(token in lowered for token in cls._SENSITIVE_KEY_TOKENS)
+
+    def _prepare_shared_payload(self, value: object) -> object:
+        """Produce a bounded, key-redacted, JSON-safe payload for SharedMemory.
+
+        ``_shared_set`` is the single publication funnel for request metadata,
+        results, summaries, errors, and lifecycle events. Bounding and key-level
+        redaction are performed here so that caller-supplied ``options`` or
+        ``metadata`` cannot leak sensitive keys through the shared store even
+        when a caller-specific baker does not pre-sanitize a given field.
+
+        Bounding uses ``to_json_safe``; redaction is key-pattern based and is a
+        best-effort hardening measure, not a cryptographic boundary.
+        """
+        max_depth = 12
+        max_items = max(1, self.max_shared_list_items, self.max_shared_model_entries)
+
+        normalized = to_json_safe(
+            value,
+            max_depth=max_depth,
+            max_items=max_items,
+            max_string_length=8_192,
+        )
+
+        def scrub(item: object, depth: int) -> object:
+            if depth >= max_depth:
+                return self._MAX_DEPTH_SENTINEL
+
+            if isinstance(item, Mapping):
+                out: dict[str, object] = {}
+                for raw_key, child in item.items():
+                    key_text = str(raw_key)
+                    if self._is_sensitive_key(key_text):
+                        out[key_text] = self._REDACTION_PLACEHOLDER
+                    else:
+                        out[key_text] = scrub(child, depth + 1)
+                return out
+
+            if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+                return [scrub(child, depth + 1) for child in list(item)[:max_items]]
+
+            return item
+
+        return scrub(normalized, 0)
+
     def _shared_set(self, key: str, value: object, *, tags: Sequence[str] = ()) -> None:
         if not self.publish_shared_memory:
             return
-        ttl = None if self.shared_memory_ttl_seconds <= 0 else self.shared_memory_ttl_seconds
-        payload = to_json_safe(
-            value,
-            redact_sensitive=True,
-            max_depth=12,
-            max_items=max(self.max_shared_list_items, self.max_shared_model_entries),
-            max_string_length=8_192,
+
+        ttl = (
+            None
+            if self.shared_memory_ttl_seconds <= 0
+            else self.shared_memory_ttl_seconds
         )
+
         try:
+            payload = self._prepare_shared_payload(value)
+
             self.shared_memory.set(
                 key,
                 payload,
                 ttl=ttl,
                 tags=list(tags),
-                metadata={"agent": self.name, "agent_id": self.agent_id, "schema": "verification_agent.v1"},
+                metadata={
+                    "agent": self.name,
+                    "agent_id": self.agent_id,
+                    "schema": "verification_agent.v1",
+                },
             )
+
         except Exception as exc:
             self._handle_shared_memory_error("set", key, exc)
 
@@ -923,7 +1000,7 @@ class VerificationAgent(BaseAgent):
             }
         # to_json_safe turns arbitrary abstract-domain values into deterministic,
         # bounded data before the subsystem's canonical fingerprint helper is used.
-        normalized = to_json_safe(payload, redact_sensitive=False, max_depth=8, max_items=1_000, max_string_length=8_192)
+        normalized = to_json_safe(payload, max_depth=8, max_items=1_000, max_string_length=8_192)
         if not isinstance(normalized, Mapping):
             normalized = {"payload": normalized}
         return artifact_fingerprint(dict(normalized))

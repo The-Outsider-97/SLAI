@@ -81,6 +81,7 @@ class OptimizationAgent(BaseAgent):
         "node_limit",
         "tasks",
     }
+    alternative_execute_is_safe_after_failure = True
 
     def __init__(
         self,

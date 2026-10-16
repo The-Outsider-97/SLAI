@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.2.1"
 
 """
 SLAI Learning Agent — Orchestration Layer for Lifelong Autonomous Learning
@@ -1296,6 +1296,15 @@ class LearningAgent(BaseAgent):
                 raise InvalidConfigError("operational_trl requires a features dictionary", config_key="features")
 
             return self.learning_factory.operational_trl_decision(profile=profile, features=features)
+
+        if mode == "operational_sdqn":
+            features = task_data.get("features")
+            if not isinstance(features, dict):
+                raise InvalidConfigError("operational_sdqn requires features", config_key="features")
+            return self.learning_factory.operational_sdqn_decision(
+                features=features,
+                profile=task_data.get("profile", "scheduling"),
+            )
 
         raise InvalidConfigError(
             f"Unsupported perform_task mode: {mode!r}. Expected one of: 'train', 'evaluate', 'auto', 'health'.",

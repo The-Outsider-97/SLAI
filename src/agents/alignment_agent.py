@@ -12,6 +12,7 @@ __version__ = "2.3.0"
 
 import threading
 import time as _time
+
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple

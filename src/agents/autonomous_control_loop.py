@@ -11,6 +11,7 @@ agents, threads, files, network calls, or background work.
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 
@@ -21,8 +22,8 @@ from threading import Event, RLock
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from .runtime_contracts import RuntimeLifecycle, RuntimeStatus
-from logs.logger import get_logger  # pyright: ignore[reportMissingImports]
 from ..utils.configuration import bind_config
+from logs.logger import get_logger  # pyright: ignore[reportMissingImports]
 
 
 logger = get_logger("Autonomous Control Loop")
@@ -342,11 +343,13 @@ class FactoryAutonomousStages:
             self._last_failed_agent_name = agent_name
             raise
 
+
     def reason(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         goal = self._goal(payload)
         objective = goal.get("objective") or goal.get("goal") or goal.get("name")
         if not objective:
             raise ControlLoopContractError("Autonomous goal requires objective, goal, or name")
+
         result = self._call_agent(
             "reasoning",
             "perform_task",
@@ -356,11 +359,65 @@ class FactoryAutonomousStages:
                 "context": {
                     **dict(payload.get("context", {})),
                     "observation": payload.get("observation", {}),
-                    "previous_feedback": payload.get("previous_feedback", {}),
+                    "previous_feedback": payload.get(
+                        "previous_feedback", {}
+                    ),
                 },
             },
         )
-        return {"status": "success", "reasoning": _safe_value(result)}
+
+        if not isinstance(result, Mapping):
+            return {
+                "status": "review_required",
+                "reason": "reasoning_result_not_mapping",
+                "reasoning": _safe_value(result),
+            }
+
+        evidence = _safe_value(dict(result))
+        raw_status = str(result.get("status", "success")).strip().lower()
+        if raw_status in {"failed", "failure", "error", "blocked"} or result.get("success") is False:
+            return {
+                "status": "failed",
+                "reason": "reasoning_inference_failed",
+                "reasoning": evidence,
+            }
+
+        raw_confidence = result.get("confidence")
+        if isinstance(raw_confidence, Mapping):
+            confidence = raw_confidence.get("value")
+            calibration = raw_confidence.get("calibrated")
+        else:
+            confidence = raw_confidence
+            calibration = None
+
+        # Explicitly reported lack of calibration cannot
+        # authorize autonomous execution.
+        if calibration is False:
+            return {
+                "status": "review_required",
+                "reason": "reasoning_confidence_not_calibrated",
+                "reasoning": evidence,
+            }
+
+        import math
+
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            return {
+                "status": "review_required",
+                "reason": "reasoning_confidence_missing_or_invalid",
+                "reasoning": evidence,
+            }
+
+        return {
+            "status": "success",
+            "confidence": float(confidence),
+            "reasoning": evidence,
+        }
 
     @staticmethod
     def _planning_task(goal: Mapping[str, Any]) -> Any:
@@ -417,38 +474,59 @@ class FactoryAutonomousStages:
     def authorize(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         goal = self._goal(payload)
         plan_output = payload.get("plan", {})
-
         reason_output = payload.get("reason", {})
         if not isinstance(reason_output, Mapping):
-            raise ControlLoopContractError(
-                "reason stage output must be a mapping"
-            )
-        
+            return {
+                "status": "review_required",
+                "approved": False,
+                "decision": "review_required",
+                "reason": "reason_stage_output_invalid",
+            }
+
+        reason_status = str(reason_output.get("status", "")).strip().lower()
+        if reason_status in {"failed", "failure", "error", "blocked"}:
+            return {
+                "status": "review_required",
+                "approved": False,
+                "decision": "review_required",
+                "reason": "reason_stage_failed",
+            }
+
+        if reason_status == "review_required":
+            return {
+                "status": "review_required",
+                "approved": False,
+                "decision": "review_required",
+                "reason": reason_output.get(
+                    "reason",
+                    "reason_stage_requires_review",
+                ),
+            }
+
         confidence = reason_output.get("confidence")
+
         if (
             isinstance(confidence, bool)
             or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
         ):
-            raise ControlLoopContractError(
-                "reason.confidence must be an explicit "
-                "calibrated number"
-            )
-        
-        if not 0.0 <= float(confidence) <= 1.0:
-            raise ControlLoopContractError(
-                "reason.confidence must be between 0 and 1"
-            )
-        
-        if float(confidence) < self.config.min_action_confidence:
+            return {
+                "status": "review_required",
+                "approved": False,
+                "decision": "review_required",
+                "reason": "missing_or_invalid_action_confidence",
+            }
+
+        confidence = float(confidence)
+        if confidence < self.config.min_action_confidence:
             return {
                 "status": "review_required",
                 "approved": False,
                 "decision": "review_required",
                 "reason": "action_confidence_below_threshold",
-                "confidence": float(confidence),
-                "required_confidence": (
-                    self.config.min_action_confidence
-                ),
+                "confidence": confidence,
+                "required_confidence": self.config.min_action_confidence,
             }
     
         safety_action = goal.get("safety_action")

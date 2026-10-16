@@ -16,7 +16,7 @@ Production-oriented knowledge retrieval and management agent with:
 import hashlib
 import json
 import math
-import yaml
+import yaml # type: ignore
 import os
 import re
 import threading
@@ -77,10 +77,7 @@ class KnowledgeAgent(BaseAgent):
         self.is_query = bool(self.knowledge_config.get("is_query", True))
         self.stopwords_path = self.knowledge_config.get("stopwords")
         self.cache_size = self._coerce_positive_int(self.knowledge_config.get("cache_size"), 1000)
-        self.retrieval_cache_ttl = self._coerce_positive_int(
-            self.knowledge_config.get("ttl"),
-            600,
-        )
+        self.retrieval_cache_ttl = self._coerce_positive_int(self.knowledge_config.get("ttl"), 600)
         self.first_pass = bool(self.knowledge_config.get("first_pass", True))
         self.max_workers = self._coerce_positive_int(self.knowledge_config.get("max_workers"), 4)
         self._decay_factor = self._coerce_float(self.knowledge_config.get("decay_factor"), 0.8)

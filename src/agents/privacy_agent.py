@@ -87,10 +87,7 @@ class PrivacyExecutionReport:
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
-        payload["created_at_iso"] = datetime.fromtimestamp(
-            self.created_at,
-            tz=timezone.utc,
-        ).isoformat()
+        payload["created_at_iso"] = datetime.fromtimestamp(self.created_at, tz=timezone.utc).isoformat()
         return payload
 
 
@@ -115,10 +112,7 @@ class PrivacyAgent(BaseAgent):
         self.agent_factory = agent_factory
 
         self.config = load_global_config()
-        self.privacy_config = get_config_section(
-            "privacy_agent",
-            config=self.config,
-        )
+        self.privacy_config = get_config_section("privacy_agent", config=self.config)
         self._load_agent_configuration()
         self._validate_runtime_configuration()
 
@@ -228,9 +222,7 @@ class PrivacyAgent(BaseAgent):
 
     def _validate_runtime_configuration(self) -> None:
         if self.shared_ttl_seconds is not None and self.shared_ttl_seconds < 0:
-            raise ValueError(
-                "privacy_agent.shared_memory.ttl_seconds must be >= 0 or null"
-            )
+            raise ValueError("privacy_agent.shared_memory.ttl_seconds must be >= 0 or null")
 
     # ------------------------------------------------------------------
     # Generic orchestration helpers
@@ -241,19 +233,13 @@ class PrivacyAgent(BaseAgent):
         return normalized or fallback
 
     @staticmethod
-    def _safe_mapping(
-        value: Optional[Mapping[str, Any]],
-    ) -> Dict[str, Any]:
+    def _safe_mapping(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         if not value:
             return {}
         return dict(value)
 
     @staticmethod
-    def _decision_from(
-        stage: Mapping[str, Any],
-        *,
-        default: str = PrivacyDecision.ALLOW.value,
-    ) -> str:
+    def _decision_from(stage: Mapping[str, Any], *, default: str = PrivacyDecision.ALLOW.value) -> str:
         raw = stage.get("decision")
         if raw is None:
             return default
@@ -290,9 +276,7 @@ class PrivacyAgent(BaseAgent):
         )
 
     @staticmethod
-    def _normalize_lineage_events(
-        lineage_events: Optional[Sequence[Mapping[str, Any]]],
-    ) -> List[Dict[str, Any]]:
+    def _normalize_lineage_events(lineage_events: Optional[Sequence[Mapping[str, Any]]]) -> List[Dict[str, Any]]:
         if lineage_events is None:
             return []
         if isinstance(lineage_events, (str, bytes, bytearray)) or not isinstance(
@@ -378,10 +362,7 @@ class PrivacyAgent(BaseAgent):
             )
         return events
 
-    def _authorized_contexts_from_consent(
-        self,
-        consent_result: Mapping[str, Any],
-    ) -> Tuple[str, ...]:
+    def _authorized_contexts_from_consent(self, consent_result: Mapping[str, Any]) -> Tuple[str, ...]:
         candidates: List[Any] = []
 
         consent_snapshot = consent_result.get("consent")
@@ -436,11 +417,7 @@ class PrivacyAgent(BaseAgent):
         if self.shared_ttl_seconds is None:
             self.shared_memory.set(key, payload)
         else:
-            self.shared_memory.set(
-                key,
-                payload,
-                ttl=self.shared_ttl_seconds,
-            )
+            self.shared_memory.set(key, payload, ttl=self.shared_ttl_seconds)
 
     def _publish_event(self, payload: Mapping[str, Any]) -> None:
         if self.publish_notifications and self.shared_memory is not None:
@@ -449,10 +426,7 @@ class PrivacyAgent(BaseAgent):
                 deepcopy(dict(payload)),
             )
 
-    def _shared_result_projection(
-        self,
-        report: Mapping[str, Any],
-    ) -> Dict[str, Any]:
+    def _shared_result_projection(self, report: Mapping[str, Any]) -> Dict[str, Any]:
         """Return a bounded projection suitable for SLAI SharedMemory.
 
         Detailed detection evidence can contain previews or path-level metadata.
@@ -524,9 +498,7 @@ class PrivacyAgent(BaseAgent):
         if self.include_stage_evidence_in_shared_memory:
             result["stages"] = deepcopy(report.get("stages") or {})
         if self.include_sanitized_payload_in_shared_memory:
-            result["sanitized_payload"] = deepcopy(
-                report.get("sanitized_payload") or {}
-            )
+            result["sanitized_payload"] = deepcopy(report.get("sanitized_payload") or {})
         if self.include_evidence_bundle_in_shared_memory:
             result["evidence_bundle"] = deepcopy(report.get("evidence_bundle"))
         return result
@@ -853,10 +825,7 @@ class PrivacyAgent(BaseAgent):
                 "flow": self._decision_from(flow_assessment),
                 "risk": self._decision_from(risk_assessment),
             }
-            final_decision = combine_privacy_decisions(
-                *decision_sources.values(),
-                default=PrivacyDecision.ALLOW.value,
-            )
+            final_decision = combine_privacy_decisions(*decision_sources.values(), default=PrivacyDecision.ALLOW.value)
             summary = self._summary_for_decision(final_decision)
 
             # 10. Record the actual final decision, not a preliminary checkpoint.
@@ -873,20 +842,12 @@ class PrivacyAgent(BaseAgent):
                     "final_decision": final_decision,
                     "decision_sources": decision_sources,
                     "pre_sensitivity": identification.get("sensitivity_score"),
-                    "post_sensitivity": post_identification.get(
-                        "sensitivity_score"
-                    ),
-                    "residual_risk_score": residual_assessment.get(
-                        "residual_risk_score"
-                    ),
+                    "post_sensitivity": post_identification.get("sensitivity_score"),
+                    "residual_risk_score": residual_assessment.get("residual_risk_score"),
                     "flow_risk_score": flow_assessment.get("flow_risk_score"),
-                    "overall_risk_score": risk_assessment.get(
-                        "overall_risk_score"
-                    ),
+                    "overall_risk_score": risk_assessment.get("overall_risk_score"),
                     "risk_confidence": risk_assessment.get("confidence"),
-                    "evidence_completeness": risk_assessment.get(
-                        "evidence_completeness"
-                    ),
+                    "evidence_completeness": risk_assessment.get("evidence_completeness"),
                     "retention_status": retention_snapshot.get("status"),
                 },
             )
@@ -941,9 +902,7 @@ class PrivacyAgent(BaseAgent):
                 flow_analysis=flow_assessment,
                 risk_assessment=risk_assessment,
                 evidence_bundle=evidence_bundle,
-                evidence_completeness=float(
-                    risk_assessment.get("evidence_completeness") or 0.0
-                ),
+                evidence_completeness=float(risk_assessment.get("evidence_completeness") or 0.0),
                 shared_memory_keys=[],
                 duration_ms=round((time.time() - started_at) * 1000.0, 3),
                 created_at=time.time(),
@@ -953,10 +912,7 @@ class PrivacyAgent(BaseAgent):
             result_key = f"{self.result_key_prefix}.{req_id}"
             summary_key = f"{self.summary_key_prefix}.{req_id}"
 
-            self._publish(
-                result_key,
-                self._shared_result_projection(report_payload),
-            )
+            self._publish(result_key, self._shared_result_projection(report_payload))
             self._publish(
                 summary_key,
                 {
@@ -964,31 +920,15 @@ class PrivacyAgent(BaseAgent):
                     "decision": final_decision,
                     "summary": summary,
                     "decision_sources": decision_sources,
-                    "pre_sensitivity_score": identification.get(
-                        "sensitivity_score"
-                    ),
-                    "post_sensitivity_score": post_identification.get(
-                        "sensitivity_score"
-                    ),
-                    "masked_field_count": minimization.get(
-                        "masked_field_count",
-                        0,
-                    ),
-                    "removed_field_count": minimization.get(
-                        "removed_field_count",
-                        0,
-                    ),
-                    "residual_risk_score": residual_assessment.get(
-                        "residual_risk_score"
-                    ),
+                    "pre_sensitivity_score": identification.get("sensitivity_score"),
+                    "post_sensitivity_score": post_identification.get("sensitivity_score"),
+                    "masked_field_count": minimization.get("masked_field_count", 0),
+                    "removed_field_count": minimization.get("removed_field_count", 0),
+                    "residual_risk_score": residual_assessment.get("residual_risk_score"),
                     "flow_risk_score": flow_assessment.get("flow_risk_score"),
-                    "overall_risk_score": risk_assessment.get(
-                        "overall_risk_score"
-                    ),
+                    "overall_risk_score": risk_assessment.get("overall_risk_score"),
                     "risk_confidence": risk_assessment.get("confidence"),
-                    "evidence_completeness": risk_assessment.get(
-                        "evidence_completeness"
-                    ),
+                    "evidence_completeness": risk_assessment.get("evidence_completeness"),
                     "retention_status": retention_snapshot.get("status"),
                     "audit_trail_ref": audit_ref,
                     "policy_id": resolved_policy_id,
@@ -1009,9 +949,7 @@ class PrivacyAgent(BaseAgent):
                     "policy_id": resolved_policy_id,
                     "policy_version": resolved_policy_version,
                     "audit_trail_ref": audit_ref,
-                    "overall_risk_score": risk_assessment.get(
-                        "overall_risk_score"
-                    ),
+                    "overall_risk_score": risk_assessment.get("overall_risk_score"),
                     "risk_confidence": risk_assessment.get("confidence"),
                     "timestamp": time.time(),
                 }
@@ -1079,6 +1017,14 @@ class PrivacyAgent(BaseAgent):
     # ------------------------------------------------------------------
     # BaseAgent task entry point
     # ------------------------------------------------------------------
+    def perform_task(self, task_data: Any) -> Dict[str, Any]:
+        """Execute privacy evaluation through the standard BaseAgent interface.
+
+        Preserve the existing PrivacyAgent payload interpretation,
+        policy evaluation, context handling, and error semantics.
+        """
+        return self.perform_task_privacy(task_data)
+
     def perform_task_privacy(
         self,
         input_data: Any,
@@ -1114,47 +1060,22 @@ class PrivacyAgent(BaseAgent):
                 record_id=input_data.get("record_id") if has_explicit_payload else None,
                 purpose=input_data.get("purpose") if has_explicit_payload else None,
                 action=input_data.get("action") if has_explicit_payload else None,
-                source_context=(
-                    input_data.get("source_context") if has_explicit_payload else None
-                ),
-                destination_context=(
-                    input_data.get("destination_context")
-                    if has_explicit_payload
-                    else None
-                ),
-                required_processor=(
-                    input_data.get("required_processor") if has_explicit_payload else None
-                ),
-                allowed_fields=(
-                    input_data.get("allowed_fields") if has_explicit_payload else None
-                ),
-                required_fields=(
-                    input_data.get("required_fields") if has_explicit_payload else None
-                ),
-                sensitive_fields=(
-                    input_data.get("sensitive_fields") if has_explicit_payload else None
-                ),
-                field_strategies=(
-                    input_data.get("field_strategies") if has_explicit_payload else None
-                ),
-                retention_days=(
-                    input_data.get("retention_days") if has_explicit_payload else None
-                ),
-                record_tags=(
-                    input_data.get("record_tags") if has_explicit_payload else None
-                ),
+                source_context=input_data.get("source_context") if has_explicit_payload else None,
+                destination_context=input_data.get("destination_context") if has_explicit_payload else None,
+                required_processor=input_data.get("required_processor") if has_explicit_payload else None,
+                allowed_fields=input_data.get("allowed_fields") if has_explicit_payload else None,
+                required_fields=input_data.get("required_fields") if has_explicit_payload else None,
+                sensitive_fields=input_data.get("sensitive_fields") if has_explicit_payload else None,
+                field_strategies=input_data.get("field_strategies") if has_explicit_payload else None,
+                retention_days=input_data.get("retention_days") if has_explicit_payload else None,
+                record_tags=input_data.get("record_tags") if has_explicit_payload else None,
                 policy_id=input_data.get("policy_id") if has_explicit_payload else None,
-                policy_version=(
-                    input_data.get("policy_version") if has_explicit_payload else None
-                ),
+                policy_version=input_data.get("policy_version") if has_explicit_payload else None,
                 lineage_events=lineage_events,
                 context=runtime_context,
             )
 
-        return self.evaluate_privacy(
-            {"content": input_data},
-            context=normalized_context,
-        )
+        return self.evaluate_privacy({"content": input_data}, context=normalized_context)
 
 
 if __name__ == "__main__":

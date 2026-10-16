@@ -860,7 +860,14 @@ class SafetyAgent(BaseAgent):
             cyber_safety = self.cyber_safety
             cyber = self._execute_component(
                 "cyber_safety",
-                lambda: cyber_safety.analyze_input(sanitized_text, context=cyber_context),
+                # Keep sanitized content for rule analysis. The trained HTTP MLP
+                # alone receives original HTTP formatting for faithful features.
+                lambda: cyber_safety.analyze_input(
+                    sanitized_text, context=cyber_context,
+                    model_input=(task_data if isinstance(task_data, str) else input_text)
+                    if cyber_context.strip().lower() in
+                    {"api_request", "http_request", "web_request"} else None,
+                ),
             )
             outcomes["cyber_safety"] = cyber
             reports["cyber_safety"] = cyber.report

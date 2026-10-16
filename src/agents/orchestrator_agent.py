@@ -609,17 +609,43 @@ class OrchestratorAgent(BaseAgent):
             wrapped.log()
             return wrapped.to_result(agent=self.name, action=action)
 
-        # 2. Broadcast intent and delegate with retry.
-        self._broadcast_delegation_start(specialty, action)
-        try:
-            result = self._delegate_with_retry(specialty, action, params)
-        finally:
-            # 3. Always recycle the specialist if TTL recycling is on.
-            self._release_specialty(specialty)
+        self._broadcast_delegation_start( specialty, action)
+        result = self._delegate_with_retry(specialty, action, params)
 
         # 4. Broadcast outcome.
         self._broadcast_delegation_result(specialty, action, result)
         return result
+
+
+    def _delegate_once(self, specialty: str, action: str, params: Any) -> Any:
+        """Acquire, invoke, and conditionally release one specialist."""
+        if self.agent_factory is None:
+            raise RuntimeError("AgentFactory is required for delegation")
+
+        if not isinstance(params, Mapping):
+            raise TypeError("Delegation params must be a mapping")
+
+        normalized = self.agent_factory.normalize_agent_type(specialty)
+        core_types = set(getattr(self.agent_factory, "DEFAULT_AGENT_SPECS", {}))
+
+        # Core agents remain factory-owned and reusable.
+        # Generated specialists may be explicitly ephemeral.
+        ephemeral = self.ttl_recycling and normalized not in core_types
+        agent = self.agent_factory.create(normalized, self.shared_memory, _ephemeral=ephemeral)
+
+        try:
+            method = getattr(agent, action, None)
+            if not callable(method):
+                raise AttributeError(
+                    f"Specialist '{normalized}' has no "
+                    f"callable action '{action}'"
+                )
+
+            return method(**dict(params))
+
+        finally:
+            if ephemeral:
+                self._release_specialty(normalized, agent)
 
     def _delegate_with_retry(self, specialty: str, action: str, params: Any) -> Any:
         """Invoke ``call_external`` with bounded retry and structured errors.
@@ -633,7 +659,7 @@ class OrchestratorAgent(BaseAgent):
         last_error: Optional[FactoryError] = None
         for attempt in range(self.max_delegation_retries + 1):
             try:
-                return self.call_external(specialty, action, params)
+                return self._delegate_once(specialty, action, params)
             except FactoryError as fe:
                 last_error = fe
                 if not fe.retryable or attempt >= self.max_delegation_retries:
@@ -662,25 +688,51 @@ class OrchestratorAgent(BaseAgent):
         )
         return last_error.to_result(agent=self.name, action=action)
 
-    def _release_specialty(self, specialty: str) -> None:
-        """Release an ephemeral specialist instance if recycling is on.
 
-        Release failures are logged but never mask the delegation
-        outcome. The runtime status reflects the degradation via the
-        standard ``lifecycle`` channel so that health checks observe it.
+    def _release_specialty(self, specialty: str, instance: Any) -> None:
+        """Release only an explicitly ephemeral acquired instance.
+
+        Never release shared core agents or another scope's
+        specialist through this delegation cleanup path.
         """
-        if not (self.ttl_recycling and self.agent_factory):
+        if not (
+            self.ttl_recycling
+            and self.agent_factory is not None
+        ):
             return
+
         try:
-            released = self.agent_factory.release(specialty)
+            released = self.agent_factory.release_instance(
+                instance,
+                ephemeral_only=True,
+            )
+
         except Exception as exc:
             self._mark_runtime_degraded(
-                "lifecycle", "release_specialty", exc, retryable=True
+                "lifecycle",
+                "release_specialty",
+                exc,
+                retryable=True,
             )
-            logger.warning("Failed to release specialty '%s': %s", specialty, exc)
+
+            logger.warning(
+                "Failed to release specialist '%s': %s",
+                specialty,
+                exc,
+            )
             return
+
         if released:
-            logger.debug("Released specialty '%s' after delegation", specialty)
+            logger.debug(
+                "Released ephemeral specialist '%s'",
+                specialty,
+            )
+        else:
+            logger.warning(
+                "Specialist '%s' was not released by "
+                "the exact-instance ephemeral release path",
+                specialty,
+            )
 
     # ==================================================================
     # Registry inspection and dynamic onboarding
