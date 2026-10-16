@@ -1,0 +1,117 @@
+{
+  "activities": {
+    "activity:6cbe8c868379befdbfb497db": {
+      "activity_id": "activity:6cbe8c868379befdbfb497db",
+      "activity_type": "train",
+      "agent_id": "safety_training",
+      "ended_at": "2026-10-12T11:45:57.509039Z",
+      "metadata": {
+        "synthetic_from_lineage": true
+      },
+      "parameters": {},
+      "started_at": "2026-10-12T11:45:57.509039Z"
+    }
+  },
+  "agents": {
+    "safety_training": {
+      "agent_id": "safety_training",
+      "agent_type": "slai_component",
+      "label": null,
+      "metadata": {},
+      "version": null
+    }
+  },
+  "checkpoints": {},
+  "custody_records": {},
+  "dependencies": {},
+  "entities": {
+    "safety-dataset-3d29a874ae7a55a75fc4cab5": {
+      "created_at": "2026-10-12T11:45:57.504750Z",
+      "digest": "3d29a874ae7a55a75fc4cab5e425acb6ccb01b679ef974d665c3f9ed4bf6cb37",
+      "entity_id": "safety-dataset-3d29a874ae7a55a75fc4cab5",
+      "entity_type": "dataset",
+      "label": "safety HTTP labeled dataset",
+      "metadata": {
+        "path_name": "cyber_risk_csic2010.jsonl",
+        "study": "offline_experiment"
+      },
+      "source_id": null
+    },
+    "safety-mlp32-a611ce7656012ec5700bf282": {
+      "created_at": "2026-10-12T11:45:57.506518Z",
+      "digest": "a611ce7656012ec5700bf282e9a58b2644c96d9d37814fa60e764b1a82af21b0",
+      "entity_id": "safety-mlp32-a611ce7656012ec5700bf282",
+      "entity_type": "model",
+      "label": "SLAI native MLP 32 features",
+      "metadata": {
+        "candidate_name": "cyber_safety_v2_integrated_candidate.json",
+        "feature_contract_digest": "4cd254f8228c352067be3262a334ce300de6ae3e53486c27d971c23ed6f09b1b",
+        "selected_variant": "regularized"
+      },
+      "source_id": null
+    }
+  },
+  "lineage_records": {
+    "lineage:88f9be5ce295dca54b265a26": {
+      "agent_id": "safety_training",
+      "artifact_id": "safety-mlp32-a611ce7656012ec5700bf282",
+      "checkpoint_id": null,
+      "lineage_type": "model",
+      "metadata": {
+        "feature_count": 32,
+        "model": {
+          "architecture": "32-16-8-1",
+          "checkpoint_ids": [],
+          "code_version": null,
+          "created_at": "2026-10-12T11:45:57.509039Z",
+          "metadata": {
+            "feature_count": 32,
+            "model_sha256": "a611ce7656012ec5700bf282e9a58b2644c96d9d37814fa60e764b1a82af21b0",
+            "training_dataset_ids": [
+              "safety-dataset-3d29a874ae7a55a75fc4cab5"
+            ]
+          },
+          "model_id": "safety-mlp32-a611ce7656012ec5700bf282",
+          "parent_model_ids": [],
+          "version": "safety_http32_experimental_v2"
+        },
+        "model_sha256": "a611ce7656012ec5700bf282e9a58b2644c96d9d37814fa60e764b1a82af21b0"
+      },
+      "model_id": null,
+      "parent_artifact_ids": [],
+      "record_id": "lineage:88f9be5ce295dca54b265a26",
+      "source_ids": [],
+      "timestamp": "2026-10-12T11:45:57.509039Z",
+      "transformation": "train",
+      "transformation_id": "activity:6cbe8c868379befdbfb497db"
+    }
+  },
+  "relations": {
+    "relation:2d10ed9d6b0c0825c5fa2d2f": {
+      "activity_id": "activity:6cbe8c868379befdbfb497db",
+      "metadata": {
+        "lineage_record_id": "lineage:88f9be5ce295dca54b265a26"
+      },
+      "object_id": "activity:6cbe8c868379befdbfb497db",
+      "relation_id": "relation:2d10ed9d6b0c0825c5fa2d2f",
+      "relation_type": "wasGeneratedBy",
+      "subject_id": "safety-mlp32-a611ce7656012ec5700bf282",
+      "timestamp": "2026-10-12T11:45:57.509039Z"
+    },
+    "relation:b3979f1e2ebaea3fcf756693": {
+      "activity_id": "activity:6cbe8c868379befdbfb497db",
+      "metadata": {
+        "lineage_record_id": "lineage:88f9be5ce295dca54b265a26"
+      },
+      "object_id": "safety_training",
+      "relation_id": "relation:b3979f1e2ebaea3fcf756693",
+      "relation_type": "wasAttributedTo",
+      "subject_id": "safety-mlp32-a611ce7656012ec5700bf282",
+      "timestamp": "2026-10-12T11:45:57.509039Z"
+    }
+  },
+  "schema_version": "slai.provenance.store.v1",
+  "sources": {},
+  "transformations": {},
+  "updated_at": "2026-10-12T11:45:57.515138Z"
+}
