@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 
+from ..model_hub import resolve_model_file
 from .modules.language_tokenizer import LanguageTokenizer
 from .modules.language_transformer import LanguageTransformer
 from .utils.config_loader import get_config_section
@@ -209,7 +210,8 @@ class LantraRuntime:
         return device
 
     def _load_runtime(self) -> None:
-        checkpoint = Path(self.checkpoint_path).expanduser()
+        checkpoint = resolve_model_file(self.checkpoint_path, "language/lantra/lantra_20261013T231832Z.pt")
+        self.checkpoint_path = str(checkpoint)
         if not checkpoint.exists():
             self._raise_model(
                 "LANTRA checkpoint was not found.",
