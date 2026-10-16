@@ -509,7 +509,7 @@ class FeasibilityConstraintHeuristic(BaseHeuristics):
             None,
         )
 
-        contributions: List[Dict[str, float]] = []
+        contributions: List[Dict[str, Any]] = []
         for name in self.feature_names:
             value = float(features[name])
             weight = float(self.weights[name])
