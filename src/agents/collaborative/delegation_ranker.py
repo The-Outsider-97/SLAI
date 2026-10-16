@@ -203,7 +203,8 @@ class DelegationRanker:
     def __init__(self, directory: str | Path, device: str = "cpu"):
         import torch # type: ignore
         from torch import nn # type: ignore
-        self.path = Path(directory)
+        from ..model_hub import resolve_model_bundle
+        self.path = resolve_model_bundle(directory, "collaborative/delegation_ranker", ("manifest.json", "features.json", "model.pt"))
         meta = json.loads((self.path / "manifest.json").read_text(encoding="utf-8"))
         checkpoint = self.path / "model.pt"
         digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
