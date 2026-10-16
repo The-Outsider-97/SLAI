@@ -14,13 +14,13 @@ import json
 import math
 import re
 import threading
-import numpy as np # type: ignore
-import torch # type: ignore
-
 from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from torch import nn # type: ignore
+
+import numpy as np
+import torch
+from torch import nn
 
 FEATURE_VERSION = 1
 FEATURE_NAMES = (
@@ -84,71 +84,70 @@ class LocalSemanticEncoder:
         if not Path(model_path).is_dir():
             raise FileNotFoundError(f"Local semantic encoder missing: {model_path}")
         try:
-            from sentence_transformers import SentenceTransformer # type: ignore
+            from sentence_transformers import SentenceTransformer
         except ImportError as exc:
             raise RuntimeError("Semantic feature requires sentence-transformers") from exc
-        self.model = SentenceTransformer(str(Path(model_path).resolve()))
+        # The model was explicitly supplied as an existing local snapshot.
+        # Inference must never trigger a download or require online access.
+        self.model = SentenceTransformer(str(Path(model_path).resolve()), local_files_only=True)
+        if max_entries < 1:
+            raise ValueError("max_entries must be positive")
         self.cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self.lock = threading.RLock()
-        if not isinstance(max_entries, int) or max_entries < 1:
-            raise ValueError("max_entries must be a positive integer")
         self.max_entries = max_entries
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
-        """Return embeddings in input order, independent of LRU eviction.
+        """Encode text in batches without losing results to LRU eviction.
 
-        The persistent cache is bounded. Embeddings requested by *this call*
-        are pinned in a temporary dictionary until its output is assembled.
-        Consequently, cached hits cannot disappear while new embeddings are
-        inserted, even when the request is larger than ``max_entries``.
+        The previous version first inserted every missing embedding into the
+        bounded cache and only then looked up every requested text. Once the
+        cache filled, inserting misses evicted requested cache hits, causing a
+        KeyError during SciFact feature extraction. Results must be retained
+        independently of the cache *before* any new insertions or eviction.
         """
         if not texts:
-            return np.empty((0, 0), dtype=np.float32)
-
+            return np.zeros((0, 0), dtype=np.float32)
         with self.lock:
-            requested = list(texts)
-            unique = list(dict.fromkeys(requested))
-            current: dict[str, np.ndarray] = {}
-            missing: list[str] = []
+            result: list[np.ndarray | None] = [None] * len(texts)
+            pending: dict[str, list[int]] = {}
 
-            for text in unique:
-                vector = self.cache.get(text)
-                if vector is None:
-                    missing.append(text)
+            for index, value in enumerate(texts):
+                hit = self.cache.get(value)
+                if hit is not None:
+                    # Retain the vector even if it is evicted later in this call.
+                    result[index] = hit
+                    self.cache.move_to_end(value)
                 else:
-                    current[text] = vector
-                    # Cache *reads* must also refresh LRU recency.
-                    self.cache.move_to_end(text)
+                    pending.setdefault(value, []).append(index)
 
-            # Bound encoder work per call and avoid creating a massive
-            # intermediate embedding array for large candidate sets.
-            for offset in range(0, len(missing), 32):
-                batch = missing[offset:offset + 32]
-                vectors = np.asarray(
+            unique_missing = list(pending)
+            for offset in range(0, len(unique_missing), 32):
+                batch = unique_missing[offset:offset + 32]
+                encoded = np.asarray(
                     self.model.encode(
-                        batch, batch_size=32,
+                        batch,
+                        batch_size=32,
                         show_progress_bar=False,
                         normalize_embeddings=True,
                     ),
                     dtype=np.float32,
                 )
-                if vectors.ndim == 1 and len(batch) == 1:
-                    vectors = vectors.reshape(1, -1)
-                if (vectors.ndim != 2 or vectors.shape[0] != len(batch)
-                        or vectors.shape[1] == 0 or not np.isfinite(vectors).all()):
-                    raise ValueError("Semantic encoder returned invalid embeddings")
-                for text, vector in zip(batch, vectors):
-                    current[text] = vector
-                    self.cache[text] = vector
-                    self.cache.move_to_end(text)
-                while len(self.cache) > self.max_entries:
-                    self.cache.popitem(last=False)
+                if encoded.ndim != 2 or encoded.shape[0] != len(batch):
+                    raise ValueError("Semantic encoder returned an unexpected embedding batch")
+                if not np.isfinite(encoded).all():
+                    raise ValueError("Semantic encoder returned nonfinite embeddings")
 
-            # Use temporary pinned references instead of looking up cache[t]
-            # after pruning: an LRU hit may have been evicted meanwhile.
-            return np.stack([current[text] for text in requested]).astype(
-                np.float32, copy=False
-            )
+                for value, vector in zip(batch, encoded):
+                    for index in pending[value]:
+                        result[index] = vector
+                    self.cache[value] = vector
+                    self.cache.move_to_end(value)
+                    while len(self.cache) > self.max_entries:
+                        self.cache.popitem(last=False)
+
+            if any(vector is None for vector in result):
+                raise RuntimeError("Internal semantic feature alignment failure")
+            return np.stack(result).astype(np.float32, copy=False)
 
 
 class FeatureExtractor:
