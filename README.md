@@ -96,7 +96,7 @@ flowchart TD
 Python and platform compatibility depend on the selected model and optional feature packages. The project has been developed for Windows and Linux; native dependencies such as CUDA, Selenium browser drivers, PyQt5, and scientific libraries may need platform-specific setup. Prefer an isolated virtual environment.
 
 ```powershell
-git clone --branch SLAI-v.2.3 https://github.com/The-Outsider-97/SLAI.git
+git clone https://github.com/The-Outsider-97/SLAI.git
 cd SLAI
 py -m venv venv
 .\venv\Scripts\Activate.ps1
@@ -118,7 +118,7 @@ Do not replace the LSTP pin with an unverified moving branch. LSTP supports sema
 ### Linux / WSL
 
 ```bash
-git clone --branch SLAI-v.2.3 https://github.com/The-Outsider-97/SLAI.git
+git clone https://github.com/The-Outsider-97/SLAI.git
 cd SLAI
 python3 -m venv venv
 source venv/bin/activate
