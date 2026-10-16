@@ -54,7 +54,11 @@ class GradientBoostingHeuristic(BaseHeuristics):
         self.planning_db_path = self.heuristics_config.get('planning_db_path')
         self.heuristic_model_path = self.heuristics_config.get('heuristic_model_path')
         os.makedirs(self.heuristic_model_path, exist_ok=True)
-        self.model_path = os.path.join(self.heuristic_model_path, 'gb_heuristic_model.pkl')
+        from ...model_hub import resolve_model_file
+        self.model_path = str(resolve_model_file(
+            os.path.join(self.heuristic_model_path, 'gb_heuristic_model.pkl'),
+            'planning/heuristics/gb_heuristic_model.pkl',
+        ))
 
         # Features
         self.feature_config = self.gb_config.get('feature_config', {})

@@ -382,7 +382,10 @@ class CyberSafetyModule:
         self.http_mlp_mode = mode
         if not coerce_bool(settings.get("enabled", False), False):
             return
-        model_path = Path(str(settings.get("model_path", ""))).expanduser()
+        from ..model_hub import resolve_model_file
+        model_path = resolve_model_file(
+            str(settings.get("model_path", "")), "safety/cyber/mlp_http_risk.pt"
+        )
         if not model_path.is_file():
             logger.warning("HTTP risk MLP not found: %s; existing Safety rules remain active", model_path)
             return

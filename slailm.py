@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from logs.logger import LoggingSettings, configure_logging, get_logger, shutdown_logging
+from src.agents.model_hub import resolve_model_file
 from src.agents.agent_factory import AgentFactory
 from src.agents.collaborative.shared_memory import SharedMemory
 from src.agents.language.lantra_runtime import LantraRuntime, LantraTextResult
@@ -445,6 +446,7 @@ def resolve_checkpoint(explicit: Optional[str]) -> Path:
     configured = _configured_checkpoint()
     if configured is None:
         raise FileNotFoundError("language_config.yaml does not define lantra_runtime.checkpoint_path; use --checkpoint PATH.")
+    configured = resolve_model_file(configured, "language/lantra/lantra_20261013T231832Z.pt")
     if configured.is_file():
         return configured
 
