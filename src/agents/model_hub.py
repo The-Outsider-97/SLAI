@@ -5,11 +5,16 @@ agent-specific schema, checksum, and inference validation.
 """
 from __future__ import annotations
 
-import logging
 import os
+
 from pathlib import Path
 
-LOGGER = logging.getLogger(__name__)
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
+
+LOGGER = get_logger("SLAI Model Hub")
+printer = PrettyPrinter()
+
+
 DEFAULT_REPOSITORY = "The-Outsider/SLAI_models"
 _VALID_SOURCES = frozenset({"local", "prefer_hub", "hub"})
 
@@ -21,9 +26,7 @@ class ModelHubError(RuntimeError):
 def _settings() -> tuple[str, str, str, bool]:
     source = os.getenv("SLAI_MODEL_SOURCE", "prefer_hub").strip().lower()
     if source not in _VALID_SOURCES:
-        raise ValueError(
-            "SLAI_MODEL_SOURCE must be local, prefer_hub, or hub"
-        )
+        raise ValueError("SLAI_MODEL_SOURCE must be local, prefer_hub, or hub")
     repository = os.getenv("SLAI_MODEL_REPOSITORY", DEFAULT_REPOSITORY).strip()
     revision = os.getenv("SLAI_MODEL_REVISION", "main").strip()
     if not repository or not revision:
@@ -55,7 +58,7 @@ def resolve_model_file(local_path: str | Path, hub_filename: str) -> Path:
     if source == "local":
         return local
     try:
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import hf_hub_download # type: ignore
 
         downloaded = Path(
             hf_hub_download(
@@ -71,18 +74,12 @@ def resolve_model_file(local_path: str | Path, hub_filename: str) -> Path:
         return downloaded
     except Exception as exc:
         if source == "hub":
-            raise ModelHubError(
-                f"Unable to resolve {remote_name} from {repository}@{revision}"
-            ) from exc
+            raise ModelHubError(f"Unable to resolve {remote_name} from {repository}@{revision}") from exc
         LOGGER.warning("Hub model unavailable (%s); checking local artifact %s", type(exc).__name__, local)
         return local
 
 
-def resolve_model_bundle(
-    local_directory: str | Path,
-    hub_directory: str,
-    filenames: tuple[str, ...],
-) -> Path:
+def resolve_model_bundle(local_directory: str | Path, hub_directory: str, filenames: tuple[str, ...]) -> Path:
     """Resolve a coherent Hub snapshot for manifest-based model bundles."""
     local = Path(local_directory).expanduser()
     folder = _relative_artifact(hub_directory)
@@ -95,7 +92,7 @@ def resolve_model_bundle(
     if source == "local":
         return local
     try:
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import snapshot_download # type: ignore
 
         snapshot = Path(
             snapshot_download(
@@ -112,8 +109,6 @@ def resolve_model_bundle(
         return directory
     except Exception as exc:
         if source == "hub":
-            raise ModelHubError(
-                f"Unable to resolve {folder} from {repository}@{revision}"
-            ) from exc
+            raise ModelHubError(f"Unable to resolve {folder} from {repository}@{revision}") from exc
         LOGGER.warning("Hub model bundle unavailable (%s); checking %s", type(exc).__name__, local)
         return local
