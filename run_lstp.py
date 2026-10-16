@@ -11,12 +11,12 @@ import argparse
 import json
 import re
 import uuid
-
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any
 
+from logs.logger import PrettyPrinter, get_logger
 from lstp import (
     Atom,
     Context,
@@ -33,7 +33,6 @@ from src.agents.agent_factory import AgentFactory
 from src.agents.collaborative.shared_memory import SharedMemory
 from src.agents.language.utils.linguistic_frame import LinguisticFrame, SpeechActType
 from src.agents.language_agent import LanguageAgent
-from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("LSTP Integration")
 printer = PrettyPrinter()

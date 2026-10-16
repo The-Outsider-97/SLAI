@@ -1,7 +1,3 @@
-# SLAI v2.3 dependencies — branch SLAI-v.2.3
-# The editable LSTP dependency requires the pinned model/LSTP checkout.
-# Run `python setup_lstp.py` before installing this requirements file when LSTP is absent.
-# These packages support distinct SLAI modules; avoid blanket uninstall/refactors without import evidence.
 -e ./model/LSTP
 boto3
 botocore
