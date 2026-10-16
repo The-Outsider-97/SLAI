@@ -194,7 +194,8 @@ class RelevanceRanker:
 
     def __init__(self, model_dir: str | Path, *, encoder_path: str | None = None,
                  device: str = "cpu", batch_size: int = 64):
-        root = Path(model_dir)
+        from ..model_hub import resolve_model_bundle
+        root = resolve_model_bundle(model_dir, "knowledge/relevance_ranker", ("manifest.json", "model.pt"))
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         if manifest.get("feature_version") != FEATURE_VERSION or tuple(manifest.get("feature_names", [])) != FEATURE_NAMES:
             raise ValueError("Unsupported RelevanceRanker feature schema")
