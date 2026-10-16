@@ -163,11 +163,10 @@ class DQNAgent:
         self.warmup_steps = int(self.dqn_config.get("warmup_steps", self.batch_size))
         self.max_steps_per_episode = self.dqn_config.get("max_steps_per_episode")
         self.target_soft_update_tau = self.dqn_config.get("target_soft_update_tau")
-        self.target_soft_update_tau = (
-            float(self.target_soft_update_tau) if self.target_soft_update_tau is not None else None
-        )
+        self.target_soft_update_tau = float(self.target_soft_update_tau) if self.target_soft_update_tau is not None else None
         self.use_double_dqn = bool(self.dqn_config.get("double_dqn", False))
         self.replay_backend = str(self.dqn_config.get("replay_backend", "uniform")).strip().lower()
+
         # --- N‑step returns ---
         self.n_step = int(self.dqn_config.get("n_step", 1))
         self.n_step_buffer = deque(maxlen=self.n_step)
@@ -902,7 +901,7 @@ class DQNAgent:
     def load(self, path: Union[str, os.PathLike[str]]) -> None:
         """Load agent state from a checkpoint created by :meth:`save`."""
         checkpoint_path = Path(path)
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         if int(checkpoint.get("state_dim", self.state_dim)) != self.state_dim:
             raise ValueError("Checkpoint state_dim does not match the current agent.")

@@ -41,25 +41,6 @@ evolutionary:
   step_size_adaptation: true   # enable self-adaptive step size
 
 
-operational_trl:
-  enabled: true
-
-  profiles:
-    scheduling:
-      enabled: true
-      mode: shadow
-      path: "src/agents/learning/models/tabularRL.pt"
-      fallback: shortest_job
-      authorized_active: false
-
-    allocation:
-      enabled: false
-      mode: disabled
-      path: "src/agents/learning/models/tabularRL_allocation.pt"
-      fallback: least_loaded
-      authorized_active: false
-
-
 dqn:
   hidden_size: 128
   gamma: 0.99
@@ -71,6 +52,17 @@ dqn:
   target_update_frequency: 100
   buffer_size: 10000
   replay_backend: "distributed"
+
+operational_dqn:
+  enabled: true
+  profiles:
+    scheduling:
+      enabled: true
+      mode: shadow
+      path: "src/agents/learning/models/StandardDQN.pt"
+      device: cpu
+      fallback: shortest_job
+      authorized_active: false
 
 
 maml:
@@ -138,6 +130,24 @@ rl:
   state_dim: 128
   double_q: false               # enable Double Q-learning (two Q-tables)
   trace_type: "accumulating"    # "accumulating" or "replacing"
+
+operational_trl:
+  enabled: true
+
+  profiles:
+    scheduling:
+      enabled: true
+      mode: shadow
+      path: "src/agents/learning/models/tabularRL.pt"
+      fallback: shortest_job
+      authorized_active: false
+
+    allocation:
+      enabled: false
+      mode: disabled
+      path: "src/agents/learning/models/tabularRL_allocation.pt"
+      fallback: least_loaded
+      authorized_active: false
 
 
 rsi:

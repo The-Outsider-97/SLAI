@@ -958,6 +958,125 @@ class LearningFactory:
             logger.warning("Operational TRL unavailable | profile=%s | %s", profile, exc)
             return reject(str(exc))
 
+    def operational_sdqn_decision(self, features: dict, profile: str = "scheduling") -> dict:
+        """Obtain a version-checked scheduling DQN recommendation."""
+        import threading
+        from train_sdqn import ( # type: ignore
+            ACTIONS_S,
+            device_choice,
+            encode,
+            greedy,
+            load,
+            parser,
+            restore_args_from_checkpoint,
+        )
+
+        fallback_default = "shortest_job"
+
+        def rejected(reason: str, fallback: str) -> dict:
+            return {
+                "status": "fallback",
+                "profile": profile,
+                "reason": str(reason),
+                "recommended_action": None,
+                "fallback_action": fallback,
+                "apply_policy": False,
+            }
+
+        config = get_config_section("operational_dqn") or {}
+        profiles = config.get("profiles", {})
+        settings = profiles.get(profile, {})
+        fallback = settings.get("fallback", fallback_default)
+        if fallback not in ACTIONS_S:
+            raise ValueError("Unsupported DQN fallback action")
+
+        if profile != "scheduling":
+            return rejected("Unsupported DQN profile", fallback)
+
+        if not config.get("enabled", False):
+            return rejected("Operational DQN disabled", fallback)
+
+        if not settings.get("enabled", False):
+            return rejected("Scheduling DQN disabled", fallback)
+
+        mode = str(settings.get("mode", "shadow"))
+
+        if mode not in {"shadow", "active", "disabled"}:
+            raise ValueError(f"Invalid operational DQN mode: {mode}")
+
+        if mode == "disabled":
+            return rejected("DQN profile disabled", fallback)
+
+        if (
+            mode == "active"
+            and not settings.get("authorized_active", False)
+        ):
+            return rejected("Active use not authorized", fallback)
+
+        root = Path(__file__).resolve().parents[3]
+        model_directory = (root / "src/agents/learning/models").resolve()
+        checkpoint = (root / str(settings.get("path", ""))).resolve()
+
+        if (
+            not checkpoint.is_relative_to(model_directory)
+            or checkpoint.suffix != ".pt"
+        ):
+            return rejected("Untrusted checkpoint path", fallback)
+
+        if not hasattr(self, "_operational_sdqn_lock"):
+            self._operational_sdqn_lock = threading.RLock()
+            self._operational_sdqn_cache = {}
+
+        with self._operational_sdqn_lock:
+            try:
+                observation = encode(features)
+                stat = checkpoint.stat()
+                signature = str(checkpoint), stat.st_mtime_ns, stat.st_size
+                entry = self._operational_sdqn_cache.get(profile)
+                if entry is None or entry["signature"] != signature:
+                    args = parser().parse_args([])
+                    restore_args_from_checkpoint(checkpoint, args)
+                    device = device_choice(str(settings.get("device", "cpu")))
+                    agent, metadata = load(checkpoint, args, device=device)
+                    if metadata.get("status") != "validated":
+                        raise ValueError("Checkpoint not independently validated")
+
+                    if agent.total_gradient_steps <= 0:
+                        raise ValueError("Untrained DQN checkpoint")
+
+                    agent.epsilon = 0.0
+                    entry = {
+                        "agent": agent,
+                        "metadata": metadata,
+                        "signature": signature,
+                    }
+
+                    self._operational_sdqn_cache[profile] = entry
+                    logger.info("Loaded operational SDQN from %s", checkpoint)
+
+                agent = entry["agent"]
+
+                action_index = greedy(agent, observation)
+
+                if action_index not in range(len(ACTIONS_S)):
+                    raise ValueError("Invalid DQN inference action")
+
+                return {
+                    "status": "ready",
+                    "profile": profile,
+                    "mode": mode,
+                    "recommended_action": ACTIONS_S[action_index],
+                    "action_index": action_index,
+                    "fallback_action": fallback,
+                    "apply_policy": mode == "active",
+                    "encoder_version": "sdqn-operational-1",
+                    "model_path": str(checkpoint),
+                }
+
+            except Exception as exc:
+                logger.warning("Operational DQN fallback | profile=%s | %s", profile, exc)
+                return rejected(str(exc), fallback)
+
     def _checkpoint_candidates(self, agent_name: str) -> List[Path]:
         names = [
             self.checkpoint_dir / f"{agent_name}_checkpoint.pt",
