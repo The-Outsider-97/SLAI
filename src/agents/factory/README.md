@@ -47,17 +47,6 @@ flowchart TD
     Index --> Resolve[Resolve requested definition]
 ```
 
-### Quantitative Agent Registrations
-
-| Identifier | Import path | Factory integration |
-| --- | --- | --- |
-| `stem` | `src.agents.stem_agent.STEMAgent` | Default registration; shared memory, factory and facade config injection |
-| `spatial` | `src.agents.spatial_agent.SpatialAgent` | Default registration; same construction contract |
-| `simulation` | `src.agents.simulation_agent.SimulationAgent` | Default registration; model objects are separately supplied/registered through the facade |
-| `optimization` | `src.agents.optimization_agent.OptimizationAgent` | Default registration; mathematical solver registry belongs to the subsystem |
-
-All four have `torch_required=False` dependency profiles. That does not make them dependency-free: their numerical and shared-runtime imports still apply. The checked-in agent configuration selects factory `default_version: "2.2.0"`; this can differ from the package's `2.3.0` marker. Use registry metadata for the effective version.
-
 ## Construction and Configuration
 
 The public interface is `create(agent_type, shared_memory=None, **kwargs)`. `create_agent()` and `get_agent()` delegate to it. Special arguments are `version`, `config`, and the boolean `_ephemeral`; remaining arguments are considered for constructor injection.
@@ -201,4 +190,3 @@ This checkout has no dedicated factory test suite under `tests/`. Embedded demon
 
 - [Agent architecture](../README.md) and [Base runtime](../base/README.md)
 - [Collaboration](../collaborative/README.md)
-- [STEM](../stem/README.md), [Spatial](../spatial/README.md), [Simulation](../simulation/README.md), [Optimization](../optimization/README.md)
