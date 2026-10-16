@@ -29,6 +29,55 @@ flowchart TD
 
 This is a conceptual map; exact execution paths depend on the entry point and task. It is **not** a guarantee that every request passes through every control.
 
+```mermaid
+flowchart TD
+    UserTask[Incoming task / event] --> Factory[AgentFactory]
+
+    Factory --> P[PlanningAgent]
+    Factory --> R[ReasoningAgent]
+    Factory --> L[LanguageAgent]
+    Factory --> S[SafetyAgent]
+    Factory --> E[ExecutionAgent]
+    Factory --> K[KnowledgeAgent]
+    Factory --> V[EvaluationAgent]
+    Factory --> A[AlignmentAgent]
+    Factory --> C[CollaborativeAgent]
+    Factory --> PE[PerceptionAgent]
+    Factory --> LE[LearningAgent]
+    Factory --> AD[AdaptiveAgent]
+    Factory --> H[HandlerAgent]
+    Factory --> B[BrowserAgent]
+    Factory --> O[ObservabilityAgent]
+    Factory --> RE[ReaderAgent]
+    Factory --> Q[QualityAgent]
+    Factory --> PR[PrivacyAgent]
+    Factory --> N[NetworkAgent]
+
+    C <--> Shared[(Collaborative Shared Memory)]
+    P <--> Shared
+    R <--> Shared
+    L <--> Shared
+    S <--> Shared
+    E <--> Shared
+    K <--> Shared
+    V <--> Shared
+    A <--> Shared
+    PE <--> Shared
+    LE <--> Shared
+    AD <--> Shared
+    H <--> Shared
+    B <--> Shared
+    O <--> Shared
+    RE <--> Shared
+    Q <--> Shared
+    PR <--> Shared
+    N <--> Shared
+
+    E --> Actions[Execution actions]
+    V --> Reports[Evaluation outputs]
+    S --> Guardrails[Safety decisions]
+```
+
 ## Environment and installation
 
 Python and platform compatibility depend on the selected model and optional feature packages. The project has been developed for Windows and Linux; native dependencies such as CUDA, Selenium browser drivers, PyQt5, and scientific libraries may need platform-specific setup. Prefer an isolated virtual environment.
