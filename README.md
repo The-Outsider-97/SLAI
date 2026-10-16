@@ -1,6 +1,6 @@
 # SLAI v2.3 — Modular Agent Framework
 
-![SLAI startup](component/assets/startup.png)
+![SLAI startup](applications/assets/startup.png)
 
 SLAI is an experimental Python multi-agent AI system with a desktop application, domain agents, runtime coordination, monitoring, language-model tooling, and optional integrations. This README documents the **`SLAI-v.2.3` branch**, not `main`. Implemented modules are not, by themselves, evidence of production readiness.
 
