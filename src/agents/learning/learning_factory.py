@@ -1015,7 +1015,10 @@ class LearningFactory:
 
         root = Path(__file__).resolve().parents[3]
         model_directory = (root / "src/agents/learning/models").resolve()
-        checkpoint = (root / str(settings.get("path", ""))).resolve()
+        from ..model_hub import resolve_model_file
+        checkpoint = resolve_model_file(
+            root / str(settings.get("path", "")), "learning/dqn/StandardDQN.pt"
+        ).resolve()
 
         if (
             not checkpoint.is_relative_to(model_directory)
@@ -1086,7 +1089,10 @@ class LearningFactory:
         ]
 
         if agent_name == "rl":
-            names.insert(0, Path("src/agents/learning/models/tabularRL.pt"))
+            from ..model_hub import resolve_model_file
+            names.insert(0, resolve_model_file(
+                "src/agents/learning/models/tabularRL.pt", "learning/rl/tabularRL.pt"
+            ))
 
         return names
 
