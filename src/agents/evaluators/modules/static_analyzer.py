@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
-import networkx as nx
+import networkx as nx # type: ignore
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path

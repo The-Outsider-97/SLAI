@@ -462,10 +462,7 @@ class ValidationProtocol:
             )
 
     def _cross_check_certification_templates(
-        self,
-        errors: List[ValidationIssue],
-        warnings: List[ValidationIssue],
-    ) -> Dict[str, Any]:
+        self, errors: List[ValidationIssue], warnings: List[ValidationIssue]) -> Dict[str, Any]:
         summary: Dict[str, Any] = {
             "checked": False,
             "template_path": None,
