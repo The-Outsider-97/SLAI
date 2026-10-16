@@ -1,270 +1,169 @@
 # SLAI Agents Architecture
 
-The `src/agents` package contains the core multi-agent runtime used by SLAI. It defines domain-specialized agents (planning, reasoning, language, safety, etc.), shared collaboration primitives, execution workflows, and factory-based instantiation.
+## Overview
 
-This document provides a practical architecture map for engineers onboarding to the codebase, extending agents, or integrating new orchestration flows.
+`src/agents/` contains SLAI's agent facades, capability subsystems, construction infrastructure, and coordination runtime. Facades such as `STEMAgent` and `PlanningAgent` expose task interfaces; their sibling packages contain algorithms, data contracts, memory, configuration, and utilities. [Package exports](__init__.py) are resolved lazily to avoid importing every optional dependency when `src.agents` is imported.
 
----
+The architecture separates capability execution from instance construction and coordination. [AgentFactory](agent_factory.py) registers definitions and constructs managed instances. [BaseAgent](base_agent.py) supplies execution accounting, recovery, shared-memory access, runtime identity, and checkpoint hooks. Concrete agents decide their input schemas and domain semantics. Registration alone does not establish that dependencies, models, or external services are available.
 
-## 1) Package goals
-
-The agents subsystem is designed to:
-
-- **Separate responsibilities by capability domain** (e.g., `planning`, `reasoning`, `safety`).
-- **Enable composition through shared memory and routing** instead of hard-coding peer dependencies.
-- **Support dynamic instantiation** with `AgentFactory` and metadata-driven registration.
-- **Standardize implementation contracts** via `BaseAgent` and common config-loading patterns.
-
----
-
-## 2) High-level architecture
+## Architecture
 
 ```mermaid
 flowchart TD
-    UserTask[Incoming task / event] --> Factory[AgentFactory]
-
-    Factory --> P[PlanningAgent]
-    Factory --> R[ReasoningAgent]
-    Factory --> L[LanguageAgent]
-    Factory --> S[SafetyAgent]
-    Factory --> E[ExecutionAgent]
-    Factory --> K[KnowledgeAgent]
-    Factory --> V[EvaluationAgent]
-    Factory --> A[AlignmentAgent]
-    Factory --> C[CollaborativeAgent]
-    Factory --> PE[PerceptionAgent]
-    Factory --> LE[LearningAgent]
-    Factory --> AD[AdaptiveAgent]
-    Factory --> H[HandlerAgent]
-    Factory --> B[BrowserAgent]
-    Factory --> O[ObservabilityAgent]
-    Factory --> RE[ReaderAgent]
-    Factory --> Q[QualityAgent]
-    Factory --> PR[PrivacyAgent]
-    Factory --> N[NetworkAgent]
-
-    C <--> Shared[(Collaborative Shared Memory)]
-    P <--> Shared
-    R <--> Shared
-    L <--> Shared
-    S <--> Shared
-    E <--> Shared
-    K <--> Shared
-    V <--> Shared
-    A <--> Shared
-    PE <--> Shared
-    LE <--> Shared
-    AD <--> Shared
-    H <--> Shared
-    B <--> Shared
-    O <--> Shared
-    RE <--> Shared
-    Q <--> Shared
-    PR <--> Shared
-    N <--> Shared
-
-    E --> Actions[Execution actions]
-    V --> Reports[Evaluation outputs]
-    S --> Guardrails[Safety decisions]
+    Caller[Runtime caller] --> Factory[AgentFactory]
+    Factory --> Registry[Factory AgentRegistry]
+    Factory --> Agent[Concrete agent facade]
+    Base[BaseAgent] -->|inherited runtime services| Agent
+    Agent --> Domain[Capability subsystem]
+    Agent --> Shared[SharedMemory]
+    Agent -->|supported checkpoint hooks| Checkpoint[Checkpoint manager]
+    Coordinator[CollaborativeAgent or OrchestratorAgent] -->|acquire agent| Factory
+    Coordinator -->|dispatch task| Agent
+    Domain --> Local[Subsystem memory and assets]
 ```
 
----
+These are construction and service relationships, not a mandatory task pipeline. Tasks do not universally pass through Quality, Planning, Execution, Privacy, and Evaluation in a fixed order. Each coordinator and facade implements its own routing and policy checks.
 
-## 3) Top-level module map
+## Module Structure
 
-The package exposes two complementary layers:
+| Component | Implementation | Responsibility |
+| --- | --- | --- |
+| Agent facade | `<name>_agent.py` | Runtime integration and domain-specific task boundary |
+| Common runtime | [base_agent.py](base_agent.py), [base/README.md](base/README.md) | Shared configuration, lazy components, execution records, issue handling, checkpoints |
+| Runtime contracts | [runtime_contracts.py](runtime_contracts.py) | Definition/instance/scope identity, lifecycle transitions, health and degradation records |
+| Construction | [agent_factory.py](agent_factory.py), [factory/README.md](factory/README.md) | Registration, version resolution, import and constructor checks, runtime ownership |
+| Coordination | [collaborative/README.md](collaborative/README.md) | Task contracts, policy, routing, collaboration, shared memory |
+| Specialist delegation | [orchestrator_agent.py](orchestrator_agent.py) | Validated specialist onboarding, invocation, result caching, ephemeral cleanup |
+| Autonomous runtime | [autonomous_control_loop.py](autonomous_control_loop.py) | Control-loop state and agent coordination |
 
-1. **Facade agents** (`*_agent.py`) at `src/agents/` used by orchestration and factory logic.
-2. **Capability subpackages** (e.g., `planning/`, `safety/`, `language/`) that hold internals, helpers, configs, and templates.
+## Agent Subsystem Directory
 
-### Facade agent files
+The identifiers below are the canonical keys in `AgentFactory.DEFAULT_AGENT_SPECS`. Unless stated otherwise, facade classes inherit `BaseAgent`, and therefore integrate with its runtime services. Dependencies listed here are significant source-level integrations, not an exhaustive installation manifest or a guarantee of automatic peer construction.
 
-- `adaptive_agent.py`
-- `alignment_agent.py`
-- `base_agent.py`
-- `browser_agent.py`
-- `collaborative_agent.py`
-- `evaluation_agent.py`
-- `execution_agent.py`
-- `handler_agent.py`
-- `knowledge_agent.py`
-- `language_agent.py`
-- `learning_agent.py`
-- `perception_agent.py`
-- `planning_agent.py`
-- `privacy_agent.py`
-- `quality_agent.py`
-- `reader_agent.py`
-- `qnn_agent.py`
-- `reasoning_agent.py`
-- `safety_agent.py`
-- `network_agent.py`
-- `observability_agent.py`
+| Identifier / subsystem | Core implementation | Responsibilities and capabilities | Important integrations | Documentation |
+| --- | --- | --- | --- | --- |
+| `adaptive` / `adaptive/` | `AdaptiveAgent`, `PolicyManager`, `LearningParameterTuner` | Adaptation, demonstration/feedback learning, recovery strategy ranking | Learning workers, `SLAIEnv` | [Adaptive](adaptive/README.md) |
+| `alignment` / `alignment/` | `AlignmentAgent`, `AlignmentSubsystem` | Alignment assessment, fairness and bias analysis, correction decisions | Value embeddings, ethical constraints, counterfactual auditor | [Alignment](alignment/README.md) |
+| `browser` / `browser/` | `BrowserAgent`, `BrowserFunctions`, `WorkFlow` | Browser actions, scraping, workflow compilation and execution | Browser driver, security and content modules | [Browser](browser/README.md) |
+| `collaborative` / `collaborative/` | `CollaborativeAgent`, `CollaborationManager` | Risk assessment, assignments, policy-controlled delegation | `PolicyEngine`, task contracts, shared memory | [Collaboration](collaborative/README.md) |
+| `evaluation` / `evaluators/` | `EvaluationAgent`, evaluator classes | Validation cycles, performance/resource/safety assessments, reports | Safety guard, issue tracking, optional anomaly models | [Evaluation](evaluators/README.md) |
+| `execution` / `execution/` | `ExecutionAgent`, `TaskCoordinator` | Action registration, task dispatch, validation and recovery | Planning scheduler, robot interface, optional Adaptive attachment | [Execution](execution/README.md) |
+| `handler` / `handler/` | `HandlerAgent`, `IssueHandler` | Failure normalization, recovery, observability and learning-loop handling | Base issue handlers and handler policies | [Handler](handler/README.md) |
+| `knowledge` / `knowledge/` | `KnowledgeAgent` | Document retrieval, ontology updates, relevance scoring, knowledge synchronization | Optional Reasoning/Learning attachments, retrieval backends | [Knowledge](knowledge/README.md) |
+| `language` / `language/` | `LanguageAgent`, `NLPEngine`, `NLUEngine`, `NLGEngine` | Staged text processing, generation, classification and semantic encoding | Dialogue context, grammar, safety guard, configured language models | [Language](language/README.md) |
+| `learning` / `learning/` | `LearningAgent`, `LearningFactory`, `StrategySelector` | Learning strategy dispatch, environment interaction and checkpoint integration | `SLAIEnv`, policy network, recovery system | [Learning](learning/README.md) |
+| `network` / `network/` | `NetworkAgent` | Relay, receive, transport health and shutdown | Network adapters, routing, reliability and lifecycle modules | [Source package](network/) — no subsystem README |
+| `observability` / `observability/` | `ObservabilityAgent` | Tracing, performance analysis, capacity and diagnostic processing | Observability intelligence and Base execution metrics | [Observability](observability/README.md) |
+| `optimization` / `optimization/` | `OptimizationAgent`, `OptimizationSolver` | Canonical problem construction, compatible solver selection, multiobjective workflows | Solver registries, local optimization evidence, NumPy/SciPy | [Optimization](optimization/README.md) |
+| `orchestrator` / facade only | `OrchestratorAgent` | Specialist registration and delegation | Factory metadata/cache, validated specialist operations | [Factory](factory/README.md) |
+| `perception` / `perception/` | `PerceptionAgent`, `PerceptionFusion`, `PerceptionTrainer` | Modality processing, fusion, task heads, training and weight loading | Encoders/decoders, learning objectives, checkpoint manager | [Perception](perception/README.md) |
+| `planning` / `planning/` | `PlanningAgent`, `ProbabilisticPlanner`, `PlanningExecutor` | Task decomposition, plan generation, scheduling and replanning | Heuristics, resource monitor, safety planning, shared memory | [Planning](planning/README.md) |
+| `privacy` / `privacy/` | `PrivacyAgent` | Consent, purpose binding, minimization, retention and privacy assessment | Flow/risk/exposure analysis and auditability | [Privacy](privacy/README.md) |
+| `provenance` / `provenance/` | `ProvenanceAgent`, `ProvenanceStore` | Source/artifact registration, lineage, custody and reproducibility reports | Lineage graph, checkpoint records, provenance memory | [Provenance](provenance/README.md) |
+| `qnn` / `qnn/` | `QNNAgent`, `StateVectorCircuit` | State-vector circuit evaluation, parameter training and state serialization | Quantum encoding/policy modules, checkpoint hooks | [QNN](qnn/README.md) |
+| `quality` / `quality/` | `QualityAgent`, `QualityMemory` | Structural, semantic, statistical and relationship quality assessment | Baseline governance, evidence calibration, workflow control | [Quality](quality/README.md) |
+| `reader` / `reader/` | `ReaderAgent` | Structured reading plans and staged content processing | Reader subsystem contracts, stage results and summaries | [Reader](reader/README.md) |
+| `reasoning` / `reasoning/` | `ReasoningAgent`, `RuleEngine` | Facts/rules, forward chaining, probabilistic queries and reasoning traces | Validation engine, probabilistic models, shared memory | [Reasoning](reasoning/README.md) |
+| `safety` / `safety/` | `SafetyAgent` | Action validation, risk/security assessment, compliance and incident handling | Safety guard, cyber safety, reward model, STPA | [Safety](safety/README.md) |
+| `simulation` / `simulation/` | `SimulationAgent`, `RolloutEngine`, `ScenarioEngine` | Supplied-model rollouts, scenarios, Monte Carlo and sensitivity analysis | Injected model callbacks, simulation memory, NumPy | [Simulation](simulation/README.md) |
+| `spatial` / `spatial/` | `SpatialAgent`, `SpatialCompute`, `SpatialQueries` | Entities, frame transforms, geometry, indexing, occupancy and map alignment | Spatial memory, collision/topology modules, NumPy | [Spatial](spatial/README.md) |
+| `stem` / `stem/` | `STEMAgent`, scientific domain classes | Explicitly dispatched mathematical, scientific and engineering calculations | Base scientific engines, units, numerical methods, local cache | [STEM](stem/README.md) |
+| `verification` / `verification/` | `VerificationAgent`, formal verification components | Formal contracts, solver-backed checks and finite-state model checking | Backend registry, verification results/memory, optional SMT backend | [Verification](verification/README.md) |
 
-### Core orchestration files
+[software/](software/) is present as package scaffolding, with analysis, semantics, refactoring, memory, module, and configuration paths. Its four top-level capability implementation files are empty. It has no `SoftwareAgent` entry in the factory defaults or package facade exports. Its presence must not be interpreted as a registered executable agent. `base/` and `factory/` are infrastructure packages rather than capability-agent registrations.
 
-- `agent_factory.py` — central dynamic creation and registry integration.
-- `__init__.py` — package version marker and import root.
-- `factory/` — metadata, config adapters, and factory utilities.
-- `collaborative/` — shared memory, registry, and task routing.
+## Construction and Runtime Identity
 
----
+`AgentFactory(config=None)` loads [agents_config.yaml](base/configs/agents_config.yaml), overlays factory settings, and normally registers the static specifications without importing every facade. Configured aliases normalize names; opt-in discovery imports explicitly named packages and inspects exported `BaseAgent` subclasses. Discovery is not recursive filesystem scanning.
 
-## 4) Capability domains and responsibilities
+`create(agent_type, shared_memory=None, **kwargs)` resolves metadata and version, combines the `<name>_agent` section with a runtime `config` override, and derives a scope from shared memory, resolved configuration, and constructor context. It checks reusable runtime records before creating dependencies and importing the class. Constructor arguments are selected from its signature; successful instances must satisfy the configured action/runtime contracts.
 
-| Domain | Primary concern | Typical contents |
-|---|---|---|
-| `adaptive/` | Online adaptation, tuning, policy improvements | policy manager, parameter tuner, RL/meta/imitation workers |
-| `alignment/` | Value alignment, fairness, and ethics controls | bias/fairness modules, counterfactual auditing, templates |
-| `base/` | Common low-level infrastructure | issue handling, metric stores, base config helpers |
-| `browser/` | Browser-task workflows and page operations | workflow, security checks, functional browser actions |
-| `collaborative/` | Multi-agent coordination | shared memory, agent registry, task router |
-| `evaluators/` | System evaluation and validation | performance/safety/efficiency evaluators, reporting utils |
-| `execution/` | Action-level task execution | action selector, coordinator, executable action classes |
-| `handler/` | Policy-based handling/orchestration glue | handler memory and policy components |
-| `knowledge/` | Knowledge management and sync | cache, ontology manager, monitor/governor utilities |
-| `language/` | NLP/NLU/NLG processing | tokenization/rules, grammar, context, templates/resources |
-| `learning/` | Learning algorithms and environments | DQN/RSI/MAML modules, strategy selectors, env wrappers |
-| `network/` | Agent-to-agent and external network operations | adapters, stream handling, reliability, lifecycle, policy, metrics |
-| `observability/` | Runtime telemetry, tracing, and diagnostics | observability memory, tracing, intelligence, contract checks |
-| `perception/` | Input encoding/decoding and memory | encoders, decoders, model modules, perception memory |
-| `planning/` | Planning and heuristic search | schedulers, planners, heuristic selector, monitoring |
-| `privacy/` | Data governance and privacy controls | consent, retention, minimization, ID/pseudonymization, auditability |
-| `quality/` | Output and workflow quality assurance | semantic/statistical/structural quality checks, workflow control |
-| `reasoning/` | Probabilistic + symbolic reasoning | rule engine, probabilistic models, validation, networks |
-| `safety/` | Runtime safety and secure operation | guard/compliance modules, cyber safety, secure memory |
+Identity consists of:
 
----
+- `definition_id`: registered `name@version`.
+- `instance_id`: unique constructed runtime identity.
+- `scope_id`: non-secret discriminator for construction context.
 
-## 5) Agent factory lifecycle
+Aliases share canonical definitions; different versions and scopes remain distinct. `active_agents` is a compatibility view by type, not the complete ownership ledger. Use `get_active_instance_identities()` and `snapshot()` to inspect managed instances. Factory defaults and lifecycle details are documented in [Factory](factory/README.md).
 
-`AgentFactory` is the canonical instantiation path and is responsible for metadata registration, dependency-aware creation, per-agent config injection, and validated runtime lifecycle ownership.
-
-Runtime identity has three non-interchangeable parts: the registered definition (`name@version`), the unique constructed `instance_id`, and a non-secret `scope_id` derived from shared memory, config, and constructor context. The cache uses the definition and scope together, so aliases resolve to the same canonical definition while different versions or constructor scopes cannot collide.
+## Execution Lifecycle
 
 ```mermaid
 sequenceDiagram
     participant Caller
     participant Factory as AgentFactory
-    participant Registry as AgentRegistry
-    participant Config as Config Loader
-    participant Agent as Target Agent
-
-    Caller->>Factory: create(agent_type, shared_memory, **kwargs)
-    Factory->>Registry: resolve canonical name and version
-    Registry-->>Factory: definition identity
-    Factory->>Factory: check definition + scope cache
-    alt cached
-        Factory-->>Caller: return existing instance
-    else not cached
-        Factory->>Registry: validate/resolve dependency tree
-        Registry-->>Factory: ordered dependencies
-        Factory->>Factory: recursively create dependencies
-        Factory->>Config: get_config_section(<agent>_agent)
-        Config-->>Factory: agent config
-        Factory->>Agent: construct(shared_memory, agent_factory, config, ...)
-        Agent-->>Factory: initialized instance
-        Factory->>Factory: validate action contract and activate
-        Factory->>Factory: cache managed runtime record
-        Factory-->>Caller: return instance
+    participant Agent as Concrete BaseAgent
+    participant Domain as Capability subsystem
+    Caller->>Factory: create(type, shared_memory, config=...)
+    Factory->>Factory: resolve definition, scope and dependencies
+    alt reusable runtime exists
+        Factory-->>Caller: existing instance
+    else construct
+        Factory->>Agent: inject supported constructor arguments
+        Factory->>Factory: validate and record ownership
+        Factory-->>Caller: active instance
     end
+    Caller->>Agent: execute(request)
+    Agent->>Domain: perform_task or capability dispatch
+    Domain-->>Agent: domain result or exception
+    Agent->>Agent: classify result and record outcome
+    Agent-->>Caller: result or failure/recovery outcome
+    Caller->>Factory: release_instance(instance)
+    Factory->>Agent: first available shutdown, close or stop hook
 ```
 
-Lifecycle transitions are restricted to `initializing`, `active`, `degraded`, `stopping`, `stopped`, and `failed`. `release()` and `shutdown()` transition and close each managed instance once. Optional persistence or telemetry failures do not mask a successful primary task; they appear in `runtime_status()` and `health_check()` with the degraded channel, operation, error, occurrence count, and timestamps.
+`BaseAgent.execute()` requires an active or degraded runtime. It tracks execution, invokes the capability, classifies returned failures, and records outcomes. Retries after exceptions require declared idempotency or supported idempotency keys. Recovery is conditional; an echoed input is not automatically a valid recovery. Optional accounting failures are recorded as degradation rather than rerunning a successful capability.
 
----
+`perform_task()` is the domain dispatch boundary. Calling it directly bypasses the common execution/retry envelope. Some facades implement `predict()` and `act()` as compatibility routes; those names do not imply learned inference or action selection. Simulation and Spatial explicitly expose computation through those routes without choosing actions.
 
-## 6) Collaboration and routing model
+Persistence is component-specific. SharedMemory, local result histories, deterministic caches, trained model state, and central checkpoints serve different purposes. Checkpoint support is declared per agent and requires the checkpoint-manager contract when enabled. Factory release does not itself guarantee that every subsystem saves state or closes caller-owned resources.
 
-The collaboration layer enables agents to cooperate without hard coupling.
+## Coordination and Shared Infrastructure
 
-```mermaid
-flowchart LR
-    Router[Task Router] --> Registry[Agent Registry]
-    Router --> Manager[Collaboration Manager]
-    Manager <--> Memory[(Shared Memory)]
+[CollaborativeAgent](collaborative_agent.py) combines risk assessment, task contracts, policy, and `CollaborationManager`. The collaboration package's registry/router serves task assignment; it is distinct from the factory's `AgentRegistry`, which stores construction metadata and versions. SharedMemory supplies cross-agent state and publication APIs, not a universal task scheduler.
 
-    Registry --> Plan[Planning]
-    Registry --> Reason[Reasoning]
-    Registry --> Exec[Execution]
-    Registry --> Safe[Safety]
-    Registry --> Eval[Evaluation]
+[OrchestratorAgent](orchestrator_agent.py) acquires registered agents through the factory and invokes the requested callable with mapping parameters. New generated specialties require a validated executable specification. Generation is restricted to the operations in [factory/operations.py](factory/operations.py); it is not arbitrary code synthesis. Generated specialists may be acquired as ephemeral instances and released by exact identity. Shared core agents remain factory-owned.
 
-    Plan --> Manager
-    Reason --> Manager
-    Exec --> Manager
-    Safe --> Manager
-    Eval --> Manager
+Integrations are explicit and conditional: Knowledge exposes Reasoning/Learning attachment methods; Execution imports the planning scheduler and permits Adaptive/robot attachments; Language and Evaluation use safety components. Learning owns learning strategy selection, while Perception supplies training/weight-loading interfaces. There is no factory-wide requirement that every agent load a trained model. The four quantitative subsystems documented here compute or execute supplied models; their APIs do not establish that a trained artifact has been deployed.
+
+## Configuration and Assets
+
+Agent orchestration settings live in [base/configs/agents_config.yaml](base/configs/agents_config.yaml). Subsystem settings live in each package's `configs/` and are loaded through its configuration helpers. A factory `config={...}` override for an agent is not an arbitrary override of its numerical solver or geometry configuration.
+
+The checked-in factory setting `default_version` is `2.2.0`, while the package marker is `2.3.0`. Registry identities follow resolved metadata, not the package marker. Inspect the registry instead of hard-coding a version from a release name.
+
+## Minimal Usage
+
+Run from the repository root in an environment with SLAI's existing dependencies. This example inspects definitions without constructing capability agents:
+
+```python
+from src.agents.agent_factory import AgentFactory
+
+factory = AgentFactory()
+try:
+    names = factory.get_registered_agent_types()
+    assert {"stem", "spatial", "simulation", "optimization"}.issubset(names)
+    print(factory.registry.get("stem").import_path)
+finally:
+    factory.shutdown()
 ```
 
----
+For task execution, use the request contract and examples in the target subsystem README. Runtime construction can allocate memory, initialize components, or access configured assets; it is not equivalent to inspecting a registered definition.
 
-## Cross-Agent Coordination Flow
+## Development and Verification
 
-```mermaid
-flowchart TD
-    IN[Input/Task/Event] --> DQ[Data Quality Agent]
-    DQ -->|pass/warn/block| PL[PlanningAgent]
+1. Locate the facade and its sibling subsystem, then inspect `perform_task()`, constructor parameters, configuration ownership, and result semantics.
+2. Implement an executable capability on a `BaseAgent` subclass. Keep domain results distinct from telemetry and persistence failures.
+3. Add construction metadata through `register_agent(AgentMetaData(...), overwrite=False)` or a deliberate default-specification change. Define dependencies and required constructor parameters explicitly.
+4. Add supported configuration and exports where appropriate. Discovery only sees classes exported by the packages it imports.
+5. Check action contracts, repeated construction/reuse, invalid inputs, failure classification, exact-instance cleanup, and checkpoint behavior where supported.
+6. Document the facade/subsystem boundary and update this directory when adding a registered agent.
 
-    PL --> EX[ExecutionAgent]
-    EX --> OBS[Observability Agent]
-    EX --> PR[Privacy Agent]
+This checkout has no dedicated `tests/` suite for the four quantitative facades or factory. Several modules contain `__main__` demonstrations; inspect their side effects before running them. Syntax checks and example execution do not replace numerical validation, backend compatibility tests, or full runtime integration testing.
 
-    PR -->|allow/modify/block| OUT[Output or Action]
-    OBS --> HANDLER[HandlerAgent]
-    OBS --> SAFE[SafetyAgent]
+## Related Documentation
 
-    DQ --> EVAL[EvaluationAgent]
-    OBS --> EVAL
-    PR --> EVAL
-
-    EVAL --> MEM[(Shared Memory / Metrics)]
-    MEM --> DQ
-    MEM --> OBS
-    MEM --> PR
-```
-
----
-
-## 7) Configuration and assets pattern
-
-Most domain folders use a consistent structure:
-
-- `configs/` for YAML/JSON runtime configuration.
-- `utils/` for domain-specific helper utilities and loaders.
-- `templates/`, `networks/`, `guidelines/`, or `models/` for static domain assets.
-- Domain `README.md` files for component-level implementation notes.
-
-This allows each domain to evolve independently while preserving predictable integration points.
-
----
-
-## 8) Extension guide (adding a new agent)
-
-1. **Create a facade agent** at `src/agents/<new>_agent.py`, inheriting from `BaseAgent`.
-2. **Add a domain package** under `src/agents/<new>/` if the logic is non-trivial.
-3. **Provide config assets** in `<new>/configs/` and load via shared config helpers.
-4. **Register in the factory agent specs** and metadata registry flow with an explicit version.
-5. **Expose collaboration hooks** if the agent participates in routed tasks.
-6. **Add/update documentation** in both domain README and this top-level architecture README.
-
----
-
-## 9) Recommended engineering practices
-
-- Keep **agent facades thin** and push detailed algorithms into domain modules.
-- Maintain **single-responsibility boundaries** between domains.
-- Prefer **shared memory + routing** for inter-agent communication.
-- Include **clear structured logs** around decision points and failures.
-- Use **config-driven behavior** over hard-coded constants where possible.
-- Update Mermaid diagrams when introducing new orchestration relationships.
-
----
-
-## 10) Quick navigation
-
-- Start here for architecture: `src/agents/README.md`
-- Factory internals: `src/agents/agent_factory.py`
-- Base contract: `src/agents/base_agent.py`
-- Coordination primitives: `src/agents/collaborative/`
-- Domain deep-dives: `src/agents/*/README.md`
+- [Factory construction and lifecycle](factory/README.md)
+- [Base runtime](base/README.md)
+- [Collaboration](collaborative/README.md)
+- [STEM](stem/README.md), [Spatial](spatial/README.md), [Simulation](simulation/README.md), [Optimization](optimization/README.md)
