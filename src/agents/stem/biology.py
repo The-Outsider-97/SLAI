@@ -17,7 +17,7 @@ from .utils.config_loader import get_config_section, load_global_config
 from .utils.stem_errors import STEMDomainError
 from .utils.stem_helpers import *
 from .stem_memory import STEMMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("SLAI Biology")
 printer = PrettyPrinter()
