@@ -20,6 +20,7 @@ Design goals
 
 import csv
 import importlib
+import importlib.util
 import io
 import json
 import re
@@ -701,11 +702,43 @@ class ParserEngine:
 
         return [self.parse(file_path) for file_path in file_paths]
 
+    @staticmethod
+    def _module_available(module_name: str) -> bool:
+        try:
+            return importlib.util.find_spec(module_name) is not None
+        except (ImportError, ValueError):
+            return False
+
+    def supported_extensions(self) -> List[str]:
+        """Extensions this engine can parse right now.
+
+        ``allowed_extensions`` only says what the configuration permits. This applies the
+        handler table, the per-format enable flags and optional-backend availability, so a
+        disabled ``.doc`` or a missing ``pypdf`` is not reported as supported.
+        """
+
+        supported = set()
+        for extension in self._dispatch:
+            if extension not in self.allowed_extensions:
+                continue
+            if extension == ".pdf" and not (
+                self.enable_pdf and self.pdf_backend == "pypdf" and self._module_available("pypdf")
+            ):
+                continue
+            if extension == ".docx" and not self.enable_docx:
+                continue
+            if extension == ".doc" and not self.enable_doc:
+                continue
+            supported.add(extension)
+        return sorted(supported)
+
     def capabilities(self) -> Dict[str, Any]:
         """Return a JSON-safe snapshot of parser capabilities and settings."""
 
         return {
             "parser_version": self._PARSER_VERSION,
+            "effective_extensions": self.supported_extensions(),
+            "pdf_backend_available": self._module_available("pypdf"),
             "allowed_extensions": sorted(self.allowed_extensions),
             "text_extensions": sorted(self.text_extensions),
             "structured_text_extensions": sorted(self.structured_text_extensions),

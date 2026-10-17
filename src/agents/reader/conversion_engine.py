@@ -118,7 +118,11 @@ class ConversionEngine:
         self.include_metadata = coerce_bool(self.ce_config.get("include_metadata"), True)
         self.include_content_hash = coerce_bool(self.ce_config.get("include_content_hash"), True)
         self.preserve_trailing_newline = coerce_bool(self.ce_config.get("preserve_trailing_newline"), True)
-        self.max_output_bytes = coerce_int(self.ce_config.get("max_output_bytes"), 100 * 1024 * 1024, minimum=0)
+        self.max_output_bytes = coerce_int(
+            self.ce_config.get("max_output_bytes"),
+            100 * 1024 * 1024,
+            minimum=0,
+        )
         self.max_merge_documents = coerce_int(
             self.ce_config.get("max_merge_documents"),
             1_000,
@@ -221,6 +225,19 @@ class ConversionEngine:
             target_ext,
             overwrite=self.overwrite_existing,
         )
+
+    def _write_output(self, out_path: Path, payload: str) -> Path:
+        """Write a finished artifact and return the path actually used.
+
+        ``prepare_output_path`` only *suggests* a free name; two concurrent conversions (or two inputs with
+        the same stem) can pick the same one. Unless ``overwrite_existing`` is set, publication is exclusive
+        (``atomic_publish_bytes``) and moves on to a unique name, so the returned path - not the suggestion -
+        is what the artifact must report.
+        """
+
+        if self.overwrite_existing:
+            return atomic_write_text(out_path, payload, encoding=self.output_encoding, purpose="output")
+        return atomic_publish_bytes(out_path, payload.encode(self.output_encoding), purpose="output")
 
     def supported_formats(self) -> List[str]:
         """Return configured output formats with registered renderers."""
@@ -537,8 +554,7 @@ class ConversionEngine:
                 if rendered is not None:
                     # Reuse cached rendered content
                     out_path = self._prepare_output_path(output_dir, Path(source).stem, target_ext)
-                    if self.overwrite_existing or not out_path.exists():
-                        atomic_write_text(out_path, rendered, encoding=self.output_encoding, purpose="output")
+                    out_path = self._write_output(out_path, rendered)
                     artifact = ConversionArtifact(
                         status="ok",
                         source=source,
@@ -558,7 +574,7 @@ class ConversionEngine:
         out_path = self._prepare_output_path(output_dir, Path(source).stem, target_ext)
         payload = self._render_document(doc, target_ext)
         self._enforce_output_limits(payload, operation="conversion", source=source, target_format=target_ext)
-        atomic_write_text(out_path, payload, encoding=self.output_encoding, purpose="output")
+        out_path = self._write_output(out_path, payload)
 
         artifact = ConversionArtifact(
             status="ok",
@@ -722,12 +738,7 @@ class ConversionEngine:
                 target_format=target_ext,
             )
 
-            atomic_write_text(
-                out_path,
-                payload,
-                encoding=self.output_encoding,
-                purpose="output",
-            )
+            out_path = self._write_output(out_path, payload)
 
         except ReaderError:
             raise

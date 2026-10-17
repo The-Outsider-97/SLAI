@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Production-grade recovery orchestration for the Reader subsystem.
 
 ``RecoveryEngine`` coordinates deterministic, non-fabricating document recovery
@@ -19,6 +17,7 @@ Pipeline
 6. Return a backward-compatible recovery result for ``ReaderAgent`` and newer
    metadata-rich payloads for observability, checkpoints, and audits.
 """
+from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
