@@ -329,6 +329,18 @@ class RecoveryEngine:
         content_changed = original != low_level
         warnings: List[str] = [*before.warnings, *after.warnings]
 
+        if not original.strip():
+            # An empty or whitespace-only source has nothing to recover. Running the semantic pass
+            # would replace legitimately empty content with a corruption placeholder.
+            return RecoveryDecision(
+                use_semantic=False,
+                reason="empty_source_nothing_to_recover",
+                quality_before=before.quality_score,
+                quality_after_low_level=after.quality_score,
+                content_changed_by_low_level=content_changed,
+                warnings=tuple(self._limited_warnings(warnings)),
+            )
+
         use_semantic = False
         reason = "quality_acceptable_after_low_level_repair"
 

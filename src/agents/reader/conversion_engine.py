@@ -14,11 +14,12 @@ import csv
 import html
 import io
 import json
+import re
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
-from xml.sax.saxutils import escape as xml_escape
+from xml.sax.saxutils import escape as _xml_escape_raw
 
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.reader_error import *
@@ -31,6 +32,16 @@ printer = PrettyPrinter()
 
 
 DEFAULT_OUTPUT_FORMATS = ("txt", "md", "html", "xml", "json", "csv")
+
+# Characters that cannot appear in an XML 1.0 document even when escaped (most C0 controls,
+# surrogates, U+FFFE/U+FFFF). Leaving them in produces output that parsers reject.
+_XML_INVALID_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
+def xml_escape(value: Any) -> str:
+    """Escape text for XML output, dropping characters XML 1.0 cannot represent."""
+
+    return _xml_escape_raw(_XML_INVALID_CHARS.sub("", str(value)))
 
 
 @dataclass(frozen=True)
@@ -107,11 +118,7 @@ class ConversionEngine:
         self.include_metadata = coerce_bool(self.ce_config.get("include_metadata"), True)
         self.include_content_hash = coerce_bool(self.ce_config.get("include_content_hash"), True)
         self.preserve_trailing_newline = coerce_bool(self.ce_config.get("preserve_trailing_newline"), True)
-        self.max_output_bytes = coerce_int(
-            self.ce_config.get("max_output_bytes"),
-            100 * 1024 * 1024,
-            minimum=0,
-        )
+        self.max_output_bytes = coerce_int(self.ce_config.get("max_output_bytes"), 100 * 1024 * 1024, minimum=0)
         self.max_merge_documents = coerce_int(
             self.ce_config.get("max_merge_documents"),
             1_000,

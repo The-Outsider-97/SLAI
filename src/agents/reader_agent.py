@@ -115,7 +115,9 @@ class ReaderStageBatch(Generic[StageItem]):
 
     @classmethod
     def empty(cls, stage: str) -> "ReaderStageBatch[Mapping[str, Any]]":
-        return ReaderStageBatch[Mapping[str, Any]](stage=stage, items=(), errors=())
+        # Construct through ``cls``: calling the subscripted alias makes typing assign
+        # ``__orig_class__``, which raises TypeError on frozen+slots dataclasses (Python 3.10).
+        return cls(stage=stage, items=(), errors=())
 
     def error_dicts(self) -> List[Dict[str, Any]]:
         return [error.to_dict() for error in self.errors]
@@ -167,8 +169,8 @@ class ReaderAgent(BaseAgent):
     """
 
     SUPPORTED_MODES = {"pipeline", "parse", "read", "recover", "convert", "merge", "capabilities", "describe"}
-    CACHE_VERSION = "reader_agent.v2"
-    RECOVERY_CACHE_VERSION = ("reader_agent.recovery.semantic_flags.v1")
+    CACHE_VERSION = "reader_agent.v3"
+    RECOVERY_CACHE_VERSION = ("reader_agent.recovery.semantic_flags.v2")
 
     def __init__(self, shared_memory, agent_factory, config: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(shared_memory=shared_memory, agent_factory=agent_factory)
@@ -664,9 +666,12 @@ class ReaderAgent(BaseAgent):
         completed = timer.stop()
         elapsed = completed.elapsed_seconds
         processed = len(working_docs)
+        # Conversion/merge runs only succeed for artifacts they actually produced;
+        # parse/read/recover runs succeed per processed document.
+        produces_artifacts = task.mode not in {"parse", "read", "recover"}
         success_count = (
             len(artifacts)
-            if artifacts
+            if artifacts or produces_artifacts
             else len(working_docs)
         )
         failed_count = len(stage_errors)

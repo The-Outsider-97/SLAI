@@ -96,7 +96,7 @@ class ParserEngine:
     _TEXT_EXTENSIONS = {".txt", ".md", ".html", ".xml", ".json", ".csv"}
     _STRUCTURED_TEXT_EXTENSIONS = {".html", ".xml", ".json", ".csv"}
     _DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".doc"}
-    _PARSER_VERSION = "2.2.0"
+    _PARSER_VERSION = "2.3.0"
 
     def __init__(self, memory: Optional[ReaderMemory] = None) -> None:
         self.config = load_global_config()
@@ -160,6 +160,13 @@ class ParserEngine:
         )
 
         self.enable_docx = coerce_bool(self.parser_config.get("enable_docx", True), True)
+        # Cap on the *uncompressed* size of word/document.xml (0 disables). max_file_size_bytes only
+        # bounds the compressed upload, so a small DOCX could otherwise expand without limit.
+        self.docx_max_xml_bytes = coerce_int(
+            self.parser_config.get("docx_max_xml_bytes", 32 * 1024 * 1024),
+            32 * 1024 * 1024,
+            minimum=0,
+        )
         self.enable_doc = coerce_bool(self.parser_config.get("enable_doc", False), False)
         self.legacy_doc_requires_external_backend = coerce_bool(
             self.parser_config.get("legacy_doc_requires_external_backend", True),
@@ -246,6 +253,9 @@ class ParserEngine:
         content = self._normalize_content(content)
         quality = text_quality_report(content)
         binary_signature = self._detect_binary_signature(raw_bytes)
+        if binary_signature and str(encoding or "").lower().startswith(("utf-16", "utf-32")):
+            # Wide encodings legitimately contain NUL bytes; this is decoded text, not binary data.
+            binary_signature = False
 
         warning_list = dedupe_preserve_order(
             list(warnings or [])
@@ -400,7 +410,7 @@ class ParserEngine:
                 parser_metadata["top_level_items"] = len(payload)
             if self.json_pretty_print:
                 content = json.dumps(json_safe(payload), ensure_ascii=False, sort_keys=True, indent=self.json_indent)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
             warnings.append("json_parse_warning")
             parser_metadata["json_parse_error"] = str(exc)
         return self._build_result(
@@ -426,8 +436,8 @@ class ParserEngine:
             dialect = csv.Sniffer().sniff(sample) if self.csv_sniff_dialect and sample.strip() else csv.excel
             delimiter = getattr(dialect, "delimiter", delimiter) or delimiter
         except csv.Error:
-            dialect = csv.excel
-            dialect.delimiter = delimiter  # type: ignore[attr-defined]
+            # Subclass instead of mutating the process-wide csv.excel dialect.
+            dialect = type("ReaderFallbackDialect", (csv.excel,), {"delimiter": delimiter})
             warnings.append("csv_dialect_sniff_failed")
 
         output = io.StringIO()
@@ -539,7 +549,23 @@ class ParserEngine:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
                 if "word/document.xml" not in archive.namelist():
                     raise ParseFailureError(str(path_info.path), "DOCX archive is missing word/document.xml")
-                document_xml = archive.read("word/document.xml")
+                limit = self.docx_max_xml_bytes
+                declared_size = archive.getinfo("word/document.xml").file_size
+                if limit and declared_size > limit:
+                    raise ParseFailureError(
+                        str(path_info.path),
+                        f"DOCX word/document.xml expands to {declared_size} bytes, above docx_max_xml_bytes={limit}",
+                        context={"declared_uncompressed_bytes": declared_size, "docx_max_xml_bytes": limit},
+                    )
+                # The ZIP header size is attacker-controlled, so bound the actual read too.
+                with archive.open("word/document.xml") as handle:
+                    document_xml = handle.read(limit + 1) if limit else handle.read()
+                if limit and len(document_xml) > limit:
+                    raise ParseFailureError(
+                        str(path_info.path),
+                        f"DOCX word/document.xml exceeds docx_max_xml_bytes={limit} while reading",
+                        context={"docx_max_xml_bytes": limit},
+                    )
         except ReaderError:
             raise
         except zipfile.BadZipFile as exc:
@@ -549,10 +575,23 @@ class ParserEngine:
 
         try:
             root = ET.fromstring(document_xml)
-            namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            namespace = {"w": w_ns[1:-1]}
             paragraphs: List[str] = []
             for paragraph in root.findall(".//w:p", namespace):
-                texts = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]
+                texts: List[str] = []
+                # Walk run content in document order so tabs and line breaks stay between the
+                # runs they separate (only direct run children are characters, not tab stops).
+                for run in paragraph.iter(w_ns + "r"):
+                    for node in run:
+                        if node.tag == w_ns + "t":
+                            texts.append(node.text or "")
+                        elif node.tag == w_ns + "tab":
+                            texts.append("\t")
+                        elif node.tag in (w_ns + "br", w_ns + "cr"):
+                            texts.append("\n")
+                        elif node.tag == w_ns + "noBreakHyphen":
+                            texts.append("-")
                 line = "".join(texts).strip()
                 if line:
                     paragraphs.append(line)

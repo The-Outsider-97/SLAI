@@ -1011,6 +1011,26 @@ def decode_bytes(
     allow_lossy_fallback: bool = True,
 ) -> DecodedText:
     attempted: List[str] = []
+    # UTF-16/32 text (e.g. Windows "Unicode" files, PowerShell redirection) is never valid UTF-8 but
+    # always decodes as Latin-1, which would silently yield mojibake. Honour an explicit BOM first.
+    for bom, bom_encoding in (
+        (b"\xff\xfe\x00\x00", "utf-32"),
+        (b"\x00\x00\xfe\xff", "utf-32"),
+        (b"\xff\xfe", "utf-16"),
+        (b"\xfe\xff", "utf-16"),
+    ):
+        if raw_bytes.startswith(bom):
+            try:
+                bom_text = raw_bytes.decode(bom_encoding)
+            except UnicodeDecodeError:
+                break
+            bom_warnings = [] if bom_text.strip() else ["empty_or_whitespace_content"]
+            return DecodedText(
+                text=bom_text,
+                encoding=bom_encoding,
+                byte_count=len(raw_bytes),
+                warnings=tuple(bom_warnings),
+            )
     for encoding in encoding_candidates:
         attempted.append(str(encoding))
         try:
