@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-__version__ = "2.2.0"
-
 """
 SLAI Reader Agent
 
@@ -16,16 +12,18 @@ Responsibilities
 - preserve BaseAgent lifecycle, metrics, retry, shared-memory audit, and issue handling
 - return deterministic, JSON-safe Reader task results without fabricating document content
 """
+from __future__ import annotations
+
+__version__ = "2.4.0"
 
 import asyncio
 import contextlib
-import threading
 import time
 import uuid
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Coroutine, Dict, Iterable, List, Mapping, TypeVar, Optional, Sequence, Tuple, Generic
+from typing import Any, Awaitable, Dict, Iterable, List, Mapping, TypeVar, Optional, Sequence, Tuple, Generic
 
 from .base_agent import BaseAgent
 from .base.utils.main_config_loader import get_config_section
@@ -114,7 +112,7 @@ class ReaderStageBatch(Generic[StageItem]):
         return len(self.items)
 
     @classmethod
-    def empty(cls, stage: str) -> "ReaderStageBatch[Mapping[str, Any]]":
+    def empty(cls, stage: str) -> "ReaderStageBatch[Any]":
         # Construct through ``cls``: calling the subscripted alias makes typing assign
         # ``__orig_class__``, which raises TypeError on frozen+slots dataclasses (Python 3.10).
         return cls(stage=stage, items=(), errors=())
@@ -514,23 +512,15 @@ class ReaderAgent(BaseAgent):
 
         # 2. Low-level recovery followed by optional semantic recovery.
         working_docs: Sequence[Mapping[str, Any]] = parsed_docs
-        recovery_stage = ReaderStageBatch[Dict[str, Any]].empty(
-            "recover"
-        )
+        recovery_stage = ReaderStageBatch[Dict[str, Any]].empty("recover")
         semantic_attempted = 0
         semantic_applied = 0
 
-        should_recover = self._should_run_recovery(
-            task,
-            parsed_docs,
-        )
+        should_recover = self._should_run_recovery(task, parsed_docs)
 
         if should_recover and parsed_docs:
             recovery_started = time.perf_counter()
-            recovery_stage = await self._recover_documents(
-                task,
-                parsed_docs,
-            )
+            recovery_stage = await self._recover_documents(task, parsed_docs)
 
             self._profile_hot_path(
                 "reader.recovery",
@@ -540,11 +530,7 @@ class ReaderAgent(BaseAgent):
                 failed=recovery_stage.failed_count,
             )
 
-            semantic_attempted, semantic_applied = (
-                self._semantic_recovery_usage(
-                    recovery_stage.items,
-                )
-            )
+            semantic_attempted, semantic_applied = self._semantic_recovery_usage(recovery_stage.items)
 
             # SemanticRecovery is internal to RecoveryEngine. Consequently,
             # duration_ms represents the containing recovery-stage wall time.
@@ -721,9 +707,7 @@ class ReaderAgent(BaseAgent):
                 / max(1, success_count + failed_count),
                 6,
             ),
-            "cache_hit_rate": self._cache_hit_rate(
-                [*parsed_docs, *working_docs]
-            ),
+            "cache_hit_rate": self._cache_hit_rate([*parsed_docs, *working_docs]),
             "settings": self._settings_snapshot(),
         }
 
@@ -740,11 +724,7 @@ class ReaderAgent(BaseAgent):
             result["errors"] = serialized_stage_errors
 
         if task.write_checkpoints:
-            self._write_checkpoint(
-                task.run_id,
-                "complete",
-                result,
-            )
+            self._write_checkpoint(task.run_id, "complete", result)
 
         self._publish_reader_event(
             "completed",
@@ -803,10 +783,7 @@ class ReaderAgent(BaseAgent):
         cached_result["metadata"] = metadata
         return cached_result
 
-    async def _parse_files(
-        self,
-        task: ReaderAgentTask,
-    ) -> ReaderStageBatch[Dict[str, Any]]:
+    async def _parse_files(self, task: ReaderAgentTask) -> ReaderStageBatch[Dict[str, Any]]:
         async def worker(file_path: str) -> Dict[str, Any]:
             return await self._parse_one(task, file_path)
     
@@ -820,11 +797,7 @@ class ReaderAgent(BaseAgent):
         return self._split_stage_results(results, operation="parse")
     
     
-    async def _parse_one(
-        self,
-        task: ReaderAgentTask,
-        file_path: str,
-    ) -> Dict[str, Any]:
+    async def _parse_one(self, task: ReaderAgentTask, file_path: str) -> Dict[str, Any]:
         cache_key = self._shared_parse_cache_key(file_path)
     
         if task.use_cache and self.cache_parse_results:
@@ -841,21 +814,14 @@ class ReaderAgent(BaseAgent):
             config=self.retry_config,
             operation_name="parser.parse",
         )
-        result = self._adapt_engine_result(
-            raw_result,
-            operation="parser.parse",
-        )
+        result = self._adapt_engine_result(raw_result, operation="parser.parse")
     
         if (
             task.use_cache
             and self.cache_parse_results
             and str(result.get("status", "")).lower() == "ok"
         ):
-            self._shared_set(
-                cache_key,
-                result,
-                tags=("reader", "reader_parse_cache"),
-            )
+            self._shared_set(cache_key, result, tags=("reader", "reader_parse_cache"))
     
         return result
 
@@ -892,13 +858,7 @@ class ReaderAgent(BaseAgent):
                 else {}
             )
     
-            semantic_was_attempted = (
-                metadata.get(
-                    "semantic_attempted",
-                    metadata.get("used_semantic"),
-                )
-                is True
-            )
+            semantic_was_attempted = (metadata.get("semantic_attempted", metadata.get("used_semantic")) is True)
             semantic_was_applied = (
                 metadata.get("semantic_applied") is True
                 or str(raw_recovery.get("strategy", "")).lower()
@@ -935,35 +895,22 @@ class ReaderAgent(BaseAgent):
         if task.use_cache and self.cache_recovery_results:
             cached = self._shared_get(cache_key)
             if isinstance(cached, Mapping):
-                adapted = self._adapt_engine_result(
-                    cached,
-                    operation="recovery.recover_and_apply",
-                )
+                adapted = self._adapt_engine_result(cached, operation="recovery.recover_and_apply")
                 return self._mark_cache_hit(adapted)
     
         raw_result = await retry_async(
-            lambda: asyncio.to_thread(
-                self.recovery.recover_and_apply,
-                doc,
-            ),
+            lambda: asyncio.to_thread(self.recovery.recover_and_apply, doc),
             config=self.retry_config,
             operation_name="recovery.recover_and_apply",
         )
-        result = self._adapt_engine_result(
-            raw_result,
-            operation="recovery.recover_and_apply",
-        )
+        result = self._adapt_engine_result(raw_result, operation="recovery.recover_and_apply")
     
         if (
             task.use_cache
             and self.cache_recovery_results
             and str(result.get("status", "")).lower() == "ok"
         ):
-            self._shared_set(
-                cache_key,
-                result,
-                tags=("reader", "reader_recovery_cache"),
-            )
+            self._shared_set(cache_key, result, tags=("reader", "reader_recovery_cache"))
     
         return result
 
@@ -980,7 +927,6 @@ class ReaderAgent(BaseAgent):
         )
         return self._split_stage_results(results, operation="convert")
     
-    
     async def _convert_one(self, task: ReaderAgentTask, parsed_doc: Mapping[str, Any]) -> Dict[str, Any]:
         raw_result = await retry_async(
             lambda: asyncio.to_thread(
@@ -992,11 +938,7 @@ class ReaderAgent(BaseAgent):
             config=self.retry_config,
             operation_name="conversion.convert",
         )
-        return self._adapt_engine_result(
-            raw_result,
-            operation="conversion.convert",
-        )
-    
+        return self._adapt_engine_result(raw_result, operation="conversion.convert")
     
     async def _merge_documents(self, task: ReaderAgentTask, docs: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         docs_as_dicts = [dict(doc) for doc in docs]
@@ -1046,19 +988,13 @@ class ReaderAgent(BaseAgent):
             safe_payload = {"payload": safe_payload}
 
         # Preserve both the stage location and the complete engine envelope.
-        details = {
-            "operation": operation,
-            "index": index,
-            **safe_payload,
-        }
-
+        details = {"operation": operation, "index": index, **safe_payload}
         nested_error = safe_payload.get("error")
         descriptor = (
             nested_error
             if isinstance(nested_error, Mapping)
             else safe_payload
         )
-
         raw_policy = descriptor.get("policy", {})
         policy = raw_policy if isinstance(raw_policy, Mapping) else {}
 
@@ -1129,12 +1065,7 @@ class ReaderAgent(BaseAgent):
 
             if isinstance(item, Mapping):
                 try:
-                    items.append(
-                        self._adapt_engine_result(
-                            item,
-                            operation=operation,
-                        )
-                    )
+                    items.append(self._adapt_engine_result(item, operation=operation))
                 except ReaderError as exc:
                     errors.append(
                         self._stage_error_from_payload(
