@@ -30,6 +30,7 @@ src/agents/planning/
 ├── planning_metrics.py
 ├── planning_monitor.py
 ├── heuristic_selector.py
+├── plan_success_predictor.py
 ├── decision_tree_heuristic.py
 ├── gradient_boosting_heuristic.py
 ├── reinforcement_learning_heuristic.py
@@ -37,6 +38,8 @@ src/agents/planning/
 ├── case_based_reasoning_heuristic.py
 ├── configs/
 │   └── planning_config.yaml
+├── models/
+│   └── plan_success_predictor/   # manifest.json + evaluation.json (train_psp.py)
 ├── templates/
 │   ├── planning_db.json
 │   └── academic_planning_error.json
@@ -122,6 +125,19 @@ Provides scheduler classes for capability/deadline-aware assignment:
 
 Core behavior includes risk thresholding, retry policy integration, and estimated duration calculations based on task requirements.
 
+### `plan_success_predictor.py` (PlanSuccessPredictor, PSP)
+Advisory whole-plan outcome model, distinct from the per-task `HeuristicSelector`. After the scheduler has produced a
+plan it estimates, as calibrated probabilities: success, replanning / recovery, resource trouble, deadline miss, the
+likely failure cause and the realised-to-planned duration (with an interval). It reports `defer_to_heuristics` when it is
+uncertain or the plan is unlike its training data, and it can never generate, validate or authorise a plan or bypass
+`SafetyPlanning`. Without a loadable checkpoint it returns `{}` and planning behaves exactly as before.
+
+- Runtime: pure-Python inference over a JSON checkpoint (`models/plan_success_predictor/manifest.json`), never pickle.
+- Modes (`plan_success_predictor.mode`): `collect` (record features + outcomes), `shadow` (also predict), `advisory`
+  (also expose a recommendation; requires a checkpoint approved with `train_psp.py export --approve`).
+- Training (repository root): `python train_psp.py all`; add real executions with
+  `python train_psp.py collect --from-log` and retrain. A checkpoint trained only on simulated plans stays `experimental`.
+
 ### `probabilistic_planner.py`
 Contains probabilistic plan structures and planner logic:
 
@@ -195,6 +211,7 @@ Configuration is loaded with `utils/config_loader.py` and drives every subsystem
 - `planning_memory`: checkpoint retention and autosave settings.
 - `planning_metrics`: scoring weights and fallback behaviors.
 - `planning_monitor`: windows, anomaly thresholds, scan intervals.
+- `plan_success_predictor`: mode (`collect`/`shadow`/`advisory`), checkpoint path, observation log, ranking weights.
 
 > Note: `templates/planning_db.json` contains seed data for method statistics and example tasks/world states used by heuristic components.
 
