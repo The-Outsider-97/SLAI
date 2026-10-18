@@ -277,6 +277,12 @@ reasoning_cache:
 
 reasoning_types:
   max_combined_types: 3
+  # Optional learned strategy selector (train it with train_rss.py). Off by default: the
+  # keyword policy below stays authoritative until a checkpoint is enabled here.
+  learned_selector:
+    enabled: false
+    model_path: null           # null = src/agents/reasoning/models/strategy_selector/model.json
+    allow_experimental: false  # must be true until the checkpoint is approved (train_rss.py export --approve)
   strategy_keywords:
     abduction:
       - explain

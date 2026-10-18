@@ -20,6 +20,7 @@ from .utils.reasoning_errors import *
 from .utils.reasoning_helpers import *
 from .types import *
 from .reasoning_memory import ReasoningMemory
+from .strategy_selector import ReasoningStrategySelector
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Reasoning Types")
@@ -41,9 +42,8 @@ class ReasoningTypes:
     _TASK_TYPES: Dict[str, Type[BaseReasoning]] = {
         "abduction": ReasoningAbduction,
         "deduction": ReasoningDeductive,
-        "inductionu": ReasoningInductive,
+        "induction": ReasoningInductive,
         "analogical": ReasoningAnalogical,
-        # "analitical": ReasoningAnalogical,      # backward‑compatible typo
         "decompositional": ReasoningDecompositional,
         "cause_effect": ReasoningCauseAndEffect,
     }
@@ -76,6 +76,13 @@ class ReasoningTypes:
                 },
             )
         )
+
+        # Optional learned selector (train_rss.py). Off unless reasoning_types.learned_selector.enabled.
+        self._learned_selector: Optional[ReasoningStrategySelector] = None
+        self._learned_selector_status = "disabled"
+        selector_cfg = dict(self.types_cfg.get("learned_selector") or {})
+        if bool(selector_cfg.get("enabled", False)):
+            self._load_learned_selector(selector_cfg)
 
         # Borrowed dependency; ReasoningTypes does not own its lifetime.
         self.reasoning_memory = memory
@@ -180,7 +187,51 @@ class ReasoningTypes:
 
         return performer(problem, context_dict)
 
-    def select_reasoning_strategy(self, problem: str) -> Dict[str, Any]:
+    def select_reasoning_strategy(self, problem: str, context: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """Choose reasoning strategies for a problem.
+
+        With ``reasoning_types.learned_selector.enabled`` and a loadable checkpoint the
+        learned ReasoningStrategySelector decides (``method`` is ``learned_selector`` or
+        ``learned_selector_fallback``). It is restricted to strategies registered here, capped
+        at ``max_combined_types``, and defers to the keyword policy when it is unsure and the
+        keyword policy has evidence. Otherwise, and on any selector error, the deterministic
+        keyword policy decides exactly as before. The result keeps the ``strategy`` /
+        ``method`` / ``matches`` contract ReasoningAgent consumes.
+        """
+        selector = self._learned_selector
+        if selector is not None:
+            try:
+                return selector.select(
+                    problem,
+                    context,
+                    allowed=self._TASK_TYPES,
+                    max_strategies=self.max_combined_types,
+                    fallback=self._select_by_keywords,
+                )
+            except Exception as exc:  # selection must never take reasoning down
+                logger.warning("Learned selector failed (%s: %s); using keyword policy", type(exc).__name__, exc)
+        return self._select_by_keywords(problem)
+
+    def _load_learned_selector(self, cfg: Mapping[str, Any]) -> None:
+        """Load the configured checkpoint. Failure is logged and reported by get_stats(), never fatal."""
+        try:
+            model = ReasoningStrategySelector.try_load(
+                cfg.get("model_path") or None,
+                allow_experimental=bool(cfg.get("allow_experimental", False)),
+            )
+        except Exception as exc:  # unapproved, corrupt or incompatible checkpoint
+            self._learned_selector_status = f"error: {type(exc).__name__}: {exc}"
+            logger.error("Learned reasoning selector disabled, keyword policy in use: %s", exc)
+            return
+        if model is None:
+            self._learned_selector_status = "missing_checkpoint"
+            logger.warning("Learned reasoning selector enabled but no checkpoint found; keyword policy in use")
+            return
+        self._learned_selector = model
+        self._learned_selector_status = "active"
+        logger.info("Learned reasoning selector active | version=%s promotion=%s", model.version, model.promotion)
+
+    def _select_by_keywords(self, problem: str) -> Dict[str, Any]:
         """Return the existing keyword-policy decision plus observable evidence.
 
         This remains a deterministic heuristic.  It deliberately does not claim
@@ -842,6 +893,8 @@ class ReasoningTypes:
                 "cache_hits": cache_hits,
                 "cache_misses": cache_misses,
                 "registered_types": list(self._TASK_TYPES.keys()),
+                "learned_selector": self._learned_selector_status,
+                "learned_selector_version": getattr(self._learned_selector, "version", None),
             }
     
     def shutdown(self, checkpoint_memory: bool = True) -> None:
@@ -1190,9 +1243,9 @@ class ReasoningTypes:
         }
 
 
-# ----------------------------------------------------------------------
-# Self‑test block
-# ----------------------------------------------------------------------
+__all__ = ["ReasoningTypes"]
+
+
 if __name__ == "__main__":
     print("\n=== Running Reasoning Types ===\n")
     printer.status("TEST", "Reasoning Types initialized", "info")
@@ -1235,17 +1288,19 @@ if __name__ == "__main__":
     else:
         printer.status("SKIP", "Instance cache disabled", "warning")
 
-    # 6. Memory integration
-    memory = factory.get_memory()
-    assert memory is not None
+    # 6. Memory integration: memory is borrowed (owned by the caller), never created here
+    assert factory.get_memory() is None
+    memory = ReasoningMemory()
+    with_memory = ReasoningTypes(memory=memory)
+    assert with_memory.get_memory() is memory
     memory.add({"type": "test", "content": "reasoning_types_test"}, priority=0.8)
     assert memory.size() >= 1
     printer.status("PASS", "Memory integration OK", "success")
 
     # 7. Combined reasoning context passing
     class DummyReasoning(BaseReasoning):
-        def perform_reasoning(self, *args, **kwargs):
-            ctx = kwargs.get("context", {})
+        def perform_reasoning(self, input_data=None, context=None, **kwargs):
+            ctx = context if context is not None else kwargs.get("context") or {}
             prev = ctx.get("prev_step_result", None)
             return {"prev": prev, "step_info": "done"}
 
