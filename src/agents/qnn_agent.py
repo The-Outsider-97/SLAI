@@ -36,6 +36,7 @@ from typing import Any, TypeAlias
 
 from .base.utils.main_config_loader import get_config_section
 from .base_agent import BaseAgent
+from .qnn.variational_classifier import VariationalQuantumClassifier
 from .qnn.quantum_encoding import *
 from .qnn.quantum_mno import *
 from .qnn.quantum_policy import *
@@ -599,6 +600,7 @@ class QNNAgent(BaseAgent):
         "quantum_circuit_inference",
         "quantum_circuit_training",
         "quantum_state_evaluation",
+        "quantum_binary_classification",
     )
 
     _MODEL_STATE_FIELDS = frozenset({"quantum_weights", "training_step"})
@@ -1276,7 +1278,47 @@ class QNNAgent(BaseAgent):
         result["metadata"] = dict(task.metadata)
         return result
 
+    def load_classifier(self, artifact_path: str) -> dict[str, Any]:
+        """Explicitly load an approved supervised classifier for inference."""
+        candidate = VariationalQuantumClassifier.load(self._circuit, artifact_path)
+        self._classifier = candidate
+        return {"status": "available", "model_id": candidate.artifact_id,
+                "capability": "quantum_binary_classification"}
+
+    def classify_features(self, features: Any) -> dict[str, Any]:
+        """Predict bounded binary features using a loaded artifact."""
+        classifier = getattr(self, "_classifier", None)
+        if classifier is None:
+            return {"status": "unavailable", "reason": "no_approved_classifier"}
+        started = time.perf_counter()
+        probabilities, out_of_range = classifier.predict_proba(features)
+        return {
+            "status": "success",
+            "model_kind": "variational_quantum_classifier",
+            "model_id": classifier.artifact_id,
+            "probabilities": probabilities.tolist(),
+            "labels": (probabilities >= 0.5).astype(int).tolist(),
+            "out_of_training_range": out_of_range.tolist(),
+            "probabilities_calibrated": False,
+            "latency_seconds": float(time.perf_counter() - started),
+        }
+
+    def classifier_health(self) -> dict[str, Any]:
+        classifier = getattr(self, "_classifier", None)
+        return {
+            "available": classifier is not None,
+            "capability": "quantum_binary_classification",
+            "model_id": None if classifier is None else classifier.artifact_id,
+            "backend": "numpy_statevector_cpu",
+        }
+
     def perform_task(self, task_data: Any) -> dict[str, Any]:
+        if isinstance(task_data, Mapping) and str(
+            task_data.get("mode", task_data.get("operation", ""))
+        ).strip().casefold() == "classify":
+            if "features" not in task_data:
+                raise QNNInputError("classify requires features")
+            return self.classify_features(task_data["features"])
         mode, tasks, steps = self._task_values(task_data)
 
         baseline_model = self.state_dict() if mode == "train" else None
