@@ -20,6 +20,7 @@ Pipeline
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -193,6 +194,7 @@ class ReasoningAnalogical(BaseReasoning):
             if self.enable_cache
             else None
         )
+        self._prop_sim_memo: Dict[Tuple[str, str], float] = {}
         logger.info("ReasoningAnalogical initialized | max_analogies=%s | cache=%s", self.max_analogies, self.enable_cache)
 
     # ------------------------------------------------------------------
@@ -201,15 +203,22 @@ class ReasoningAnalogical(BaseReasoning):
     def perform_reasoning(self, target: Any, source_domain: Sequence[Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: # type: ignore[override]
         """Perform analogical reasoning between one target and source candidates."""
         started = time.monotonic()
+        if context is not None and not isinstance(context, Mapping):
+            raise ReasoningValidationError(
+                "context must be a mapping",
+                context={"type": type(context).__name__},
+            )
         context = dict(context or {})
         self._log_step("Starting analogical reasoning process")
 
         target = self._validate_target(target)
         sources = self._validate_source_domain(source_domain)
         cache_key = self._reasoning_cache_key(target, sources, context)
-        if self.cache is not None:
+        if self.cache is not None and cache_key:
             cached = self.cache.get(cache_key)
             if cached is not None:
+                # Work on a private copy: mutating the cached object corrupted every later hit.
+                cached = copy.deepcopy(cached)
                 cached["metrics"]["cache_hit"] = True
                 return cached
 
@@ -241,8 +250,8 @@ class ReasoningAnalogical(BaseReasoning):
         )
         result["metrics"]["cache_hit"] = False
 
-        if self.cache is not None:
-            self.cache.set(cache_key, result, ttl_seconds=self.cache_ttl_seconds, metadata={"reasoning_type": "analogical"})
+        if self.cache is not None and cache_key:
+            self.cache.set(cache_key, copy.deepcopy(result), ttl_seconds=self.cache_ttl_seconds, metadata={"reasoning_type": "analogical"})
         self._record_memory_event(context, result)
         self._log_step(
             f"Analogical reasoning complete | analogies={len(filtered_analogies)} | transfers={len(transfers)} "
@@ -341,6 +350,8 @@ class ReasoningAnalogical(BaseReasoning):
 
     def _is_corresponding(self, target_prop: str, source_prop: str, context: Dict[str, Any]) -> bool:
         """Determine whether two properties can be aligned."""
+        if self._property_similarity_bound(target_prop, source_prop) < self.min_correspondence_similarity:
+            return False  # cheap upper bound already below the threshold: skip the exact (slow) score
         similarity = self._property_similarity(target_prop, source_prop)
         if similarity < self.min_correspondence_similarity:
             return False
@@ -353,17 +364,36 @@ class ReasoningAnalogical(BaseReasoning):
             return False
         return True
 
-    def _property_similarity(self, prop1: str, prop2: str) -> float:
-        """Calculate robust lexical similarity between two property labels."""
+    def _property_similarity_bound(self, prop1: str, prop2: str) -> float:
+        """Upper bound of ``_property_similarity`` using SequenceMatcher.quick_ratio()."""
         p1, p2 = self._tokenize_property(prop1), self._tokenize_property(prop2)
         if not p1 and not p2:
             return 1.0
         if not p1 or not p2:
             return 0.0
         jaccard = len(p1 & p2) / len(p1 | p2)
-        sequence = SequenceMatcher(None, str(prop1).lower(), str(prop2).lower()).ratio()
-        synonym = self._synonym_overlap_score(prop1, prop2)
-        return clamp_confidence(0.55 * jaccard + 0.30 * sequence + 0.15 * synonym)
+        matcher = SequenceMatcher(None, str(prop1).lower(), str(prop2).lower())
+        return min(1.0, 0.55 * jaccard + 0.30 * matcher.quick_ratio() + 0.15 * 1.0)
+
+    def _property_similarity(self, prop1: str, prop2: str) -> float:
+        """Calculate robust lexical similarity between two property labels (memoized)."""
+        key = (str(prop1), str(prop2))
+        hit = self._prop_sim_memo.get(key)
+        if hit is not None:
+            return hit
+        p1, p2 = self._tokenize_property(prop1), self._tokenize_property(prop2)
+        if not p1 and not p2:
+            value = 1.0
+        elif not p1 or not p2:
+            value = 0.0
+        else:
+            jaccard = len(p1 & p2) / len(p1 | p2)
+            sequence = SequenceMatcher(None, str(prop1).lower(), str(prop2).lower()).ratio()
+            synonym = self._synonym_overlap_score(prop1, prop2)
+            value = clamp_confidence(0.55 * jaccard + 0.30 * sequence + 0.15 * synonym)
+        if len(self._prop_sim_memo) < 200_000:
+            self._prop_sim_memo[key] = value
+        return value
 
     def _calculate_structural_score(self, target_props: Set[str], source_props: Set[str], correspondences: List[Dict[str, Any]]) -> float:
         """Calculate structure preservation score from coverage and match quality."""
@@ -522,7 +552,16 @@ class ReasoningAnalogical(BaseReasoning):
         """Select the best transfer by validation-aware transfer score."""
         if not transfers:
             return None
-        return max(transfers, key=lambda t: (float(t.get("transfer_score", 0.0)), float(t.get("mapping_score", 0.0))))
+        # A transfer that failed its own validation must not beat a valid one just because
+        # its raw score is higher (the docstring promised this; the code ignored validity).
+        return max(
+            transfers,
+            key=lambda t: (
+                bool((t.get("validation") or {}).get("valid", False)),
+                float(t.get("transfer_score", 0.0)),
+                float(t.get("mapping_score", 0.0)),
+            ),
+        )
 
     def _format_results(
         self,
@@ -548,6 +587,8 @@ class ReasoningAnalogical(BaseReasoning):
                 "mapping_score": best_transfer.get("mapping_score", 0.0) if best_transfer else 0.0,
                 "transfer_score": best_transfer.get("transfer_score", 0.0) if best_transfer else 0.0,
                 "success": best_transfer is not None,
+                # "success" only says a transfer was produced; this says it passed its own validation.
+                "transfer_validated": bool(best_transfer is not None and (best_transfer.get("validation") or {}).get("valid", False)),
                 "elapsed_seconds": elapsed,
                 "cache_enabled": self.cache is not None,
             },
@@ -870,18 +911,30 @@ class ReasoningAnalogical(BaseReasoning):
         return {key: max(0.0, float(value)) / total for key, value in weights.items()}
 
     def _reasoning_cache_key(self, target: Any, sources: Sequence[Any], context: Mapping[str, Any]) -> str:
+        # Digest the FULL representation: the previous 1500-character truncation made two
+        # different large targets/sources with a common prefix share one cache entry.
         payload = {
-            "target": self._safe_repr(target),
-            "sources": [self._safe_repr(src) for src in sources],
-            "context": self._cache_safe_context(context),
-            "version": "2.1.0",
+            "target": self._digest(target),
+            "sources": [self._digest(src) for src in sources],
+            "context": {
+                str(k): self._digest(v) for k, v in context.items()
+                if str(k) not in {"reasoning_memory", "memory", "cache", "logger"}
+            },
+            "version": "2.2.0",
         }
+        parts = [payload["target"], payload["context"], *payload["sources"]]
+        if any(part is None for part in parts) or any(v is None for v in payload["context"].values()):
+            return ""  # too large/deep to key safely: caller skips the cache
         encoded = json.dumps(payload, sort_keys=True, default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _cache_safe_context(self, context: Mapping[str, Any]) -> Dict[str, Any]:
         excluded = {"reasoning_memory", "memory", "cache", "logger"}
         return {str(k): self._safe_repr(v) for k, v in context.items() if str(k) not in excluded}
+
+    @staticmethod
+    def _digest(value: Any) -> Optional[str]:
+        return stable_digest(value)
 
     @staticmethod
     def _safe_repr(value: Any, max_len: int = 1500) -> str:
