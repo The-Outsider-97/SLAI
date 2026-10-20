@@ -20,15 +20,14 @@ reverse imports into their orchestration layers.
 
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.4.0"
 
 import copy
 import hashlib
 import json
 import math
 import time
-import numpy as np
-
+import numpy as np # type: ignore
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -169,31 +168,17 @@ class QNNConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "num_qubits", positive_int(self.num_qubits, "num_qubits"))
-        object.__setattr__(
-            self,
-            "num_quantum_layers",
-            positive_int(self.num_quantum_layers, "num_quantum_layers"),
-        )
-        object.__setattr__(
-            self,
-            "learning_rate",
-            positive_float(self.learning_rate, "learning_rate"),
-        )
+        object.__setattr__(self, "num_quantum_layers", positive_int(self.num_quantum_layers, "num_quantum_layers"))
+        object.__setattr__(self, "learning_rate", positive_float(self.learning_rate, "learning_rate"))
         object.__setattr__(self, "seed", _non_negative_int(self.seed, "seed"))
-        object.__setattr__(
-            self,
-            "entanglement",
-            _normalized_choice(
+        object.__setattr__(self, "entanglement", _normalized_choice(
                 self.entanglement,
                 name="entanglement",
                 allowed=_SUPPORTED_ENTANGLEMENT,
                 aliases={"adjacent": "linear"},
             ),
         )
-        object.__setattr__(
-            self,
-            "loss",
-            _normalized_choice(
+        object.__setattr__(self, "loss", _normalized_choice(
                 self.loss,
                 name="loss",
                 allowed=_SUPPORTED_LOSSES,
@@ -212,10 +197,7 @@ class QNNConfig:
         object.__setattr__(
             self,
             "finite_difference_step",
-            positive_float(
-                self.finite_difference_step,
-                "finite_difference_step",
-            ),
+            positive_float(self.finite_difference_step, "finite_difference_step"),
         )
         object.__setattr__(
             self,
@@ -235,9 +217,7 @@ class QNNConfig:
             object.__setattr__(self, name, positive_int(getattr(self, name), name))
 
         if self.gradient_method == "parameter_shift" and self.loss != "state_fidelity":
-            raise QNNConfigurationError(
-                "parameter_shift is supported only with state_fidelity loss"
-            )
+            raise QNNConfigurationError("parameter_shift is supported only with state_fidelity loss")
 
         if self.statevector_bytes > self.max_statevector_bytes:
             raise QNNResourceLimitError(
@@ -316,10 +296,7 @@ class QNNTask:
         if targets is not None:
             normalized_targets = self._normalize_sequence(targets, "target_outputs")
             if len(normalized_targets) != len(inputs):
-                raise QNNInputError(
-                    "target_outputs must contain the same number of states "
-                    "as input_sequences"
-                )
+                raise QNNInputError("target_outputs must contain the same number of states as input_sequences")
             object.__setattr__(self, "target_outputs", normalized_targets)
 
         if not isinstance(self.metadata, Mapping):
@@ -334,9 +311,7 @@ class QNNTask:
             if value.ndim == 2:
                 values = tuple(value[index] for index in range(value.shape[0]))
             else:
-                raise QNNInputError(
-                    f"{name} must be a one- or two-dimensional NumPy array"
-                )
+                raise QNNInputError(f"{name} must be a one- or two-dimensional NumPy array")
         else:
             if isinstance(value, (str, bytes, bytearray)) or not isinstance(
                 value, Sequence
@@ -363,9 +338,7 @@ class QNNTask:
             )
 
         if not hasattr(value, "input_sequences"):
-            raise QNNInputError(
-                "QNN task must be QNNTask, a mapping, or expose input_sequences"
-            )
+            raise QNNInputError("QNN task must be QNNTask, a mapping, or expose input_sequences")
         return cls(
             input_sequences=getattr(value, "input_sequences"),
             target_outputs=getattr(value, "target_outputs", None),
@@ -422,13 +395,7 @@ def zero_state(num_qubits: int) -> np.ndarray:
     return state
 
 
-def apply_gate(
-    state: Any,
-    gate: Any,
-    target_qubits: Sequence[int],
-    *,
-    num_qubits: int,
-) -> np.ndarray:
+def apply_gate(state: Any, gate: Any, target_qubits: Sequence[int], *, num_qubits: int) -> np.ndarray:
     """Apply a k-qubit gate without materializing a full-system matrix."""
 
     qubits = positive_int(num_qubits, "num_qubits")
@@ -439,9 +406,7 @@ def apply_gate(
     except (TypeError, ValueError) as exc:
         raise QNNInputError("state cannot be converted to complex128") from exc
     if vector.shape != (expected_dimension,):
-        raise QNNInputError(
-            f"state must have shape ({expected_dimension},), got {vector.shape}"
-        )
+        raise QNNInputError(f"state must have shape ({expected_dimension},), got {vector.shape}")
     if not np.all(np.isfinite(vector.real)) or not np.all(np.isfinite(vector.imag)):
         raise QNNInputError("state contains non-finite amplitudes")
 
@@ -480,10 +445,7 @@ def apply_gate(
     inverse = np.argsort(permutation)
     front = np.transpose(tensor, permutation).reshape(width, -1)
     updated = matrix @ front
-    result = np.transpose(
-        updated.reshape((2,) * qubits),
-        inverse,
-    ).reshape(expected_dimension)
+    result = np.transpose(updated.reshape((2,) * qubits), inverse).reshape(expected_dimension)
 
     if not np.all(np.isfinite(result.real)) or not np.all(np.isfinite(result.imag)):
         raise QNNInputError("gate application produced non-finite amplitudes")
@@ -540,15 +502,11 @@ class StateVectorCircuit:
             raise QNNInputError("layer weights must be float-compatible") from exc
         expected = (self.num_qubits, 3)
         if weights.shape != expected or not np.all(np.isfinite(weights)):
-            raise QNNInputError(
-                f"layer weights must be finite with shape {expected}"
-            )
+            raise QNNInputError(f"layer weights must be finite with shape {expected}")
 
         current = np.asarray(state, dtype=np.complex128)
         if current.shape != (self.state_dimension,):
-            raise QNNInputError(
-                f"state must have shape ({self.state_dimension},)"
-            )
+            raise QNNInputError(f"state must have shape ({self.state_dimension},)")
 
         for qubit in range(self.num_qubits):
             current = apply_gate(
@@ -584,9 +542,7 @@ class StateVectorCircuit:
         parameters = self.validate_weights(weights)
         current = np.asarray(state, dtype=np.complex128)
         if current.shape != (self.state_dimension,):
-            raise QNNInputError(
-                f"state must have shape ({self.state_dimension},)"
-            )
+            raise QNNInputError(f"state must have shape ({self.state_dimension},)")
         for layer_index in range(self.num_layers):
             current = self.apply_layer(current, parameters[layer_index])
         return np.ascontiguousarray(current, dtype=np.complex128)
@@ -634,13 +590,7 @@ class QNNAgent(BaseAgent):
             checkpoint_manager=checkpoint_manager,
         )
 
-        resolved = dict(
-            get_config_section(
-                "qnn_agent",
-                config=self.config,
-            )
-            or {}
-        )
+        resolved = dict(get_config_section("qnn_agent", config=self.config) or {})
         if config:
             resolved.update(dict(config))
 
@@ -651,21 +601,15 @@ class QNNAgent(BaseAgent):
                 f"{', '.join(sorted(str(item) for item in unknown))}"
             )
 
-        model_config = {
-            key: value for key, value in resolved.items() if key in self._MODEL_CONFIG_FIELDS
-        }
+        model_config = {key: value for key, value in resolved.items() if key in self._MODEL_CONFIG_FIELDS}
         self.qnn_config = QNNConfig.from_mapping(model_config)
-        self._shared_memory_config = self._resolve_shared_memory_config(
-            resolved.get("shared_memory")
-        )
+        self._shared_memory_config = self._resolve_shared_memory_config(resolved.get("shared_memory"))
 
         self._rng = np.random.default_rng(self.qnn_config.seed)
         self._circuit = self._build_circuit(self.qnn_config)
         self._encoder = self._build_encoder(self.qnn_config)
         self._policy = self._build_policy(self.qnn_config)
-        self.measurement_optimizer = self._build_measurement_optimizer(
-            self.qnn_config
-        )
+        self.measurement_optimizer = self._build_measurement_optimizer(self.qnn_config)
         self.qnn_metrics = self.measurement_optimizer.metrics
         self.evaluator = self.qnn_metrics
 
@@ -675,8 +619,7 @@ class QNNAgent(BaseAgent):
         self.gate_definitions = self._define_quantum_gates()
 
         logger.info(
-            "QNN Agent initialized | qubits=%d | layers=%d | entanglement=%s | "
-            "loss=%s | gradient=%s",
+            "QNN Agent initialized | qubits=%d | layers=%d | entanglement=%s | loss=%s | gradient=%s",
             self.num_qubits,
             self.num_quantum_layers,
             self.entanglement,
@@ -710,13 +653,8 @@ class QNNAgent(BaseAgent):
         configured = policy.policy_config
         for name in _POLICY_DEFAULTS:
             if name not in configured:
-                raise QNNConfigurationError(
-                    f"quantum_policy.{name} is required"
-                )
-            owned_value = positive_int(
-                configured[name],
-                f"quantum_policy.{name}",
-            )
+                raise QNNConfigurationError(f"quantum_policy.{name} is required")
+            owned_value = positive_int(configured[name], f"quantum_policy.{name}")
             if name in {"max_statevector_bytes", "max_parameter_bytes"}:
                 runtime_value = int(getattr(config, name))
             else:
@@ -730,9 +668,7 @@ class QNNAgent(BaseAgent):
         return policy
 
     @staticmethod
-    def _build_measurement_optimizer(
-        config: QNNConfig,
-    ) -> QuantumMeasurementOptimizer:
+    def _build_measurement_optimizer(config: QNNConfig) -> QuantumMeasurementOptimizer:
         return QuantumMeasurementOptimizer(
             loss=config.loss,
             gradient_method=config.gradient_method,
@@ -759,25 +695,19 @@ class QNNAgent(BaseAgent):
         resolved = {**cls._DEFAULT_SHARED_MEMORY_CONFIG, **section}
         for name in ("enabled", "publish_notifications"):
             if not isinstance(resolved[name], bool):
-                raise QNNConfigurationError(
-                    f"qnn_agent.shared_memory.{name} must be a boolean"
-                )
+                raise QNNConfigurationError(f"qnn_agent.shared_memory.{name} must be a boolean")
 
         ttl = resolved["ttl_seconds"]
         if ttl is not None:
             ttl = _finite_scalar(ttl, "qnn_agent.shared_memory.ttl_seconds")
             if ttl <= 0.0:
-                raise QNNConfigurationError(
-                    "qnn_agent.shared_memory.ttl_seconds must be positive"
-                )
+                raise QNNConfigurationError("qnn_agent.shared_memory.ttl_seconds must be positive")
         resolved["ttl_seconds"] = ttl
 
         for name in ("summary_key_prefix", "event_channel"):
             item = resolved[name]
             if not isinstance(item, str) or not item.strip():
-                raise QNNConfigurationError(
-                    f"qnn_agent.shared_memory.{name} must be a non-empty string"
-                )
+                raise QNNConfigurationError(f"qnn_agent.shared_memory.{name} must be a non-empty string")
             resolved[name] = item.strip()
         return resolved
 
@@ -839,12 +769,7 @@ class QNNAgent(BaseAgent):
             size=self._circuit.weight_shape,
         ).astype(np.float64)
 
-    def _normalize_sequence(
-        self,
-        sequence: Sequence[Any],
-        *,
-        name: str,
-    ) -> tuple[np.ndarray, ...]:
+    def _normalize_sequence(self, sequence: Sequence[Any], *, name: str) -> tuple[np.ndarray, ...]:
         encoded = self._encoder.encode_sequence(sequence, name=name)
         self._policy.validate_sequence_length(len(encoded), name=name)
         return encoded
@@ -885,9 +810,7 @@ class QNNAgent(BaseAgent):
                 raise
             reset_step = True
         else:
-            candidate_weights = candidate_circuit.validate_weights(
-                self.quantum_weights
-            )
+            candidate_weights = candidate_circuit.validate_weights(self.quantum_weights)
             reset_step = False
 
         self.qnn_config = candidate
@@ -1427,16 +1350,9 @@ class QNNAgent(BaseAgent):
             }
         )
 
-    def _born_sample(
-        self,
-        state: Any,
-        num_samples: int = 1,
-    ) -> np.ndarray:
+    def _born_sample(self, state: Any, num_samples: int = 1) -> np.ndarray:
         sample_count = positive_int(num_samples, "num_samples")
-        encoded_state = self._encoder.encode_state(
-            state,
-            name="sample_state",
-        )
+        encoded_state = self._encoder.encode_state(state, name="sample_state")
         return self.measurement_optimizer.sample(
             encoded_state,
             rng=self._rng,
@@ -1480,22 +1396,14 @@ class QNNAgent(BaseAgent):
             "measurement_optimization": {
                 "loss": measurement_optimizer.loss,
                 "gradient_method": measurement_optimizer.gradient_method,
-                "probability_tolerance": (
-                    measurement_optimizer.probability_tolerance
-                ),
+                "probability_tolerance": measurement_optimizer.probability_tolerance,
                 "parameter_shift": measurement_optimizer.parameter_shift,
-                "finite_difference_step": (
-                    measurement_optimizer.finite_difference_step
-                ),
-                "gradient_clip_norm": (
-                    measurement_optimizer.gradient_clip_norm
-                ),
+                "finite_difference_step": measurement_optimizer.finite_difference_step,
+                "gradient_clip_norm": measurement_optimizer.gradient_clip_norm,
             },
             "policy": {
                 **policy_limits,
-                "allowed_tuning_parameters": sorted(
-                    policy.allowed_tuning_parameters
-                ),
+                "allowed_tuning_parameters": sorted(policy.allowed_tuning_parameters),
             },
         }
 
@@ -1516,11 +1424,7 @@ class QNNAgent(BaseAgent):
     ) -> str:
         effective_config = {
             "agent": config.to_dict(),
-            "numerical_profile": cls._numerical_profile_for(
-                encoder,
-                measurement_optimizer,
-                policy,
-            ),
+            "numerical_profile": cls._numerical_profile_for(encoder, measurement_optimizer, policy),
         }
         canonical = json.dumps(
             json_safe(effective_config),
@@ -1595,22 +1499,11 @@ class QNNAgent(BaseAgent):
     # ------------------------------------------------------------------
     def state_dict(self) -> dict[str, np.ndarray]:
         return {
-            "quantum_weights": np.array(
-                self.quantum_weights,
-                copy=True,
-            ),
-            "training_step": np.array(
-                [self._training_step],
-                dtype=np.int64,
-            ),
+            "quantum_weights": np.array(self.quantum_weights, copy=True),
+            "training_step": np.array([self._training_step], dtype=np.int64),
         }
 
-    def load_state_dict(
-        self,
-        state: Mapping[str, Any],
-        *,
-        strict: bool = True,
-    ) -> None:
+    def load_state_dict(self, state: Mapping[str, Any], *, strict: bool = True) -> None:
         if not isinstance(state, Mapping):
             raise QNNInputError("QNN model state must be a mapping")
         if not isinstance(strict, bool):
@@ -1626,10 +1519,7 @@ class QNNAgent(BaseAgent):
                 f"unknown={sorted(str(item) for item in unknown)}"
             )
 
-        candidate_weights = np.array(
-            self._circuit.validate_weights(state["quantum_weights"]),
-            copy=True,
-        )
+        candidate_weights = np.array(self._circuit.validate_weights(state["quantum_weights"]), copy=True)
         raw_step = np.asarray(state["training_step"])
         if raw_step.size != 1:
             raise QNNInputError("training_step must contain one integer")
@@ -1673,65 +1563,46 @@ class QNNAgent(BaseAgent):
             checkpoint_config.num_qubits != self.num_qubits
             or checkpoint_config.num_quantum_layers != self.num_quantum_layers
         ):
-            raise QNNInputError(
-                "checkpoint QNN architecture does not match the active agent"
-            )
+            raise QNNInputError("checkpoint QNN architecture does not match the active agent")
 
         state_training_step = state.get("training_step")
         if (
+            state_training_step is None
+            or
             isinstance(state_training_step, bool)
             or not isinstance(state_training_step, (int, np.integer))
             or int(state_training_step) < 0
         ):
-            raise QNNInputError(
-                "checkpoint agent-state training_step must be non-negative"
-            )
+            raise QNNInputError( "checkpoint agent-state training_step must be non-negative")
         if int(state_training_step) != self._training_step:
-            raise QNNInputError(
-                "checkpoint model and agent-state training_step values disagree"
-            )
+            raise QNNInputError("checkpoint model and agent-state training_step values disagree")
 
         generator_name = state.get("rng_bit_generator")
         if generator_name != self._rng.bit_generator.__class__.__name__:
-            raise QNNInputError(
-                "checkpoint RNG bit generator is incompatible"
-            )
+            raise QNNInputError("checkpoint RNG bit generator is incompatible")
         rng_state = state.get("rng_state")
         if not isinstance(rng_state, Mapping):
-            raise QNNInputError(
-                "checkpoint rng_state must be a mapping"
-            )
+            raise QNNInputError("checkpoint rng_state must be a mapping")
 
-        candidate_rng = np.random.Generator(
-            self._rng.bit_generator.__class__()
-        )
+        candidate_rng = np.random.Generator(self._rng.bit_generator.__class__())
         try:
             candidate_rng.bit_generator.state = json_safe(rng_state)
         except (TypeError, ValueError) as exc:
-            raise QNNInputError(
-                "checkpoint rng_state is invalid"
-            ) from exc
+            raise QNNInputError("checkpoint rng_state is invalid") from exc
 
         candidate_circuit = self._build_circuit(checkpoint_config)
         candidate_circuit.validate_weights(self.quantum_weights)
         candidate_encoder = self._build_encoder(checkpoint_config)
         candidate_policy = self._build_policy(checkpoint_config)
-        candidate_optimizer = self._build_measurement_optimizer(
-            checkpoint_config
-        )
+        candidate_optimizer = self._build_measurement_optimizer(checkpoint_config)
 
-        profile_fingerprint = state.get(
-            "numerical_profile_fingerprint"
-        )
+        profile_fingerprint = state.get("numerical_profile_fingerprint")
         if profile_fingerprint is not None:
             if (
                 not isinstance(profile_fingerprint, str)
                 or not profile_fingerprint
             ):
-                raise QNNInputError(
-                    "checkpoint numerical_profile_fingerprint must be "
-                    "a non-empty string"
-                )
+                raise QNNInputError("checkpoint numerical_profile_fingerprint must be a non-empty string")
             candidate_profile = self._fingerprint_components(
                 checkpoint_config,
                 candidate_encoder,
@@ -1739,10 +1610,7 @@ class QNNAgent(BaseAgent):
                 candidate_policy,
             )
             if profile_fingerprint != candidate_profile:
-                raise QNNInputError(
-                    "checkpoint numerical configuration is incompatible "
-                    "with the active QNN subsystem configuration"
-                )
+                raise QNNInputError("checkpoint numerical configuration is incompatible with the active QNN subsystem configuration")
 
         self.qnn_config = checkpoint_config
         self._circuit = candidate_circuit
@@ -1774,22 +1642,15 @@ class QNNAgent(BaseAgent):
         return self._latest_checkpoint_metrics()
     
     
-    def _apply_checkpoint_components(
-        self,
-        components: Mapping[str, Any],
-    ) -> None:
+    def _apply_checkpoint_components(self, components: Mapping[str, Any]) -> None:
         model_state = components.get("model")
         agent_state = components.get("agent_state")
     
         if not isinstance(model_state, Mapping):
-            raise QNNInputError(
-                "checkpoint model component must be a mapping"
-            )
+            raise QNNInputError("checkpoint model component must be a mapping")
     
         if not isinstance(agent_state, Mapping):
-            raise QNNInputError(
-                "checkpoint agent_state component must be a mapping"
-            )
+            raise QNNInputError("checkpoint agent_state component must be a mapping")
     
         # Model first: load_agent_state validates agreement with the restored
         # training step and architecture.
@@ -1797,31 +1658,22 @@ class QNNAgent(BaseAgent):
         self.load_agent_state(agent_state)
     
     
-    def _capture_checkpoint_restore_state(
-        self,
-    ) -> Mapping[str, Any]:
+    def _capture_checkpoint_restore_state(self) -> Mapping[str, Any]:
         return {
             "model": self.state_dict(),
             "agent_state": self.agent_state(),
         }
     
     
-    def _rollback_checkpoint_restore_state(
-        self,
-        baseline: Mapping[str, Any],
-    ) -> None:
+    def _rollback_checkpoint_restore_state(self, baseline: Mapping[str, Any]) -> None:
         model_state = baseline.get("model")
         agent_state = baseline.get("agent_state")
     
         if not isinstance(model_state, Mapping):
-            raise QNNInputError(
-                "rollback model state must be a mapping"
-            )
+            raise QNNInputError("rollback model state must be a mapping")
     
         if not isinstance(agent_state, Mapping):
-            raise QNNInputError(
-                "rollback agent state must be a mapping"
-            )
+            raise QNNInputError("rollback agent state must be a mapping")
     
         self.load_state_dict(model_state, strict=True)
         self.load_agent_state(agent_state)
@@ -1840,38 +1692,17 @@ class QNNAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Optional visualization; matplotlib remains lazy
     # ------------------------------------------------------------------
-    def visualize_output(
-        self,
-        output_sequence: Sequence[Any],
-        *,
-        show: bool = False,
-    ) -> Any:
+    def visualize_output(self, output_sequence: Sequence[Any], *, show: bool = False) -> Any:
         if self.num_qubits == 1:
-            return self.visualize_bloch(
-                output_sequence,
-                show=show,
-            )
-        return self.visualize_amplitudes(
-            output_sequence,
-            show=show,
-        )
+            return self.visualize_bloch(output_sequence, show=show)
+        return self.visualize_amplitudes(output_sequence, show=show)
 
-    def visualize_bloch(
-        self,
-        output_sequence: Sequence[Any],
-        *,
-        show: bool = False,
-    ) -> Any:
-        import matplotlib.pyplot as plt
+    def visualize_bloch(self, output_sequence: Sequence[Any], *, show: bool = False) -> Any:
+        import matplotlib.pyplot as plt # type: ignore
 
-        states = self._normalize_sequence(
-            output_sequence,
-            name="output_sequence",
-        )
+        states = self._normalize_sequence(output_sequence, name="output_sequence")
         if self.num_qubits != 1:
-            raise QNNInputError(
-                "Bloch visualization requires exactly one qubit"
-            )
+            raise QNNInputError("Bloch visualization requires exactly one qubit")
 
         figure = plt.figure(figsize=(8, 6))
         axes = figure.add_subplot(111, projection="3d")
@@ -1889,17 +1720,10 @@ class QNNAgent(BaseAgent):
         return figure
 
     @staticmethod
-    def _bloch_coordinates(
-        state: Any,
-    ) -> tuple[float, float, float]:
-        amplitudes = np.asarray(
-            state,
-            dtype=np.complex128,
-        )
+    def _bloch_coordinates(state: Any) -> tuple[float, float, float]:
+        amplitudes = np.asarray(state, dtype=np.complex128)
         if amplitudes.shape != (2,):
-            raise QNNInputError(
-                "Bloch coordinates require a one-qubit state"
-            )
+            raise QNNInputError("Bloch coordinates require a one-qubit state")
         a, b = amplitudes
         coherence = np.conjugate(a) * b
         return (
@@ -1908,13 +1732,8 @@ class QNNAgent(BaseAgent):
             float(abs(a) ** 2 - abs(b) ** 2),
         )
 
-    def visualize_amplitudes(
-        self,
-        output_sequence: Sequence[Any],
-        *,
-        show: bool = False,
-    ) -> list[Any]:
-        import matplotlib.pyplot as plt
+    def visualize_amplitudes(self, output_sequence: Sequence[Any], *, show: bool = False) -> list[Any]:
+        import matplotlib.pyplot as plt # type: ignore
 
         states = self._normalize_sequence(
             output_sequence,
@@ -1950,10 +1769,7 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    basis_zero = np.array(
-        [1.0, 0.0, 0.0, 0.0],
-        dtype=np.complex128,
-    )
+    basis_zero = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128)
     agent = QNNAgent(
         config={
             "num_qubits": 2,

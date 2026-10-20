@@ -31,3 +31,17 @@ quantum_policy:
     - gradient_method
     - finite_difference_step
     - gradient_clip_norm
+
+vqc:
+  # Supervised binary variational classifier (variational_classifier.py).
+  # Inference batch size, epoch / gradient-evaluation budgets and the working-set
+  # limit are inherited from quantum_policy; the parameter-shift step comes from
+  # quantum_mno. Only VQC-specific limits live here.
+  max_qubits: 8
+  max_training_rows: 20000
+  max_artifact_bytes: 1048576
+  max_manifest_bytes: 65536
+  # Probability clip used inside log-loss / gradient chain terms.
+  probability_epsilon: 1.0e-7
+  # Tolerance for unit-norm checks on states produced by the injected circuit.
+  norm_tolerance: 1.0e-8
