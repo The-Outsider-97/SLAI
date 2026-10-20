@@ -591,6 +591,15 @@ class RetryPolicy:
     ) -> Dict[str, Any]:
         if error is not None:
             code = getattr(error, "code", None)
+            # An error that declares itself never retryable (for example NoRouteAvailableError, a
+            # RoutingError subclass) must not be reclassified as retryable by a broader isinstance
+            # rule below. DuplicateMessageError is excluded because its retryability is an explicit
+            # profile option (retry_on_duplicate_active).
+            if (
+                not isinstance(error, DuplicateMessageError)
+                and self._resolve_retry_disposition(error) == RetryDisposition.NEVER
+            ):
+                return {"retryable": False, "reason": f"error {code or type(error).__name__} is declared never retryable"}
             if isinstance(error, RateLimitExceededError) and profile.retry_on_rate_limits:
                 return {"retryable": True, "reason": "rate-limit error is retryable under profile"}
             if isinstance(error, (ConnectionTimeoutError, DeliveryTimeoutError)) and profile.retry_on_timeouts:

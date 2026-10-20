@@ -356,6 +356,27 @@ network_metrics:
   unhealthy_success_rate_threshold: 0.80
   unhealthy_error_rate_threshold: 0.25
   unhealthy_consecutive_failures_threshold: 5
+  min_events_for_rate_status: 10
+
+
+# Predictive delivery controller (see src/agents/network/delivery_predictor.py).
+# mode: off | shadow | active. shadow predicts and logs but never changes behaviour. active may only
+# shorten a timeout or veto a retry that reliability already allowed, and requires an `approved`
+# checkpoint unless allow_experimental_active is true.
+delivery_predictor:
+  enabled: true
+  mode: "shadow"
+  manifest_path: "src/agents/network/models/delivery_predictor/manifest.json"
+  allow_experimental_active: false
+  min_history: 8
+  min_timeout_ms: 50
+  timeout_margin: 1.5
+  timeout_escalation: 2.0
+  veto_p_success: 0.15
+  veto_min_consecutive_failures: 2
+  max_endpoints: 256
+  max_consecutive_errors: 5
+  error_cooldown_s: 60.0
 
 
 network_policy:
@@ -411,6 +432,7 @@ network_policy:
 
 network_channel_selector:
   enabled: true
+  panic_route_when_all_unhealthy: true
   sanitize_logs: true
   record_selection_snapshots: true
 
@@ -476,6 +498,8 @@ network_endpoint_registry:
 
 network_route_policy:
   enabled: true
+  min_samples_for_rate_checks: 10
+  panic_route_when_all_unhealthy: true
   sanitize_logs: true
   record_policy_decisions: true
 

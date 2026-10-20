@@ -668,6 +668,10 @@ class HTTPAdapter(BaseAdapter):
         except NetworkError:
             raise
         except Exception as exc:
+            # A timeout or transport error can leave the persistent HTTPConnection mid-exchange (state
+            # "Request-sent"), after which every later request on it raises CannotSendRequest. Drop it so the
+            # next attempt opens a fresh connection instead of failing until the adapter is rebuilt.
+            self._reset_connection()
             raise normalize_network_exception(
                 exc,
                 operation="receive" if is_receive else "send",

@@ -1034,6 +1034,28 @@ class CircuitBreaker:
             self._sync_snapshot_memory()
             return record.to_dict()
 
+    def refresh_open_circuits(self) -> int:
+        """
+        Move open circuits whose open timeout has elapsed to ``half_open`` and publish the new state.
+
+        The open -> half_open transition otherwise only happens inside ``allow_request``, but route
+        selection rejects endpoints whose published state is ``open`` *before* admission is consulted. A
+        tripped circuit on an endpoint with no alternative therefore never reached the probe state and stayed
+        open until its memory record expired. Returns the number of circuits moved.
+        """
+        if not self.auto_transition_half_open:
+            return 0
+        moved = 0
+        with self._lock:
+            for record in list(self._circuits.values()):
+                if record.is_open() and record.open_timeout_elapsed():
+                    self._transition_locked(record, "half_open", reason="open timeout elapsed; eligible for a probe request")
+                    self._sync_record_memory(record)
+                    moved += 1
+            if moved:
+                self._sync_snapshot_memory()
+        return moved
+
     def _find_record_locked(self, key_or_endpoint: str) -> Optional[CircuitRecord]:
         lookup = ensure_non_empty_string(str(key_or_endpoint), field_name="circuit_lookup").strip()
         if lookup in self._circuits:
