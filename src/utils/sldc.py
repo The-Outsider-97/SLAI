@@ -79,6 +79,7 @@ MAX_BLOCKS = 20_000
 MAX_TEXT_CHARS = 8_000_000
 MAX_JSON_DEPTH = 64
 MAX_COMPRESSION_RATIO = 200
+_RATIO_CHECK_MIN_BYTES = 1024 * 1024  # Below this the absolute size caps already bound the cost.
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _LANGUAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
@@ -340,7 +341,8 @@ def _check_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
         if info.file_size > limit:
             raise SLDCValidationError(f"SLDC entry {info.filename!r} exceeds size limit")
         total_size += info.file_size
-        if info.file_size and info.file_size / max(1, info.compress_size) > MAX_COMPRESSION_RATIO:
+        if (info.file_size > _RATIO_CHECK_MIN_BYTES
+                and info.file_size / max(1, info.compress_size) > MAX_COMPRESSION_RATIO):
             raise SLDCValidationError("SLDC archive exceeds compression-ratio limit")
     if total_size > MAX_UNCOMPRESSED_BYTES:
         raise SLDCValidationError("SLDC uncompressed data exceeds size limit")
@@ -506,7 +508,11 @@ def read_sldc(path: str | os.PathLike[str]) -> dict[str, Any]:
     if not stat.S_ISREG(os.stat(source).st_mode):  # OSError (e.g. FileNotFoundError) propagates
         raise SLDCValidationError("SLDC must be a regular file")
     with open(source, "rb") as handle:
-        data = handle.read(MAX_ARCHIVE_BYTES + 1)  # Bounded, even if the file grows meanwhile.
+        size = os.fstat(handle.fileno()).st_size
+        if size > MAX_ARCHIVE_BYTES:
+            raise SLDCValidationError("SLDC must be no larger than 25 MiB")
+        # Allocate for the real size, not the limit; still bounded if the file grows meanwhile.
+        data = handle.read(size + 1)
     return loads_sldc(data)
 
 
@@ -737,10 +743,17 @@ def document_from_text(text: str, *, title: str, language: str = "en", markdown:
                        source_ref: str | None = None, doc_id: str | None = None,
                        metadata: Mapping[str, Any] | None = None,
                        provenance: Iterable[Mapping[str, Any]] | None = None) -> dict[str, Any]:
-    """Build a document from plain text or Markdown (see :func:`blocks_from_text`)."""
+    """Build a document from plain text or Markdown (see :func:`blocks_from_text`).
+
+    Unless ``doc_id`` is given, the id is derived from the title and blocks, so identical input
+    always yields the identical document (and the identical archive bytes).
+    """
+    blocks = blocks_from_text(text, markdown=markdown, source_ref=source_ref)
+    if doc_id is None:
+        fingerprint = hashlib.sha256(_canonical_json({"title": title, "blocks": blocks}))
+        doc_id = "doc-" + fingerprint.hexdigest()[:32]
     return new_document(
-        title, blocks_from_text(text, markdown=markdown, source_ref=source_ref),
-        language=language, doc_id=doc_id, metadata=metadata, provenance=provenance,
+        title, blocks, language=language, doc_id=doc_id, metadata=metadata, provenance=provenance,
     )
 
 
@@ -777,8 +790,10 @@ def document_from_reader_result(result: Mapping[str, Any], *, title: str | None 
 
     warnings = result.get("warnings")
     parser = result.get("parser")
+    parsed_at = meta.get("parsed_at")  # The Reader's own parse time keeps the entry reproducible.
     entry = provenance_entry(
         "reader.parse",
+        timestamp=parsed_at if isinstance(parsed_at, str) and parsed_at else None,
         agent=parser if isinstance(parser, str) else None,
         source=filename,
         raw_sha256=digest("raw_sha256") or digest("sha256"),
