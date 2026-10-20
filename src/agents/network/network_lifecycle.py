@@ -294,6 +294,22 @@ class NetworkLifecycle:
     def mark_selected(self, message_or_key: str, **kwargs: Any) -> Dict[str, Any]:
         return self._transition_delivery(message_or_key, "selected", **kwargs)
 
+    def _reopen_idempotency_if_failed(self, idempotency_key: Any) -> None:
+        """
+        ``fail`` marks the idempotency record failed after every failed attempt, including ones that are about to be
+        retried. Move it back to ``processing`` so a retried delivery that later succeeds can be recorded as
+        completed (``failed -> completed`` is not an allowed transition) instead of staying "failed" and inviting a
+        duplicate send when the caller re-submits the same key.
+        """
+        if not idempotency_key:
+            return
+        try:
+            record = self.idempotency.get_record(str(idempotency_key), include_history=False)
+            if record and record.get("status") == "failed":
+                self.idempotency.mark_processing(str(idempotency_key), metadata={"reopened_for_retry": True})
+        except Exception as exc:  # noqa: BLE001 - best effort; the caller still reports the delivery outcome
+            logger.warning("NetworkLifecycle could not reopen idempotency record %s: %s", idempotency_key, exc)
+
     def mark_sent(self, message_or_key: str, **kwargs: Any) -> Dict[str, Any]:
         return self._transition_delivery(message_or_key, "sent", **kwargs)
 
@@ -312,6 +328,7 @@ class NetworkLifecycle:
             acked = self.deliveries.mark_acked(record["message_id"], metadata=metadata)
             idempotency_result = None
             if self.auto_complete_idempotency_on_ack:
+                self._reopen_idempotency_if_failed(acked.get("idempotency_key"))
                 idempotency_result = self.idempotency.mark_completed(
                     acked["idempotency_key"],
                     response_snapshot=response_snapshot or {"message_id": acked["message_id"], "state": "acked"},
@@ -408,6 +425,7 @@ class NetworkLifecycle:
         with self._lock:
             record = self._require_delivery_record(message_or_key)
             retrying = self.deliveries.mark_retrying(record["message_id"], error=error, metadata=metadata)
+            self._reopen_idempotency_if_failed(retrying.get("idempotency_key"))
             retry_envelope = None
             if self.auto_build_retry_envelope:
                 retry_envelope = self.envelopes.clone_for_retry(

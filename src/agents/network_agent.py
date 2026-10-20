@@ -5,19 +5,85 @@ while broad enough to support the full lifecycle of networked operations across 
 
 from __future__ import annotations
 
+import threading
 import time
-from typing import Any, Dict, Mapping, Optional
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base_agent import BaseAgent
 from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .network import *
+from .network.delivery_predictor import DeliveryContext, DeliveryDecision, DeliveryPredictor, classify_error
 from .network.utils.network_errors import *
 from .network.utils.network_helpers import *
 from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Network Agent")
 printer = PrettyPrinter()
+
+# Errors that originate locally (policy, validation, lifecycle state, local credentials). They say
+# nothing about the remote endpoint, so they never feed endpoint health or its circuit breaker, and
+# retrying them cannot help.
+_LOCAL_ERROR_TYPES = (
+    PolicyViolationError,
+    PayloadError,
+    NetworkConfigurationError,
+    DuplicateMessageError,
+    IdempotencyViolationError,
+    DeliveryStateError,
+    DeliveryExpiredError,
+    AuthenticationFailedError,
+    AuthorizationFailedError,
+)
+
+
+@dataclass
+class _AttemptPlan:
+    """Per-attempt transport parameters chosen before sending."""
+
+    timeout_ms: Optional[int]
+    decision: Optional[Dict[str, Any]] = None
+    prediction: Optional[DeliveryDecision] = None
+    context: Optional[DeliveryContext] = None
+    sent_at: float = 0.0
+    transport_ms: Optional[float] = None
+
+
+class _RelayState:
+    """Mutable state of one relay() call shared by its attempt helpers."""
+
+    __slots__ = (
+        "begin", "envelope", "constraints", "message_id", "correlation_id", "started", "max_attempts",
+        "deadline_ms", "deadline_at", "idempotent", "last_route_resolution", "last_reliability", "last_plan",
+        "warnings", "payload_bytes", "last_error_class", "last_retry_prediction",
+    )
+
+    def __init__(self, *, begin, envelope, constraints, message_id, correlation_id, started, max_attempts,
+                 deadline_ms, idempotent) -> None:
+        self.begin = begin
+        self.envelope = envelope
+        self.constraints = constraints
+        self.message_id = message_id
+        self.correlation_id = correlation_id
+        self.started = started
+        self.max_attempts = max_attempts
+        self.deadline_ms = deadline_ms
+        self.deadline_at = None if deadline_ms is None else started + deadline_ms / 1000.0
+        self.idempotent = idempotent
+        self.last_route_resolution: Optional[Dict[str, Any]] = None
+        self.last_reliability: Optional[Dict[str, Any]] = None
+        self.last_plan: Optional[_AttemptPlan] = None
+        self.warnings: List[str] = []
+        self.payload_bytes: Optional[int] = None
+        self.last_error_class: str = "none"
+        self.last_retry_prediction: Optional[Dict[str, Any]] = None
+
+    def remaining_ms(self) -> Optional[float]:
+        if self.deadline_at is None:
+            return None
+        return (self.deadline_at - time.monotonic()) * 1000.0
 
 
 class NetworkAgent(BaseAgent):
@@ -89,6 +155,24 @@ class NetworkAgent(BaseAgent):
         self.metrics = NetworkMetrics(memory=self.network_memory)
 
         self._network_agent_closed = False
+        self._closing = False
+        self._bookkeeping_errors = 0
+        # NetworkAgent bookkeeping read-modify-writes shared memory; serialize it so concurrent
+        # relay()/receive() calls cannot lose updates (active_tasks, history, coordination state).
+        self._state_lock = threading.RLock()
+
+        # Delivery bounds. The attempt ceiling stops envelope-supplied max_attempts from causing retry storms.
+        self.max_attempts_ceiling = max(self.max_delivery_attempts, int(self.network_config.get("max_delivery_attempts_ceiling", 10)))
+        self.default_deadline_ms = max(0, int(self.network_config.get("default_deadline_ms", 0) or 0))
+        self.max_deadline_ms = max(1000, int(self.network_config.get("max_deadline_ms", 3_600_000)))
+        self.min_attempt_budget_ms = max(1, int(self.network_config.get("min_attempt_budget_ms", 10)))
+        self.enforce_policy_on_receive = bool(self.network_config.get("enforce_policy_on_receive", True))
+
+        # Predictive delivery controller. Defaults to shadow mode; it can only shorten a timeout or veto a
+        # retry that reliability already allowed, and degrades to the deterministic path on any problem.
+        predictor_config = dict(get_config_section("delivery_predictor") or {})
+        predictor_config.update(dict(ensure_mapping(self.network_config.get("delivery_predictor"), field_name="delivery_predictor", allow_none=True)))
+        self.delivery_predictor = DeliveryPredictor(predictor_config, base_dir=Path(__file__).resolve().parents[2])
 
     def perform_task(self, task_data: Any) -> Dict[str, Any]:
         """Dispatch supported network operations in a consistent agent-facing interface."""
@@ -104,11 +188,13 @@ class NetworkAgent(BaseAgent):
                 timeout_ms = max(1, int(payload.get("timeout_ms", self.default_receive_timeout_ms)))
                 endpoint = payload.get("endpoint")
                 protocol = payload.get("protocol")
+                receive_constraints = ensure_mapping(payload.get("constraints"), field_name="constraints", allow_none=True)
                 return self.receive(
                     channel=channel,
                     timeout_ms=timeout_ms,
                     endpoint=str(endpoint) if endpoint is not None else None,
                     protocol=str(protocol) if protocol is not None else None,
+                    constraints=receive_constraints,
                 )
             if operation in {"health", "status", "snapshot"}:
                 return self.get_network_health()
@@ -125,14 +211,36 @@ class NetworkAgent(BaseAgent):
         )
 
     def relay(self, envelope: dict, constraints: dict | None = None) -> dict:
-        """Select route, apply policy checks, send payload, and finalize lifecycle."""
+        """
+        Select route, apply policy checks, send payload, and finalize lifecycle.
+
+        Delivery contract:
+
+        * Once ``stream.relay`` has returned, the message *is delivered*. Post-delivery
+          bookkeeping (lifecycle completion, reliability/metrics accounting, shared-memory
+          persistence, events) is best-effort: a failure there is logged and surfaced in
+          ``result["bookkeeping_warnings"]`` but never turns the delivery into a failure or a
+          retry (which would duplicate the message).
+        * Retries are bounded by ``max_attempts`` (capped by ``max_delivery_attempts_ceiling``),
+          by the reliability layer, and by an optional overall ``deadline_ms`` (constraints or
+          envelope, falling back to ``default_deadline_ms``). Each attempt's timeout is clamped to
+          the remaining budget and a retry is not started if the budget cannot cover it.
+        * Failure bookkeeping always runs (failure metrics, dead-letter, persisted result, events),
+          even if the reliability layer itself raises (for example ``FailoverExhaustedError``).
+        * If the call is interrupted (``KeyboardInterrupt``, ``SystemExit``, task cancellation) the
+          delivery is marked failed so its idempotency claim is released, then the interrupt is
+          re-raised.
+        """
         if not self.enabled:
             return {"status": "disabled", "agent": self.name, "reason": "network agent disabled"}
+        self._ensure_open("relay")
 
         self._mark_agent_activity(operation="relay", stage="start")
         started = time.monotonic()
         request_envelope = ensure_mapping(envelope, field_name="envelope")
         constraint_map = ensure_mapping(constraints, field_name="constraints", allow_none=True)
+        state: Optional[_RelayState] = None
+        attempt = 1
 
         try:
             begin = self.lifecycle.begin_delivery(
@@ -149,339 +257,736 @@ class NetworkAgent(BaseAgent):
 
             canonical_envelope = ensure_mapping(begin.get("envelope"), field_name="canonical_envelope")
             delivery = ensure_mapping(begin.get("delivery"), field_name="delivery", allow_none=True)
-            message_id = delivery.get("message_id") or canonical_envelope.get("message_id")
-            correlation_id = canonical_envelope.get("correlation_id")
-            payload = canonical_envelope.get("payload")
+            deadline_ms = self._resolve_deadline_ms(request_envelope, constraint_map)
+            state = _RelayState(
+                begin=begin,
+                envelope=canonical_envelope,
+                constraints=constraint_map,
+                message_id=delivery.get("message_id") or canonical_envelope.get("message_id"),
+                correlation_id=canonical_envelope.get("correlation_id"),
+                started=started,
+                max_attempts=self._resolve_max_attempts(delivery.get("max_attempts")),
+                deadline_ms=deadline_ms,
+                idempotent=self._resolve_idempotent(canonical_envelope),
+            )
 
-            attempt = 1
-            max_attempts = int(delivery.get("max_attempts") or self.max_delivery_attempts)
-            last_error: Optional[BaseException] = None
-            last_reliability: Optional[Dict[str, Any]] = None
-            last_route_resolution: Optional[Dict[str, Any]] = None
-
-            while attempt <= max_attempts:
-                route_resolution: Optional[Dict[str, Any]] = None
-                selected_route: Dict[str, Any] = {}
-                try:
-                    policy_result = self.policy.assert_allowed(
-                        envelope=canonical_envelope,
-                        endpoint=canonical_envelope.get("endpoint"),
-                        protocol=canonical_envelope.get("protocol"),
-                        channel=canonical_envelope.get("channel"),
-                        constraints=constraint_map,
-                    )
-
-                    route_resolution = self.stream.resolve_route(
-                        protocol=canonical_envelope.get("protocol"),
-                        channel=canonical_envelope.get("channel"),
-                        endpoint=canonical_envelope.get("endpoint"),
-                        region=canonical_envelope.get("region"),
-                        operation=canonical_envelope.get("operation"),
-                        constraints=constraint_map,
-                    )
-                    last_route_resolution = route_resolution
-                    selected_route = ensure_mapping(route_resolution.get("selected"), field_name="selected_route")
-
-                    if message_id:
-                        self.lifecycle.mark_selected(
-                            str(message_id),
-                            metadata={"route": selected_route, "attempt": attempt},
-                        )
-
-                    admission = self.reliability.admit_request(
-                        endpoint=selected_route.get("endpoint") or canonical_envelope.get("endpoint"),
-                        channel=selected_route.get("channel") or canonical_envelope.get("channel"),
-                        protocol=selected_route.get("protocol") or canonical_envelope.get("protocol"),
-                        route=selected_route.get("route") or canonical_envelope.get("route"),
-                        current_route=selected_route,
-                        candidates=route_resolution.get("candidates"),
-                        request_context={"operation": canonical_envelope.get("operation")},
-                        attempt=attempt,
-                        correlation_id=correlation_id,
-                        message_id=message_id,
-                        metadata={"agent": self.name},
-                    )
-
-                    if not bool(admission.get("allow_request", True)) and admission.get("action") != "failover":
-                        raise ReliabilityError(
-                            "Request blocked by reliability admission controls.",
-                            context={
-                                "operation": "relay",
-                                "endpoint": selected_route.get("endpoint"),
-                                "channel": selected_route.get("channel"),
-                                "protocol": selected_route.get("protocol"),
-                                "route": selected_route.get("route"),
-                                "attempt": attempt,
-                                "max_attempts": max_attempts,
-                                "correlation_id": correlation_id,
-                            },
-                            details={"admission": admission},
-                        )
-
-                    stream_result = self.stream.relay(
-                        payload,
-                        envelope=canonical_envelope,
-                        protocol=selected_route.get("protocol") or canonical_envelope.get("protocol"),
-                        channel=selected_route.get("channel") or canonical_envelope.get("channel"),
-                        endpoint=selected_route.get("endpoint") or canonical_envelope.get("endpoint"),
-                        operation=canonical_envelope.get("operation"),
-                        constraints=constraint_map,
-                        timeout_ms=canonical_envelope.get("timeout_ms"),
-                        metadata=canonical_envelope.get("metadata"),
-                        await_response=bool(canonical_envelope.get("await_response", False)),
-                        receive_timeout_ms=canonical_envelope.get("receive_timeout_ms"),
-                    )
-
-                    if message_id:
-                        self.lifecycle.mark_sent(str(message_id), metadata={"attempt": attempt})
-                        self.lifecycle.complete(
-                            str(message_id),
-                            response_snapshot={"stream": stream_result, "attempt": attempt},
-                            metadata={"status": "delivered"},
-                        )
-
-                    success_route = ensure_mapping(stream_result.get("route"), field_name="stream_result.route", allow_none=True)
-                    self.reliability.record_success(
-                        endpoint=selected_route.get("endpoint") or canonical_envelope.get("endpoint"),
-                        channel=selected_route.get("channel") or canonical_envelope.get("channel"),
-                        protocol=selected_route.get("protocol") or canonical_envelope.get("protocol"),
-                        route=selected_route.get("route") or canonical_envelope.get("route"),
-                        current_route=selected_route,
-                        previous_route=success_route.get("secondary") if success_route else None,
-                        used_failover=bool(success_route.get("used_secondary", False)) if success_route else None,
-                        correlation_id=correlation_id,
-                        message_id=message_id,
-                        metadata={"attempt": attempt},
-                    )
-
-                    latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
-                    self.metrics.record_success(
-                        channel=selected_route.get("channel") or canonical_envelope.get("channel") or "http",
-                        endpoint=selected_route.get("endpoint") or canonical_envelope.get("endpoint"),
-                        protocol=selected_route.get("protocol") or canonical_envelope.get("protocol"),
-                        route=selected_route.get("route") or canonical_envelope.get("route"),
-                        operation=canonical_envelope.get("operation"),
-                        latency_ms=latency_ms,
-                        retry_count=max(0, attempt - 1),
-                        delivery_state="acked",
-                        message_id=message_id,
-                        correlation_id=correlation_id,
-                        metadata={"policy": policy_result.get("decision")},
-                    )
-
-                    result = {
-                        "status": "delivered",
-                        "attempt": attempt,
-                        "max_attempts": max_attempts,
-                        "lifecycle": begin,
-                        "policy": policy_result,
-                        "route": route_resolution,
-                        "stream": stream_result,
-                        "correlation_id": correlation_id,
-                        "message_id": message_id,
-                        "elapsed_ms": round(latency_ms, 3),
-                    }
-                    self._persist_agent_result(result)
-                    self._mark_agent_activity(operation="relay", stage="success")
-                    self._record_coordination_event(
-                        event_type="relay.delivered",
-                        payload={
-                            "message_id": message_id,
-                            "correlation_id": correlation_id,
-                            "attempt": attempt,
-                            "max_attempts": max_attempts,
-                            "selected_route": selected_route,
-                            "policy": policy_result.get("decision"),
-                        },
-                    )
+            error: Optional[NetworkError] = None
+            while attempt <= state.max_attempts:
+                result, retry, error = self._run_attempt(state, attempt)
+                if result is not None:
                     return result
+                if retry:
+                    attempt += 1
+                    continue
+                break
 
-                except NetworkError as exc:
-                    last_error = exc
-                    latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
-
-                    if message_id:
-                        self.lifecycle.fail(str(message_id), exc, metadata={"attempt": attempt})
-
-                    failure_route = selected_route or {}
-                    last_reliability = self.reliability.record_failure(
-                        exc,
-                        attempt=attempt,
-                        max_attempts=max_attempts,
-                        endpoint=failure_route.get("endpoint") or canonical_envelope.get("endpoint"),
-                        channel=failure_route.get("channel") or canonical_envelope.get("channel"),
-                        protocol=failure_route.get("protocol") or canonical_envelope.get("protocol"),
-                        route=failure_route.get("route") or canonical_envelope.get("route"),
-                        current_route=failure_route,
-                        candidates=(route_resolution or {}).get("candidates") if route_resolution else None,
-                        request_context={"operation": canonical_envelope.get("operation")},
-                        correlation_id=correlation_id,
-                        message_id=message_id,
-                        status_code=getattr(exc, "status_code", None),
-                        metadata={"agent": self.name},
-                        retry_profile=self._resolve_retry_profile_for_route(selected_route=selected_route, envelope=canonical_envelope),
-                    )
-
-                    self.metrics.record_failure(
-                        channel=failure_route.get("channel") or canonical_envelope.get("channel") or "http",
-                        endpoint=failure_route.get("endpoint") or canonical_envelope.get("endpoint"),
-                        protocol=failure_route.get("protocol") or canonical_envelope.get("protocol"),
-                        route=failure_route.get("route") or canonical_envelope.get("route"),
-                        operation=canonical_envelope.get("operation"),
-                        error=exc,
-                        latency_ms=latency_ms,
-                        retry_count=max(0, attempt - 1),
-                        delivery_state="failed",
-                        message_id=message_id,
-                        correlation_id=correlation_id,
-                        metadata={"attempt": attempt},
-                    )
-
-                    should_retry = self._should_retry(last_reliability)
-                    if attempt < max_attempts and should_retry:
-                        if message_id:
-                            self.lifecycle.plan_retry(str(message_id), exc, metadata={"attempt": attempt})
-                        self._sleep_for_retry(last_reliability)
-                        attempt += 1
-                        continue
-
-                    if message_id:
-                        self.lifecycle.dead_letter(
-                            str(message_id),
-                            exc,
-                            metadata={"attempt": attempt, "reason": "retry_exhausted_or_not_retryable"},
-                        )
-                    self._mark_agent_activity(operation="relay", stage="failure")
-                    self._record_coordination_event(
-                        event_type="relay.failed_network_error",
-                        payload={
-                            "message_id": message_id,
-                            "correlation_id": correlation_id,
-                            "attempt": attempt,
-                            "max_attempts": max_attempts,
-                            "route": selected_route,
-                            "reliability": last_reliability,
-                            "error": json_safe(exc.to_dict()),
-                        },
-                    )
-                    break
-
-                except Exception as exc:  # noqa: BLE001 - final boundary normalization.
-                    normalized = normalize_network_exception(
-                        exc,
-                        operation="network_agent_relay",
-                        endpoint=canonical_envelope.get("endpoint"),
-                        protocol=canonical_envelope.get("protocol"),
-                        channel=canonical_envelope.get("channel"),
-                        route=canonical_envelope.get("route"),
-                        correlation_id=correlation_id,
-                        attempt=attempt,
-                        max_attempts=max_attempts,
-                        metadata={"agent": self.name},
-                    )
-                    last_error = normalized
-                    latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
-                    self.metrics.record_failure(
-                        channel=selected_route.get("channel") or canonical_envelope.get("channel") or "http",
-                        endpoint=selected_route.get("endpoint") or canonical_envelope.get("endpoint"),
-                        protocol=selected_route.get("protocol") or canonical_envelope.get("protocol"),
-                        route=selected_route.get("route") or canonical_envelope.get("route"),
-                        operation=canonical_envelope.get("operation"),
-                        error=normalized,
-                        latency_ms=latency_ms,
-                        retry_count=max(0, attempt - 1),
-                        delivery_state="failed",
-                        message_id=message_id,
-                        correlation_id=correlation_id,
-                        metadata={"attempt": attempt, "source": "exception_boundary"},
-                    )
-                    if message_id:
-                        self.lifecycle.fail(str(message_id), normalized, metadata={"attempt": attempt})
-                    last_reliability = self.reliability.record_failure(
-                        normalized,
-                        attempt=attempt,
-                        max_attempts=max_attempts,
-                        endpoint=selected_route.get("endpoint") or canonical_envelope.get("endpoint"),
-                        channel=selected_route.get("channel") or canonical_envelope.get("channel"),
-                        protocol=selected_route.get("protocol") or canonical_envelope.get("protocol"),
-                        route=selected_route.get("route") or canonical_envelope.get("route"),
-                        current_route=selected_route or None,
-                        candidates=(route_resolution or {}).get("candidates") if route_resolution else None,
-                        request_context={"operation": canonical_envelope.get("operation")},
-                        correlation_id=correlation_id,
-                        message_id=message_id,
-                        status_code=getattr(normalized, "status_code", None),
-                        metadata={"agent": self.name, "source": "exception_boundary"},
-                        retry_profile=self._resolve_retry_profile_for_route(selected_route=selected_route, envelope=canonical_envelope),
-                    )
-                    should_retry = self._should_retry(last_reliability)
-                    if attempt < max_attempts and should_retry:
-                        if message_id:
-                            self.lifecycle.plan_retry(str(message_id), normalized, metadata={"attempt": attempt})
-                        self._sleep_for_retry(last_reliability)
-                        attempt += 1
-                        continue
-
-                    if message_id:
-                        self.lifecycle.dead_letter(
-                            str(message_id),
-                            normalized,
-                            metadata={"attempt": attempt, "reason": "exception_boundary"},
-                        )
-                    self._mark_agent_activity(operation="relay", stage="failure")
-                    self._record_coordination_event(
-                        event_type="relay.failed_exception_boundary",
-                        payload={
-                            "message_id": message_id,
-                            "correlation_id": correlation_id,
-                            "attempt": attempt,
-                            "max_attempts": max_attempts,
-                            "route": selected_route,
-                            "reliability": last_reliability,
-                            "error": json_safe(normalized.to_dict()),
-                        },
-                    )
-                    break
-
-            failure_payload = {
-                "status": "failed",
-                "attempt": attempt,
-                "max_attempts": max_attempts,
-                "message_id": message_id,
-                "correlation_id": correlation_id,
-                "route": last_route_resolution,
-                "reliability": last_reliability,
-                "error": json_safe(last_error.to_dict() if isinstance(last_error, NetworkError) else last_error),
-                "elapsed_ms": round(max(0.0, (time.monotonic() - started) * 1000.0), 3),
-            }
-            self._persist_agent_result(failure_payload)
-            self._record_coordination_event(
-                event_type="relay.failed",
-                payload={
-                    "message_id": message_id,
-                    "correlation_id": correlation_id,
-                    "attempt": attempt,
-                    "max_attempts": max_attempts,
-                    "route": last_route_resolution,
-                    "reliability": last_reliability,
-                    "error": failure_payload.get("error"),
-                },
-            )
-            if isinstance(last_error, NetworkError):
-                raise last_error
-            raise normalize_network_exception(
-                last_error or RuntimeError("relay failed without explicit error"),
-                operation="network_agent_relay",
-                endpoint=canonical_envelope.get("endpoint"),
-                protocol=canonical_envelope.get("protocol"),
-                channel=canonical_envelope.get("channel"),
-                route=canonical_envelope.get("route"),
-                correlation_id=correlation_id,
-                message_id=message_id, # type: ignore
-                metadata={"agent": self.name},
-            )
+            return self._raise_relay_failure(state, attempt, error)
+        except BaseException as exc:
+            if not isinstance(exc, Exception) and state is not None:
+                self._abort_delivery(state, exc, attempt)
+            raise
         finally:
             self._mark_agent_activity(operation="relay", stage="end")
+
+    # ------------------------------------------------------------------
+    # Relay internals
+    # ------------------------------------------------------------------
+    def _run_attempt(self, state: "_RelayState", attempt: int) -> Tuple[Optional[dict], bool, Optional[NetworkError]]:
+        """Run one delivery attempt. Returns ``(result, retry, error)``; ``result`` is set on delivery."""
+        attempt_started = time.monotonic()
+        envelope = state.envelope
+        route_resolution: Optional[Dict[str, Any]] = None
+        selected_route: Dict[str, Any] = {}
+        plan: Optional[_AttemptPlan] = None
+        state.last_plan = None
+
+        try:
+            remaining_ms = state.remaining_ms()
+            if remaining_ms is not None and remaining_ms < self.min_attempt_budget_ms:
+                raise DeliveryTimeoutError(
+                    "Overall delivery deadline exhausted before the attempt could start.",
+                    context={
+                        "operation": "relay",
+                        "endpoint": envelope.get("endpoint"),
+                        "channel": envelope.get("channel"),
+                        "protocol": envelope.get("protocol"),
+                        "attempt": attempt,
+                        "max_attempts": state.max_attempts,
+                        "correlation_id": state.correlation_id,
+                    },
+                    details={"deadline_ms": state.deadline_ms, "remaining_ms": round(remaining_ms, 3)},
+                )
+
+            policy_result = self.policy.assert_allowed(
+                envelope=envelope,
+                endpoint=envelope.get("endpoint"),
+                protocol=envelope.get("protocol"),
+                channel=envelope.get("channel"),
+                constraints=state.constraints,
+            )
+
+            # Let circuits whose open timeout has elapsed offer a probe before routes are chosen.
+            self._best_effort(state, "reliability.refresh_circuits", self.reliability.refresh_circuits)
+            route_resolution = self.stream.resolve_route(
+                protocol=envelope.get("protocol"),
+                channel=envelope.get("channel"),
+                endpoint=envelope.get("endpoint"),
+                region=envelope.get("region"),
+                operation=envelope.get("operation"),
+                constraints=state.constraints,
+            )
+            state.last_route_resolution = route_resolution
+            selected_route = ensure_mapping(route_resolution.get("selected"), field_name="selected_route")
+
+            if state.message_id:
+                self.lifecycle.mark_selected(
+                    str(state.message_id),
+                    metadata={"route": selected_route, "attempt": attempt},
+                )
+
+            admission = self.reliability.admit_request(
+                endpoint=selected_route.get("endpoint") or envelope.get("endpoint"),
+                channel=selected_route.get("channel") or envelope.get("channel"),
+                protocol=selected_route.get("protocol") or envelope.get("protocol"),
+                route=selected_route.get("route") or envelope.get("route"),
+                current_route=selected_route,
+                candidates=route_resolution.get("candidates"),
+                request_context={"operation": envelope.get("operation")},
+                attempt=attempt,
+                correlation_id=state.correlation_id,
+                message_id=state.message_id,
+                metadata={"agent": self.name},
+            )
+
+            if not bool(admission.get("allow_request", True)) and admission.get("action") != "failover":
+                raise ReliabilityError(
+                    "Request blocked by reliability admission controls.",
+                    context={
+                        "operation": "relay",
+                        "endpoint": selected_route.get("endpoint"),
+                        "channel": selected_route.get("channel"),
+                        "protocol": selected_route.get("protocol"),
+                        "route": selected_route.get("route"),
+                        "attempt": attempt,
+                        "max_attempts": state.max_attempts,
+                        "correlation_id": state.correlation_id,
+                    },
+                    details={"admission": admission},
+                )
+
+            # Planned here (not earlier) so the prediction is about the endpoint that will actually be used.
+            plan = self._plan_attempt(state, attempt, state.remaining_ms(), selected_route)
+            plan.sent_at = time.monotonic()
+            stream_result = self.stream.relay(
+                envelope.get("payload"),
+                envelope=envelope,
+                protocol=selected_route.get("protocol") or envelope.get("protocol"),
+                channel=selected_route.get("channel") or envelope.get("channel"),
+                endpoint=selected_route.get("endpoint") or envelope.get("endpoint"),
+                operation=envelope.get("operation"),
+                constraints=state.constraints,
+                timeout_ms=plan.timeout_ms,
+                metadata=envelope.get("metadata"),
+                await_response=bool(envelope.get("await_response", False)),
+                receive_timeout_ms=envelope.get("receive_timeout_ms"),
+            )
+            plan.transport_ms = (time.monotonic() - plan.sent_at) * 1000.0
+        except Exception as exc:  # noqa: BLE001 - final boundary normalization.
+            if plan is not None and plan.sent_at and plan.transport_ms is None:
+                plan.transport_ms = (time.monotonic() - plan.sent_at) * 1000.0
+            retry, final_error = self._handle_attempt_failure(
+                state,
+                exc,
+                attempt=attempt,
+                attempt_started=attempt_started,
+                route_resolution=route_resolution,
+                selected_route=selected_route,
+            )
+            return None, retry, final_error
+
+        # The message has been handed to the transport: from here on nothing may cause a retry.
+        result = self._finish_delivery(
+            state,
+            attempt=attempt,
+            attempt_started=attempt_started,
+            policy_result=policy_result,
+            route_resolution=route_resolution,
+            selected_route=selected_route,
+            stream_result=stream_result,
+            plan=plan,
+        )
+        return result, False, None
+
+    def _finish_delivery(
+        self,
+        state: "_RelayState",
+        *,
+        attempt: int,
+        attempt_started: float,
+        policy_result: Mapping[str, Any],
+        route_resolution: Mapping[str, Any],
+        selected_route: Mapping[str, Any],
+        stream_result: Mapping[str, Any],
+        plan: "_AttemptPlan",
+    ) -> dict:
+        envelope = state.envelope
+        message_id = str(state.message_id) if state.message_id else None
+        now = time.monotonic()
+        attempt_latency_ms = max(0.0, (now - attempt_started) * 1000.0)
+        elapsed_ms = max(0.0, (now - state.started) * 1000.0)
+        endpoint = selected_route.get("endpoint") or envelope.get("endpoint")
+        channel = selected_route.get("channel") or envelope.get("channel")
+        protocol = selected_route.get("protocol") or envelope.get("protocol")
+        route_name = selected_route.get("route") or envelope.get("route")
+
+        if message_id:
+            self._best_effort(state, "lifecycle.mark_sent", self.lifecycle.mark_sent, message_id, metadata={"attempt": attempt})
+            self._best_effort(
+                state,
+                "lifecycle.complete",
+                self.lifecycle.complete,
+                message_id,
+                response_snapshot={"stream": stream_result, "attempt": attempt},
+                metadata={"status": "delivered"},
+            )
+
+        success_route = ensure_mapping(stream_result.get("route"), field_name="stream_result.route", allow_none=True)
+        self._best_effort(
+            state,
+            "reliability.record_success",
+            self.reliability.record_success,
+            endpoint=endpoint,
+            channel=channel,
+            protocol=protocol,
+            route=route_name,
+            current_route=selected_route,
+            previous_route=success_route.get("secondary") if success_route else None,
+            used_failover=bool(success_route.get("used_secondary", False)) if success_route else None,
+            correlation_id=state.correlation_id,
+            message_id=state.message_id,
+            metadata={"attempt": attempt},
+        )
+        self._best_effort(
+            state,
+            "metrics.record_success",
+            self.metrics.record_success,
+            channel=channel or "http",
+            endpoint=endpoint,
+            protocol=protocol,
+            route=route_name,
+            operation=envelope.get("operation"),
+            latency_ms=attempt_latency_ms,
+            retry_count=max(0, attempt - 1),
+            delivery_state="acked",
+            message_id=state.message_id,
+            correlation_id=state.correlation_id,
+            metadata={"policy": policy_result.get("decision")},
+        )
+
+        result = {
+            "status": "delivered",
+            "attempt": attempt,
+            "max_attempts": state.max_attempts,
+            "lifecycle": state.begin,
+            "policy": policy_result,
+            "route": route_resolution,
+            "stream": stream_result,
+            "correlation_id": state.correlation_id,
+            "message_id": state.message_id,
+            "elapsed_ms": round(elapsed_ms, 3),
+            "attempt_latency_ms": round(attempt_latency_ms, 3),
+        }
+        if plan.decision is not None:
+            result["delivery_prediction"] = plan.decision
+        if state.warnings:
+            result["bookkeeping_warnings"] = list(state.warnings)
+
+        self._best_effort(state, "persist_result", self._persist_agent_result, result)
+        self._best_effort(state, "agent_activity", self._mark_agent_activity, operation="relay", stage="success")
+        self._best_effort(
+            state,
+            "coordination_event",
+            self._record_coordination_event,
+            event_type="relay.delivered",
+            payload={
+                "message_id": state.message_id,
+                "correlation_id": state.correlation_id,
+                "attempt": attempt,
+                "max_attempts": state.max_attempts,
+                "selected_route": selected_route,
+                "policy": policy_result.get("decision"),
+            },
+        )
+        self._record_delivery_outcome(
+            state,
+            attempt=attempt,
+            plan=plan,
+            selected_route=selected_route,
+            success=True,
+            latency_ms=attempt_latency_ms,
+            error=None,
+        )
+        return result
+
+    def _handle_attempt_failure(
+        self,
+        state: "_RelayState",
+        exc: Exception,
+        *,
+        attempt: int,
+        attempt_started: float,
+        route_resolution: Optional[Mapping[str, Any]],
+        selected_route: Mapping[str, Any],
+    ) -> Tuple[bool, NetworkError]:
+        """
+        Record one failed attempt and decide whether to retry.
+
+        Returns ``(retry, error)``. This method never raises ``Exception``: every bookkeeping
+        step is isolated so the original delivery error is what the caller ultimately sees.
+        """
+        envelope = state.envelope
+        message_id = str(state.message_id) if state.message_id else None
+        route = dict(selected_route or {})
+        endpoint = route.get("endpoint") or envelope.get("endpoint")
+        channel = route.get("channel") or envelope.get("channel")
+        protocol = route.get("protocol") or envelope.get("protocol")
+        route_name = route.get("route") or envelope.get("route")
+        attempt_latency_ms = max(0.0, (time.monotonic() - attempt_started) * 1000.0)
+        source = "network_error" if isinstance(exc, NetworkError) else "exception_boundary"
+
+        if isinstance(exc, NetworkError):
+            error: NetworkError = exc
+        else:
+            error = normalize_network_exception(
+                exc,
+                operation="network_agent_relay",
+                endpoint=envelope.get("endpoint"),
+                protocol=envelope.get("protocol"),
+                channel=envelope.get("channel"),
+                route=envelope.get("route"),
+                correlation_id=state.correlation_id,
+                attempt=attempt,
+                max_attempts=state.max_attempts,
+                metadata={"agent": self.name},
+            )
+
+        attributable = self._is_endpoint_attributable(error)
+        state.last_error_class = classify_error(error)
+        if message_id:
+            self._best_effort(state, "lifecycle.fail", self.lifecycle.fail, message_id, error, metadata={"attempt": attempt})
+
+        reliability, final_error = self._evaluate_failure(
+            state,
+            error,
+            attributable=attributable,
+            attempt=attempt,
+            endpoint=endpoint,
+            channel=channel,
+            protocol=protocol,
+            route_name=route_name,
+            route=route,
+            route_resolution=route_resolution,
+            source=source,
+        )
+        state.last_reliability = reliability
+
+        self._best_effort(
+            state,
+            "metrics.record_failure",
+            self.metrics.record_failure,
+            channel=channel or "http",
+            # Local errors (policy denial, invalid payload, duplicate key...) say nothing about the
+            # remote endpoint, so they must not degrade its health or trip its circuit breaker.
+            endpoint=endpoint if attributable else None,
+            protocol=protocol,
+            route=route_name,
+            operation=envelope.get("operation"),
+            error=error,
+            latency_ms=attempt_latency_ms,
+            retry_count=max(0, attempt - 1),
+            delivery_state="failed",
+            message_id=state.message_id,
+            correlation_id=state.correlation_id,
+            metadata={"attempt": attempt, **({"source": source} if source != "network_error" else {})},
+        )
+        self._record_delivery_outcome(
+            state,
+            attempt=attempt,
+            plan=state.last_plan,
+            selected_route=route,
+            success=False,
+            latency_ms=attempt_latency_ms,
+            error=error,
+        )
+
+        retry = attempt < state.max_attempts and final_error is None and self._should_retry(reliability)
+        reason = "retry_exhausted_or_not_retryable" if source == "network_error" else "exception_boundary"
+        sleep_ms = 0
+        if retry:
+            retry, sleep_ms = self._check_retry_budget(state, reliability)
+            if not retry:
+                reason = "deadline_exhausted"
+        if retry:
+            retry = self._gate_retry(state, attempt=attempt, error=error, selected_route=route)
+            if not retry:
+                reason = "predicted_retry_ineffective"
+        if retry and message_id:
+            try:
+                self.lifecycle.plan_retry(message_id, error, metadata={"attempt": attempt})
+            except Exception as plan_exc:  # noqa: BLE001
+                # Never re-send a message whose lifecycle/idempotency state cannot be tracked.
+                logger.warning("NetworkAgent could not plan retry for %s: %s", message_id, plan_exc)
+                state.warnings.append("lifecycle.plan_retry")
+                retry = False
+                reason = "retry_planning_failed"
+
+        if retry:
+            self._sleep_for_retry(reliability, planned_ms=sleep_ms)
+            return True, error
+
+        if message_id:
+            self._best_effort(
+                state,
+                "lifecycle.dead_letter",
+                self.lifecycle.dead_letter,
+                message_id,
+                error,
+                metadata={"attempt": attempt, "reason": reason},
+            )
+        outcome = final_error if final_error is not None else error
+        if outcome is not error and outcome.__cause__ is None:
+            outcome.__cause__ = error
+        self._best_effort(state, "agent_activity", self._mark_agent_activity, operation="relay", stage="failure")
+        self._best_effort(
+            state,
+            "coordination_event",
+            self._record_coordination_event,
+            event_type="relay.failed_network_error" if source == "network_error" else "relay.failed_exception_boundary",
+            payload={
+                "message_id": state.message_id,
+                "correlation_id": state.correlation_id,
+                "attempt": attempt,
+                "max_attempts": state.max_attempts,
+                "route": route,
+                "reliability": reliability,
+                "reason": reason,
+                "delivery_prediction": state.last_retry_prediction,
+                "error": json_safe(error.to_dict()),
+            },
+        )
+        return False, outcome
+
+    def _evaluate_failure(
+        self,
+        state: "_RelayState",
+        error: NetworkError,
+        *,
+        attributable: bool,
+        attempt: int,
+        endpoint: Any,
+        channel: Any,
+        protocol: Any,
+        route_name: Any,
+        route: Mapping[str, Any],
+        route_resolution: Optional[Mapping[str, Any]],
+        source: str,
+    ) -> Tuple[Dict[str, Any], Optional[NetworkError]]:
+        """Ask the reliability layer for a recovery decision without letting it abort the relay."""
+        envelope = state.envelope
+        if not attributable:
+            return (
+                {
+                    "action": "fail",
+                    "should_retry": False,
+                    "reason": "local, non-transport error: retrying cannot help and the endpoint is not at fault",
+                    "source": "network_agent",
+                },
+                None,
+            )
+        try:
+            decision = self.reliability.record_failure(
+                error,
+                attempt=attempt,
+                max_attempts=state.max_attempts,
+                endpoint=endpoint,
+                channel=channel,
+                protocol=protocol,
+                route=route_name,
+                current_route=route or None,
+                candidates=(route_resolution or {}).get("candidates") if route_resolution else None,
+                request_context={"operation": envelope.get("operation")},
+                correlation_id=state.correlation_id,
+                message_id=state.message_id,
+                idempotent=state.idempotent,
+                status_code=getattr(error, "status_code", None),
+                metadata={"agent": self.name, **({"source": source} if source != "network_error" else {})},
+                retry_profile=self._resolve_retry_profile_for_route(selected_route=route, envelope=envelope),
+            )
+            return decision, None
+        except NetworkError as reliability_exc:
+            # e.g. FailoverExhaustedError: the reliability layer reached a terminal verdict by raising.
+            return (
+                {
+                    "action": "fail",
+                    "should_retry": False,
+                    "reason": reliability_exc.message,
+                    "source": "reliability_exception",
+                    "error": json_safe(reliability_exc.to_dict()),
+                },
+                reliability_exc,
+            )
+        except Exception as reliability_exc:  # noqa: BLE001
+            logger.warning("NetworkAgent reliability evaluation failed: %s", reliability_exc)
+            state.warnings.append("reliability.record_failure")
+            return (
+                {
+                    "action": "fail",
+                    "should_retry": False,
+                    "reason": "reliability evaluation unavailable",
+                    "source": "reliability_unavailable",
+                },
+                None,
+            )
+
+    def _raise_relay_failure(self, state: "_RelayState", attempt: int, error: Optional[NetworkError]) -> dict:
+        final_error: BaseException = error or RuntimeError("relay failed without explicit error")
+        failure_payload = {
+            "status": "failed",
+            "attempt": attempt,
+            "max_attempts": state.max_attempts,
+            "message_id": state.message_id,
+            "correlation_id": state.correlation_id,
+            "route": state.last_route_resolution,
+            "reliability": state.last_reliability,
+            "error": json_safe(final_error.to_dict() if isinstance(final_error, NetworkError) else final_error),
+            "elapsed_ms": round(max(0.0, (time.monotonic() - state.started) * 1000.0), 3),
+        }
+        if state.warnings:
+            failure_payload["bookkeeping_warnings"] = list(state.warnings)
+        self._best_effort(state, "persist_result", self._persist_agent_result, failure_payload)
+        self._best_effort(
+            state,
+            "coordination_event",
+            self._record_coordination_event,
+            event_type="relay.failed",
+            payload={
+                "message_id": state.message_id,
+                "correlation_id": state.correlation_id,
+                "attempt": attempt,
+                "max_attempts": state.max_attempts,
+                "route": state.last_route_resolution,
+                "reliability": state.last_reliability,
+                "error": failure_payload.get("error"),
+            },
+        )
+        if isinstance(final_error, NetworkError):
+            raise final_error
+        raise normalize_network_exception(
+            final_error,
+            operation="network_agent_relay",
+            endpoint=state.envelope.get("endpoint"),
+            protocol=state.envelope.get("protocol"),
+            channel=state.envelope.get("channel"),
+            route=state.envelope.get("route"),
+            correlation_id=state.correlation_id,
+            message_id=state.message_id,  # type: ignore
+            metadata={"agent": self.name},
+        )
+
+    def _abort_delivery(self, state: "_RelayState", exc: BaseException, attempt: int) -> None:
+        """Release lifecycle/idempotency state when relay is interrupted by a non-Exception."""
+        if not state.message_id:
+            return
+        try:
+            self.lifecycle.fail(
+                str(state.message_id),
+                RuntimeError(f"relay interrupted by {type(exc).__name__}"),
+                metadata={"attempt": attempt, "reason": "interrupted"},
+            )
+        except Exception as abort_exc:  # noqa: BLE001
+            logger.warning("NetworkAgent could not release delivery %s after interrupt: %s", state.message_id, abort_exc)
+        try:
+            self._mark_agent_activity(operation="relay", stage="failure")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _best_effort(self, state: Optional["_RelayState"], label: str, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run a bookkeeping step; log and record (never raise) on failure."""
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("NetworkAgent bookkeeping step '%s' failed: %s", label, exc)
+            self._bookkeeping_errors += 1
+            if state is not None:
+                state.warnings.append(label)
+            return None
+
+    def _ensure_open(self, operation: str) -> None:
+        if self._network_agent_closed or self._closing:
+            raise SessionClosedError(
+                "NetworkAgent has been shut down and no longer accepts communication requests.",
+                context={"operation": operation},
+                retryable=False,
+                retry_disposition=RetryDisposition.NEVER,
+            )
+
+    def _resolve_max_attempts(self, requested: Any) -> int:
+        """Caller/envelope supplied attempt counts are clamped: they must not enable retry storms."""
+        try:
+            value = int(requested) if requested else self.max_delivery_attempts
+        except (TypeError, ValueError):
+            value = self.max_delivery_attempts
+        return max(1, min(value, self.max_attempts_ceiling))
+
+    def _resolve_deadline_ms(self, envelope: Mapping[str, Any], constraints: Mapping[str, Any]) -> Optional[float]:
+        raw = constraints.get("deadline_ms")
+        if raw is None:
+            raw = envelope.get("deadline_ms")
+        if raw is None:
+            raw = self.default_deadline_ms or None
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if not (value > 0.0) or value == float("inf"):
+            raise PayloadValidationError(
+                "deadline_ms must be a positive, finite number of milliseconds.",
+                context={"operation": "relay"},
+                details={"received": repr(raw)[:64]},
+            )
+        return min(value, float(self.max_deadline_ms))
+
+    @staticmethod
+    def _resolve_idempotent(envelope: Mapping[str, Any]) -> bool:
+        """Honour an explicit ``idempotent`` flag (envelope or metadata); default stays True."""
+        for source in (envelope, envelope.get("metadata") if isinstance(envelope.get("metadata"), Mapping) else {}):
+            if "idempotent" in source:
+                value = source["idempotent"]
+                if isinstance(value, str):
+                    return value.strip().lower() not in {"false", "0", "no", "off"}
+                return bool(value)
+        return True
+
+    @staticmethod
+    def _is_endpoint_attributable(error: BaseException) -> bool:
+        """Whether a failure says anything about the remote endpoint's health."""
+        return not isinstance(error, _LOCAL_ERROR_TYPES)
+
+    def _check_retry_budget(self, state: "_RelayState", reliability: Optional[Mapping[str, Any]]) -> Tuple[bool, int]:
+        sleep_ms = self._planned_sleep_ms(reliability)
+        remaining_ms = state.remaining_ms()
+        if remaining_ms is None:
+            return True, sleep_ms
+        if remaining_ms - sleep_ms < self.min_attempt_budget_ms:
+            return False, 0
+        return True, sleep_ms
+
+    def _payload_bytes(self, state: "_RelayState") -> int:
+        if state.payload_bytes is None:
+            try:
+                state.payload_bytes = int(estimate_payload_size(state.envelope.get("payload")))
+            except Exception:  # noqa: BLE001 - a feature only; never worth failing a delivery over
+                state.payload_bytes = 0
+        return state.payload_bytes
+
+    def _delivery_context(
+        self,
+        state: "_RelayState",
+        attempt: int,
+        requested_timeout_ms: Optional[int],
+        remaining_ms: Optional[float],
+        selected_route: Optional[Mapping[str, Any]],
+    ) -> DeliveryContext:
+        route = selected_route or {}
+        endpoint = route.get("endpoint") or state.envelope.get("endpoint") or ""
+        return DeliveryContext(
+            endpoint=str(endpoint),
+            attempt=attempt,
+            max_attempts=state.max_attempts,
+            requested_timeout_ms=requested_timeout_ms,
+            remaining_ms=remaining_ms,
+            payload_bytes=self._payload_bytes(state),
+            protocol=str(route.get("protocol") or state.envelope.get("protocol") or "http"),
+            idempotent=state.idempotent,
+            last_error_class=state.last_error_class,
+        )
+
+    def _plan_attempt(
+        self,
+        state: "_RelayState",
+        attempt: int,
+        remaining_ms: Optional[float],
+        selected_route: Optional[Mapping[str, Any]] = None,
+    ) -> "_AttemptPlan":
+        """
+        Choose the transport timeout for one attempt.
+
+        The deterministic part clamps the caller's timeout to the remaining deadline budget. The
+        DeliveryPredictor may then *shorten* it (never lengthen, never below its floor) when it is in
+        ``active`` mode; in ``shadow`` mode it only records what it would have done.
+        """
+        requested = state.envelope.get("timeout_ms")
+        timeout_ms: Optional[int] = None if requested is None else int(requested)
+        if remaining_ms is not None:
+            base = timeout_ms if timeout_ms is not None else int(getattr(self.stream, "default_request_timeout_ms", self.default_receive_timeout_ms))
+            timeout_ms = max(1, min(base, int(remaining_ms)))
+
+        plan = _AttemptPlan(timeout_ms=timeout_ms)
+        if self.delivery_predictor.mode != "off":
+            context = self._delivery_context(state, attempt, timeout_ms, remaining_ms, selected_route)
+            prediction = self.delivery_predictor.plan(context)
+            plan.context = context
+            plan.prediction = prediction
+            plan.decision = prediction.to_dict()
+            if prediction.timeout_ms is not None and (timeout_ms is None or prediction.timeout_ms <= timeout_ms):
+                plan.timeout_ms = prediction.timeout_ms
+        state.last_plan = plan
+        return plan
+
+    def _gate_retry(self, state: "_RelayState", *, attempt: int, error: NetworkError, selected_route: Mapping[str, Any]) -> bool:
+        """
+        Last veto before a retry that policy and reliability already permit.
+
+        Deterministic default: allow. The DeliveryPredictor can veto only on evidence (enough endpoint
+        history, consecutive endpoint failures, a low predicted success probability) and only in
+        ``active`` mode.
+        """
+        if self.delivery_predictor.mode == "off":
+            return True
+        plan = state.last_plan
+        requested = plan.context.requested_timeout_ms if plan is not None and plan.context is not None else None
+        context = self._delivery_context(state, attempt + 1, requested, state.remaining_ms(), selected_route)
+        decision = self.delivery_predictor.allow_retry(context)
+        state.last_retry_prediction = decision.to_dict()
+        return bool(decision.allow_retry)
+
+    def _record_delivery_outcome(
+        self,
+        state: "_RelayState",
+        *,
+        attempt: int,
+        plan: Optional["_AttemptPlan"],
+        selected_route: Mapping[str, Any],
+        success: bool,
+        latency_ms: float,
+        error: Optional[NetworkError],
+    ) -> None:
+        """Feed the attempt outcome back to the predictor (transport time only; local errors are not evidence)."""
+        if plan is None or plan.context is None or not plan.sent_at:
+            return  # the attempt failed before anything was sent
+        if error is not None and not self._is_endpoint_attributable(error):
+            return
+        transport_ms = plan.transport_ms if plan.transport_ms is not None else latency_ms
+        self.delivery_predictor.observe(
+            plan.context.endpoint,
+            ok=success,
+            latency_ms=transport_ms,
+            error=error,
+            decision=plan.prediction,
+            context=plan.context,
+        )
 
     def receive(
         self,
@@ -490,20 +995,58 @@ class NetworkAgent(BaseAgent):
         *,
         endpoint: Optional[str] = None,
         protocol: Optional[str] = None,
+        constraints: Optional[Mapping[str, Any]] = None,
     ) -> dict:
-        """Receive and normalize inbound message from a channel."""
+        """
+        Receive and normalize inbound message from a channel.
+
+        When an explicit ``endpoint`` is given the same destination/protocol/TLS policy that guards
+        ``relay`` is applied first (``enforce_policy_on_receive``), because receiving may open an
+        outbound connection to a caller-supplied destination.
+        """
         if not self.enabled:
             return {"status": "disabled", "agent": self.name, "reason": "network agent disabled"}
+        self._ensure_open("receive")
 
         self._mark_agent_activity(operation="receive", stage="start")
+        try:
+            return self._receive_impl(channel, timeout_ms, endpoint=endpoint, protocol=protocol, constraints=constraints)
+        finally:
+            self._mark_agent_activity(operation="receive", stage="end")
+
+    def _receive_impl(
+        self,
+        channel: str,
+        timeout_ms: int,
+        *,
+        endpoint: Optional[str],
+        protocol: Optional[str],
+        constraints: Optional[Mapping[str, Any]],
+    ) -> dict:
         normalized_channel = normalize_protocol_name(channel)
         resolved_protocol = normalize_protocol_name(protocol) if protocol is not None else normalized_channel
+        constraint_map = ensure_mapping(constraints, field_name="constraints", allow_none=True)
         started = time.monotonic()
         try:
+            if endpoint is not None and self.enforce_policy_on_receive:
+                self.policy.assert_allowed(
+                    envelope={
+                        "channel": normalized_channel,
+                        "protocol": resolved_protocol,
+                        "endpoint": endpoint,
+                        "operation": "receive",
+                    },
+                    endpoint=endpoint,
+                    protocol=resolved_protocol,
+                    channel=normalized_channel,
+                    constraints=constraint_map,
+                )
+
             stream_result = self.stream.receive(
                 channel=normalized_channel,
                 protocol=resolved_protocol,
                 endpoint=endpoint,
+                constraints=constraint_map or None,
                 timeout_ms=max(1, int(timeout_ms)),
             )
 
@@ -521,47 +1064,8 @@ class NetworkAgent(BaseAgent):
                 timeout_ms=max(1, int(timeout_ms)),
                 metadata={"source": "network_agent.receive"},
             )
-
-            delivery = ensure_mapping(lifecycle_result.get("delivery"), field_name="lifecycle.delivery", allow_none=True)
-            message_id = delivery.get("message_id") or envelope.get("message_id")
-            correlation_id = delivery.get("correlation_id") or envelope.get("correlation_id")
-
-            self.metrics.record_success(
-                channel=envelope.get("channel") or normalized_channel,
-                endpoint=envelope.get("endpoint") or endpoint,
-                protocol=envelope.get("protocol") or resolved_protocol,
-                route=envelope.get("route"),
-                operation="receive",
-                latency_ms=max(0.0, (time.monotonic() - started) * 1000.0),
-                delivery_state="received",
-                message_id=message_id,
-                correlation_id=correlation_id,
-                metadata={"source": "network_agent.receive"},
-            )
-
-            response = {
-                "status": "received",
-                "stream": stream_result,
-                "lifecycle": lifecycle_result,
-                "message_id": message_id,
-                "correlation_id": correlation_id,
-                "channel": normalized_channel,
-            }
-            self._persist_agent_result(response)
-            self._mark_agent_activity(operation="receive", stage="success")
-            self._record_coordination_event(
-                event_type="receive.delivered",
-                payload={
-                    "message_id": message_id,
-                    "correlation_id": correlation_id,
-                    "channel": normalized_channel,
-                    "protocol": resolved_protocol,
-                    "endpoint": endpoint,
-                },
-            )
-            return response
         except Exception as exc:  # noqa: BLE001 - final boundary normalization.
-            normalized = normalize_network_exception(
+            normalized = exc if isinstance(exc, NetworkError) else normalize_network_exception(
                 exc,
                 operation="network_agent_receive",
                 endpoint=endpoint,
@@ -569,9 +1073,13 @@ class NetworkAgent(BaseAgent):
                 channel=normalized_channel,
                 metadata={"agent": self.name},
             )
-            self.metrics.record_failure(
+            attributable = self._is_endpoint_attributable(normalized)
+            self._best_effort(
+                None,
+                "metrics.record_failure",
+                self.metrics.record_failure,
                 channel=normalized_channel,
-                endpoint=endpoint,
+                endpoint=endpoint if attributable else None,
                 protocol=resolved_protocol,
                 operation="receive",
                 error=normalized,
@@ -587,15 +1095,58 @@ class NetworkAgent(BaseAgent):
                 "endpoint": endpoint,
                 "error": json_safe(normalized.to_dict()),
             }
-            self._persist_agent_result(failure_payload)
-            self._mark_agent_activity(operation="receive", stage="failure")
-            self._record_coordination_event(
-                event_type="receive.failed",
-                payload=failure_payload,
-            )
-            raise normalized
-        finally:
-            self._mark_agent_activity(operation="receive", stage="end")
+            self._best_effort(None, "persist_result", self._persist_agent_result, failure_payload)
+            self._best_effort(None, "agent_activity", self._mark_agent_activity, operation="receive", stage="failure")
+            self._best_effort(None, "coordination_event", self._record_coordination_event, event_type="receive.failed", payload=failure_payload)
+            if normalized is exc:
+                raise
+            raise normalized from exc
+
+        # The inbound message has been received and registered: telemetry must not discard it.
+        delivery = ensure_mapping(lifecycle_result.get("delivery"), field_name="lifecycle.delivery", allow_none=True)
+        message_id = delivery.get("message_id") or envelope.get("message_id")
+        correlation_id = delivery.get("correlation_id") or envelope.get("correlation_id")
+
+        self._best_effort(
+            None,
+            "metrics.record_success",
+            self.metrics.record_success,
+            channel=envelope.get("channel") or normalized_channel,
+            endpoint=envelope.get("endpoint") or endpoint,
+            protocol=envelope.get("protocol") or resolved_protocol,
+            route=envelope.get("route"),
+            operation="receive",
+            latency_ms=max(0.0, (time.monotonic() - started) * 1000.0),
+            delivery_state="received",
+            message_id=message_id,
+            correlation_id=correlation_id,
+            metadata={"source": "network_agent.receive"},
+        )
+
+        response = {
+            "status": "received",
+            "stream": stream_result,
+            "lifecycle": lifecycle_result,
+            "message_id": message_id,
+            "correlation_id": correlation_id,
+            "channel": normalized_channel,
+        }
+        self._best_effort(None, "persist_result", self._persist_agent_result, response)
+        self._best_effort(None, "agent_activity", self._mark_agent_activity, operation="receive", stage="success")
+        self._best_effort(
+            None,
+            "coordination_event",
+            self._record_coordination_event,
+            event_type="receive.delivered",
+            payload={
+                "message_id": message_id,
+                "correlation_id": correlation_id,
+                "channel": normalized_channel,
+                "protocol": resolved_protocol,
+                "endpoint": endpoint,
+            },
+        )
+        return response
 
     def get_network_health(self) -> dict:
         """Return channel/endpoint health, circuit states, and recent failures."""
@@ -608,6 +1159,7 @@ class NetworkAgent(BaseAgent):
             "policy": self.policy.get_policy_state(),
             "lifecycle": self.lifecycle.get_snapshot(),
             "metrics": self.metrics.export_snapshot(),
+            "delivery_predictor": self.delivery_predictor.get_snapshot(),
             "shared_memory_keys": {
                 "health": self.health_shared_key,
                 "last_result": self.last_result_shared_key,
@@ -652,28 +1204,65 @@ class NetworkAgent(BaseAgent):
             return True
         return bool(payload.get("should_retry", False))
 
-    def _sleep_for_retry(self, reliability_payload: Optional[Mapping[str, Any]]) -> None:
+    def _planned_sleep_ms(self, reliability_payload: Optional[Mapping[str, Any]]) -> int:
+        """
+        Backoff before the next attempt, in ms (0 when ``retry_sleep_enabled`` is off).
+
+        ``RetryPolicy`` publishes its jittered exponential backoff as ``wait_ms`` (it already folds in a
+        server ``Retry-After``); ``retry_after_ms`` is only a legacy fallback. Reading only the latter
+        meant the computed backoff was never applied.
+        """
         if not self.retry_sleep_enabled:
-            return
+            return 0
         payload = ensure_mapping(reliability_payload, field_name="reliability_payload", allow_none=True)
         retry_payload = ensure_mapping(payload.get("retry"), field_name="retry_payload", allow_none=True)
         decision = ensure_mapping(retry_payload.get("decision"), field_name="retry_decision", allow_none=True)
-        retry_after_ms = int(decision.get("retry_after_ms") or 0)
-        retry_after_ms = min(max(0, retry_after_ms), self.max_retry_sleep_ms)
-        if retry_after_ms > 0:
-            time.sleep(retry_after_ms / 1000.0)
+        wait_ms = decision.get("wait_ms")
+        if wait_ms is None:
+            wait_ms = decision.get("retry_after_ms")
+        try:
+            wait = int(wait_ms or 0)
+        except (TypeError, ValueError):
+            wait = 0
+        return min(max(0, wait), self.max_retry_sleep_ms)
+
+    def _sleep_for_retry(self, reliability_payload: Optional[Mapping[str, Any]], *, planned_ms: Optional[int] = None) -> None:
+        sleep_ms = self._planned_sleep_ms(reliability_payload) if planned_ms is None else max(0, int(planned_ms))
+        if sleep_ms > 0:
+            time.sleep(sleep_ms / 1000.0)
+
+    @staticmethod
+    def _summarize_result(result: Mapping[str, Any]) -> Dict[str, Any]:
+        """Compact, scalar-only view of a result for histories (full results are ~30 KB each)."""
+        route = result.get("route") if isinstance(result.get("route"), Mapping) else {}
+        selected = route.get("selected") if isinstance(route.get("selected"), Mapping) else {}
+        error = result.get("error") if isinstance(result.get("error"), Mapping) else {}
+        keys = ("status", "operation", "message_id", "correlation_id", "attempt", "max_attempts",
+                "elapsed_ms", "attempt_latency_ms", "channel", "protocol", "endpoint")
+        summary = {key: result.get(key) for key in keys if isinstance(result.get(key), (str, int, float, bool))}
+        for key in ("endpoint", "channel", "protocol"):
+            if key not in summary and isinstance(selected.get(key), (str, int, float, bool)):
+                summary[key] = selected.get(key)
+        if error:
+            summary["error_code"] = error.get("code")
+            summary["error_type"] = error.get("type")
+        if result.get("bookkeeping_warnings"):
+            summary["bookkeeping_warnings"] = list(result["bookkeeping_warnings"])
+        return summary
 
     def _persist_agent_result(self, result: Mapping[str, Any]) -> None:
         snapshot = sanitize_for_logging(json_safe(result))
-        self.shared_memory.set(self.last_result_shared_key, snapshot)
-        history = self.shared_memory.get(self.history_shared_key) or []
-        if not isinstance(history, list):
-            history = [history]
-        history.append(snapshot)
-        if len(history) > self.max_history:
-            history = history[-self.max_history :]
-        self.shared_memory.set(self.history_shared_key, history)
-        self._update_coordination_state(last_result=snapshot, history_size=len(history))
+        summary = sanitize_for_logging(json_safe(self._summarize_result(result)))
+        with self._state_lock:
+            self.shared_memory.set(self.last_result_shared_key, snapshot)
+            history = self.shared_memory.get(self.history_shared_key) or []
+            if not isinstance(history, list):
+                history = [history]
+            history.append(summary)
+            if len(history) > self.max_history:
+                history = history[-self.max_history :]
+            self.shared_memory.set(self.history_shared_key, history)
+            self._update_coordination_state(last_result=summary, history_size=len(history))
 
     def _record_coordination_event(self, *, event_type: str, payload: Mapping[str, Any]) -> None:
         """
@@ -690,13 +1279,14 @@ class NetworkAgent(BaseAgent):
                 }
             )
         )
-        history = self.shared_memory.get(self.event_stream_key) or []
-        if not isinstance(history, list):
-            history = [history]
-        history.append(event)
-        if len(history) > self.max_event_stream:
-            history = history[-self.max_event_stream :]
-        self.shared_memory.set(self.event_stream_key, history)
+        with self._state_lock:
+            history = self.shared_memory.get(self.event_stream_key) or []
+            if not isinstance(history, list):
+                history = [history]
+            history.append(event)
+            if len(history) > self.max_event_stream:
+                history = history[-self.max_event_stream :]
+            self.shared_memory.set(self.event_stream_key, history)
 
         if hasattr(self.shared_memory, "publish"):
             try:
@@ -719,6 +1309,13 @@ class NetworkAgent(BaseAgent):
         Keep a compact, deterministic state block that other agents can poll for
         handoffs without scanning large histories.
         """
+        with self._state_lock:
+            self._update_coordination_state_locked(
+                last_result=last_result, history_size=history_size,
+                last_event=last_event, event_stream_size=event_stream_size,
+            )
+
+    def _update_coordination_state_locked(self, *, last_result: Optional[Mapping[str, Any]] = None, history_size: Optional[int] = None, last_event: Optional[Mapping[str, Any]] = None, event_stream_size: Optional[int] = None) -> None:
         state = self.shared_memory.get(self.coordination_state_key) or {}
         if not isinstance(state, dict):
             state = {"previous_state": json_safe(state)}
@@ -761,6 +1358,10 @@ class NetworkAgent(BaseAgent):
         Align with cross-agent shared-memory conventions used by TaskRouter and
         execution/collaboration flows (`agent_stats`, `agent:<name>`, `active_agent`).
         """
+        with self._state_lock:
+            self._mark_agent_activity_locked(operation=operation, stage=stage)
+
+    def _mark_agent_activity_locked(self, *, operation: str, stage: str) -> None:
         now = time.time()
         stats = self.shared_memory.get(self.agent_stats_key, {}) or {}
         if not isinstance(stats, dict):
@@ -821,7 +1422,9 @@ class NetworkAgent(BaseAgent):
         """
         if self._network_agent_closed:
             return
-    
+        # Refuse new relay()/receive() calls from here on; a failed shutdown can be retried.
+        self._closing = True
+
         errors = []
         try:
             self.stream.close_stream(reason="network_agent_shutdown")
@@ -940,6 +1543,7 @@ if __name__ == "__main__":
                 "protocol": "http",
                 "endpoint": smoke_endpoint,
                 "timeout_ms": 1500,
+                "constraints": {"tls_required": False, "allow_loopback_hosts": True},
             }
         )
         printer.pretty("NETWORK RECEIVE", receive_result, "success")

@@ -6,7 +6,9 @@ counterfactual evidence, builds a compact causal graph, and emits predictions.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
+import heapq
 import math
 import re
 import time
@@ -133,6 +135,7 @@ class ReasoningCauseAndEffect(BaseReasoning):
 
         self.max_pair_distance: int = bounded_iterations(self.cause_effect_config.get("max_pair_distance", 5), minimum=1, maximum=10000)
         self.max_relationships: int = bounded_iterations(self.cause_effect_config.get("max_relationships", 256), minimum=1, maximum=100000)
+        self.max_events: int = bounded_iterations(self.cause_effect_config.get("max_events", 5000), minimum=2, maximum=1_000_000)
         self.max_predictions: int = bounded_iterations(self.cause_effect_config.get("max_predictions", 128), minimum=1, maximum=100000)
         self.max_time_gap: float = max(1e-9, float(self.cause_effect_config.get("max_time_gap", 10.0)))
         self.temporal_decay: float = max(1e-9, float(self.cause_effect_config.get("temporal_decay", 1.0)))
@@ -174,6 +177,12 @@ class ReasoningCauseAndEffect(BaseReasoning):
         """Perform cause-and-effect reasoning over an event stream."""
         start = time.monotonic()
         logger.info("Starting cause-and-effect reasoning")
+        for label, value in (("context", context), ("conditions", conditions)):
+            if value is not None and not isinstance(value, Mapping):
+                raise ReasoningValidationError(
+                    f"{label} must be a mapping",
+                    context={"type": type(value).__name__},
+                )
         context = dict(context or {})
         conditions = dict(conditions or {})
         cache_key = self._build_cache_key(events, conditions, context)
@@ -181,7 +190,8 @@ class ReasoningCauseAndEffect(BaseReasoning):
         if self._cache is not None:
             cached = self._cache.get(cache_key)
             if cached is not None:
-                cached = dict(cached)
+                # Private copy: a shallow dict() copy still shared (and mutated) the nested metrics.
+                cached = copy.deepcopy(cached)
                 cached.setdefault("metrics", {})["cache_hit"] = True
                 return cached
 
@@ -210,7 +220,7 @@ class ReasoningCauseAndEffect(BaseReasoning):
         )
 
         if self._cache is not None:
-            self._cache.set(cache_key, result, ttl_seconds=self.cache_ttl_seconds)
+            self._cache.set(cache_key, copy.deepcopy(result), ttl_seconds=self.cache_ttl_seconds)
         return result
 
     # ------------------------------------------------------------------
@@ -226,6 +236,11 @@ class ReasoningCauseAndEffect(BaseReasoning):
             events = [events]
         if not events:
             raise ReasoningValidationError("events must be non-empty")
+        if len(events) > self.max_events:
+            raise ReasoningValidationError(
+                "event count exceeds reasoning_cause_effect.max_events",
+                context={"count": len(events), "max_events": self.max_events},
+            )
 
         normalized: List[Dict[str, Any]] = []
         for index, event in enumerate(events):
@@ -327,11 +342,13 @@ class ReasoningCauseAndEffect(BaseReasoning):
         relationships: List[CausalRelationship] = []
         for index, cause in enumerate(events[:-1]):
             upper = min(len(events), index + self.max_pair_distance + 1)
-            for effect in events[index + 1: upper]:
+            for offset, effect in enumerate(events[index + 1: upper], start=1):
                 gap = float(effect["timestamp"]) - float(cause["timestamp"])
                 if gap < 0 or (gap == 0 and self.same_timestamp_policy == "reject"):
                     continue
-                distance = max(1, events.index(effect) - index)
+                # Position distance by enumeration; events.index(effect) was O(n) per pair and
+                # returned the FIRST of any equal events.
+                distance = max(1, offset)
                 confidence = clamp_confidence(self.sequential_base_confidence / math.sqrt(distance))
                 relationships.append(CausalRelationship(
                     cause=cause,
@@ -435,7 +452,7 @@ class ReasoningCauseAndEffect(BaseReasoning):
         scores = ValidationScores(
             temporal=self._validate_temporal(cause, effect, context),
             correlation=self._validate_correlation(cause, effect, conditions, context),
-            counterfactual=self._counterfactual_analysis(cause, effect, context) if self.enable_counterfactual else 0.0,
+            counterfactual=self._counterfactual_detail(cause, effect, context)[0] if self.enable_counterfactual else 0.0,
             mechanism=self._validate_mechanism(cause, effect, context),
             condition=self._validate_conditions(cause, effect, conditions, context),
             confounder_penalty=self._confounder_penalty(cause, effect, conditions, context),
@@ -452,6 +469,9 @@ class ReasoningCauseAndEffect(BaseReasoning):
             "validated_confidence": adjusted,
             **scores.to_dict(),
             "validation_score": weighted_score,
+            # Where the counterfactual score came from. Only "simulator"/"context" are caller
+            # evidence; "builtin_rule" is a two-pattern keyword heuristic and "default" a constant.
+            "counterfactual_basis": self._counterfactual_detail(cause, effect, context)[1] if self.enable_counterfactual else "disabled",
             "is_valid": is_valid,
             "validation_status": "accepted" if is_valid else "rejected",
         }
@@ -488,15 +508,19 @@ class ReasoningCauseAndEffect(BaseReasoning):
         return clamp_confidence(max(external_score, attr_score * self.attribute_match_weight + token_score * self.token_overlap_weight + condition_score * self.condition_match_weight))
 
     def _counterfactual_analysis(self, cause: Dict, effect: Dict, context: Dict) -> float:
+        return self._counterfactual_detail(cause, effect, context)[0]
+
+    def _counterfactual_detail(self, cause: Dict, effect: Dict, context: Dict) -> Tuple[float, str]:
+        """Return ``(score, basis)`` for the "would the effect still occur without the cause?" check."""
         simulated_effect = self._simulate_absence(cause, effect, context)
         original = str(effect.get("description", ""))
         if simulated_effect != original:
-            return self.counterfactual_change_score
+            return self.counterfactual_change_score, ("simulator" if callable(context.get("counterfactual_simulator")) else "builtin_rule")
         counterfactuals = context.get("counterfactuals", {}) or {}
         key = (cause.get("id"), effect.get("id"))
         if isinstance(counterfactuals, Mapping) and key in counterfactuals:
-            return clamp_confidence(counterfactuals[key])
-        return self.counterfactual_default_score
+            return clamp_confidence(counterfactuals[key]), "context"
+        return self.counterfactual_default_score, "default"
 
     def _simulate_absence(self, cause: Dict, effect: Dict, context: Dict) -> str:
         simulator = context.get("counterfactual_simulator")
@@ -658,21 +682,44 @@ class ReasoningCauseAndEffect(BaseReasoning):
         return predictions[: self.max_predictions]
 
     def _predict_with_bayesian_network(self, network: Dict, context: Dict) -> List[Dict]:
+        """Project root causes onto everything reachable from them.
+
+        The confidence of a projection is the best (maximum-product) path through the
+        validated edge confidences -- it used to be the constant 0.75 regardless of how
+        weak the supporting edges were. It remains a heuristic ranking score, not a
+        probability: edge confidences are not conditional probabilities.
+        """
         predictions: List[Dict[str, Any]] = []
         node_ids = set(network.get("nodes", {}).keys())
-        targets = {edge["target"] for edge in network.get("edges", [])}
+        edges = network.get("edges", [])
+        targets = {edge["target"] for edge in edges}
         roots = sorted(node_ids - targets)
-        reachable = self._network_reachability(network.get("edges", []))
+        weights: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+        for edge in edges:
+            weights[str(edge["source"])].append((str(edge["target"]), clamp_confidence(edge.get("confidence", 0.0))))
         for root in roots:
-            for effect in sorted(reachable.get(root, set())):
-                if root == effect:
+            best: Dict[str, Tuple[float, List[str]]] = {root: (1.0, [root])}
+            heap: List[Tuple[float, str]] = [(-1.0, root)]
+            while heap:
+                neg_score, node = heapq.heappop(heap)
+                score = -neg_score
+                if score < best.get(node, (0.0, []))[0]:
                     continue
+                for nxt, weight in weights.get(node, []):
+                    candidate = score * weight
+                    if candidate > best.get(nxt, (0.0, []))[0] and nxt not in best[node][1]:
+                        best[nxt] = (candidate, best[node][1] + [nxt])
+                        heapq.heappush(heap, (-candidate, nxt))
+            for effect in sorted(best):
+                if effect == root:
+                    continue
+                score, path = best[effect]
                 predictions.append(self._apply_intervention({
                     "cause": root,
                     "effect": effect,
                     "type": "bayesian_projection",
-                    "confidence": 0.75,
-                    "path": [root, effect],
+                    "confidence": clamp_confidence(score),
+                    "path": path,
                 }, context))
         return predictions
 
@@ -797,24 +844,24 @@ class ReasoningCauseAndEffect(BaseReasoning):
         return sorted(node for node in nodes if node not in sources)
 
     def _is_acyclic(self, edges: Sequence[Mapping[str, Any]]) -> bool:
+        """Cycle check by Kahn's algorithm (iterative: the recursive DFS hit RecursionError on long chains)."""
         graph = self._build_adjacency(edges)
-        visiting: Set[str] = set()
-        visited: Set[str] = set()
-
-        def dfs(node: str) -> bool:
-            if node in visiting:
-                return False
-            if node in visited:
-                return True
-            visiting.add(node)
-            for nxt in graph.get(node, []):
-                if not dfs(nxt):
-                    return False
-            visiting.remove(node)
-            visited.add(node)
-            return True
-
-        return all(dfs(node) for node in graph)
+        indegree: Dict[str, int] = defaultdict(int)
+        nodes: Set[str] = set(graph)
+        for source, targets in graph.items():
+            for target in targets:
+                indegree[target] += 1
+                nodes.add(target)
+        queue: Deque[str] = deque(node for node in nodes if indegree[node] == 0)
+        visited = 0
+        while queue:
+            node = queue.popleft()
+            visited += 1
+            for target in graph.get(node, []):
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    queue.append(target)
+        return visited == len(nodes)
 
     def _network_reachability(self, edges: Sequence[Mapping[str, Any]]) -> Dict[str, Set[str]]:
         adjacency = self._build_adjacency(edges)
@@ -839,6 +886,9 @@ class ReasoningCauseAndEffect(BaseReasoning):
         adjusted = dict(prediction)
         adjusted["confidence"] = clamp_confidence(float(prediction.get("confidence", 0.0)) * clamp_confidence(strength))
         adjusted["intervention"] = intervention
+        # Honest label: this scales a confidence score. It is not Pearl's do() operator
+        # (no graph surgery, no recomputed downstream distribution).
+        adjusted["intervention_model"] = "confidence_scaling"
         return adjusted
 
     def _build_cache_key(self, events: Any, conditions: Any, context: Mapping[str, Any]) -> str:

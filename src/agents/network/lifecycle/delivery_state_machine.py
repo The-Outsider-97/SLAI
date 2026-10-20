@@ -247,6 +247,8 @@ class DeliveryStateMachine:
         self.snapshot_ttl_seconds = self._get_non_negative_int_config("snapshot_ttl_seconds", 1800)
         self.history_ttl_seconds = self._get_non_negative_int_config("history_ttl_seconds", 7200)
         self.max_deliveries = max(1, self._get_non_negative_int_config("max_deliveries", 5000))
+        # Rows listed per bucket in get_snapshot(); counts stay exact. 0 = list everything.
+        self.snapshot_max_records = self._get_non_negative_int_config("snapshot_max_records", 25)
         self.max_history_size = max(1, self._get_non_negative_int_config("max_history_size", 1000))
         self.max_transition_history_per_message = max(1, self._get_non_negative_int_config("max_transition_history_per_message", 50))
         self.default_max_attempts = max(1, self._get_non_negative_int_config("default_max_attempts", 3))
@@ -643,21 +645,39 @@ class DeliveryStateMachine:
                 self._sync_snapshot_memory()
             return purged
 
-    def get_snapshot(self) -> Dict[str, Any]:
+    def get_snapshot(self, max_records: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Snapshot of delivery state.
+
+        ``active_count``/``terminal_count`` are always exact. The ``active`` and ``terminal``
+        row lists hold at most ``max_records`` (default ``snapshot_max_records``) of the most
+        recently updated records: the lifecycle layer persists this snapshot on every
+        transition, so serializing every retained delivery made each relay O(retained deliveries).
+        """
+        limit = self.snapshot_max_records if max_records is None else max(0, int(max_records))
         with self._lock:
             self._expire_stale_locked()
-            active = [record.to_dict(include_history=False) for record in self._deliveries.values() if not record.is_terminal(self.terminal_states)]
-            terminal = [record.to_dict(include_history=False) for record in self._deliveries.values() if record.is_terminal(self.terminal_states)]
+            active_records: List[DeliveryRecord] = []
+            terminal_records: List[DeliveryRecord] = []
+            for record in self._deliveries.values():
+                (terminal_records if record.is_terminal(self.terminal_states) else active_records).append(record)
+
+            def newest(records: List[DeliveryRecord]) -> List[Dict[str, Any]]:
+                if limit and len(records) > limit:
+                    records = sorted(records, key=lambda item: str(item.updated_at))[-limit:]
+                return sorted((item.to_dict(include_history=False) for item in records), key=self._sort_delivery_dict)
+
             return {
                 "generated_at": utc_timestamp(),
                 "started_at": self._started_at,
                 "stats": dict(self._stats),
                 "delivery_count": len(self._deliveries),
-                "active_count": len(active),
-                "terminal_count": len(terminal),
+                "active_count": len(active_records),
+                "terminal_count": len(terminal_records),
                 "dead_letter_count": len(self._dead_letter),
-                "active": sorted(active, key=self._sort_delivery_dict),
-                "terminal": sorted(terminal, key=self._sort_delivery_dict),
+                "active": newest(active_records),
+                "terminal": newest(terminal_records),
+                "rows_truncated": bool(limit and (len(active_records) > limit or len(terminal_records) > limit)),
                 "history_size": len(self._history),
             }
 
@@ -870,13 +890,24 @@ class DeliveryStateMachine:
     def _sync_snapshot_memory(self) -> None:
         if not self.record_memory_snapshots:
             return
-        active = [record.to_dict(include_history=False) for record in self._deliveries.values() if not record.is_terminal(self.terminal_states)]
+        # Newest ``snapshot_max_records`` rows only; counts stay exact (see idempotency for why).
+        limit = self.snapshot_max_records
+        active_count = 0
+        active_records: list = []
+        for record in reversed(list(self._deliveries.values())):
+            if not record.is_terminal(self.terminal_states):
+                active_count += 1
+                if not limit or len(active_records) < limit:
+                    active_records.append(record)
+        active = [record.to_dict(include_history=False) for record in reversed(active_records)]
+        dead_letter = dict(list(self._dead_letter.items())[-limit:]) if limit else self._dead_letter
         snapshot = {
             "generated_at": utc_timestamp(),
             "started_at": self._started_at,
             "stats": dict(self._stats),
             "delivery_count": len(self._deliveries),
-            "active_count": len(active),
+            "active_count": active_count,
+            "rows_truncated": bool(limit) and active_count > limit,
             "dead_letter_count": len(self._dead_letter),
             "states": self._state_counts(),
         }
@@ -895,7 +926,7 @@ class DeliveryStateMachine:
         if self._dead_letter:
             self.memory.set(
                 _DELIVERY_STATE_MACHINE_DEAD_LETTER_KEY,
-                {"messages": json_safe(self._dead_letter), "generated_at": utc_timestamp()},
+                {"messages": json_safe(dead_letter), "generated_at": utc_timestamp()},
                 ttl_seconds=self.dead_letter_ttl_seconds,
                 source="delivery_state_machine",
             )

@@ -159,6 +159,15 @@ class RoutePolicy:
         self.max_latency_ms = self._coerce_float(self.route_policy_config.get("max_latency_ms"), 2000.0, minimum=1.0)
         self.min_success_rate = self._coerce_float(self.route_policy_config.get("min_success_rate"), 0.80, minimum=0.0, maximum=1.0)
         self.max_error_rate = self._coerce_float(self.route_policy_config.get("max_error_rate"), 0.25, minimum=0.0, maximum=1.0)
+        # Lifetime success/error rates are meaningless on a handful of requests: one failed request is a 100%
+        # error rate, which used to disqualify a sole endpoint outright (and, because disqualified endpoints
+        # get no traffic, keep it disqualified until the health record expired). Rate thresholds therefore
+        # apply only once the endpoint has this many observed requests (0 restores the old behaviour).
+        self.min_samples_for_rate_checks = self._get_non_negative_int_config("min_samples_for_rate_checks", 10)
+        # If every candidate is rejected only for health reasons (status or rates), try the least-bad one
+        # instead of failing closed; otherwise a rejected sole endpoint gets no traffic and can never
+        # prove it recovered. Open circuits, security, cost and capability rejections are never overridden.
+        self.panic_route_when_all_unhealthy = self._get_bool_config("panic_route_when_all_unhealthy", True)
 
         self.priority_weight = self._coerce_float(self.route_policy_config.get("priority_weight"), 1.0, minimum=0.0)
         self.health_weight = self._coerce_float(self.route_policy_config.get("health_weight"), 1.5, minimum=0.0)
@@ -283,9 +292,11 @@ class RoutePolicy:
             score.disqualify("private-host route is disallowed")
         if self.disallow_loopback_hosts and endpoint and self._endpoint_is_loopback(endpoint):
             score.disqualify("loopback route is disallowed")
-        if success_rate is not None and success_rate < self.min_success_rate:
+        sample_count = self._endpoint_sample_count(endpoint)
+        rates_trusted = sample_count is None or sample_count >= self.min_samples_for_rate_checks
+        if rates_trusted and success_rate is not None and success_rate < self.min_success_rate:
             score.disqualify("success rate below policy threshold")
-        if error_rate is not None and error_rate > self.max_error_rate:
+        if rates_trusted and error_rate is not None and error_rate > self.max_error_rate:
             score.disqualify("error rate exceeds policy threshold")
 
         score.priority_score = round((max(0.0, priority) / 100.0) * self.priority_weight, 6)
@@ -350,6 +361,13 @@ class RoutePolicy:
         evaluations.sort(key=self._sort_evaluation, reverse=True)
         return evaluations
 
+    @staticmethod
+    def _only_health_rejections(evaluation: Mapping[str, Any]) -> bool:
+        score = evaluation.get("score") if isinstance(evaluation.get("score"), Mapping) else {}
+        reasons = list(score.get("disqualification_reasons") or evaluation.get("disqualification_reasons") or [])
+        soft = ("degraded routes are disabled", "unhealthy routes are disabled", "success rate below policy threshold", "error rate exceeds policy threshold")
+        return bool(reasons) and all(str(reason) in soft for reason in reasons)
+
     def select_routes(
         self,
         candidates: Sequence[Mapping[str, Any]],
@@ -363,6 +381,12 @@ class RoutePolicy:
         normalized_secondary_count = max(0, int(self.default_secondary_count if secondary_count is None else secondary_count))
         evaluations = self.evaluate_candidates(candidates, constraints=constraints, request_context=request_context)
         allowed = [item for item in evaluations if bool(item.get("allowed"))]
+        panic_fallback = False
+        if not allowed and self.panic_route_when_all_unhealthy:
+            soft = [item for item in evaluations if self._only_health_rejections(item)]
+            if soft:
+                allowed = soft[: normalized_primary_count + normalized_secondary_count]
+                panic_fallback = True
 
         if not allowed and self.fail_on_no_viable_routes:
             raise NoRouteAvailableError(
@@ -385,6 +409,7 @@ class RoutePolicy:
             "evaluations": evaluations,
             "strategy": self.selection_strategy,
             "selected_at": utc_timestamp(),
+            "panic_fallback": panic_fallback,
             "constraints": sanitize_for_logging(constraints) if self.sanitize_logs else json_safe(constraints),
             "request_context": sanitize_for_logging(request_context) if self.sanitize_logs else json_safe(request_context),
         }
@@ -500,6 +525,20 @@ class RoutePolicy:
             if isinstance(payload, Mapping):
                 return dict(payload)
         return {}
+
+    def _endpoint_sample_count(self, endpoint: Optional[str]) -> Optional[int]:
+        """Observed request count for an endpoint from telemetry (None when telemetry has no record of it)."""
+        if not self.use_memory_metrics or not endpoint:
+            return None
+        metrics_map = self.memory.get("network.telemetry.endpoint_metrics", default={})
+        if isinstance(metrics_map, Mapping):
+            payload = metrics_map.get(endpoint)
+            if isinstance(payload, Mapping):
+                try:
+                    return int(payload.get("total_events", 0) or 0)
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     def _get_memory_channel_metrics(self, channel: str) -> Dict[str, Any]:
         if not self.use_memory_metrics:

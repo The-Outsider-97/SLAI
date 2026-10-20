@@ -584,6 +584,12 @@ class NetworkReliability:
     ) -> Dict[str, Any]:
         return self.failover_manager.record_failover_failure(selected_route, error, metadata=metadata)
 
+    def refresh_circuits(self) -> int:
+        """Publish open->half_open transitions that are due, so route selection can offer probe traffic."""
+        if not self.circuit_breaker_enabled:
+            return 0
+        return self.circuit_breaker.refresh_open_circuits()
+
     def get_network_health(self) -> Dict[str, Any]:
         memory_health = self.memory.get_network_health() if hasattr(self.memory, "get_network_health") else {}
         circuit_snapshot = self.circuit_breaker.get_snapshot() if self.circuit_breaker_enabled else {}

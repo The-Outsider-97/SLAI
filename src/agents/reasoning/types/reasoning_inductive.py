@@ -14,7 +14,9 @@ Pipeline
 """
 from __future__ import annotations
 
+import copy
 import math
+import re
 import time
 
 from collections import Counter, defaultdict
@@ -32,6 +34,65 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 
 logger = get_logger("Reasoning Inductive")
 printer = PrettyPrinter()
+
+# Function words carry no inductive signal; without this filter "the"/"and" were
+# reported as "recurring content" in nearly every free-text data set.
+_STOPWORDS = frozenset(
+    "the and for are was were with that this from has have had not but you your our their its his her "
+    "they them then than into out off over under about also can could would should will shall may might "
+    "been being does did done any all some one two who whom what when where why how which while there here".split()
+)
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the regularized incomplete beta function (Lentz's method)."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 200):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 3e-14:
+            break
+    return h
+
+
+def _regularized_beta(a: float, b: float, x: float) -> float:
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    ln_front = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
+    front = math.exp(ln_front)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def correlation_p_value(r: float, n: int) -> float:
+    """Two-sided p-value for H0: no linear relationship, given Pearson ``r`` over ``n`` points."""
+    if n < 3:
+        return 1.0
+    r = max(-1.0, min(1.0, float(r)))
+    if abs(r) >= 1.0 - 1e-12:
+        return 0.0
+    df = n - 2
+    t2 = r * r * df / (1.0 - r * r)
+    return float(_regularized_beta(df / 2.0, 0.5, df / (df + t2)))
 
 
 @dataclass(frozen=True)
@@ -129,6 +190,11 @@ class ReasoningInductive(BaseReasoning):
         self.numeric_residual_tolerance: float = max(
             0.0, float(self.inductive_config.get("numeric_residual_tolerance", 0.20))
         )
+        # A numeric trend is only reported when the slope is statistically distinguishable
+        # from zero; with 5 unrelated points ~25% pass an R^2 >= 0.4 gate by chance alone.
+        self.trend_significance_alpha: float = clamp_confidence(
+            self.inductive_config.get("trend_significance_alpha", 0.05)
+        )
 
         self.extrapolation_limit: float = max(0.0, float(self.inductive_config.get("extrapolation_limit", 1.5)))
         self.trend_analysis_weight: float = clamp_confidence(
@@ -167,6 +233,11 @@ class ReasoningInductive(BaseReasoning):
     def perform_reasoning(self, observations: List[Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: # type: ignore
         """Run inductive reasoning from observations to theory and predictions."""
         started = time.monotonic()
+        if context is not None and not isinstance(context, Mapping):
+            raise ReasoningValidationError(
+                "context must be a mapping",
+                context={"type": type(context).__name__},
+            )
         context = dict(context or {})
         cache_key = self._cache_key(observations, context)
 
@@ -174,12 +245,14 @@ class ReasoningInductive(BaseReasoning):
             return self._perform_reasoning_uncached(observations, context, started)
 
         if self._cache is not None and not context.get("disable_cache", False):
-            return self._cache.get_or_set(
+            cached = self._cache.get_or_set(
                 cache_key,
                 _run,
                 ttl_seconds=self.cache_ttl_seconds,
                 metadata={"strategy": "inductive"},
             )
+            # Never hand out the cached (shared, mutable) object.
+            return copy.deepcopy(cached)
         return _run()
 
     def diagnostics(self) -> Dict[str, Any]:
@@ -386,9 +459,20 @@ class ReasoningInductive(BaseReasoning):
             metadata=dict(item.get("metadata", {})) if isinstance(item.get("metadata", {}), Mapping) else {},
         )
 
+    @staticmethod
+    def _has_explicit_timestamp(observation: Mapping[str, Any]) -> bool:
+        raw = observation.get("raw")
+        return isinstance(raw, Mapping) and raw.get("timestamp") is not None
+
     def _identify_temporal_patterns(self, observations: List[Dict[str, Any]]) -> List[PatternRecord]:
-        timestamps = [float(obs["timestamp"]) for obs in observations]
         patterns: List[PatternRecord] = []
+        # Timestamps that were merely assigned from the list position are always strictly
+        # increasing and perfectly regular, so "temporal_order"/"periodic" were reported for
+        # ANY list. Temporal patterns require caller-supplied timestamps.
+        explicit = [obs for obs in observations if self._has_explicit_timestamp(obs)]
+        if len(explicit) < max(3, int(0.8 * len(observations))):
+            return patterns
+        timestamps = [float(obs["timestamp"]) for obs in explicit]
         if len(timestamps) < 3:
             return patterns
         diffs = np.diff(np.asarray(timestamps, dtype=float))
@@ -449,7 +533,8 @@ class ReasoningInductive(BaseReasoning):
         r2 = self._r_squared(y, predicted)
         direction = "increases" if slope > 0 else "decreases" if slope < 0 else "remains stable"
         confidence = clamp_confidence(0.50 + 0.50 * r2)
-        if abs(slope) > 1e-12:
+        p_value = correlation_p_value(math.sqrt(max(0.0, r2)), len(values))
+        if abs(slope) > 1e-12 and p_value <= self.trend_significance_alpha:
             patterns.append(
                 PatternRecord(
                     type="numeric_trend",
@@ -458,7 +543,13 @@ class ReasoningInductive(BaseReasoning):
                     statement=f"Attribute '{key}' {direction} over observations",
                     dimension="attribute",
                     attribute=key,
-                    metadata={"slope": float(slope), "intercept": float(intercept), "r_squared": float(r2)},
+                    metadata={
+                        "slope": float(slope),
+                        "intercept": float(intercept),
+                        "r_squared": float(r2),
+                        "p_value": float(p_value),
+                        "residual_std": float(np.std(y - predicted)),
+                    },
                 )
             )
         if np.std(y) <= max(1e-9, abs(float(np.mean(y))) * 0.05):
@@ -499,15 +590,17 @@ class ReasoningInductive(BaseReasoning):
         ]
 
     def _identify_content_patterns(self, observations: List[Dict[str, Any]]) -> List[PatternRecord]:
-        tokens: List[str] = []
+        # Document frequency: the share of OBSERVATIONS containing a token. (Counting raw
+        # occurrences let one verbose observation inflate "frequency" beyond 100%.)
+        document_counts: Counter = Counter()
         for obs in observations:
-            tokens.extend(self._tokenize(obs.get("content")))
-        if not tokens:
+            tokens = {t for t in self._content_tokens(obs.get("content")) if t and t not in _STOPWORDS}
+            document_counts.update(tokens)
+        if not document_counts:
             return []
-        counts = Counter(tokens)
         total_obs = max(1, len(observations))
         patterns: List[PatternRecord] = []
-        for token, count in counts.most_common(5):
+        for token, count in document_counts.most_common(5):
             frequency = count / total_obs
             if frequency >= self.dominant_value_threshold:
                 patterns.append(
@@ -526,7 +619,27 @@ class ReasoningInductive(BaseReasoning):
     @staticmethod
     def _tokenize(value: Any) -> List[str]:
         text = str(value).lower().replace("_", " ")
-        return [part.strip(".,:;!?()[]{}\"'") for part in text.split() if len(part.strip()) > 2]
+        return re.findall(r"[a-z][a-z'\-]{2,}", text)
+
+    def _content_tokens(self, content: Any, _depth: int = 0) -> List[str]:
+        """Word tokens of the *values* in an observation (never dict keys or numbers).
+
+        Tokenizing ``str({"v": 0.3})`` made the key ``v`` a "recurring content token" of
+        every structured data set, which then counted as inductive support.
+        """
+        if _depth > 4 or content is None or isinstance(content, (bool, int, float)):
+            return []
+        if isinstance(content, Mapping):
+            tokens: List[str] = []
+            for value in content.values():
+                tokens.extend(self._content_tokens(value, _depth + 1))
+            return tokens
+        if isinstance(content, (list, tuple, set)):
+            tokens = []
+            for value in content:
+                tokens.extend(self._content_tokens(value, _depth + 1))
+            return tokens
+        return self._tokenize(content)
 
     @staticmethod
     def _is_number(value: Any) -> bool:
@@ -663,6 +776,9 @@ class ReasoningInductive(BaseReasoning):
         is_valid = validation_confidence >= self.confidence_threshold and not failed
         return {
             "is_valid": is_valid,
+            # "in_sample": nothing but the fitting data was checked; "holdout": the theory was
+            # also tested on data it was not derived from.
+            "evidence_level": "holdout" if "holdout_data" in context else "in_sample",
             "confidence": validation_confidence,
             "tests": tests,
             "failed_tests": failed,
@@ -685,12 +801,67 @@ class ReasoningInductive(BaseReasoning):
         return {"consistent": len(contradictions) == 0, "confidence": confidence, "contradictions": contradictions, "support_score": support_score}
 
     def _test_predictive_accuracy(self, theory: Dict[str, Any], holdout_data: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
-        predictions = self._make_predictions(theory, holdout_data, context)
-        if not predictions:
-            return {"accuracy": 0.0, "confidence": 0.0, "correct_predictions": 0, "total_predictions": 0}
-        correct = sum(1 for p in predictions if p.get("validated", True) and p.get("confidence", 0.0) >= self.confidence_threshold)
-        accuracy = correct / len(predictions)
-        return {"accuracy": accuracy, "confidence": clamp_confidence(accuracy * 1.1), "correct_predictions": correct, "total_predictions": len(predictions)}
+        """Out-of-sample test: do the theory's patterns hold on data it has not seen?
+
+        The previous version generated predictions *from the holdout set itself* and
+        scored a prediction correct when its self-reported confidence cleared a threshold,
+        so it could not fail. Here each fitted numeric trend is continued across the
+        holdout block and compared with the actual values, stable values must stay inside
+        their observed spread, and dominant categorical values must recur.
+        """
+        tolerance = self.numeric_residual_tolerance
+        checks: List[bool] = []
+        for pattern in theory.get("supporting_patterns", []) or []:
+            ptype = pattern.get("type")
+            attribute = pattern.get("attribute")
+            metadata = pattern.get("metadata", {}) or {}
+            if attribute is None:
+                continue
+            held = [
+                obs["attributes"][attribute]
+                for obs in holdout_data
+                if attribute in obs.get("attributes", {})
+            ]
+            if ptype == "numeric_trend":
+                slope, intercept = metadata.get("slope"), metadata.get("intercept")
+                if slope is None or intercept is None:
+                    continue
+                n_train = int(pattern.get("support", 0))
+                residual_std = float(metadata.get("residual_std", 0.0))
+                numeric = [float(v) for v in held if self._is_number(v)]
+                for offset, actual in enumerate(numeric):
+                    predicted = float(slope) * (n_train + offset) + float(intercept)
+                    allowed = max(tolerance * abs(actual), 2.0 * residual_std, 1e-9)
+                    checks.append(abs(predicted - actual) <= allowed)
+            elif ptype == "stable_numeric_value":
+                center = pattern.get("value")
+                if center is None:
+                    continue
+                spread = float(metadata.get("std", 0.0))
+                for actual in (float(v) for v in held if self._is_number(v)):
+                    allowed = max(3.0 * spread, tolerance * abs(float(center)), 1e-9)
+                    checks.append(abs(actual - float(center)) <= allowed)
+            elif ptype == "dominant_value":
+                expected = str(pattern.get("value"))
+                checks.extend(str(v) == expected for v in held)
+
+        if not checks:
+            return {
+                "accuracy": 0.0,
+                "confidence": 0.0,
+                "correct_predictions": 0,
+                "total_predictions": 0,
+                "testable": False,
+            }
+        correct = sum(1 for ok in checks if ok)
+        accuracy = correct / len(checks)
+        return {
+            "accuracy": accuracy,
+            "confidence": clamp_confidence(accuracy),
+            "correct_predictions": correct,
+            "total_predictions": len(checks),
+            "testable": True,
+        }
 
     def _check_counterexamples(self, theory: Dict[str, Any], observations: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
         counterexamples = [obs["id"] for obs in observations if not self._observation_conforms(theory, obs, context)]
@@ -705,7 +876,7 @@ class ReasoningInductive(BaseReasoning):
 
     def _observation_conforms(self, theory: Dict[str, Any], observation: Dict[str, Any], context: Dict[str, Any]) -> bool:
         text = str(observation.get("content", "")).lower()
-        if "exception" in text or "counterexample" in text:
+        if re.search(r"\b(?:exception|counterexample)\b", text):
             return False
         for pattern in theory.get("supporting_patterns", []) or []:
             if pattern.get("type") == "dominant_value":
@@ -745,15 +916,20 @@ class ReasoningInductive(BaseReasoning):
             y = np.asarray(values, dtype=float)
             slope, intercept = np.polyfit(x, y, 1)
             r2 = self._r_squared(y, slope * x + intercept)
-            trends.append({"type": "linear", "attribute": attr, "slope": float(slope), "intercept": float(intercept), "confidence": clamp_confidence(0.5 + 0.5 * r2), "r_squared": r2, "observed_count": len(values)})
+            p_value = correlation_p_value(math.sqrt(max(0.0, r2)), len(values))
+            trends.append({"type": "linear", "attribute": attr, "slope": float(slope), "intercept": float(intercept), "confidence": clamp_confidence(0.5 + 0.5 * r2), "r_squared": r2, "p_value": p_value, "observed_count": len(values)})
             if all(v > 0 for v in values):
                 log_y = np.log(y)
                 exp_slope, exp_intercept = np.polyfit(x, log_y, 1)
                 pred = np.exp(exp_slope * x + exp_intercept)
-                trends.append({"type": "exponential", "attribute": attr, "growth_rate": float(exp_slope), "intercept": float(exp_intercept), "confidence": clamp_confidence(0.45 + 0.45 * self._r_squared(y, pred)), "observed_count": len(values)})
+                log_r2 = self._r_squared(log_y, exp_slope * x + exp_intercept)
+                trends.append({"type": "exponential", "attribute": attr, "growth_rate": float(exp_slope), "intercept": float(exp_intercept), "confidence": clamp_confidence(0.45 + 0.45 * self._r_squared(y, pred)), "p_value": correlation_p_value(math.sqrt(max(0.0, log_r2)), len(values)), "observed_count": len(values)})
         return trends
 
     def _extrapolate_trend(self, trend: Dict[str, Any], context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Do not extrapolate a trend that is indistinguishable from noise.
+        if float(trend.get("p_value", 0.0)) > self.trend_significance_alpha:
+            return None
         horizon = float(context.get("extrapolation_factor", context.get("prediction_horizon", self.extrapolation_limit)))
         base_index = float(trend.get("observed_count", 1) - 1 + horizon)
         if trend["type"] == "linear":
@@ -769,7 +945,9 @@ class ReasoningInductive(BaseReasoning):
             "value": future_value,
             "confidence": clamp_confidence(trend.get("confidence", 0.0) * 0.9),
             "extrapolation_factor": horizon,
-            "validated": True,
+            # An extrapolation is a forecast, not a validated fact.
+            "validated": False,
+            "validation_status": "unvalidated_extrapolation",
             "basis": trend,
         }
 
@@ -784,7 +962,8 @@ class ReasoningInductive(BaseReasoning):
                         "prediction": f"Next observation will likely have {pattern.get('attribute')} = {pattern.get('value')}",
                         "value": pattern.get("value"),
                         "confidence": clamp_confidence(pattern.get("confidence", 0.0) * 0.85),
-                        "validated": True,
+                        "validated": False,
+                        "validation_status": "unvalidated_extrapolation",
                         "pattern": pattern,
                     }
                 )

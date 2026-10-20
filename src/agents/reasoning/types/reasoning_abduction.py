@@ -31,8 +31,9 @@ Design constraints
  
 from __future__ import annotations
  
+import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.reasoning_errors import *
@@ -42,6 +43,14 @@ from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissin
 
 logger = get_logger("Reasoning Abduction")
 printer = PrettyPrinter()
+
+# Function words must not count as "shared keywords": with substring matching a hypothesis
+# containing "a" or "is" appeared to explain nearly every piece of evidence.
+_STOPWORDS = frozenset(
+    "a an the of in on at to for from by with and or but is are was were be been being it its this that these those "
+    "as into over under than then there here has have had do does did not no so if".split()
+)
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 class ReasoningAbduction(BaseReasoning):
     """Abductive reasoning: inference to the best explanation (IBE).
@@ -118,7 +127,11 @@ class ReasoningAbduction(BaseReasoning):
         t0 = time.monotonic()
         log_step("Starting abductive reasoning process")
  
-        context  = context or {}
+        context = dict(context) if isinstance(context, Mapping) else {}
+        # Per-run state: repeated calls on one instance must not accumulate evidence or
+        # leak hypothesis metadata from an earlier run.
+        self.evidence = []
+        self._hypothesis_meta: Dict[str, Dict[str, Any]] = {}
         obs_list = self._prepare_observations(observations)
  
         if not obs_list:
@@ -129,6 +142,7 @@ class ReasoningAbduction(BaseReasoning):
  
         # Phase 1 — Evidence
         evidence = self._collect_evidence(obs_list, context)
+        self._evidence_rejected = max(0, getattr(self, "_evidence_offered", 0) - len(evidence))
  
         # Phase 2 — Hypothesis generation
         hypotheses = self._generate_hypotheses(obs_list, context)
@@ -140,6 +154,7 @@ class ReasoningAbduction(BaseReasoning):
         best = self._select_best_hypothesis(evaluated)
  
         result = self._format_results(best, evaluated, evidence, elapsed_seconds(t0))
+        result["metrics"]["evidence_rejected"] = self._evidence_rejected
         log_step(
             f"Abduction complete | hypotheses={len(evaluated)} "
             f"| best={'yes' if best else 'none'} "
@@ -158,13 +173,40 @@ class ReasoningAbduction(BaseReasoning):
             return [o for o in observations if o is not None]
         return [observations]
  
+    @staticmethod
+    def _as_list(value: Any) -> List[Any]:
+        """Tolerant list view of an optional context field (None / wrong type never raises)."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return list(value)
+        if isinstance(value, (str, Mapping)):
+            return [value]
+        return []
+
+    @staticmethod
+    def _tokens(text: Any) -> Set[str]:
+        """Lower-cased content words with light suffix stemming; stop-words removed."""
+        words: Set[str] = set()
+        for word in _TOKEN_RE.findall(str(text).lower()):
+            if word in _STOPWORDS:
+                continue
+            for suffix in ("ing", "ed", "es", "s"):
+                if len(word) > len(suffix) + 2 and word.endswith(suffix):
+                    word = word[: -len(suffix)]
+                    break
+            words.add(word)
+        return words
+
     def _collect_evidence(self, obs_list: List[Any], context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Merge caller-supplied evidence with observation-derived items.
- 
+
         Observations become evidence items with ``confidence=1.0`` and
         ``type="observation"``; caller-supplied sources are merged in
         afterwards.  All items pass through ``BaseReasoning.collect_evidence``
-        which applies the configured ``validation_threshold``.
+        which applies the configured ``validation_threshold``; the number of
+        offered-but-rejected items is reported in ``metrics.evidence_rejected``
+        instead of being dropped silently.
         """
         obs_evidence: List[Dict[str, Any]] = [
             {
@@ -175,65 +217,89 @@ class ReasoningAbduction(BaseReasoning):
             }
             for i, obs in enumerate(obs_list)
         ]
-        external: List[Dict[str, Any]] = context.get("evidence_sources", [])
-        return self.collect_evidence(obs_evidence + external)
- 
+        external = [item for item in self._as_list(context.get("evidence_sources")) if isinstance(item, Mapping)]
+        offered = obs_evidence + [dict(item) for item in external]
+        self._evidence_offered = len(offered)
+        return self.collect_evidence(offered)
+
     # ------------------------------------------------------------------
-    # Phase 2 — Hypothesis generation
+    # Phase 2 - Hypothesis generation
     # ------------------------------------------------------------------
     def _generate_hypotheses(self, obs_list: List[Any], context: Dict[str, Any]) -> List[str]:
-        """Generate candidate hypotheses, with seeds prioritised."""
- 
-        # 1. Seeds from context (highest priority)
-        seeds = [h.strip() for h in context.get("seed_hypotheses", []) if isinstance(h, str) and h.strip()]
-        selected = seeds[:self.max_hypotheses]          # take up to cap
+        """Generate candidate hypotheses; caller-supplied seeds come first.
+
+        A seed is either a string or a mapping ``{"hypothesis": str, "prior": float,
+        "explains": [observation index | observation text, ...]}``. Everything else is a
+        *template*: generic wording around the observation. Templates are flagged
+        (``origin != "seed"``) because they restate the observation instead of explaining
+        it; a result whose best hypothesis is a template is not reported as supported.
+        """
+        meta: Dict[str, Dict[str, Any]] = {}
+        seeds: List[str] = []
+        for raw_seed in self._as_list(context.get("seed_hypotheses")):
+            if isinstance(raw_seed, Mapping):
+                text = str(raw_seed.get("hypothesis", raw_seed.get("text", ""))).strip()
+                info = {
+                    "origin": "seed",
+                    "prior": raw_seed.get("prior"),
+                    "explains": self._as_list(raw_seed.get("explains")),
+                }
+            elif isinstance(raw_seed, str):
+                text, info = raw_seed.strip(), {"origin": "seed", "prior": None, "explains": []}
+            else:
+                continue
+            if text and text not in meta:
+                meta[text] = info
+                seeds.append(text)
+
+        selected = seeds[:self.max_hypotheses]
         remaining = self.max_hypotheses - len(selected)
-    
+        self._hypothesis_meta = {h: meta[h] for h in selected}
+
         if remaining <= 0:
             return selected
-    
-        # 2. Auto‑generated candidates (only used while slots remain)
-        candidates: List[str] = []
-    
-        # Layer 1 – per‑observation
+
+        candidates: List[Tuple[str, str]] = []
+
+        # Layer 1 - per-observation templates
         for obs in obs_list:
             obs_str = str(obs).strip()
             if obs_str:
-                candidates.append(f"Possible cause for: {obs_str}")
-                candidates.append(f"Potential explanation for: {obs_str}")
-    
-        # Layer 2 – unified
+                candidates.append((f"Possible cause for: {obs_str}", "template"))
+                candidates.append((f"Potential explanation for: {obs_str}", "template"))
+
+        # Layer 2 - unified templates
         if len(obs_list) > 1:
             combined = " and ".join(str(o) for o in obs_list[:3])
             if len(obs_list) > 3:
                 combined += f" and {len(obs_list) - 3} more"
-            candidates.append(f"Common underlying cause for: {combined}")
-            candidates.append(f"Systemic condition explaining: {combined}")
-    
-        # Layer 3 – domain keyword
-        candidates.extend(self._domain_keyword_hypotheses(obs_list))
-    
-        # Layer 4 – temporal pattern
-        candidates.extend(self._temporal_pattern_hypotheses(obs_list))
-    
-        # Deduplicate (preserve order) and add until cap reached
-        seen = set(selected)          # already added seeds
-        for h in candidates:
-            if h not in seen:
-                seen.add(h)
-                selected.append(h)
+            candidates.append((f"Common underlying cause for: {combined}", "template"))
+            candidates.append((f"Systemic condition explaining: {combined}", "template"))
+
+        # Layer 3 - domain keyword templates
+        candidates.extend((h, "template") for h in self._domain_keyword_hypotheses(obs_list))
+
+        # Layer 4 - temporal pattern of NUMERIC observation values
+        candidates.extend((h, "pattern") for h in self._temporal_pattern_hypotheses(obs_list))
+
+        seen = set(selected)
+        for text, origin in candidates:
+            if text not in seen:
+                seen.add(text)
+                selected.append(text)
+                self._hypothesis_meta[text] = {"origin": origin, "prior": None, "explains": []}
                 remaining -= 1
                 if remaining == 0:
                     break
-    
+
         log_step(f"Generated {len(selected)} hypotheses (cap={self.max_hypotheses})")
         return selected
- 
+
     def _domain_keyword_hypotheses(self, obs_list: List[Any]) -> List[str]:
         """Mine observation content for type/keyword clusters and template hypotheses."""
         types:    set = set()
         keywords: set = set()
- 
+
         for obs in obs_list:
             if isinstance(obs, dict):
                 types.update(obs.keys())
@@ -242,10 +308,10 @@ class ReasoningAbduction(BaseReasoning):
                         keywords.update(v.lower().split())
             elif isinstance(obs, str):
                 keywords.update(obs.lower().split())
- 
+
         hypotheses: List[str] = []
         if types:
-            type_list = ", ".join(sorted(types)[:3])
+            type_list = ", ".join(sorted(str(t) for t in types)[:3])
             hypotheses.append(f"Configuration issue affecting: {type_list}")
         if keywords:
             # Filter short stop-words
@@ -253,14 +319,22 @@ class ReasoningAbduction(BaseReasoning):
             if meaningful:
                 hypotheses.append(f"Process failure involving: {', '.join(meaningful)}")
         return hypotheses
- 
+
     def _temporal_pattern_hypotheses(self, obs_list: List[Any]) -> List[str]:
-        """Use ``BaseReasoning.recognize_patterns`` on observation indices."""
+        """Pattern hypotheses from the observations' own numeric values.
+
+        The earlier version analysed ``range(len(obs_list))`` -- always an increasing
+        sequence -- so every multi-observation input "showed" an escalating failure.
+        """
+        values = [
+            float(o) for o in obs_list
+            if isinstance(o, (int, float)) and not isinstance(o, bool)
+        ]
+        if len(values) < 3 or len(values) != len(obs_list):
+            return []
         hypotheses: List[str] = []
         try:
-            patterns = self.recognize_patterns(
-                list(range(len(obs_list))), "temporal"
-            )
+            patterns = self.recognize_patterns(values, "temporal")
             _pattern_map: Dict[str, str] = {
                 "increasing_sequence": "Escalating / progressive failure",
                 "decreasing_sequence": "Recovery or degenerative decline",
@@ -274,9 +348,9 @@ class ReasoningAbduction(BaseReasoning):
         except Exception as exc:
             log_step(f"Temporal pattern analysis skipped: {exc}", "warning")
         return hypotheses
- 
+
     # ------------------------------------------------------------------
-    # Phase 3 — Hypothesis evaluation
+    # Phase 3 - Hypothesis evaluation
     # ------------------------------------------------------------------
     def _evaluate_hypotheses(self, hypotheses: List[str], evidence: List[Dict[str, Any]],
                              context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -308,6 +382,7 @@ class ReasoningAbduction(BaseReasoning):
             parsimony         = self._parsimony_score(hypothesis)
             evidence_coverage = self._evidence_coverage(hypothesis, evidence)
             contradictions    = self._find_contradictions(hypothesis, evidence, context)
+            origin            = self._meta_for(hypothesis).get("origin", "template")
  
             composite = (
                 self._w_confidence  * clamp_confidence(confidence)
@@ -326,6 +401,7 @@ class ReasoningAbduction(BaseReasoning):
                 "composite_score":  round(composite, 6),
                 "evidence_coverage": evidence_coverage,
                 "contradictions":   contradictions,
+                "origin":           origin,
             })
  
         # Sort descending by composite score for stable ranking
@@ -351,8 +427,8 @@ class ReasoningAbduction(BaseReasoning):
         """
         evidence    = test_conditions.get("evidence", [])
         context     = test_conditions.get("context", {})
-        known_facts = context.get("known_facts", [])
-        constraints = context.get("constraints", [])
+        known_facts = self._as_list(context.get("known_facts"))
+        constraints = self._as_list(context.get("constraints"))
  
         # Base: posterior probability
         base_conf = self._bayesian_posterior(hypothesis, evidence)
@@ -378,38 +454,63 @@ class ReasoningAbduction(BaseReasoning):
     # ------------------------------------------------------------------
     # Metric implementations
     # ------------------------------------------------------------------
+    def _meta_for(self, hypothesis: str) -> Dict[str, Any]:
+        return getattr(self, "_hypothesis_meta", {}).get(hypothesis, {})
+
+    def _explicitly_explained(self, hypothesis: str, evidence: List[Dict[str, Any]]) -> Set[int]:
+        """Indices of evidence items the caller declared this seed hypothesis to explain."""
+        declared = self._meta_for(hypothesis).get("explains") or []
+        explained: Set[int] = set()
+        for entry in declared:
+            for index, item in enumerate(evidence):
+                if isinstance(entry, int) and not isinstance(entry, bool):
+                    if item.get("source") == f"observation_{entry}":
+                        explained.add(index)
+                elif isinstance(entry, str) and entry.strip():
+                    needle, content = entry.strip().lower(), str(item.get("content", "")).lower()
+                    if needle in content or content in needle:
+                        explained.add(index)
+        return explained
+
+    def _explained_indices(self, hypothesis: str, evidence: List[Dict[str, Any]]) -> Set[int]:
+        keywords = self._tokens(hypothesis)
+        explained = {
+            index for index, item in enumerate(evidence)
+            if keywords & self._tokens(item.get("content", ""))
+        }
+        return explained | self._explicitly_explained(hypothesis, evidence)
+
     def _explanatory_power(self, hypothesis: str, evidence: List[Dict[str, Any]]) -> float:
-        """Fraction of evidence items that share ≥1 keyword with the hypothesis."""
+        """Fraction of evidence items explained: shared content word, or declared via ``explains``."""
         if not evidence:
             return 0.0
-        keywords = set(hypothesis.lower().split())
-        explained = sum(
-            1 for item in evidence
-            if any(kw in str(item.get("content", "")).lower() for kw in keywords)
-        )
-        return round(explained / len(evidence), 6)
- 
+        return round(len(self._explained_indices(hypothesis, evidence)) / len(evidence), 6)
+
     def _bayesian_posterior(self, hypothesis: str, evidence: List[Dict[str, Any]]) -> float:
         """Compute P(H|E) via Bayes' theorem with configurable parameters.
- 
-        P(H|E) = P(E|H) · P(H) / P(E)
- 
-        - P(H):   prior — decreases with word count (complexity penalty).
-        - P(E|H): likelihood — fraction of evidence items whose keyword
-                  overlap with the hypothesis exceeds ``likelihood_overlap_threshold``.
-        - P(E):   marginal evidence probability — mean confidence weighted
-                  by source diversity.
+
+        P(H|E) = P(E|H) * P(H) / P(E)
+
+        - P(H):   prior -- a caller-supplied seed ``prior`` or, by default, an Occam prior
+                  that decreases with word count.
+        - P(E|H): likelihood -- fraction of evidence items the hypothesis explains.
+        - P(E):   marginal evidence probability -- mean confidence weighted by source diversity.
+
+        NOTE: these are heuristic scores on a [0, 1] scale, not calibrated probabilities.
         """
         prior      = self._prior(hypothesis)
         likelihood = self._likelihood(hypothesis, evidence)
         evidence_p = self._evidence_probability(evidence)
- 
+
         if evidence_p <= 0.0:
             return 0.0
         return clamp_confidence((likelihood * prior) / evidence_p)
- 
+
     def _prior(self, hypothesis: str) -> float:
-        """Occam-weighted prior: simpler (shorter) hypotheses have higher prior."""
+        """Caller-supplied prior if given, else an Occam-weighted prior (shorter = likelier)."""
+        supplied = self._meta_for(hypothesis).get("prior")
+        if isinstance(supplied, (int, float)) and not isinstance(supplied, bool):
+            return clamp_confidence(supplied)
         words      = len(hypothesis.split())
         complexity = min(1.0, words / self._parsimony_max_words)
         return clamp_confidence(self._prior_base - complexity * self._prior_complexity_scale)
@@ -422,10 +523,14 @@ class ReasoningAbduction(BaseReasoning):
         """
         if not evidence:
             return 1.0   # no evidence does not contradict
-        hyp_kw = set(hypothesis.lower().split())
+        hyp_kw = self._tokens(hypothesis)
+        declared = self._explicitly_explained(hypothesis, evidence)
         explained = 0
-        for item in evidence:
-            content_kw = set(str(item.get("content", "")).lower().split())
+        for index, item in enumerate(evidence):
+            if index in declared:
+                explained += 1
+                continue
+            content_kw = self._tokens(item.get("content", ""))
             if not content_kw:
                 continue
             overlap_ratio = len(hyp_kw & content_kw) / len(content_kw)
@@ -453,77 +558,84 @@ class ReasoningAbduction(BaseReasoning):
  
     def _evidence_coverage(self, hypothesis: str, evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Return a per-item record showing which evidence pieces are explained."""
-        keywords = set(hypothesis.lower().split())
+        explained = self._explained_indices(hypothesis, evidence)
         return [
             {
                 "evidence":   item,
-                "explained":  any(kw in str(item.get("content", "")).lower() for kw in keywords),
+                "explained":  index in explained,
                 "confidence": clamp_confidence(item.get("confidence", 0.0)),
             }
-            for item in evidence
+            for index, item in enumerate(evidence)
         ]
- 
+
     def _find_contradictions(self, hypothesis: str, evidence: List[Dict[str, Any]],
                              context: Dict[str, Any]) -> List[str]:
         """Identify evidence items and constraints that contradict the hypothesis.
- 
+
         Contradiction signals:
-        - Evidence typed as ``"contradiction"`` that shares keywords.
+        - Evidence typed as ``"contradiction"`` that shares a content word.
         - Constraint strings containing ``" contradicts "`` and the hypothesis text.
         """
-        hyp_kw  = set(hypothesis.lower().split())
+        hyp_kw  = self._tokens(hypothesis)
         contradictions: List[str] = []
- 
+
         for item in evidence:
             if item.get("type") == "contradiction":
-                content_kw = set(str(item.get("content", "")).lower().split())
-                if hyp_kw & content_kw:
+                if hyp_kw & self._tokens(item.get("content", "")):
                     contradictions.append(str(item.get("content", "")))
- 
-        for constraint in context.get("constraints", []):
+
+        for constraint in self._as_list(context.get("constraints")):
             if " contradicts " in str(constraint) and hypothesis in str(constraint):
                 contradictions.append(str(constraint))
- 
+
         return contradictions
- 
+
     # ------------------------------------------------------------------
     # Phase 4 — Selection
     # ------------------------------------------------------------------
     def _select_best_hypothesis(self, evaluated: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Pick the highest-composite-score hypothesis that passes the gates.
 
-        ``selection_mode`` is intentionally explicit so callers can distinguish a
-        strict accepted hypothesis from the existing relaxed explanatory-threshold
-        fallback.  No scoring formula or threshold policy is changed here.
+        * A hypothesis contradicted by evidence/constraints is never selected.
+        * Caller-supplied (seed) hypotheses are considered before generated templates:
+          a template restates the observation, so it trivially "covers" it and used to
+          outrank every real candidate.
+        * ``selection_mode`` is explicit so callers can distinguish a strict accepted
+          hypothesis from the relaxed explanatory-threshold fallback.
         """
-        valid = [
-            hypothesis
-            for hypothesis in evaluated
-            if hypothesis["is_supported"]
-            and hypothesis["confidence"] >= self.min_confidence
-            and hypothesis["explanatory_power"] >= self.explanatory_threshold
-        ]
+        eligible = [h for h in evaluated if not h.get("contradictions")]
+        tiers = (
+            [h for h in eligible if h.get("origin") == "seed"],
+            [h for h in eligible if h.get("origin") != "seed"],
+        )
+        for tier in tiers:
+            valid = [
+                hypothesis
+                for hypothesis in tier
+                if hypothesis["is_supported"]
+                and hypothesis["confidence"] >= self.min_confidence
+                and hypothesis["explanatory_power"] >= self.explanatory_threshold
+            ]
+            if valid:
+                best = valid[0]
+                best["selection_mode"] = "strict"
+                log_step(f"Best hypothesis selected: {best['hypothesis'][:80]}")
+                return best
 
-        if valid:
-            best = valid[0]
-            best["selection_mode"] = "strict"
-            log_step(f"Best hypothesis selected: {best['hypothesis'][:80]}")
-            return best
-
-        relaxed = [
-            hypothesis
-            for hypothesis in evaluated
-            if hypothesis["is_supported"]
-            and hypothesis["confidence"] >= self.min_confidence
-        ]
-        if relaxed:
-            best = relaxed[0]
-            best["selection_mode"] = "relaxed_explanatory_threshold"
-            log_step(
-                f"Fallback hypothesis (relaxed threshold): {best['hypothesis'][:80]}",
-                "warning",
-            )
-            return best
+            relaxed = [
+                hypothesis
+                for hypothesis in tier
+                if hypothesis["is_supported"]
+                and hypothesis["confidence"] >= self.min_confidence
+            ]
+            if relaxed:
+                best = relaxed[0]
+                best["selection_mode"] = "relaxed_explanatory_threshold"
+                log_step(
+                    f"Fallback hypothesis (relaxed threshold): {best['hypothesis'][:80]}",
+                    "warning",
+                )
+                return best
 
         log_step("No hypothesis met the acceptance criteria", "warning")
         return None
@@ -540,14 +652,21 @@ class ReasoningAbduction(BaseReasoning):
     ) -> Dict[str, Any]:
         """Build the canonical abduction result payload."""
         valid_count = sum(1 for h in all_hypotheses if h["is_supported"])
+        contradictions = [
+            {"hypothesis": h["hypothesis"], "contradicted_by": c}
+            for h in all_hypotheses
+            for c in h.get("contradictions", [])
+        ]
         return json_safe_reasoning_state({
             "best_explanation":       best,
             "alternative_hypotheses": [h for h in all_hypotheses if h is not best],
             "evidence_used":          evidence,
+            "contradictions":         contradictions,
             "metrics": {
                 "total_hypotheses": len(all_hypotheses),
                 "valid_hypotheses": valid_count,
                 "evidence_count":   len(evidence),
+                "grounded":         bool(best is not None and best.get("origin") == "seed"),
                 "elapsed_ms":       round(elapsed * 1000, 2),
                 "timestamp_ms":     monotonic_timestamp_ms(),
                 "success":          best is not None,

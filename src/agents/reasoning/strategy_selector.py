@@ -215,7 +215,14 @@ class ReasoningStrategySelector:
         raw = path.read_bytes()
         self._init(json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest(), allow_experimental)
 
-        logger.info(f"RSS successfully initialized with {raw}.")
+        # Log provenance, never the artifact bytes (this used to dump the entire ~4 MB checkpoint).
+        logger.info(
+            "RSS initialized | version=%s promotion=%s sha256=%s bytes=%d",
+            getattr(self, "version", None),
+            getattr(self, "promotion", None),
+            self.checksum[:12],
+            len(raw),
+        )
 
     @classmethod
     def from_model(cls, model: Mapping[str, Any], *, allow_experimental: bool = True) -> "ReasoningStrategySelector":
