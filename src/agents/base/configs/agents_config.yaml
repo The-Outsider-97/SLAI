@@ -576,6 +576,9 @@ handler_agent:
   enable_learning_loop: true
   enable_escalation: true
   enable_lightweight_fallback: true
+  # Fallback requires allow_lightweight_fallback=true and idempotent=true in
+  # the trusted task context; it shares the total recovery attempt budget.
+  lightweight_fallback_requires_opt_in: true
   checkpoint_max_age_seconds: 600
   telemetry_buffer_size: 1000
   postmortem_buffer_size: 1000
@@ -590,7 +593,7 @@ handler_agent:
     - dependency
     - resource
     - unicode
-  honor_retry_delay: false
+  honor_retry_delay: true
   publish_last_execution_to_shared_memory: true
   publish_status_to_shared_memory: true
   shared_last_result_key: handler:agent:last_execution
