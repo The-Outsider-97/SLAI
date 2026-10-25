@@ -78,7 +78,12 @@ def make_entity(kind: str, geometry: dict, *, layer="0", name=None, metadata=Non
     return validate_entity(entity)
 
 def entity_bounds(entity: dict) -> tuple[tuple[float,float], tuple[float,float]]:
-    """Conservative analytic 2D bounds (arc uses full circle envelope)."""
+    """Tight analytic 2D bounds, including partial-arc extrema."""
+    from .operations import entity_bounds as _bounds
+    return _bounds(entity)
+
+
+def _legacy_entity_bounds(entity: dict) -> tuple[tuple[float,float], tuple[float,float]]:
     validate_entity(entity)
     kind, g = entity["kind"], entity["geometry"]
     if kind == "point":

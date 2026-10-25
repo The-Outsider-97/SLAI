@@ -57,7 +57,7 @@ class Scene:
                 raise ValidationError("scene graph contains a parent cycle")
             for key in chain:
                 state[key]=2
-        if not isinstance(self.families,list):
+        if not isinstance(self.families,list) or len(self.families)>10_000:
             raise ValidationError("families must be a list")
         from .families import validate_family, resolve_parameters
         assert_unique(f.get("id") if isinstance(f,dict) else None for f in self.families)
