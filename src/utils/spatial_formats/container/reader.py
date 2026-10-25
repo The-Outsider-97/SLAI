@@ -1,7 +1,7 @@
 """Defensive bounded decoder for SLAI SGEO/SDRW ZIP artifacts."""
 from dataclasses import dataclass
 from pathlib import Path
-from zipfile import ZipFile, ZIP_STORED, BadZipFile
+from zipfile import ZipFile, ZIP_STORED, ZIP_DEFLATED, BadZipFile
 from ..common.errors import ValidationError, IntegrityError, ResourceLimitError, UnsupportedFeatureError
 from ..common.helpers import parse_json, digest
 from ..common.ids import require_id
@@ -91,6 +91,10 @@ def load_package(path, *, max_archive_size=MAX_ARCHIVE_SIZE, max_unpacked=MAX_UN
                 raise ValidationError("duplicate archive members")
             for info in infos:
                 _validate_name(info.filename)
+                if info.compress_type not in (ZIP_STORED, ZIP_DEFLATED):
+                    raise UnsupportedFeatureError('unsupported ZIP compression method')
+                if info.filename in ('mimetype', 'manifest.json') and info.file_size > 1024 * 1024:
+                    raise ResourceLimitError('container header exceeds 1 MiB')
                 if info.flag_bits & 1:
                     raise ValidationError("encrypted ZIP entries are unsupported")
                 if info.file_size > MAX_UNPACKED or (info.file_size and info.file_size > MAX_RATIO * max(1, info.compress_size)):
