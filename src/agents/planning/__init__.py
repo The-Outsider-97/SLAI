@@ -22,7 +22,6 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "PlanningExecutor": (".planning_executor", "PlanningExecutor"),
     "PlanningMemory": (".planning_memory", "PlanningMemory"),
     "PlanningMetrics": (".planning_metrics", "PlanningMetrics"),
-    "PlanSuccessPredictor": (".plan_success_predictor", "PlanSuccessPredictor"),
     "PlanningMonitor": (".planning_monitor", "PlanningMonitor"),
     "ProbabilisticAction": (".probabilistic_planner", "ProbabilisticAction"),
     "ProbabilisticPlanner": (".probabilistic_planner", "ProbabilisticPlanner"),

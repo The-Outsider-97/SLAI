@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.4.0"
+__version__ = "2.2.0"
 
 """
 Production Handler Agent
@@ -86,9 +86,12 @@ class HandlerAgent(BaseAgent):
 
     Responsibilities:
     - normalize raw failures into Handler failure payloads
-    - coordinate policy, SLA, intelligence, strategy selection, retry, recovery, checkpointing, telemetry, postmortems, and escalation
-    - use IssueHandler recovery functions instead of duplicating issue-specific remediation logic
-    - keep SharedMemory as a collaboration fabric and HandlerMemory as the authoritative operational memory API
+    - coordinate policy, SLA, intelligence, strategy selection, retry, recovery,
+      checkpointing, telemetry, postmortems, and escalation
+    - use IssueHandler recovery functions instead of duplicating issue-specific
+      remediation logic
+    - keep SharedMemory as a collaboration fabric and HandlerMemory as the
+      authoritative operational memory API
     """
 
     DEFAULT_RECOVERY_STRATEGIES: Tuple[str, ...] = (
@@ -143,12 +146,7 @@ class HandlerAgent(BaseAgent):
         self.enable_learning_loop = coerce_bool(cfg.get("enable_learning_loop"), default=True)
         self.enable_escalation = coerce_bool(cfg.get("enable_escalation"), default=True)
         self.enable_lightweight_fallback = coerce_bool(cfg.get("enable_lightweight_fallback"), default=True)
-        # A mode change can alter task quality and replay side effects. A caller
-        # must explicitly authorize it for a known-idempotent task.
-        self.lightweight_fallback_requires_opt_in = coerce_bool(
-            cfg.get("lightweight_fallback_requires_opt_in"), default=True
-        )
-        self.honor_retry_delay = coerce_bool(cfg.get("honor_retry_delay"), default=True)
+        self.honor_retry_delay = coerce_bool(cfg.get("honor_retry_delay"), default=False)
         self.publish_last_execution_to_shared_memory = coerce_bool(cfg.get("publish_last_execution_to_shared_memory"), default=True)
         self.publish_status_to_shared_memory = coerce_bool(cfg.get("publish_status_to_shared_memory"), default=True)
         self.include_result_payload = coerce_bool(cfg.get("include_result_payload"), default=True)
@@ -312,7 +310,6 @@ class HandlerAgent(BaseAgent):
         context: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Coordinate SLA, policy, strategy, retry, checkpoint, fallback, and escalation."""
-        recovery_started = monotonic_timestamp()
         context_map = coerce_mapping(context)
         failure = normalize_failure_payload(normalized_failure, policy=self.error_policy)
         target_agent_name = get_agent_name(target_agent, context=context_map)
@@ -335,22 +332,6 @@ class HandlerAgent(BaseAgent):
                 sla=sla,
                 insight=insight_payload,
                 last_result={"status": "failed", "reason": "target_agent_missing"},
-                checkpoint_id=None,
-            )
-
-        # Handler must not infer that re-running a side-effecting operation is
-        # safe. Reject before probing a circuit breaker or changing its state.
-        if context_map.get("idempotent") is False:
-            return self._failed_recovery(
-                normalized_failure=failure,
-                context=context_map,
-                strategy="none",
-                recommendation="non_idempotent_recovery_requires_review",
-                attempts=0,
-                max_retries=0,
-                sla=sla,
-                insight=insight_payload,
-                last_result={"status": "failed", "reason": "non_idempotent_operation"},
                 checkpoint_id=None,
             )
 
@@ -394,12 +375,6 @@ class HandlerAgent(BaseAgent):
             coerce_int(retry_payload.get("retries"), 0, minimum=0),
             coerce_int(sla.get("recommended_attempts"), 0, minimum=0),
         )
-        # Allocate a single attempt *within* the same budget to an explicitly
-        # authorized fallback; never append an invisible extra retry.
-        fallback_eligible = self._lightweight_fallback_eligible(
-            target_agent=target_agent, context=context_map, sla=sla
-        ) and max_retries > 1
-        primary_attempt_limit = max_retries - int(fallback_eligible)
 
         checkpoint_id = self._save_pre_recovery_checkpoint(
             target_agent_name=target_agent_name,
@@ -419,31 +394,16 @@ class HandlerAgent(BaseAgent):
         last_result: Dict[str, Any] = {"status": "failed", "reason": "unattempted"}
         executed_strategies: List[str] = []
 
-        while attempts < primary_attempt_limit and self._has_recovery_time_left(sla, recovery_started) and (
-            # The initial policy decision is already evaluated above. Calling
-            # it twice would consume two half-open circuit-breaker probes.
-            attempts == 0 or self._can_continue_recovery(
-                target_agent_name=target_agent_name,
-                attempts=attempts,
-                max_retries=max_retries,
-                normalized_failure=failure,
-                context=context_map,
-                sla=sla,
-            )
+        while self._can_continue_recovery(
+            target_agent_name=target_agent_name,
+            attempts=attempts,
+            max_retries=max_retries,
+            normalized_failure=failure,
+            context=context_map,
+            sla=sla,
         ):
-            if not coerce_bool(sla.get("can_retry"), default=False):
-                break
             if self.honor_retry_delay:
-                remaining = coerce_float(sla.get("remaining_seconds"), 0.0, minimum=0.0) - elapsed_seconds(recovery_started)
-                if not self._sleep_before_attempt(
-                    attempts=attempts,
-                    retry_payload=retry_payload,
-                    failure=failure,
-                    remaining_seconds=remaining,
-                ):
-                    break
-                if not self._has_recovery_time_left(sla, recovery_started):
-                    break
+                self._sleep_before_attempt(attempts=attempts, retry_payload=retry_payload, failure=failure)
 
             raw_result = self._execute_strategy(
                 strategy_key=strategy_key,
@@ -506,16 +466,9 @@ class HandlerAgent(BaseAgent):
             retry_decision=retry_payload,
             selection=selection,
             executed_strategies=executed_strategies,
-            normalized_failure=failure,
-            max_retries=max_retries,
-            recovery_started=recovery_started,
         )
         if fallback_result is not None:
-            if fallback_result.get("status") == "recovered":
-                return fallback_result
-            attempts += 1
-            executed_strategies.append("fallback_mode")
-            last_result = fallback_result
+            return fallback_result
 
         restored_state = self.memory.restore_checkpoint(checkpoint_id) if checkpoint_id else None
         escalation_started = time.perf_counter()
@@ -748,23 +701,6 @@ class HandlerAgent(BaseAgent):
         )
         return bool(decision.allowed)
 
-    @staticmethod
-    def _has_recovery_time_left(sla: Mapping[str, Any], started: float) -> bool:
-        return elapsed_seconds(started) < coerce_float(sla.get("remaining_seconds"), 0.0, minimum=0.0)
-
-    def _lightweight_fallback_eligible(
-        self, *, target_agent: Any, context: Mapping[str, Any], sla: Mapping[str, Any]
-    ) -> bool:
-        if not self.enable_lightweight_fallback or not callable(getattr(target_agent, "use_lightweight_mode", None)):
-            return False
-        if self.lightweight_fallback_requires_opt_in and not coerce_bool(context.get("allow_lightweight_fallback"), default=False):
-            return False
-        if context.get("idempotent") is not True:
-            return False
-        if not coerce_bool(sla.get("can_retry"), default=False) or not coerce_bool(sla.get("degrade_allowed"), default=False):
-            return False
-        return True
-
     def _execute_strategy(
         self,
         *,
@@ -829,37 +765,19 @@ class HandlerAgent(BaseAgent):
         retry_decision: Mapping[str, Any],
         selection: Mapping[str, Any],
         executed_strategies: Sequence[str],
-        normalized_failure: Mapping[str, Any],
-        max_retries: int,
-        recovery_started: float,
     ) -> Optional[Dict[str, Any]]:
-        if not self._lightweight_fallback_eligible(target_agent=target_agent, context=context, sla=sla):
+        if not self.enable_lightweight_fallback:
             return None
-        if attempts >= max_retries or not self._has_recovery_time_left(sla, recovery_started):
+        if not callable(getattr(target_agent, "use_lightweight_mode", None)):
             return None
-        if not self._can_continue_recovery(
-            target_agent_name=target_agent_name,
-            attempts=attempts,
-            max_retries=max_retries,
-            normalized_failure=normalized_failure,
-            context=context,
-            sla=sla,
-        ):
+        if coerce_float(sla.get("remaining_seconds"), 0.0) <= 0:
             return None
 
         enabled = False
         try:
-            enabled = True
             target_agent.use_lightweight_mode(True)
+            enabled = True
             fallback = target_agent.perform_task(task_data)
-            if not self._is_recovered(fallback):
-                self.policy.record_failure(
-                    target_agent_name,
-                    normalized_failure=normalized_failure,
-                    context=context,
-                    reason="lightweight_fallback_unverified",
-                )
-                return {"status": "failed", "reason": "lightweight_fallback_unverified", "recovered": False}
             self.policy.record_success(target_agent_name, context=context, reset_failure_window=False)
             return self._recovery_payload(
                 status="recovered",
@@ -880,11 +798,11 @@ class HandlerAgent(BaseAgent):
         except Exception as exc:
             self.policy.record_failure(
                 target_agent_name,
-                normalized_failure={"type": type(exc).__name__, "message": "lightweight fallback raised", "severity": "medium", "retryable": False},
+                normalized_failure={"type": type(exc).__name__, "message": str(exc), "severity": "medium", "retryable": False},
                 context=context,
                 reason="lightweight_fallback_failed",
             )
-            return {"status": "failed", "reason": "lightweight_fallback_exception", "recovered": False}
+            return None
         finally:
             if enabled:
                 with contextlib.suppress(Exception):
@@ -1012,10 +930,15 @@ class HandlerAgent(BaseAgent):
 
     @staticmethod
     def _is_recovered(result: Any) -> bool:
-        """Use the subsystem's single, conservative outcome-verification rule."""
-        if isinstance(result, bool):
-            return result
-        return is_recovered_result(HandlerAgent._payload(result))
+        payload = HandlerAgent._payload(result)
+        status = str(payload.get("status", "")).lower()
+        if payload.get("recovered") is True:
+            return True
+        if status in {"recovered", "ok", "success", "degraded"}:
+            return True
+        if status in {"failed", "error", "not_applicable", "skipped"}:
+            return False
+        return is_recovered_result(payload)
 
     @staticmethod
     def _execution_status(recovery_result: Mapping[str, Any]) -> str:
@@ -1028,21 +951,14 @@ class HandlerAgent(BaseAgent):
             return "skipped"
         return "failed"
 
-    def _sleep_before_attempt(
-        self, *, attempts: int, retry_payload: Mapping[str, Any],
-        failure: Mapping[str, Any], remaining_seconds: Optional[float] = None,
-    ) -> bool:
-        """Return False instead of waiting when backoff exhausts the SLA."""
+    def _sleep_before_attempt(self, *, attempts: int, retry_payload: Mapping[str, Any], failure: Mapping[str, Any]) -> None:
         schedule = coerce_list(retry_payload.get("delay_schedule"))
         if attempts >= len(schedule):
-            return True
+            return
         delay = coerce_float(schedule[attempts], 0.0, minimum=0.0, maximum=60.0)
-        if remaining_seconds is not None and delay >= remaining_seconds:
-            return False
         if delay > 0:
             logger.debug("HandlerAgent sleeping before retry | delay=%s failure=%s", delay, failure.get("context_hash"))
             time.sleep(delay)
-        return True
 
     def _telemetry_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         history_limit = coerce_int(limit, self.telemetry_buffer_size, minimum=1, maximum=self.telemetry_buffer_size)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.4.0"
+__version__ = "2.0.0"
 
 import copy
 import hashlib
@@ -725,22 +725,16 @@ def normalize_recovery_result(recovery_result: Optional[Mapping[str, Any]]) -> D
 
 
 def is_recovered_result(result: Any) -> bool:
-    """Require affirmative recovery evidence, never mere presence of a result.
-
-    A failed/negative result takes precedence over contradictory success flags.
-    Degraded and unknown outcomes are not verified full recoveries.
-    """
+    """Return True when a strategy result should be treated as recovered."""
     if isinstance(result, Mapping):
-        status = str(result.get("status") or "").strip().lower()
-        if status in {"failed", "error", "cancelled", "canceled", "skipped", "not_applicable", "quarantined", "unknown", "degraded"}:
+        status = str(result.get("status", "")).lower()
+        if status == "failed":
             return False
-        if any(result.get(key) is False for key in ("ok", "success", "recovered", "handled")):
+        if status in {"recovered", "ok", "success", "degraded"}:
+            return True
+        if result.get("ok") is False:
             return False
-        return (
-            status in {"recovered", "ok", "success"}
-            or any(result.get(key) is True for key in ("ok", "success", "recovered"))
-        )
-    return result is True
+    return result is not None
 
 
 def build_telemetry_event(

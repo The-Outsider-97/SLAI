@@ -36,12 +36,6 @@ __all__ = [
     "ReaderTimeoutError",
     "ReaderCancelledError",
     "ReaderTaskExecutionError",
-    "IntegrityError",
-    "CompressionError",
-    "SalvageError",
-    "JobError",
-    "JobNotFoundError",
-    "JobStateError",
     "normalize_reader_error",
     "reader_error_payload",
     # Helpers
@@ -92,10 +86,6 @@ __all__ = [
     "atomic_write_bytes",
     "atomic_write_text",
     "atomic_write_json",
-    "publish_file",
-    "atomic_publish_bytes",
-    "read_file_head",
-    "warn_unknown_config_keys",
     "read_json_file",
     # Task / planning
     "normalize_files",

@@ -10,7 +10,6 @@ src/agents/quality/
 │   ├── baseline_governance.py
 │   ├── relationship_quality.py
 │   ├── evidence_calibration.py
-│   ├── quality_predictor.py
 │   └── README.md
 ├── structural_quality.py
 ├── statistical_quality.py
@@ -19,8 +18,6 @@ src/agents/quality/
 ├── workflow_control.py
 ├── configs/
 │   └── quality_config.yaml
-├── models/
-│   └── quality_predictor/        # trained advisory checkpoint + evaluation.json (train_qp.py)
 └── utils/
     ├── config_loader.py
     ├── quality_error.py
@@ -178,45 +175,6 @@ Returned evidence includes confidence, uncertainty, evidence strength, support c
 
 The calibrator never changes `pass/warn/block`. The active fitness policy decides whether weak evidence is acceptable.
 
-## `quality_predictor.py`
-
-`QualityPredictor` is a learned, **advisory-only** early-warning model. Before the full checks run it estimates, from cheap batch features, how likely the batch is to be blocked (`block`) or flagged (`attention`) and which defect family is the likely cause (`schema`, `required`, `constraints`, `missingness`, `duplicates`, `outliers`, `drift`, `leakage`, `consistency`, `provenance`). It returns calibrated probabilities, an ensemble-disagreement uncertainty, an out-of-distribution fraction, a risk tier (`low` / `elevated` / `high`) and a focus list naming the subsystem and checks to watch.
-
-Boundaries:
-
-- It never changes `pass/warn/block`, never relaxes a policy and never skips a mandatory check (`advice.mandatory_checks_unchanged` is always `true`). Structural validation remains the first deterministic barrier.
-- `deprioritize_optional_checks` is only ever set for an **approved**, reliable, low-risk prediction; no QualityAgent code path currently skips a check because of it.
-- Features are computed before the checks from a bounded, deterministic record sample plus QualityMemory source history. They use no label values and no outcome of the current batch, so there is no target leakage.
-- It fails open: any error is logged and the deterministic pipeline continues unchanged. A missing or invalid configuration raises `CONFIGURATION_INVALID` at construction.
-
-Modes (`quality_agent.intelligence.quality_predictor` in `agents_config.yaml`; **disabled by default**):
-
-| mode | behaviour |
-| --- | --- |
-| `collect` | extract features and record the real outcome; no model needed. Use this to gather training data |
-| `shadow` | also predict and record the prediction beside the real outcome; the verdict is untouched |
-| `advisory` | additionally exposes `quality_prediction` (risk tier, probabilities, focus) to WorkflowControl; refuses any checkpoint that is not `approved` |
-
-When enabled, the decision carries `quality_prediction` (features, predictions, observed outcome, absolute error). It is persisted with the final decision in QualityMemory (`record_type == "quality_agent_final_decision"`), so shadow-mode logs can be harvested for retraining with `python train_qp.py collect --from-memory`.
-
-Checkpoints are JSON (never pickle) at `src/agents/quality/models/quality_predictor/manifest.json` and are validated on load (schema, feature and target lists, scaler, domain, ensemble members, calibration, selection thresholds, promotion).
-
-### Training (`train_qp.py`, repository root)
-
-Training labels are never invented: each training row is produced by running the **real** QualityAgent (isolated in-memory QualityMemory, predictor in `collect` mode), so features and labels come from the production code path.
-
-```bash
-python train_qp.py doctor                       # environment + real-agent probe
-python train_qp.py all                          # synthesize -> prepare -> train -> smoke
-python train_qp.py collect --batches my.jsonl --source-name lab --source-license internal
-python train_qp.py collect --from-memory        # harvest shadow/collect decisions
-python train_qp.py all --use-sources all --no-synthetic
-python train_qp.py predict --batch batch.json
-python train_qp.py export --approve             # only if the evaluation gate passes
-```
-
-Sources are held out as whole groups for validation and test, calibration and risk thresholds are fitted on validation only, and the trainer verifies that the shipped pure-Python runtime reproduces the trained probabilities. A checkpoint stays `experimental` until it beats the prior, history and logistic baselines on held-out data **and** enough non-synthetic test rows exist; synthetic metrics measure agreement with the deterministic pipeline on simulated batches, not production performance.
-
 ## Recommended QualityAgent pipeline
 
 ```mermaid
@@ -286,8 +244,6 @@ relationship_quality: ...
 evidence_calibration: ...
 ```
 
-The one exception is `quality_predictor`, which is an optional QualityAgent runtime feature and is therefore configured under `quality_agent.intelligence.quality_predictor` in `src/agents/base/configs/agents_config.yaml` (defaults live in `quality_predictor.py`).
-
 No local YAML/JSON configuration and no hidden environment-variable policy is introduced.
 
 ## Failure semantics
@@ -297,7 +253,6 @@ No local YAML/JSON configuration and no hidden environment-variable policy is in
 - insufficient pair support -> pair is skipped;
 - unavailable memory -> explicit-input operation remains possible;
 - weak evidence -> lower evidence strength, not automatic verdict mutation;
-- predictor unavailable, unapproved for advisory mode, or failing -> no prediction, deterministic pipeline unchanged;
 - hard-block policy -> decided by the active fitness policy using existing QualityErrorType values.
 
 ## Academic interpretation

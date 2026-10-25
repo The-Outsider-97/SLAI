@@ -71,12 +71,6 @@ class ReaderErrorType(Enum):
     CANCELLED = "Reader task cancelled"
     UNEXPECTED_FAILURE = "Unexpected reader failure"
 
-    # Detection, integrity, compression, salvage and durable-job additions.
-    INTEGRITY_FAILURE = "Integrity failure"
-    COMPRESSION_FAILURE = "Compression failure"
-    SALVAGE_FAILURE = "Salvage failure"
-    JOB_FAILURE = "Job failure"
-
 
 class ReaderErrorStage(Enum):
     """Execution stage where a Reader error occurred."""
@@ -95,11 +89,6 @@ class ReaderErrorStage(Enum):
     MEMORY = "memory"
     BATCH = "batch"
     RUNTIME = "runtime"
-    DETECTION = "detection"
-    INTEGRITY = "integrity"
-    COMPRESSION = "compression"
-    SALVAGE = "salvage"
-    JOB = "job"
 
 
 class ReaderErrorSeverity(Enum):
@@ -772,133 +761,6 @@ class ReaderTaskExecutionError(ReaderError):
             policy=ReaderErrorPolicy(retryable=False, recoverable=False, user_correctable=False),
             resolution="Inspect the internal Reader error payload and root cause chain.",
         )
-
-
-class IntegrityError(ReaderError):
-    """Raised when a file or artifact fails a mandatory integrity check."""
-
-    def __init__(
-        self,
-        source: str,
-        message: str = "Reader integrity validation failed",
-        *,
-        checks: Optional[Iterable[Mapping[str, Any]]] = None,
-        context: Optional[Mapping[str, Any]] = None,
-        cause: Optional[BaseException] = None,
-    ) -> None:
-        merged_context: Dict[str, Any] = {"source": source}
-        if checks is not None:
-            merged_context["checks"] = [dict(check) for check in checks]
-        if context:
-            merged_context.update(context)
-        super().__init__(
-            ReaderErrorType.INTEGRITY_FAILURE,
-            message,
-            merged_context,
-            cause=cause,
-            stage=ReaderErrorStage.INTEGRITY,
-            severity=ReaderErrorSeverity.ERROR,
-            policy=ReaderErrorPolicy(retryable=False, recoverable=True, user_correctable=True),
-            resolution="Provide an intact copy of the source, or run Reader salvage when the file is damaged.",
-        )
-
-
-class CompressionError(ReaderError):
-    """Raised when Reader cannot compress, optimize or expand a file."""
-
-    def __init__(
-        self,
-        source: str,
-        method: str,
-        message: str,
-        cause: Optional[BaseException] = None,
-        *,
-        context: Optional[Mapping[str, Any]] = None,
-    ) -> None:
-        merged_context: Dict[str, Any] = {"source": source, "method": str(method)}
-        if context:
-            merged_context.update(context)
-        super().__init__(
-            ReaderErrorType.COMPRESSION_FAILURE,
-            message,
-            merged_context,
-            cause=cause,
-            stage=ReaderErrorStage.COMPRESSION,
-            severity=ReaderErrorSeverity.ERROR,
-            policy=ReaderErrorPolicy(retryable=isinstance(cause, OSError), recoverable=True, user_correctable=True),
-            resolution="Check the requested method, the output directory, available disk space, and the configured size limits.",
-        )
-
-
-class SalvageError(ReaderError):
-    """Raised when damaged-container salvage cannot recover anything usable."""
-
-    def __init__(
-        self,
-        source: str,
-        message: str = "Reader could not salvage the damaged file",
-        *,
-        context: Optional[Mapping[str, Any]] = None,
-        cause: Optional[BaseException] = None,
-    ) -> None:
-        merged_context: Dict[str, Any] = {"source": source}
-        if context:
-            merged_context.update(context)
-        super().__init__(
-            ReaderErrorType.SALVAGE_FAILURE,
-            message,
-            merged_context,
-            cause=cause,
-            stage=ReaderErrorStage.SALVAGE,
-            severity=ReaderErrorSeverity.ERROR,
-            policy=ReaderErrorPolicy(retryable=False, recoverable=False, user_correctable=True),
-            resolution="Provide an intact copy of the source; the damaged file did not contain recoverable content.",
-        )
-
-
-class JobError(ReaderError):
-    """Base failure for durable Reader job journaling."""
-
-    def __init__(
-        self,
-        message: str,
-        context: Optional[Mapping[str, Any]] = None,
-        cause: Optional[BaseException] = None,
-        *,
-        code: Optional[str] = None,
-    ) -> None:
-        super().__init__(
-            ReaderErrorType.JOB_FAILURE,
-            message,
-            context=context,
-            cause=cause,
-            code=code,
-            stage=ReaderErrorStage.JOB,
-            severity=ReaderErrorSeverity.ERROR,
-            policy=ReaderErrorPolicy(retryable=isinstance(cause, OSError), recoverable=True, user_correctable=True),
-            resolution="Check the Reader job store location, permissions and free space, then retry or resume the job.",
-        )
-
-
-class JobNotFoundError(JobError):
-    def __init__(self, job_id: str) -> None:
-        super().__init__(
-            f"Reader job does not exist: {job_id}",
-            {"job_id": job_id},
-            code="READER_JOB_NOT_FOUND",
-        )
-        self.policy = ReaderErrorPolicy(retryable=False, recoverable=False, user_correctable=True)
-        self.resolution = "List jobs to find a valid job id; completed jobs may have been pruned."
-
-
-class JobStateError(JobError):
-    def __init__(self, job_id: str, message: str, context: Optional[Mapping[str, Any]] = None) -> None:
-        merged_context: Dict[str, Any] = {"job_id": job_id}
-        if context:
-            merged_context.update(context)
-        super().__init__(message, merged_context, code="READER_JOB_STATE_INVALID")
-        self.policy = ReaderErrorPolicy(retryable=False, recoverable=False, user_correctable=True)
-        self.resolution = "Resume only interrupted or failed jobs; a running job belongs to its active owner."
 
 
 def normalize_reader_error(
