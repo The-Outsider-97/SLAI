@@ -33,6 +33,19 @@ def import_dxf(path, *, unit="mm"):
     from math import radians
     for entity in doc.modelspace():
         kind=entity.dxftype()
+        # Reject 3D/projected entities: SDRW only represents planar coordinates.
+        if kind == "LWPOLYLINE":
+            if abs(float(entity.dxf.elevation)) > 1e-9:
+                raise UnsupportedFeatureError("elevated DXF polylines require projection")
+            points=entity.get_points("xyb")
+            if any(abs(float(point[2]))>1e-12 for point in points):
+                raise UnsupportedFeatureError("DXF polyline bulge arcs require exact curve decomposition")
+        elif kind in {"POINT","LINE","CIRCLE","ARC"}:
+            values = ([entity.dxf.start,entity.dxf.end] if kind=="LINE" else
+                      [entity.dxf.location] if kind=="POINT" else [entity.dxf.center])
+            if any(abs(float(p[2]))>1e-9 for p in values):
+                raise UnsupportedFeatureError("3D/elevated DXF entity cannot be silently projected")
+
         if kind not in {"POINT","LINE","LWPOLYLINE","CIRCLE","ARC"}:
             raise UnsupportedFeatureError("unsupported DXF entity: "+kind)
         layer=entity.dxf.layer
