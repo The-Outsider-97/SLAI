@@ -76,7 +76,7 @@ def _checked_expression(expression: str) -> ast.Expression:
                ast.Compare, ast.BoolOp, ast.IfExp, ast.Call, ast.Add, ast.Sub,
                ast.Mult, ast.Div, ast.Pow, ast.UAdd, ast.USub, ast.Eq,
                ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.And,
-               ast.Or, ast.Not)
+               ast.Or, ast.Not, ast.Load)
     while stack:
         node, depth = stack.pop()
         count += 1
