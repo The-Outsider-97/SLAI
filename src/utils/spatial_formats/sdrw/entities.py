@@ -77,24 +77,7 @@ def make_entity(kind: str, geometry: dict, *, layer="0", name=None, metadata=Non
         entity["style"] = style
     return validate_entity(entity)
 
-def entity_bounds(entity: dict) -> tuple[tuple[float,float], tuple[float,float]]:
-    """Tight analytic 2D bounds, including partial-arc extrema."""
-    from .operations import entity_bounds as _bounds
-    return _bounds(entity)
-
-
-def _legacy_entity_bounds(entity: dict) -> tuple[tuple[float,float], tuple[float,float]]:
-    validate_entity(entity)
-    kind, g = entity["kind"], entity["geometry"]
-    if kind == "point":
-        points = [g["position"]]
-    elif kind == "line":
-        points = [g["start"], g["end"]]
-    elif kind == "polyline":
-        points = g["points"]
-    else:
-        x, y = g["center"]
-        r = g["radius"]
-        points = [(x-r,y-r),(x+r,y+r)]
-    return (tuple(min(p[i] for p in points) for i in range(2)),
-            tuple(max(p[i] for p in points) for i in range(2)))
+def entity_bounds(entity: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Tight analytic bounds for drawing entities, including arc extrema."""
+    from .operations import entity_bounds as evaluate_bounds
+    return evaluate_bounds(entity)
