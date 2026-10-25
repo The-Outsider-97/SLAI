@@ -1,3 +1,8 @@
+
+![Startup](applications/assets/startup.png)
+---
+
+
 # SLAI — Scalable Learning Autonomous Intelligence
 
 SLAI is a Python-based, modular multi-agent artificial intelligence platform for coordinating specialized computational capabilities. Its architecture separates **agent construction**, **task coordination**, **domain execution**, and **shared runtime services**, allowing language processing, reasoning, planning, learning, scientific computation, and operational controls to be developed and evaluated independently.
