@@ -1206,6 +1206,7 @@ class ReaderAgent(BaseAgent):
         artifacts: List[Dict[str, Any]] = []
         for item in stage.items:
             payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+            assert payload is not None
             output = payload.get("output_path") or payload.get("repaired_path") or payload.get("output_dir")
             if output:
                 artifacts.append({"operation": mode, "output_path": output, "report": payload.get("report")})
