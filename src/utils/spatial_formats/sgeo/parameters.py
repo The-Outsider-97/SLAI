@@ -1,8 +1,7 @@
 """Strict, CPU-only expression evaluation for parametric CAD dimensions.
 
-This is deliberately NOT Python evaluation. It accepts an allowlist of AST
-nodes, evaluates a bounded dependency DAG, and rejects incompatible dimensions.
-Lengths are expressed in the family/document's declared units, angles in radians.
+This is deliberately NOT Python evaluation. It accepts an allowlist of AST nodes, evaluates a bounded dependency DAG,
+and rejects incompatible dimensions. Lengths are expressed in the family/document's declared units, angles in radians.
 """
 from __future__ import annotations
 
