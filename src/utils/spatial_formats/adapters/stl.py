@@ -32,7 +32,7 @@ def import_binary_stl(data: bytes) -> dict:
     if not isinstance(data,bytes) or len(data)<84:
         raise ValidationError("invalid binary STL payload")
     count=COUNT.unpack_from(data,80)[0]
-    if count>MAX_FACES or len(data)!=84+50*count:
+    if count>min(MAX_FACES,333333) or len(data)!=84+50*count:
         raise ResourceLimitError("STL size/count mismatch or triangle budget exceeded")
     vertices=[];faces=[]
     for index in range(count):

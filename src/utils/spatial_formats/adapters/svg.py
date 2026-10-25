@@ -18,7 +18,7 @@ def export_svg(drawing: Drawing) -> str:
     root=ET.Element("svg",{"xmlns":NS,"version":"1.1","data-unit":drawing.unit})
     for entity in drawing.entities:
         kind,g=entity["kind"],entity["geometry"]
-        attrs={"data-id":entity["id"],"data-layer":entity.get("layer","0")}
+        attrs={"data-id":entity["id"],"data-layer":entity.get("layer","0"),"data-kind":kind}
         if kind=="point":
             tag="circle";attrs.update({"cx":str(g["position"][0]),"cy":str(g["position"][1]),"r":"0.01"})
         elif kind=="line":
@@ -69,7 +69,9 @@ def import_svg(raw: str|bytes, *, unit="mm") -> Drawing:
                 return finite(float(child.attrib[key]),key)
             except (KeyError,ValueError,TypeError) as exc:
                 raise ValidationError("invalid SVG numeric attribute: "+key) from exc
-        if tag=="line":
+        if tag=="circle" and child.attrib.get("data-kind")=="point":
+            drawing.add("point",{"position":[n("cx"),n("cy")]},layer=layer)
+        elif tag=="line":
             drawing.add("line",{"start":[n("x1"),n("y1")],"end":[n("x2"),n("y2")]},layer=layer)
         elif tag=="circle":
             drawing.add("circle",{"center":[n("cx"),n("cy")],"radius":n("r")},layer=layer)

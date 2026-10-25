@@ -124,6 +124,8 @@ def load_package(path, *, max_archive_size=MAX_ARCHIVE_SIZE, max_unpacked=MAX_UN
             document = parse_json(data.pop(payload))
             if not isinstance(document, dict):
                 raise ValidationError("document must be an object")
+            from ..verification.invariants import validate_document
+            validate_document(manifest, document)
             return SpatialPackage(manifest, document, data)
     except (BadZipFile, EOFError, RuntimeError) as exc:
         raise IntegrityError("invalid or corrupted spatial ZIP package") from exc
