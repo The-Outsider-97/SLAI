@@ -237,25 +237,23 @@ def evaluate_parameters(specifications: dict, overrides: dict | None = None) -> 
             deps[name]=frozenset()
     ordering=[]
     state={}
-    for node in specifications:
-        stack=[(node,False)]
+    for start in specifications:
+        if state.get(start)==2:
+            continue
+        stack=[(start,iter(sorted(deps[start])))]
+        state[start]=1
         while stack:
-            name,finished=stack.pop()
-            if finished:
+            name,iterator=stack[-1]
+            dependency=next(iterator,None)
+            if dependency is None:
                 state[name]=2
                 ordering.append(name)
-                continue
-            if state.get(name)==2:
-                continue
-            if state.get(name)==1:
+                stack.pop()
+            elif state.get(dependency)==1:
                 raise ValidationError("cyclic parameter dependencies")
-            state[name]=1
-            stack.append((name,True))
-            for dependency in sorted(deps[name],reverse=True):
-                if state.get(dependency)==1:
-                    raise ValidationError("cyclic parameter dependencies")
-                if state.get(dependency)!=2:
-                    stack.append((dependency,False))
+            elif state.get(dependency)!=2:
+                state[dependency]=1
+                stack.append((dependency,iter(sorted(deps[dependency]))))
     values={}
     for name in ordering:
         spec=specifications[name]
