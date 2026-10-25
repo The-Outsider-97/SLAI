@@ -60,7 +60,10 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
             for member, raw in sorted(members.items()):
                 _entry(member, raw, archive, ZIP_DEFLATED)
         load_package(name)
-        with open(name, "rb") as handle:
+        # On Windows, os.fsync() calls the CRT _commit() API, which requires
+        # a writable file descriptor. The archive is closed at this point;
+        # reopen it read/write to commit the completed ZIP bytes to storage.
+        with open(name, "r+b") as handle:
             os.fsync(handle.fileno())
         if overwrite:
             os.replace(name, destination)
