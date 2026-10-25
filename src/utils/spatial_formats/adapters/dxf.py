@@ -1,0 +1,51 @@
+"""DXF subset through ezdxf, explicitly optional and restricted to supported entities."""
+from ..common import ValidationError, DependencyUnavailableError, UnsupportedFeatureError
+from ..sdrw import Drawing
+
+def _ezdxf():
+    try: import ezdxf
+    except ImportError as exc: raise DependencyUnavailableError("install ezdxf for DXF exchange") from exc
+    return ezdxf
+
+def export_dxf(drawing:Drawing, path):
+    ezdxf=_ezdxf()
+    drawing.validate()
+    doc=ezdxf.new("R2010")
+    msp=doc.modelspace()
+    for layer in drawing.layers:
+        if layer["name"]!="0": doc.layers.new(layer["name"])
+    for entity in drawing.entities:
+        kind,g=entity["kind"],entity["geometry"]
+        attrs={"layer":entity.get("layer","0")}
+        if kind=="point": msp.add_point((*g["position"],0),dxfattribs=attrs)
+        elif kind=="line": msp.add_line((*g["start"],0),(*g["end"],0),dxfattribs=attrs)
+        elif kind=="polyline": msp.add_lwpolyline(g["points"],close=g.get("closed",False),dxfattribs=attrs)
+        elif kind=="circle": msp.add_circle((*g["center"],0),g["radius"],dxfattribs=attrs)
+        elif kind=="arc":
+            from math import degrees
+            msp.add_arc((*g["center"],0),g["radius"],degrees(g["start_angle"]),degrees(g["end_angle"]),dxfattribs=attrs)
+    doc.saveas(str(path))
+
+def import_dxf(path, *, unit="mm"):
+    ezdxf=_ezdxf()
+    doc=ezdxf.readfile(str(path))
+    drawing=Drawing(unit=unit)
+    from math import radians
+    for entity in doc.modelspace():
+        kind=entity.dxftype()
+        if kind not in {"POINT","LINE","LWPOLYLINE","CIRCLE","ARC"}:
+            raise UnsupportedFeatureError("unsupported DXF entity: "+kind)
+        layer=entity.dxf.layer
+        if layer not in {x["name"] for x in drawing.layers}: drawing.add_layer(layer)
+        if kind=="POINT":
+            drawing.add("point",{"position":list(entity.dxf.location)[:2]},layer=layer)
+        elif kind=="LINE":
+            drawing.add("line",{"start":list(entity.dxf.start)[:2],"end":list(entity.dxf.end)[:2]},layer=layer)
+        elif kind=="LWPOLYLINE":
+            drawing.add("polyline",{"points":[list(p[:2]) for p in entity.get_points()],"closed":bool(entity.closed)},layer=layer)
+        elif kind=="CIRCLE":
+            drawing.add("circle",{"center":list(entity.dxf.center)[:2],"radius":entity.dxf.radius},layer=layer)
+        else:
+            drawing.add("arc",{"center":list(entity.dxf.center)[:2],"radius":entity.dxf.radius,
+                              "start_angle":radians(entity.dxf.start_angle),"end_angle":radians(entity.dxf.end_angle if entity.dxf.end_angle>entity.dxf.start_angle else entity.dxf.end_angle+360)},layer=layer)
+    return drawing
