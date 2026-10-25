@@ -3,10 +3,11 @@ import json
 import math
 import struct
 from pathlib import Path
+import os
 import pytest
 
 from src.utils.spatial_formats import Drawing, Scene, load_package, write_package
-from src.utils.spatial_formats.common import ValidationError, ConflictError
+from src.utils.spatial_formats.common import ValidationError, ConflictError, IntegrityError
 from src.utils.spatial_formats.adapters.svg import export_svg, import_svg
 from src.utils.spatial_formats.adapters.stl import export_binary_stl, import_binary_stl
 from src.utils.spatial_formats.sgeo.geometry import validate_geometry
@@ -86,11 +87,52 @@ def test_corrupt_archive_rejected(tmp_path):
     target=tmp_path/"valid.sgeo"
     write_package(target,scene.manifest(),scene.as_dict())
     damaged=tmp_path/"bad.sgeo"
-    data=bytearray(target.read_bytes());data[len(data)//2]^=0xFF
+    # Damage the first local ZIP header. Mutating an arbitrary middle byte
+    # can hit unused metadata and produce an archive that is still valid.
+    data=bytearray(target.read_bytes())
+    data[0]^=0xFF
     damaged.write_bytes(data)
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         load_package(damaged)
 
 def test_metadata_namespace_required():
     with pytest.raises(ValidationError):
         Scene(metadata={"unqualified":1})
+
+
+def test_fsync_receives_writable_file_descriptor(tmp_path, monkeypatch):
+    """Regression: Windows CRT _commit() rejects a read-only ZIP fd (EBADF)."""
+    real_fsync=os.fsync
+    observed=[]
+
+    def validate_fsync(fd):
+        # A zero-byte write verifies descriptor access without changing bytes.
+        assert os.write(fd,b"")==0
+        observed.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os,"fsync",validate_fsync)
+    drawing=Drawing()
+    target=tmp_path/"fsync.sdrw"
+    write_package(target,drawing.manifest(),drawing.as_dict())
+    assert observed, "writer must commit the temporary file to disk"
+    assert Drawing.from_package(load_package(target)).document_id==drawing.document_id
+
+
+def test_failed_overwrite_leaves_prior_document_intact(tmp_path, monkeypatch):
+    """A failed atomic replace must not destroy the previous valid archive."""
+    from src.utils.spatial_formats.container import writer
+    drawing=Drawing()
+    path=tmp_path/"original.sdrw"
+    write_package(path,drawing.manifest(),drawing.as_dict())
+    original=path.read_bytes()
+    drawing.add("point",{"position":[1,2]})
+
+    def reject_replace(source, destination):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(writer.os,"replace",reject_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        write_package(path,drawing.manifest(),drawing.as_dict(),overwrite=True)
+    assert path.read_bytes()==original
+    assert not list(tmp_path.glob(".slai-spatial-*.tmp"))
