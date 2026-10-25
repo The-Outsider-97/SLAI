@@ -86,7 +86,7 @@ def _checked_expression(expression: str) -> ast.Expression:
             raise ValidationError("forbidden AST node: " + type(node).__name__)
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.keywords or node.func.id not in {
-                "abs", "min", "max", "sqrt", "sin", "cos", "choose", "clamp",
+                "abs", "min", "max", "sqrt", "sin", "cos", "choose", "clamp", "length", "angle",
             }:
                 raise ValidationError("function is not allowlisted")
         if isinstance(node, ast.Constant) and (isinstance(node.value, str) or node.value is None):
@@ -97,7 +97,7 @@ def _checked_expression(expression: str) -> ast.Expression:
 
 def expression_dependencies(expression: str) -> frozenset[str]:
     tree = _checked_expression(expression)
-    function_names = {"abs", "min", "max", "sqrt", "sin", "cos", "choose", "clamp"}
+    function_names = {"abs", "min", "max", "sqrt", "sin", "cos", "choose", "clamp", "length", "angle"}
     return frozenset(n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id not in function_names)
 
 
@@ -192,6 +192,10 @@ def evaluate_expression(expression: str, variables: dict[str, Quantity]) -> Quan
             if len(args)!=1:
                 raise ValidationError("invalid function arity")
             arg=args[0]
+            if name in ("length","angle"):
+                if arg.dimension!=(0,0):
+                    raise ValidationError("unit constructor requires dimensionless scalar")
+                return _quantity(arg.as_number(),(1,0) if name=="length" else (0,1))
             if name=="abs":
                 return _quantity(abs(arg.as_number()),arg.dimension)
             if name=="sqrt":
