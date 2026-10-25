@@ -1,6 +1,7 @@
 """Deterministic validated ZIP writer with atomic replacement semantics."""
 import os
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED, ZIP_STORED
 from ..common.errors import ConflictError, ValidationError, ResourceLimitError
@@ -87,14 +88,32 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
             except FileExistsError as exc:
                 raise ConflictError("output file already exists") from exc
             except OSError:
-                with open(destination, "xb") as target, open(name, "rb") as source:
-                    while True:
-                        chunk = source.read(1024 * 1024)
-                        if not chunk: break
-                        target.write(chunk)
-                    target.flush()
-                    os.fsync(target.fileno())
-        return digest(destination.read_bytes())
+                # Platform fallback when hardlinks are unavailable. Remove an
+                # incomplete newly-created destination if copying fails.
+                created=False
+                try:
+                    with open(destination, "xb") as target:
+                        created=True
+                        with open(name, "rb") as source:
+                            while True:
+                                chunk = source.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                target.write(chunk)
+                            target.flush()
+                            os.fsync(target.fileno())
+                except FileExistsError as exc:
+                    raise ConflictError("output file already exists") from exc
+                except BaseException:
+                    if created:
+                        destination.unlink(missing_ok=True)
+                    raise
+        # Hash incrementally rather than allocating the whole ZIP again.
+        hasher=sha256()
+        with open(destination, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                hasher.update(chunk)
+        return hasher.hexdigest()
     finally:
         if name is not None and os.path.exists(name):
             os.unlink(name)
