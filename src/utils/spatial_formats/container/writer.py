@@ -1,1 +1,81 @@
-# deterministic output, atomic replace
+"""Deterministic validated ZIP writer with atomic replacement semantics."""
+import os
+import tempfile
+from pathlib import Path
+from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED, ZIP_STORED
+from ..common.errors import ConflictError, ValidationError, ResourceLimitError
+from ..common.helpers import canonical_json, digest
+from .reader import MIMES, PAYLOADS, _manifest, _validate_name, MAX_UNPACKED, MAX_MEMBERS
+
+def _entry(name, raw, archive, compression):
+    entry = ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+    entry.compress_type = compression
+    entry.create_system = 3
+    entry.external_attr = 0o100644 << 16
+    archive.writestr(entry, raw)
+
+def write_package(path, manifest: dict, document: dict, assets=None, *, overwrite=False) -> str:
+    """Write a package; return its SHA-256 hex digest.
+
+    Never writes to a caller's existing file unless explicitly permitted. The
+    temporary archive is validated by the same reader before final placement.
+    """
+    from .reader import load_package
+    format_id = manifest.get("format_id") if isinstance(manifest, dict) else None
+    if format_id not in MIMES:
+        raise ValidationError("unsupported document format")
+    payload = PAYLOADS[format_id]
+    assets = {} if assets is None else assets
+    if not isinstance(assets, dict):
+        raise ValidationError("assets must be a path-to-bytes mapping")
+    members = {payload: canonical_json(document)}
+    for name, content in assets.items():
+        if not isinstance(name, str):
+            raise ValidationError("asset path must be a string")
+        _validate_name(name)
+        if name in (payload, "manifest.json", "mimetype") or not isinstance(content, bytes):
+            raise ValidationError("invalid asset path or payload")
+        members[name] = content
+    if len(members) + 2 > MAX_MEMBERS or sum(map(len, members.values())) > MAX_UNPACKED:
+        raise ResourceLimitError("package exceeds resource budget")
+    final_manifest = {**manifest, "parts": [
+        {"path": name, "size": len(raw), "sha256": digest(raw)}
+        for name, raw in sorted(members.items())
+    ]}
+    _manifest(final_manifest)
+    manifest_bytes = canonical_json(final_manifest)
+    destination = Path(path)
+    if destination.exists() and not overwrite:
+        raise ConflictError("output file already exists")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    name = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".slai-spatial-", suffix=".tmp", dir=destination.parent, delete=False) as handle:
+            name = handle.name
+        with ZipFile(name, "w", allowZip64=False) as archive:
+            _entry("mimetype", MIMES[format_id], archive, ZIP_STORED)
+            _entry("manifest.json", manifest_bytes, archive, ZIP_DEFLATED)
+            for member, raw in sorted(members.items()):
+                _entry(member, raw, archive, ZIP_DEFLATED)
+        load_package(name)
+        with open(name, "rb") as handle:
+            os.fsync(handle.fileno())
+        if overwrite:
+            os.replace(name, destination)
+        else:
+            try:
+                os.link(name, destination)
+            except FileExistsError as exc:
+                raise ConflictError("output file already exists") from exc
+            except OSError:
+                with open(destination, "xb") as target, open(name, "rb") as source:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk: break
+                        target.write(chunk)
+                    target.flush()
+                    os.fsync(target.fileno())
+        return digest(destination.read_bytes())
+    finally:
+        if name is not None and os.path.exists(name):
+            os.unlink(name)
