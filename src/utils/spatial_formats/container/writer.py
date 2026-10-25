@@ -43,6 +43,8 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
         for name, raw in sorted(members.items())
     ]}
     _manifest(final_manifest)
+    from ..verification.invariants import validate_document
+    validate_document(final_manifest, document)
     manifest_bytes = canonical_json(final_manifest)
     destination = Path(path)
     if destination.exists() and not overwrite:
