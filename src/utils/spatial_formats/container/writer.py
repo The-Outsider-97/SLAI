@@ -25,6 +25,17 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
     if format_id not in MIMES:
         raise ValidationError("unsupported document format")
     payload = PAYLOADS[format_id]
+    # Externalize SGEO indexed meshes after validating the complete in-memory scene.
+    from ..verification.invariants import validate_document
+    from .scene_buffers import externalize_scene, validate_buffer_references, hydrate_scene
+    pre_manifest={**manifest,"parts":[{"path":payload,"size":0,"sha256":"0"*64}]}
+    validate_document(pre_manifest,document)
+    if format_id == "slai.sgeo":
+        encoded_document, generated_assets = externalize_scene(document)
+        if assets:
+            raise ValidationError("SGEO binary assets are managed by the scene codec")
+        assets=generated_assets
+        document=encoded_document
     assets = {} if assets is None else assets
     if not isinstance(assets, dict):
         raise ValidationError("assets must be a path-to-bytes mapping")
@@ -43,8 +54,11 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
         for name, raw in sorted(members.items())
     ]}
     _manifest(final_manifest)
-    from ..verification.invariants import validate_document
-    validate_document(final_manifest, document)
+    if format_id == "slai.sgeo":
+        validate_buffer_references(document, assets)
+        validate_document(final_manifest, hydrate_scene(document,assets))
+    else:
+        validate_document(final_manifest, document)
     manifest_bytes = canonical_json(final_manifest)
     destination = Path(path)
     if destination.exists() and not overwrite:

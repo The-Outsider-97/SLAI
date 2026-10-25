@@ -5,3 +5,5 @@ from .scene import Scene
 
 from .analysis import MeshDiagnostics, analyze_mesh, transformed_bounds
 from .tessellation import tessellate
+
+from .transactions import apply_scene_operations, objects_within_bounds
