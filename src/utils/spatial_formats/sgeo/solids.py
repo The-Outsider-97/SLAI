@@ -105,8 +105,8 @@ def revolve(profile, *, sweep=2*pi, segments=64):
             faces.extend([[a,b,d],[a,d,c]])
     if not closed:
         for i in range(1,n-1):
-            faces.extend([[0,i,i+1],
-                          [segments*n,segments*n+i+1,segments*n+i]])
+            faces.extend([[0,i+1,i],
+                          [segments*n,segments*n+i,segments*n+i+1]])
     result={"kind":"mesh","vertices":vertices,"faces":faces}
     validate_geometry(result)
     diag=analyze_mesh(result)
