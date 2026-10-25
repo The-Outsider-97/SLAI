@@ -14,11 +14,12 @@ import csv
 import html
 import io
 import json
+import re
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
-from xml.sax.saxutils import escape as xml_escape
+from xml.sax.saxutils import escape as _xml_escape_raw
 
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.reader_error import *
@@ -31,6 +32,16 @@ printer = PrettyPrinter()
 
 
 DEFAULT_OUTPUT_FORMATS = ("txt", "md", "html", "xml", "json", "csv")
+
+# Characters that cannot appear in an XML 1.0 document even when escaped (most C0 controls,
+# surrogates, U+FFFE/U+FFFF). Leaving them in produces output that parsers reject.
+_XML_INVALID_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
+def xml_escape(value: Any) -> str:
+    """Escape text for XML output, dropping characters XML 1.0 cannot represent."""
+
+    return _xml_escape_raw(_XML_INVALID_CHARS.sub("", str(value)))
 
 
 @dataclass(frozen=True)
@@ -214,6 +225,19 @@ class ConversionEngine:
             target_ext,
             overwrite=self.overwrite_existing,
         )
+
+    def _write_output(self, out_path: Path, payload: str) -> Path:
+        """Write a finished artifact and return the path actually used.
+
+        ``prepare_output_path`` only *suggests* a free name; two concurrent conversions (or two inputs with
+        the same stem) can pick the same one. Unless ``overwrite_existing`` is set, publication is exclusive
+        (``atomic_publish_bytes``) and moves on to a unique name, so the returned path - not the suggestion -
+        is what the artifact must report.
+        """
+
+        if self.overwrite_existing:
+            return atomic_write_text(out_path, payload, encoding=self.output_encoding, purpose="output")
+        return atomic_publish_bytes(out_path, payload.encode(self.output_encoding), purpose="output")
 
     def supported_formats(self) -> List[str]:
         """Return configured output formats with registered renderers."""
@@ -530,8 +554,7 @@ class ConversionEngine:
                 if rendered is not None:
                     # Reuse cached rendered content
                     out_path = self._prepare_output_path(output_dir, Path(source).stem, target_ext)
-                    if self.overwrite_existing or not out_path.exists():
-                        atomic_write_text(out_path, rendered, encoding=self.output_encoding, purpose="output")
+                    out_path = self._write_output(out_path, rendered)
                     artifact = ConversionArtifact(
                         status="ok",
                         source=source,
@@ -551,7 +574,7 @@ class ConversionEngine:
         out_path = self._prepare_output_path(output_dir, Path(source).stem, target_ext)
         payload = self._render_document(doc, target_ext)
         self._enforce_output_limits(payload, operation="conversion", source=source, target_format=target_ext)
-        atomic_write_text(out_path, payload, encoding=self.output_encoding, purpose="output")
+        out_path = self._write_output(out_path, payload)
 
         artifact = ConversionArtifact(
             status="ok",
@@ -715,12 +738,7 @@ class ConversionEngine:
                 target_format=target_ext,
             )
 
-            atomic_write_text(
-                out_path,
-                payload,
-                encoding=self.output_encoding,
-                purpose="output",
-            )
+            out_path = self._write_output(out_path, payload)
 
         except ReaderError:
             raise

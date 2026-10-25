@@ -208,11 +208,16 @@ class ReaderMemory:
         ns = safe_filename(namespace or self.cache_namespace, fallback="reader")
         return stable_hash({"namespace": ns, "payload": json_safe(payload)})
 
-    def _json_size(self, payload: Mapping[str, Any]) -> int:
-        return len(stable_json_dumps(payload, redact=self.redact_sensitive_payloads).encode("utf-8"))
+    def _redact_flag(self, exact: bool = False) -> bool:
+        """Exact entries are stored verbatim; everything else follows the configured redaction."""
 
-    def _assert_payload_size(self, payload: Mapping[str, Any], *, max_bytes: int, purpose: str) -> None:
-        size_bytes = self._json_size(payload)
+        return False if exact else self.redact_sensitive_payloads
+
+    def _json_size(self, payload: Mapping[str, Any], *, exact: bool = False) -> int:
+        return len(stable_json_dumps(payload, redact=self._redact_flag(exact)).encode("utf-8"))
+
+    def _assert_payload_size(self, payload: Mapping[str, Any], *, max_bytes: int, purpose: str, exact: bool = False) -> None:
+        size_bytes = self._json_size(payload, exact=exact)
         if size_bytes > max_bytes:
             error_context = {"size_bytes": size_bytes, "max_bytes": max_bytes, "purpose": purpose}
             if purpose == "checkpoint":
@@ -239,8 +244,9 @@ class ReaderMemory:
         return self.audit_dir / DEFAULT_INDEX_FILENAME
 
     def _build_envelope(self, *, entry_type: str, identifier: str, payload: Mapping[str, Any],
-                        metadata: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                        metadata: Optional[Mapping[str, Any]] = None, exact: bool = False) -> Dict[str, Any]:
         created_at = utc_timestamp()
+        redact = self._redact_flag(exact)
         envelope: Dict[str, Any] = {
             "schema_version": READER_MEMORY_SCHEMA_VERSION,
             "entry_type": entry_type,
@@ -248,22 +254,22 @@ class ReaderMemory:
             "created_at": created_at,
             "created_at_iso": utc_now().isoformat(),
             "payload": json_safe(payload, redact=False),
-            "metadata": json_safe(metadata or {}, redact=False),
+            "metadata": json_safe({**dict(metadata or {}), **({"exact": True} if exact else {})}, redact=False),
         }
         if self.enable_integrity_hash:
             envelope["integrity"] = {
                 "algorithm": "sha256",
-                "payload_hash": stable_hash(envelope["payload"], redact=self.redact_sensitive_payloads),
-                "envelope_hash": stable_hash({k: v for k, v in envelope.items() if k != "integrity"}, redact=self.redact_sensitive_payloads),
+                "payload_hash": stable_hash(envelope["payload"], redact=redact),
+                "envelope_hash": stable_hash({k: v for k, v in envelope.items() if k != "integrity"}, redact=redact),
             }
         return envelope
 
-    def _write_payload(self, path: Path, payload: Mapping[str, Any], *, purpose: str) -> str:
+    def _write_payload(self, path: Path, payload: Mapping[str, Any], *, purpose: str, exact: bool = False) -> str:
         try:
             atomic_write_json(
                 path,
                 payload,
-                redact=self.redact_sensitive_payloads,
+                redact=self._redact_flag(exact),
                 indent=self.json_indent,
                 purpose=purpose,
             )
@@ -296,7 +302,9 @@ class ReaderMemory:
         if not isinstance(integrity, Mapping):
             raise PersistenceError("Reader memory envelope is missing integrity metadata", {"path": str(path) if path else None})
         expected_payload_hash = integrity.get("payload_hash")
-        actual_payload_hash = stable_hash(envelope.get("payload", {}), redact=self.redact_sensitive_payloads)
+        stored_metadata = envelope.get("metadata", {})
+        exact = isinstance(stored_metadata, Mapping) and stored_metadata.get("exact") is True
+        actual_payload_hash = stable_hash(envelope.get("payload", {}), redact=self._redact_flag(exact))
         if expected_payload_hash != actual_payload_hash:
             raise PersistenceError(
                 "Reader memory payload integrity check failed",
@@ -346,8 +354,15 @@ class ReaderMemory:
         run_id: Optional[str] = None,
         *,
         metadata: Optional[Mapping[str, Any]] = None,
+        exact: bool = False,
     ) -> str:
-        """Persist a versioned checkpoint and return the checkpoint path."""
+        """Persist a versioned checkpoint and return the checkpoint path.
+
+        Checkpoints are diagnostic by default: sensitive keys are masked and long strings are
+        truncated on disk. Pass ``exact=True`` for state that must be read back and acted on
+        (for example durable job records); it is stored verbatim and its integrity hash covers
+        the exact payload.
+        """
 
         step_name = self._normalize_step(step)
         normalized_run_id = self._normalize_run_id(run_id)
@@ -366,7 +381,7 @@ class ReaderMemory:
             "run_id": normalized_run_id,
             "payload": json_safe(data, redact=False),
         }
-        self._assert_payload_size(checkpoint_payload, max_bytes=self.max_checkpoint_payload_bytes, purpose="checkpoint")
+        self._assert_payload_size(checkpoint_payload, max_bytes=self.max_checkpoint_payload_bytes, purpose="checkpoint", exact=exact)
 
         envelope = self._build_envelope(
             entry_type="checkpoint",
@@ -375,13 +390,14 @@ class ReaderMemory:
             metadata={
                 "step": step_name,
                 "run_id": normalized_run_id,
-                "payload_bytes": self._json_size(checkpoint_payload),
+                "payload_bytes": self._json_size(checkpoint_payload, exact=exact),
                 **dict(metadata or {}),
             },
+            exact=exact,
         )
 
         with self._lock:
-            path = self._write_payload(checkpoint_path, envelope, purpose="checkpoint")
+            path = self._write_payload(checkpoint_path, envelope, purpose="checkpoint", exact=exact)
             self._audit("checkpoint_written", {"checkpoint_id": checkpoint_id, "path": path, "step": step_name, "run_id": normalized_run_id})
             self.prune_checkpoints(max_entries=self.max_checkpoint_entries)
             self._write_index("checkpoint")
@@ -414,12 +430,13 @@ class ReaderMemory:
         limit: Optional[int] = None,
         newest_first: bool = True,
     ) -> List[Dict[str, Any]]:
-        entries = [entry for entry in self._scan_entries("checkpoint")]
+        normalized_run_id = self._normalize_run_id(run_id) if run_id else None
+        # Checkpoint ids embed the run id, so only that run's files need to be opened.
+        entries = [entry for entry in self._scan_entries("checkpoint", f"*_{normalized_run_id}_*.json" if normalized_run_id else "*.json")]
         if step:
             step_name = self._normalize_step(step)
             entries = [entry for entry in entries if entry.step == step_name]
-        if run_id:
-            normalized_run_id = self._normalize_run_id(run_id)
+        if normalized_run_id:
             entries = [entry for entry in entries if entry.run_id == normalized_run_id]
         entries.sort(key=lambda item: item.created_at, reverse=newest_first)
         if limit is not None:
@@ -442,6 +459,12 @@ class ReaderMemory:
 
     def prune_checkpoints(self, *, max_entries: Optional[int] = None, older_than_seconds: Optional[int] = None) -> int:
         limit = max_entries if max_entries is not None else self.max_checkpoint_entries
+        if not (older_than_seconds is not None and older_than_seconds > 0):
+            # Nothing can be over the limit, so skip opening every checkpoint just to count them.
+            index_names = {DEFAULT_INDEX_FILENAME, self.checkpoint_index_file, self.cache_index_file}
+            file_count = sum(1 for item in self.checkpoint_dir.glob("*.json") if item.name not in index_names)
+            if not limit or file_count <= limit:
+                return 0
         entries = self._scan_entries("checkpoint")
         now = utc_timestamp()
         to_delete: List[ReaderMemoryEntry] = []
@@ -675,9 +698,10 @@ class ReaderMemory:
                 expires_at = float(created_at) + self.cache_ttl_seconds
         return bool(expires_at is not None and utc_timestamp() > float(expires_at))
 
-    def _scan_entries(self, entry_type: str) -> List[ReaderMemoryEntry]:
+    def _scan_entries(self, entry_type: str, pattern: str = "*.json") -> List[ReaderMemoryEntry]:
+        """Read entry envelopes; ``pattern`` narrows the files opened (it never widens the scan)."""
+
         directory = self.checkpoint_dir if entry_type == "checkpoint" else self.cache_dir
-        pattern = "*.json"
         index_names = {DEFAULT_INDEX_FILENAME, self.checkpoint_index_file, self.cache_index_file}
         entries: List[ReaderMemoryEntry] = []
         for path in directory.glob(pattern):
@@ -737,7 +761,7 @@ class ReaderMemory:
         }
 
     def find_checkpoints(self, pattern: str = "*", *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        matched = [entry for entry in self._scan_entries("checkpoint") if fnmatch.fnmatch(Path(entry.path).name, pattern)]
+        matched = [entry for entry in self._scan_entries("checkpoint", pattern) if fnmatch.fnmatch(Path(entry.path).name, pattern)]
         matched.sort(key=lambda item: item.created_at, reverse=True)
         if limit is not None:
             matched = matched[: max(0, int(limit))]

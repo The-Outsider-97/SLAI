@@ -576,6 +576,9 @@ handler_agent:
   enable_learning_loop: true
   enable_escalation: true
   enable_lightweight_fallback: true
+  # Fallback requires allow_lightweight_fallback=true and idempotent=true in
+  # the trusted task context; it shares the total recovery attempt budget.
+  lightweight_fallback_requires_opt_in: true
   checkpoint_max_age_seconds: 600
   telemetry_buffer_size: 1000
   postmortem_buffer_size: 1000
@@ -590,7 +593,7 @@ handler_agent:
     - dependency
     - resource
     - unicode
-  honor_retry_delay: false
+  honor_retry_delay: true
   publish_last_execution_to_shared_memory: true
   publish_status_to_shared_memory: true
   shared_last_result_key: handler:agent:last_execution
@@ -1200,6 +1203,18 @@ quality_agent:
       batch_aggregation:
         mean_weight: 0.70
         minimum_weight: 0.30
+
+    # Locally trained, advisory-only batch-risk model (modules/quality_predictor.py, trained by
+    # train_qp.py). It cannot change a verdict, relax a policy or skip a mandatory check, and it
+    # fails open. Defaults preserve existing QualityAgent behavior.
+    quality_predictor:
+      enabled: true
+      mode: shadow                 # collect (features + outcome only) | shadow | advisory (approved checkpoint only)
+      model_path: src/agents/quality/models/quality_predictor/manifest.json
+      allow_experimental: true     # ignored in advisory mode
+      max_sample_records: 128      # bounded, deterministic sample used for features
+      history_limit: 10            # recent final decisions per source used as history features
+      record_features: true        # keep features in the decision so QualityMemory can feed retraining
   result_cache:
     enabled: true
     max_entries: 128
@@ -1252,6 +1267,14 @@ reader_agent:
   retry_max_delay_seconds: 2.0
   retry_backoff_factor: 2.0
   retry_jitter_ratio: 0.10
+
+  # Opt-in capability engines. Every default below leaves existing behavior unchanged; a task can also
+  # switch each one on with the same key (detect / verify / salvage / durable). Engine policy and limits
+  # (detection_engine, integrity_engine, job_engine, compression_engine, salvage_engine) live in reader_config.yaml.
+  detect_files: false             # annotate parsed documents with content-based format detection
+  verify_outputs: false           # validate each written artifact (IntegrityEngine) before reporting success
+  salvage_on_parse_failure: false # try SalvageEngine when a damaged file fails to parse; the run becomes "partial"
+  durable_jobs: false             # journal finished artifacts so an interrupted batch can resume
 
 
 reasoning_agent:

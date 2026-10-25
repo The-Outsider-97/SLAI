@@ -1,0 +1,1236 @@
+{
+  "baselines_used": [
+    "history",
+    "logistic",
+    "prior"
+  ],
+  "caveat": "Simulated rows measure agreement with the plan simulator, not performance on production plans. Collect real executions (collect --from-log) and re-train before relying on it.",
+  "checkpoint_bytes": 625883,
+  "dataset_fingerprint": "4c9a6fda93838e0fee77431ac8ccbc798da5dbcec12813ad44da4e418e964291",
+  "feature_importance": {
+    "cause_resource": {
+      "concurrency_peak_ratio": 0.020015,
+      "critical_share": 0.034342,
+      "deadline_share": 0.043657,
+      "deadline_slack": 0.055112,
+      "gpu_peak_ratio": 0.014825,
+      "hist_task_success_mean": 0.031844,
+      "late_share": 0.022849,
+      "log_gpu_total": 0.016339,
+      "priority_mean": 0.018005,
+      "ram_margin": 0.197601,
+      "ram_peak_ratio": 0.28475,
+      "schedule_efficiency": 0.030672
+    },
+    "cause_task": {
+      "agent_load_mean": 0.039395,
+      "agent_reliability_mean": 0.028272,
+      "agent_reliability_min": 0.03233,
+      "deadline_share": 0.02866,
+      "deadline_slack": 0.233733,
+      "hist_task_success_min": 0.018292,
+      "late_share": 0.043292,
+      "plan_hist_mean_log_ratio": 0.049095,
+      "plan_hist_replan_rate": 0.048792,
+      "ram_peak_ratio": 0.097921,
+      "system_load": 0.028533,
+      "zero_retry_share": 0.047981
+    },
+    "cause_temporal": {
+      "agent_load_mean": 0.02722,
+      "critical_share": 0.037653,
+      "deadline_share": 0.048132,
+      "deadline_slack": 0.339612,
+      "hist_task_known_share": 0.018272,
+      "late_share": 0.037724,
+      "plan_hist_mean_log_ratio": 0.042662,
+      "plan_hist_replan_rate": 0.036818,
+      "ram_margin": 0.024793,
+      "ram_peak_ratio": 0.049603,
+      "system_load": 0.023422,
+      "zero_retry_share": 0.03387
+    },
+    "deadline_miss": {
+      "deadline_share": 0.023276,
+      "deadline_slack": 0.704463,
+      "depth_ratio": 0.014782,
+      "hist_task_success_min": 0.005324,
+      "late_share": 0.046596,
+      "log_parallelism": 0.016713,
+      "plan_hist_log_count": 0.005045,
+      "plan_hist_mean_log_ratio": 0.05014,
+      "plan_hist_success_rate": 0.012428,
+      "ram_peak_ratio": 0.004788,
+      "tight_deadline_share": 0.005825,
+      "width_ratio": 0.021239
+    },
+    "duration_log_ratio": {
+      "agent_balance": 0.020258,
+      "deadline_slack": 0.036756,
+      "hist_log_hazard": 0.018452,
+      "hist_task_success_mean": 0.016361,
+      "max_duration_share": 0.014851,
+      "plan_hist_mean_log_ratio": 0.383855,
+      "plan_hist_success_rate": 0.040126,
+      "ram_peak_ratio": 0.014976,
+      "retry_budget_mean": 0.092523,
+      "risk_mean": 0.016265,
+      "schedule_efficiency": 0.016914,
+      "zero_retry_share": 0.037349
+    },
+    "replan": {
+      "agent_load_mean": 0.04665,
+      "agent_reliability_mean": 0.024363,
+      "agent_reliability_min": 0.024538,
+      "hist_log_hazard": 0.102827,
+      "hist_task_success_mean": 0.018629,
+      "hist_task_success_min": 0.016676,
+      "plan_hist_replan_rate": 0.040936,
+      "retry_budget_mean": 0.086792,
+      "risk_max": 0.01962,
+      "risk_mean": 0.030892,
+      "system_load": 0.055451,
+      "zero_retry_share": 0.305758
+    },
+    "resource_risk": {
+      "concurrency_peak_ratio": 0.213139,
+      "gpu_margin": 0.064294,
+      "gpu_peak_ratio": 0.043491,
+      "high_risk_share": 0.010119,
+      "hist_log_hazard": 0.011371,
+      "hist_task_success_mean": 0.013458,
+      "log_agents_used": 0.015821,
+      "log_gpu_total": 0.010882,
+      "plan_hist_replan_rate": 0.009833,
+      "ram_margin": 0.105984,
+      "ram_peak_ratio": 0.314751,
+      "specialized_hw_share": 0.014797
+    },
+    "success": {
+      "agent_load_mean": 0.028814,
+      "critical_share": 0.052159,
+      "deadline_slack": 0.231466,
+      "hist_log_hazard": 0.042183,
+      "late_share": 0.060083,
+      "log_tasks": 0.023989,
+      "plan_hist_mean_log_ratio": 0.040064,
+      "plan_hist_success_rate": 0.052776,
+      "ram_margin": 0.032964,
+      "ram_peak_ratio": 0.083886,
+      "system_load": 0.027921,
+      "zero_retry_share": 0.042223
+    }
+  },
+  "feature_schema": "3ca20b636290ff7e",
+  "gate": {
+    "checks": {
+      "deadline_miss": {
+        "best_baseline_brier": 0.112599,
+        "best_baseline_minority_pr_auc": 0.845334,
+        "brier": 0.107688,
+        "minority_pr_auc": 0.8594562443578178,
+        "passes": false,
+        "pr_auc_gain": 0.014122
+      },
+      "duration_log_ratio": {
+        "best_baseline_mae": 0.186111,
+        "interval_coverage": 0.880172,
+        "mae": 0.182729,
+        "mae_gain": 0.003382,
+        "passes": false
+      },
+      "replan": {
+        "best_baseline_brier": 0.155735,
+        "best_baseline_minority_pr_auc": 0.572485,
+        "brier": 0.156264,
+        "minority_pr_auc": 0.5704506812113043,
+        "passes": false,
+        "pr_auc_gain": -0.002035
+      },
+      "resource_risk": {
+        "best_baseline_brier": 0.147999,
+        "best_baseline_minority_pr_auc": 0.775605,
+        "brier": 0.13099,
+        "minority_pr_auc": 0.810582354620752,
+        "passes": true,
+        "pr_auc_gain": 0.034978
+      },
+      "success": {
+        "best_baseline_brier": 0.159032,
+        "best_baseline_minority_pr_auc": 0.627216,
+        "brier": 0.149351,
+        "minority_pr_auc": 0.6728732941689822,
+        "passes": true,
+        "pr_auc_gain": 0.045657
+      }
+    },
+    "improves_on_baselines": false,
+    "low_tier_failure_rate": 0.087089,
+    "low_tier_within_limit": true,
+    "non_synthetic_test_rows": 0,
+    "production_eligible": false,
+    "required_non_synthetic_test_rows": 200,
+    "selection_not_worse_than_default": true
+  },
+  "model_sha256": "8360df7d25ed33017476d3da17ecd156a1e851f3a1774b932ea60c87c5907074",
+  "production_approved": false,
+  "test": {
+    "baselines": {
+      "history": {
+        "cause_resource": {
+          "brier": 0.183344,
+          "count": 1038,
+          "ece": 0.067516,
+          "f1": 0.0,
+          "minority_pr_auc": 0.23314065510597304,
+          "positives": 242,
+          "pr_auc": 0.23314065510597304,
+          "precision": 0.0,
+          "prevalence": 0.233141,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "cause_task": {
+          "brier": 0.207553,
+          "count": 1038,
+          "ece": 0.007584,
+          "f1": 0.0,
+          "minority_pr_auc": 0.29383429672447015,
+          "positives": 305,
+          "pr_auc": 0.29383429672447015,
+          "precision": 0.0,
+          "prevalence": 0.293834,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "cause_temporal": {
+          "brier": 0.254912,
+          "count": 1038,
+          "ece": 0.0751,
+          "f1": 0.64225,
+          "minority_pr_auc": 0.4730250481695568,
+          "positives": 491,
+          "pr_auc": 0.4730250481695568,
+          "precision": 0.473025,
+          "prevalence": 0.473025,
+          "recall": 1.0,
+          "roc_auc": 0.5
+        },
+        "deadline_miss": {
+          "brier": 0.233263,
+          "count": 3600,
+          "ece": 0.021296,
+          "f1": 0.0,
+          "minority_pr_auc": 0.3688888888888889,
+          "positives": 1328,
+          "pr_auc": 0.3688888888888889,
+          "precision": 0.0,
+          "prevalence": 0.368889,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "replan": {
+          "brier": 0.200833,
+          "count": 3600,
+          "ece": 0.088437,
+          "f1": 0.312708,
+          "minority_pr_auc": 0.3749088954622506,
+          "positives": 948,
+          "pr_auc": 0.3749088954622506,
+          "precision": 0.423423,
+          "prevalence": 0.263333,
+          "recall": 0.24789,
+          "roc_auc": 0.6421813248181454
+        },
+        "resource_risk": {
+          "brier": 0.228255,
+          "count": 3600,
+          "ece": 0.003333,
+          "f1": 0.0,
+          "minority_pr_auc": 0.3525,
+          "positives": 1269,
+          "pr_auc": 0.3525,
+          "precision": 0.0,
+          "prevalence": 0.3525,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "success": {
+          "brier": 0.218629,
+          "count": 3600,
+          "ece": 0.109566,
+          "f1": 0.818958,
+          "minority_pr_auc": 0.3802222842710771,
+          "positives": 2562,
+          "pr_auc": 0.7723945600131702,
+          "precision": 0.739692,
+          "prevalence": 0.711667,
+          "recall": 0.917252,
+          "roc_auc": 0.6089827762811748
+        }
+      },
+      "logistic": {
+        "cause_resource": {
+          "brier": 0.112249,
+          "count": 1038,
+          "ece": 0.03612,
+          "f1": 0.537396,
+          "minority_pr_auc": 0.7335394259370234,
+          "positives": 242,
+          "pr_auc": 0.7335394259370234,
+          "precision": 0.815126,
+          "prevalence": 0.233141,
+          "recall": 0.400826,
+          "roc_auc": 0.8823559948502845
+        },
+        "cause_task": {
+          "brier": 0.162832,
+          "count": 1038,
+          "ece": 0.034761,
+          "f1": 0.515625,
+          "minority_pr_auc": 0.5991161631705101,
+          "positives": 305,
+          "pr_auc": 0.5991161631705101,
+          "precision": 0.637681,
+          "prevalence": 0.293834,
+          "recall": 0.432787,
+          "roc_auc": 0.7888086238901438
+        },
+        "cause_temporal": {
+          "brier": 0.136885,
+          "count": 1038,
+          "ece": 0.029032,
+          "f1": 0.797721,
+          "minority_pr_auc": 0.8532071590804342,
+          "positives": 491,
+          "pr_auc": 0.8532071590804342,
+          "precision": 0.747331,
+          "prevalence": 0.473025,
+          "recall": 0.855397,
+          "roc_auc": 0.8864720359524456
+        },
+        "deadline_miss": {
+          "brier": 0.112599,
+          "count": 3600,
+          "ece": 0.034518,
+          "f1": 0.781573,
+          "minority_pr_auc": 0.8453341179820386,
+          "positives": 1328,
+          "pr_auc": 0.8453341179820386,
+          "precision": 0.826891,
+          "prevalence": 0.368889,
+          "recall": 0.740964,
+          "roc_auc": 0.9176628388554217
+        },
+        "replan": {
+          "brier": 0.155735,
+          "count": 3600,
+          "ece": 0.021591,
+          "f1": 0.40946,
+          "minority_pr_auc": 0.5724854211814074,
+          "positives": 948,
+          "pr_auc": 0.5724854211814074,
+          "precision": 0.683951,
+          "prevalence": 0.263333,
+          "recall": 0.292194,
+          "roc_auc": 0.7764751226683468
+        },
+        "resource_risk": {
+          "brier": 0.147999,
+          "count": 3600,
+          "ece": 0.03983,
+          "f1": 0.645714,
+          "minority_pr_auc": 0.7756046331811841,
+          "positives": 1269,
+          "pr_auc": 0.7756046331811841,
+          "precision": 0.815884,
+          "prevalence": 0.3525,
+          "recall": 0.534279,
+          "roc_auc": 0.8477454151213016
+        },
+        "success": {
+          "brier": 0.159032,
+          "count": 3600,
+          "ece": 0.021407,
+          "f1": 0.849807,
+          "minority_pr_auc": 0.6272163011409772,
+          "positives": 2562,
+          "pr_auc": 0.883440703302122,
+          "precision": 0.801453,
+          "prevalence": 0.711667,
+          "recall": 0.904372,
+          "roc_auc": 0.7821510170131415
+        }
+      },
+      "prior": {
+        "cause_resource": {
+          "brier": 0.183344,
+          "count": 1038,
+          "ece": 0.067516,
+          "f1": 0.0,
+          "minority_pr_auc": 0.23314065510597304,
+          "positives": 242,
+          "pr_auc": 0.23314065510597304,
+          "precision": 0.0,
+          "prevalence": 0.233141,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "cause_task": {
+          "brier": 0.207553,
+          "count": 1038,
+          "ece": 0.007584,
+          "f1": 0.0,
+          "minority_pr_auc": 0.29383429672447015,
+          "positives": 305,
+          "pr_auc": 0.29383429672447015,
+          "precision": 0.0,
+          "prevalence": 0.293834,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "cause_temporal": {
+          "brier": 0.254912,
+          "count": 1038,
+          "ece": 0.0751,
+          "f1": 0.64225,
+          "minority_pr_auc": 0.4730250481695568,
+          "positives": 491,
+          "pr_auc": 0.4730250481695568,
+          "precision": 0.473025,
+          "prevalence": 0.473025,
+          "recall": 1.0,
+          "roc_auc": 0.5
+        },
+        "deadline_miss": {
+          "brier": 0.233263,
+          "count": 3600,
+          "ece": 0.021296,
+          "f1": 0.0,
+          "minority_pr_auc": 0.3688888888888889,
+          "positives": 1328,
+          "pr_auc": 0.3688888888888889,
+          "precision": 0.0,
+          "prevalence": 0.368889,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "replan": {
+          "brier": 0.194052,
+          "count": 3600,
+          "ece": 0.007963,
+          "f1": 0.0,
+          "minority_pr_auc": 0.2633333333333333,
+          "positives": 948,
+          "pr_auc": 0.2633333333333333,
+          "precision": 0.0,
+          "prevalence": 0.263333,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "resource_risk": {
+          "brier": 0.228255,
+          "count": 3600,
+          "ece": 0.003333,
+          "f1": 0.0,
+          "minority_pr_auc": 0.3525,
+          "positives": 1269,
+          "pr_auc": 0.3525,
+          "precision": 0.0,
+          "prevalence": 0.3525,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "success": {
+          "brier": 0.205261,
+          "count": 3600,
+          "ece": 0.007963,
+          "f1": 0.831548,
+          "minority_pr_auc": 0.28833333333333333,
+          "positives": 2562,
+          "pr_auc": 0.7116666666666667,
+          "precision": 0.711667,
+          "prevalence": 0.711667,
+          "recall": 1.0,
+          "roc_auc": 0.5
+        }
+      }
+    },
+    "by_target_source": {
+      "synthetic_plan_simulation": {
+        "rows": 3600,
+        "success": {
+          "brier": 0.149351,
+          "count": 3600,
+          "ece": 0.022217,
+          "f1": 0.859155,
+          "minority_pr_auc": 0.6728732941689822,
+          "positives": 2562,
+          "pr_auc": 0.8969084386260766,
+          "precision": 0.817925,
+          "prevalence": 0.711667,
+          "recall": 0.904762,
+          "roc_auc": 0.8067596064611131
+        }
+      }
+    },
+    "duration": {
+      "baselines": {
+        "history": {
+          "count": 2562,
+          "mae": 0.195551,
+          "r2": 0.266366,
+          "rmse": 0.254406
+        },
+        "logistic": {
+          "count": 2562,
+          "mae": 0.186111,
+          "r2": 0.331878,
+          "rmse": 0.242782
+        },
+        "prior": {
+          "count": 2562,
+          "mae": 0.226226,
+          "r2": -0.000609,
+          "rmse": 0.297112
+        }
+      },
+      "model": {
+        "count": 2562,
+        "interval_coverage": 0.880172,
+        "mae": 0.182729,
+        "r2": 0.329596,
+        "rmse": 0.243196
+      },
+      "planned_as_is": {
+        "count": 2562,
+        "mae": 0.31469,
+        "r2": -0.805548,
+        "rmse": 0.39911
+      }
+    },
+    "rows": 3600,
+    "selection_study": {
+      "decisive_goals": 195,
+      "goals": 1200,
+      "policies": {
+        "fastest_planned": {
+          "all": {
+            "replan_rate": 0.370833,
+            "success_rate": 0.666667
+          },
+          "decisive": {
+            "replan_rate": 0.758974,
+            "success_rate": 0.210256
+          }
+        },
+        "most_reliable_agents": {
+          "all": {
+            "replan_rate": 0.209167,
+            "success_rate": 0.714167
+          },
+          "decisive": {
+            "replan_rate": 0.441026,
+            "success_rate": 0.502564
+          }
+        },
+        "oracle": {
+          "all": {
+            "replan_rate": null,
+            "success_rate": 0.795
+          },
+          "decisive": {
+            "replan_rate": null,
+            "success_rate": 1.0
+          }
+        },
+        "planner_default": {
+          "all": {
+            "replan_rate": 0.308333,
+            "success_rate": 0.714167
+          },
+          "decisive": {
+            "replan_rate": 0.676923,
+            "success_rate": 0.502564
+          }
+        },
+        "psp_utility": {
+          "all": {
+            "replan_rate": 0.141667,
+            "success_rate": 0.760833
+          },
+          "decisive": {
+            "replan_rate": 0.261538,
+            "success_rate": 0.789744
+          }
+        },
+        "random": {
+          "all": {
+            "replan_rate": 0.263333,
+            "success_rate": 0.711667
+          },
+          "decisive": {
+            "replan_rate": 0.548718,
+            "success_rate": 0.487179
+          }
+        }
+      }
+    },
+    "success_on_reliable_rows": {
+      "brier": 0.145287,
+      "count": 3414,
+      "ece": 0.023284,
+      "f1": 0.866175,
+      "minority_pr_auc": 0.6767649742333726,
+      "positives": 2454,
+      "pr_auc": 0.900892447937969,
+      "precision": 0.826425,
+      "prevalence": 0.718805,
+      "recall": 0.909943,
+      "roc_auc": 0.8103330446889432
+    },
+    "targets": {
+      "cause_resource": {
+        "brier": 0.110245,
+        "count": 1038,
+        "ece": 0.039603,
+        "f1": 0.589189,
+        "minority_pr_auc": 0.7525012978804898,
+        "positives": 242,
+        "pr_auc": 0.7525012978804898,
+        "precision": 0.851562,
+        "prevalence": 0.233141,
+        "recall": 0.450413,
+        "roc_auc": 0.8801341417832966
+      },
+      "cause_task": {
+        "brier": 0.147274,
+        "count": 1038,
+        "ece": 0.028316,
+        "f1": 0.6,
+        "minority_pr_auc": 0.6771191303253199,
+        "positives": 305,
+        "pr_auc": 0.6771191303253199,
+        "precision": 0.706667,
+        "prevalence": 0.293834,
+        "recall": 0.521311,
+        "roc_auc": 0.8217408807281998
+      },
+      "cause_temporal": {
+        "brier": 0.137526,
+        "count": 1038,
+        "ece": 0.037674,
+        "f1": 0.812202,
+        "minority_pr_auc": 0.8526636992645171,
+        "positives": 491,
+        "pr_auc": 0.8526636992645171,
+        "precision": 0.763441,
+        "prevalence": 0.473025,
+        "recall": 0.867617,
+        "roc_auc": 0.8841933598185995
+      },
+      "deadline_miss": {
+        "brier": 0.107688,
+        "count": 3600,
+        "ece": 0.01653,
+        "f1": 0.795542,
+        "minority_pr_auc": 0.8594562443578178,
+        "positives": 1328,
+        "pr_auc": 0.8594562443578178,
+        "precision": 0.812402,
+        "prevalence": 0.368889,
+        "recall": 0.779367,
+        "roc_auc": 0.9222533288965722
+      },
+      "replan": {
+        "brier": 0.156264,
+        "count": 3600,
+        "ece": 0.012743,
+        "f1": 0.396791,
+        "minority_pr_auc": 0.5704506812113043,
+        "positives": 948,
+        "pr_auc": 0.5704506812113043,
+        "precision": 0.643026,
+        "prevalence": 0.263333,
+        "recall": 0.28692,
+        "roc_auc": 0.7746804417969719
+      },
+      "resource_risk": {
+        "brier": 0.13099,
+        "count": 3600,
+        "ece": 0.046198,
+        "f1": 0.703256,
+        "minority_pr_auc": 0.810582354620752,
+        "positives": 1269,
+        "pr_auc": 0.810582354620752,
+        "precision": 0.858116,
+        "prevalence": 0.3525,
+        "recall": 0.595745,
+        "roc_auc": 0.8713133937720227
+      },
+      "success": {
+        "brier": 0.149351,
+        "count": 3600,
+        "ece": 0.022217,
+        "f1": 0.859155,
+        "minority_pr_auc": 0.6728732941689822,
+        "positives": 2562,
+        "pr_auc": 0.8969084386260766,
+        "precision": 0.817925,
+        "prevalence": 0.711667,
+        "recall": 0.904762,
+        "roc_auc": 0.8067596064611131
+      }
+    },
+    "tiers": {
+      "deferred_share": 0.051667,
+      "elevated": {
+        "failure_rate": 0.222031,
+        "replan_rate": 0.32358,
+        "share": 0.322778
+      },
+      "high": {
+        "failure_rate": 0.589903,
+        "replan_rate": 0.343667,
+        "share": 0.313611
+      },
+      "low": {
+        "failure_rate": 0.087089,
+        "replan_rate": 0.140565,
+        "share": 0.363611
+      },
+      "low_tier_failure_rate": 0.087089,
+      "reliable_share": 0.948333
+    }
+  },
+  "trainer_runtime_parity_max_abs_diff": 2.7755575615628914e-16,
+  "validation": {
+    "baselines": {
+      "history": {
+        "cause_resource": {
+          "brier": 0.150164,
+          "count": 959,
+          "ece": 0.0179,
+          "f1": 0.0,
+          "minority_pr_auc": 0.1835245046923879,
+          "positives": 176,
+          "pr_auc": 0.1835245046923879,
+          "precision": 0.0,
+          "prevalence": 0.183525,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "cause_task": {
+          "brier": 0.212997,
+          "count": 959,
+          "ece": 0.020319,
+          "f1": 0.0,
+          "minority_pr_auc": 0.30656934306569344,
+          "positives": 294,
+          "pr_auc": 0.30656934306569344,
+          "precision": 0.0,
+          "prevalence": 0.306569,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "cause_temporal": {
+          "brier": 0.251363,
+          "count": 959,
+          "ece": 0.038219,
+          "f1": 0.675414,
+          "minority_pr_auc": 0.49009384775808135,
+          "positives": 489,
+          "pr_auc": 0.5099061522419187,
+          "precision": 0.509906,
+          "prevalence": 0.509906,
+          "recall": 1.0,
+          "roc_auc": 0.5
+        },
+        "deadline_miss": {
+          "brier": 0.221794,
+          "count": 3600,
+          "ece": 0.073519,
+          "f1": 0.0,
+          "minority_pr_auc": 0.31666666666666665,
+          "positives": 1140,
+          "pr_auc": 0.31666666666666665,
+          "precision": 0.0,
+          "prevalence": 0.316667,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "replan": {
+          "brier": 0.209281,
+          "count": 3600,
+          "ece": 0.106054,
+          "f1": 0.30039,
+          "minority_pr_auc": 0.3345727843052085,
+          "positives": 917,
+          "pr_auc": 0.3345727843052085,
+          "precision": 0.371981,
+          "prevalence": 0.254722,
+          "recall": 0.251908,
+          "roc_auc": 0.5956988770931805
+        },
+        "resource_risk": {
+          "brier": 0.212877,
+          "count": 3600,
+          "ece": 0.056667,
+          "f1": 0.0,
+          "minority_pr_auc": 0.2991666666666667,
+          "positives": 1077,
+          "pr_auc": 0.2991666666666667,
+          "precision": 0.0,
+          "prevalence": 0.299167,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "success": {
+          "brier": 0.199205,
+          "count": 3600,
+          "ece": 0.102089,
+          "f1": 0.843336,
+          "minority_pr_auc": 0.4003253034214932,
+          "positives": 2641,
+          "pr_auc": 0.8118507641203413,
+          "precision": 0.772527,
+          "prevalence": 0.733611,
+          "recall": 0.928436,
+          "roc_auc": 0.6429611812443465
+        }
+      },
+      "logistic": {
+        "cause_resource": {
+          "brier": 0.112432,
+          "count": 959,
+          "ece": 0.017289,
+          "f1": 0.442748,
+          "minority_pr_auc": 0.5632210080171914,
+          "positives": 176,
+          "pr_auc": 0.5632210080171914,
+          "precision": 0.674419,
+          "prevalence": 0.183525,
+          "recall": 0.329545,
+          "roc_auc": 0.8302711018228259
+        },
+        "cause_task": {
+          "brier": 0.170472,
+          "count": 959,
+          "ece": 0.03631,
+          "f1": 0.490405,
+          "minority_pr_auc": 0.5832474411224257,
+          "positives": 294,
+          "pr_auc": 0.5832474411224257,
+          "precision": 0.657143,
+          "prevalence": 0.306569,
+          "recall": 0.391156,
+          "roc_auc": 0.7792184542990128
+        },
+        "cause_temporal": {
+          "brier": 0.148479,
+          "count": 959,
+          "ece": 0.028039,
+          "f1": 0.787938,
+          "minority_pr_auc": 0.8773756901826304,
+          "positives": 489,
+          "pr_auc": 0.851919060599246,
+          "precision": 0.751391,
+          "prevalence": 0.509906,
+          "recall": 0.828221,
+          "roc_auc": 0.8653831092546664
+        },
+        "deadline_miss": {
+          "brier": 0.103955,
+          "count": 3600,
+          "ece": 0.017704,
+          "f1": 0.744444,
+          "minority_pr_auc": 0.8466796285825213,
+          "positives": 1140,
+          "pr_auc": 0.8466796285825213,
+          "precision": 0.788235,
+          "prevalence": 0.316667,
+          "recall": 0.705263,
+          "roc_auc": 0.9232309941520468
+        },
+        "replan": {
+          "brier": 0.155795,
+          "count": 3600,
+          "ece": 0.018897,
+          "f1": 0.388218,
+          "minority_pr_auc": 0.5340072504968929,
+          "positives": 917,
+          "pr_auc": 0.5340072504968929,
+          "precision": 0.63145,
+          "prevalence": 0.254722,
+          "recall": 0.280262,
+          "roc_auc": 0.7676139317346465
+        },
+        "resource_risk": {
+          "brier": 0.141245,
+          "count": 3600,
+          "ece": 0.042166,
+          "f1": 0.617117,
+          "minority_pr_auc": 0.7074664950955062,
+          "positives": 1077,
+          "pr_auc": 0.7074664950955062,
+          "precision": 0.783977,
+          "prevalence": 0.299167,
+          "recall": 0.508821,
+          "roc_auc": 0.8292209352692462
+        },
+        "success": {
+          "brier": 0.140356,
+          "count": 3600,
+          "ece": 0.019605,
+          "f1": 0.877815,
+          "minority_pr_auc": 0.6640611011651005,
+          "positives": 2641,
+          "pr_auc": 0.91074804900388,
+          "precision": 0.82555,
+          "prevalence": 0.733611,
+          "recall": 0.937145,
+          "roc_auc": 0.8138624932335565
+        }
+      },
+      "prior": {
+        "cause_resource": {
+          "brier": 0.150164,
+          "count": 959,
+          "ece": 0.0179,
+          "f1": 0.0,
+          "minority_pr_auc": 0.1835245046923879,
+          "positives": 176,
+          "pr_auc": 0.1835245046923879,
+          "precision": 0.0,
+          "prevalence": 0.183525,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "cause_task": {
+          "brier": 0.212997,
+          "count": 959,
+          "ece": 0.020319,
+          "f1": 0.0,
+          "minority_pr_auc": 0.30656934306569344,
+          "positives": 294,
+          "pr_auc": 0.30656934306569344,
+          "precision": 0.0,
+          "prevalence": 0.306569,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "cause_temporal": {
+          "brier": 0.251363,
+          "count": 959,
+          "ece": 0.038219,
+          "f1": 0.675414,
+          "minority_pr_auc": 0.49009384775808135,
+          "positives": 489,
+          "pr_auc": 0.5099061522419187,
+          "precision": 0.509906,
+          "prevalence": 0.509906,
+          "recall": 1.0,
+          "roc_auc": 0.5
+        },
+        "deadline_miss": {
+          "brier": 0.221794,
+          "count": 3600,
+          "ece": 0.073519,
+          "f1": 0.0,
+          "minority_pr_auc": 0.31666666666666665,
+          "positives": 1140,
+          "pr_auc": 0.31666666666666665,
+          "precision": 0.0,
+          "prevalence": 0.316667,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "replan": {
+          "brier": 0.189839,
+          "count": 3600,
+          "ece": 0.000648,
+          "f1": 0.0,
+          "minority_pr_auc": 0.25472222222222224,
+          "positives": 917,
+          "pr_auc": 0.25472222222222224,
+          "precision": 0.0,
+          "prevalence": 0.254722,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "resource_risk": {
+          "brier": 0.212877,
+          "count": 3600,
+          "ece": 0.056667,
+          "f1": 0.0,
+          "minority_pr_auc": 0.2991666666666667,
+          "positives": 1077,
+          "pr_auc": 0.2991666666666667,
+          "precision": 0.0,
+          "prevalence": 0.299167,
+          "recall": 0.0,
+          "roc_auc": 0.5
+        },
+        "success": {
+          "brier": 0.19632,
+          "count": 3600,
+          "ece": 0.029907,
+          "f1": 0.846339,
+          "minority_pr_auc": 0.2663888888888889,
+          "positives": 2641,
+          "pr_auc": 0.7336111111111111,
+          "precision": 0.733611,
+          "prevalence": 0.733611,
+          "recall": 1.0,
+          "roc_auc": 0.5
+        }
+      }
+    },
+    "by_target_source": {
+      "synthetic_plan_simulation": {
+        "rows": 3600,
+        "success": {
+          "brier": 0.134137,
+          "count": 3600,
+          "ece": 0.024121,
+          "f1": 0.879196,
+          "minority_pr_auc": 0.6954442055501356,
+          "positives": 2641,
+          "pr_auc": 0.917156705417179,
+          "precision": 0.835836,
+          "prevalence": 0.733611,
+          "recall": 0.9273,
+          "roc_auc": 0.827171312727547
+        }
+      }
+    },
+    "duration": {
+      "baselines": {
+        "history": {
+          "count": 2641,
+          "mae": 0.194193,
+          "r2": 0.141855,
+          "rmse": 0.251917
+        },
+        "logistic": {
+          "count": 2641,
+          "mae": 0.179994,
+          "r2": 0.268378,
+          "rmse": 0.232606
+        },
+        "prior": {
+          "count": 2641,
+          "mae": 0.214769,
+          "r2": -0.0014,
+          "rmse": 0.272133
+        }
+      },
+      "model": {
+        "count": 2641,
+        "interval_coverage": 0.899659,
+        "mae": 0.173591,
+        "r2": 0.310301,
+        "rmse": 0.225843
+      },
+      "planned_as_is": {
+        "count": 2641,
+        "mae": 0.315134,
+        "r2": -1.091308,
+        "rmse": 0.393266
+      }
+    },
+    "rows": 3600,
+    "selection_study": {
+      "decisive_goals": 162,
+      "goals": 1200,
+      "policies": {
+        "fastest_planned": {
+          "all": {
+            "replan_rate": 0.373333,
+            "success_rate": 0.691667
+          },
+          "decisive": {
+            "replan_rate": 0.802469,
+            "success_rate": 0.17284
+          }
+        },
+        "most_reliable_agents": {
+          "all": {
+            "replan_rate": 0.199167,
+            "success_rate": 0.7325
+          },
+          "decisive": {
+            "replan_rate": 0.475309,
+            "success_rate": 0.475309
+          }
+        },
+        "oracle": {
+          "all": {
+            "replan_rate": null,
+            "success_rate": 0.803333
+          },
+          "decisive": {
+            "replan_rate": null,
+            "success_rate": 1.0
+          }
+        },
+        "planner_default": {
+          "all": {
+            "replan_rate": 0.299167,
+            "success_rate": 0.731667
+          },
+          "decisive": {
+            "replan_rate": 0.635802,
+            "success_rate": 0.469136
+          }
+        },
+        "psp_utility": {
+          "all": {
+            "replan_rate": 0.118333,
+            "success_rate": 0.7875
+          },
+          "decisive": {
+            "replan_rate": 0.228395,
+            "success_rate": 0.882716
+          }
+        },
+        "random": {
+          "all": {
+            "replan_rate": 0.254722,
+            "success_rate": 0.733611
+          },
+          "decisive": {
+            "replan_rate": 0.537037,
+            "success_rate": 0.483539
+          }
+        }
+      }
+    },
+    "success_on_reliable_rows": {
+      "brier": 0.130855,
+      "count": 3420,
+      "ece": 0.023313,
+      "f1": 0.88476,
+      "minority_pr_auc": 0.701320702635197,
+      "positives": 2527,
+      "pr_auc": 0.9200893717529803,
+      "precision": 0.841485,
+      "prevalence": 0.738889,
+      "recall": 0.932727,
+      "roc_auc": 0.8301437420982172
+    },
+    "targets": {
+      "cause_resource": {
+        "brier": 0.113494,
+        "count": 959,
+        "ece": 0.029452,
+        "f1": 0.452107,
+        "minority_pr_auc": 0.57218534753043,
+        "positives": 176,
+        "pr_auc": 0.57218534753043,
+        "precision": 0.694118,
+        "prevalence": 0.183525,
+        "recall": 0.335227,
+        "roc_auc": 0.8103484558225937
+      },
+      "cause_task": {
+        "brier": 0.154013,
+        "count": 959,
+        "ece": 0.028611,
+        "f1": 0.594912,
+        "minority_pr_auc": 0.6742031464819347,
+        "positives": 294,
+        "pr_auc": 0.6742031464819347,
+        "precision": 0.700461,
+        "prevalence": 0.306569,
+        "recall": 0.517007,
+        "roc_auc": 0.8161168226689172
+      },
+      "cause_temporal": {
+        "brier": 0.140411,
+        "count": 959,
+        "ece": 0.014179,
+        "f1": 0.81194,
+        "minority_pr_auc": 0.8888015612886528,
+        "positives": 489,
+        "pr_auc": 0.862303377240669,
+        "precision": 0.790698,
+        "prevalence": 0.509906,
+        "recall": 0.834356,
+        "roc_auc": 0.8782382630640039
+      },
+      "deadline_miss": {
+        "brier": 0.097995,
+        "count": 3600,
+        "ece": 0.017672,
+        "f1": 0.769369,
+        "minority_pr_auc": 0.8478091577843737,
+        "positives": 1140,
+        "pr_auc": 0.8478091577843737,
+        "precision": 0.790741,
+        "prevalence": 0.316667,
+        "recall": 0.749123,
+        "roc_auc": 0.9313582227927543
+      },
+      "replan": {
+        "brier": 0.154244,
+        "count": 3600,
+        "ece": 0.015889,
+        "f1": 0.40386,
+        "minority_pr_auc": 0.5322044327012585,
+        "positives": 917,
+        "pr_auc": 0.5322044327012585,
+        "precision": 0.632558,
+        "prevalence": 0.254722,
+        "recall": 0.296619,
+        "roc_auc": 0.7748563088162431
+      },
+      "resource_risk": {
+        "brier": 0.124576,
+        "count": 3600,
+        "ece": 0.020539,
+        "f1": 0.662427,
+        "minority_pr_auc": 0.7594792209365375,
+        "positives": 1077,
+        "pr_auc": 0.7594792209365375,
+        "precision": 0.771605,
+        "prevalence": 0.299167,
+        "recall": 0.580316,
+        "roc_auc": 0.8693983780049911
+      },
+      "success": {
+        "brier": 0.134137,
+        "count": 3600,
+        "ece": 0.024121,
+        "f1": 0.879196,
+        "minority_pr_auc": 0.6954442055501356,
+        "positives": 2641,
+        "pr_auc": 0.917156705417179,
+        "precision": 0.835836,
+        "prevalence": 0.733611,
+        "recall": 0.9273,
+        "roc_auc": 0.827171312727547
+      }
+    },
+    "tiers": {
+      "deferred_share": 0.05,
+      "elevated": {
+        "failure_rate": 0.209854,
+        "replan_rate": 0.304745,
+        "share": 0.304444
+      },
+      "high": {
+        "failure_rate": 0.610725,
+        "replan_rate": 0.359484,
+        "share": 0.279722
+      },
+      "low": {
+        "failure_rate": 0.076152,
+        "replan_rate": 0.147629,
+        "share": 0.415833
+      },
+      "low_tier_failure_rate": 0.076152,
+      "reliable_share": 0.95
+    }
+  }
+}

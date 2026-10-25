@@ -196,3 +196,66 @@ semantic_recovery:
   debug_preview_chars: 240
 
 
+# ---------------------------------------------------------------------------
+# Foundations: shared by Parser, Conversion, Compression, Salvage and Job engines.
+# ---------------------------------------------------------------------------
+
+detection_engine:
+  # Bytes read from the start of a file for signature and text sniffing.
+  sniff_bytes: 65536
+  # Bytes of an OLE (.doc/.xls/.ppt) file scanned for stream names.
+  ole_scan_bytes: 1048576
+  # ZIP containers with more entries than this are reported, not enumerated.
+  max_zip_entries: 10000
+  max_zip_members_listed: 20
+
+integrity_engine:
+  # Expansion guard shared by every container reader (0 disables a limit).
+  max_zip_members: 10000
+  max_member_bytes: 268435456
+  max_total_bytes: 1073741824
+  max_compression_ratio: 1000
+  # Validation behavior.
+  max_validate_bytes: 67108864
+  max_xml_parse_bytes: 33554432
+  deep_by_default: false
+  reject_xml_entities: true
+  # Verification of artifacts the Reader writes.
+  verify_outputs: true
+  require_nonempty_outputs: true
+
+job_engine:
+  # Dedicated store: job records are never pruned by checkpoint retention.
+  job_dir: tmp/reader/jobs
+  max_jobs: 1000
+  # A job left "running" longer than this is treated as a crashed run and may be resumed.
+  stale_after_seconds: 3600
+  max_item_result_bytes: 65536
+  # Reuse a finished item on resume only if its artifacts still match their recorded size and SHA-256.
+  verify_artifacts_on_resume: true
+  # 0 keeps terminal jobs until max_jobs is exceeded.
+  retain_terminal_seconds: 0
+
+compression_engine:
+  output_dir: tmp/reader/compressed
+  default_package_format: zip
+  compression_level: 9
+  # optimize() keeps the original unless the result is at least this fraction smaller.
+  min_gain_ratio: 0.01
+  max_input_bytes: 536870912
+  max_package_files: 10000
+  max_expand_files: 10000
+  verify: true
+  verify_text_max_pages: 200
+  # Only used when a task passes lossy: true.
+  image_max_dimension: 2048
+  jpeg_quality: 85
+
+salvage_engine:
+  output_dir: tmp/reader/salvaged
+  max_input_bytes: 268435456
+  max_output_bytes: 536870912
+  # Upper bound on JSON cut points tried when repairing truncated JSON.
+  max_candidates: 4000
+  # Re-validate every repaired file and discard it if it does not validate.
+  validate_output: true
