@@ -552,24 +552,3 @@ meta_controller:
   min_analysis_samples: 10
   cooldown_period_seconds: 300
   retraining_thresholds: {}
-
-# Advisory whole-plan outcome predictor (plan_success_predictor.py, trained by train_psp.py).
-# It scores a finished, scheduled plan before execution and never changes, validates or authorises a plan.
-plan_success_predictor:
-  enabled: true
-  mode: shadow                # collect: record features + outcome | shadow: also predict | advisory: expose a recommendation (needs an approved checkpoint)
-  model_path: "src/agents/planning/models/plan_success_predictor/manifest.json"
-  allow_experimental: true    # collect/shadow only; advisory mode always requires `train_psp.py export --approve`
-  record_features: true
-  record_observations: true   # append executed-plan rows to observation_log for retraining (train_psp.py collect --from-log)
-  observation_log: "data/training/planning/psp/observations.jsonl"
-  max_log_bytes: 50000000
-  max_tasks: 500
-  history_limit: 20           # recent outcomes per workflow family used for the plan-history features
-  max_families: 256
-  top_drivers: 3
-  ranking_weights:            # utility used to order candidate plans of one goal
-    success: 1.0
-    replan: 0.25
-    resource: 0.15
-    duration: 0.10

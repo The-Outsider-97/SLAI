@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Production-grade recovery orchestration for the Reader subsystem.
 
 ``RecoveryEngine`` coordinates deterministic, non-fabricating document recovery
@@ -17,7 +19,6 @@ Pipeline
 6. Return a backward-compatible recovery result for ``ReaderAgent`` and newer
    metadata-rich payloads for observability, checkpoints, and audits.
 """
-from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -327,18 +328,6 @@ class RecoveryEngine:
         after = text_quality_report(low_level)
         content_changed = original != low_level
         warnings: List[str] = [*before.warnings, *after.warnings]
-
-        if not original.strip():
-            # An empty or whitespace-only source has nothing to recover. Running the semantic pass
-            # would replace legitimately empty content with a corruption placeholder.
-            return RecoveryDecision(
-                use_semantic=False,
-                reason="empty_source_nothing_to_recover",
-                quality_before=before.quality_score,
-                quality_after_low_level=after.quality_score,
-                content_changed_by_low_level=content_changed,
-                warnings=tuple(self._limited_warnings(warnings)),
-            )
 
         use_semantic = False
         reason = "quality_acceptable_after_low_level_repair"
