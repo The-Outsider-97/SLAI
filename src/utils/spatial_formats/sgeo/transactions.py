@@ -12,6 +12,15 @@ from .geometry import validate_geometry
 from .families import generate_geometry
 
 def apply_scene_operations(scene, operations: list[dict], *, expected_revision: int | None = None):
+    """Serialize optimistic edits against the Scene's private mutation lock."""
+    from .scene import Scene
+    if not isinstance(scene,Scene):
+        raise ValidationError("expected an SGEO Scene")
+    with scene._mutation_lock:
+        return _apply_scene_operations_locked(scene,operations,expected_revision=expected_revision)
+
+
+def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_revision: int | None = None):
     from .scene import Scene
     if not isinstance(scene, Scene) or not isinstance(operations,list) or not 1 <= len(operations) <= 1000:
         raise ValidationError("operations must be a bounded nonempty list for a Scene")
