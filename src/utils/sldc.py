@@ -20,7 +20,10 @@ Versions
            citations and footnotes, publication metadata, revisions, review comments, declarative
            EMBED records, detached signatures and an authenticated-encryption envelope. All of it
            is inventoried in the manifest with per-part size and SHA-256.
-
+           Adds editable scientific equations, inline scientific/image objects and declarative
+           image transforms/placement. New mandatory features are declared in ``requires``.
+           Old 1.0.0 packages retain their version when read and saved unchanged.
+           
 Compatibility rules (1.x)
   * Unknown keys are rejected, except inside ``extensions`` (document or block level, keys of the
     form ``vendor.name``) and ``x-`` prefixed manifest keys. Both are inert data and are preserved
@@ -146,9 +149,9 @@ MIMETYPE = "application/x-slai-sldc+zip"  # Provisional; not an IANA-registered 
 EXTENSIONS = frozenset({".sldc"})
 MEMBERS = ("mimetype", "manifest.json", "document.json")  # The fixed 0.1.0 member list.
 BLOCK_TYPES = frozenset({"heading", "paragraph", "list_item", "quote", "code"})  # 0.1.0
-BLOCK_TYPES_V1 = BLOCK_TYPES | {"table", "figure", "embed"}
+BLOCK_TYPES_V1 = BLOCK_TYPES | {"table", "figure", "embed", "equation"}
 REQUIRED_FEATURES = frozenset({"tables", "figures", "embeds"})
-SUPPORTED_FEATURES = REQUIRED_FEATURES  # Features a 1.0 reader understands and may be required.
+SUPPORTED_FEATURES = REQUIRED_FEATURES | {"scientific", "inline-media", "image-layout"}
 
 # --- Limits, 0.1.0 (unchanged) ---------------------------------------------------------------
 MAX_ARCHIVE_BYTES = 25 * 1024 * 1024
@@ -257,6 +260,7 @@ class SLDCBlock(_BlockRequired, total=False):
     section: str
     table: dict[str, Any]
     figure: dict[str, Any]
+    equation: dict[str, Any]
     embed: str
     extensions: dict[str, Any]
 
@@ -590,7 +594,7 @@ _DOCUMENT_KEYS_V1 = frozenset({
 })
 _BLOCK_KEYS_V1 = frozenset({
     "id", "type", "text", "spans", "source_ref", "attributes", "style", "section", "table",
-    "figure", "embed", "extensions",
+    "figure", "equation", "embed", "extensions",
 })
 _ALIGN = frozenset({"left", "center", "right", "justify"})
 _CHAR_PROPS = frozenset({"based_on", "font_family", "font_size_pt", "bold", "italic", "underline",
@@ -891,6 +895,128 @@ def _validate_revision_record(record: Any, label: str, *, with_id: bool = False)
     _text_field(record, "note", label, 2000)
 
 
+# SLDC 1.1 content contract (all values are data, never executable instructions):
+# - Display equations use block type=equation, text="", equation={syntax,source,...}.
+#   numbered=True requests a display number computed by the renderer from document order.
+#   Refer to numbered equations via existing xref spans targeting the equation block id.
+# - Inline objects use one U+FFFC character and a type=equation/image span covering it.
+# - Image source bytes stay unchanged in Asset; crop is normalized source rectangle [0,1].
+# - width_mm/height_mm describe a display bounding box (renderer preserves proportions).
+# - rotation_deg is clockwise about the display box center; flip applies before rotation.
+# - Floating x_mm/y_mm are from the top-left of the page content box or target block box;
+#   the containing page is the page on which the figure's block resides. Square wrapping
+#   uses the axis-aligned transformed bounding box; top_bottom displaces full lines.
+# - The renderer is responsible for avoiding clipping, honoring layering, and pagination.
+# Scientific sources are inert, editable data. UI/renderers must use a constrained renderer.
+MAX_EQUATION_SOURCE = 65_536
+MAX_SEQUENCE_NOTES = 1_024
+_OBJECT_CHAR = "\uFFFC"  # Unicode OBJECT REPLACEMENT CHARACTER, one Python string index.
+_MATH_SYNTAX = frozenset({"latex", "mhchem", "mathml", "sequence"})
+_MATH_DOMAINS = frozenset({"mathematics", "chemistry", "biology"})
+_MATHML_NS = "{http://www.w3.org/1998/Math/MathML}"
+_MATHML_ELEMENTS = frozenset({
+    "math", "mrow", "mi", "mn", "mo", "mtext", "mfrac", "msqrt", "mroot", "msub",
+    "msup", "msubsup", "munder", "mover", "munderover", "mtable", "mtr", "mtd",
+    "mfenced", "menclose", "mspace", "mmultiscripts", "mprescripts", "none",
+})
+_MATHML_ATTRS = frozenset({
+    "display", "mathvariant", "mathsize", "mathcolor", "mathbackground", "displaystyle",
+    "stretchy", "fence", "separator", "form", "lspace", "rspace", "minsize", "maxsize",
+    "linethickness", "columnalign", "rowalign", "columnspacing", "rowspacing",
+    "scriptlevel", "notation", "accent", "accentunder", "width", "height", "depth",
+})
+_SEQUENCE_ALPHABETS = {"dna": frozenset("ACGTRYSWKMBDHVN"),
+                       "rna": frozenset("ACGURYSWKMBDHVN"),
+                       "protein": frozenset("ACDEFGHIKLMNPQRSTVWYBXZJUO*")}
+
+
+def _validate_mathml(source: str, label: str) -> None:
+    # No DTD/entity declarations, processing instructions, comments or non-MathML elements.
+    # ElementTree does not fetch remote resources; the small, closed grammar prevents embedded HTML.
+    if "<!" in source or "<?" in source:
+        raise SLDCValidationError(f"{label} contains forbidden XML markup")
+    from xml.etree import ElementTree
+    try:
+        root = ElementTree.fromstring(source)
+    except ElementTree.ParseError as exc:
+        raise SLDCValidationError(f"{label} is not well-formed MathML: {exc}") from exc
+    if root.tag != _MATHML_NS + "math":
+        raise SLDCValidationError(f"{label} needs a MathML namespace <math> root")
+    nodes = [(root, 1)]
+    count = 0
+    while nodes:
+        node, depth = nodes.pop()
+        count += 1
+        if depth > 64 or count > 4096:
+            raise SLDCValidationError(f"{label} MathML exceeds complexity budget")
+        if not isinstance(node.tag, str) or not node.tag.startswith(_MATHML_NS) or \
+                node.tag[len(_MATHML_NS):] not in _MATHML_ELEMENTS:
+            raise SLDCValidationError(f"{label} contains an unsupported MathML element")
+        for key, value in node.attrib.items():
+            if key not in _MATHML_ATTRS or len(value) > 128 or \
+                    any(ch in value.lower() for ch in ("url(", "javascript:", "data:", "<", ">")):
+                raise SLDCValidationError(f"{label} contains an unsafe/unsupported MathML attribute")
+        nodes.extend((child, depth + 1) for child in node)
+
+
+def _validate_equation(equation: Any, label: str, *, inline: bool) -> None:
+    if not isinstance(equation, dict):
+        raise SLDCValidationError(f"{label} must be an object")
+    _check_keys(equation, {"syntax", "source", "domain", "align", "numbered", "alphabet", "direction",
+                           "start_index", "annotations"}, label)
+    syntax = equation.get("syntax")
+    if not _has(_MATH_SYNTAX, syntax):
+        raise SLDCValidationError(f"{label}.syntax must be latex, mhchem, mathml or sequence")
+    domain = equation.get("domain", "mathematics")
+    if not _has(_MATH_DOMAINS, domain):
+        raise SLDCValidationError(f"{label}.domain is invalid")
+    if (syntax == "mhchem" and domain != "chemistry") or (syntax == "sequence" and domain != "biology"):
+        raise SLDCValidationError(f"{label}.syntax is incompatible with domain")
+    source = _text_field(equation, "source", label, MAX_EQUATION_SOURCE, required=True)
+    if source is None:
+        raise SLDCValidationError(f"{label} requires 'source'")
+    if any(ord(ch) < 32 and ch not in "\t\r\n" for ch in source):
+        raise SLDCValidationError(f"{label}.source contains control characters")
+    if "align" in equation:
+        if inline or not _has({"left", "center", "right"}, equation["align"]):
+            raise SLDCValidationError(f"{label}.align is only for display equations")
+    if "numbered" in equation:
+        if inline:
+            raise SLDCValidationError(f"{label}.numbered is only for display equations")
+        _flag(equation["numbered"], f"{label}.numbered")
+    if syntax == "mathml":
+        _validate_mathml(source, label)
+    if syntax == "sequence":
+        _check_keys(equation, {"syntax", "source", "domain", "numbered", "alphabet", "direction", "start_index", "annotations"}, label)
+        alphabet = equation.get("alphabet")
+        if alphabet is None or not _has(_SEQUENCE_ALPHABETS, alphabet):
+            raise SLDCValidationError(f"{label}.alphabet must be dna, rna or protein")
+        if len(source) > 50_000 or any(base not in _SEQUENCE_ALPHABETS[alphabet] for base in source):
+            raise SLDCValidationError(f"{label}.source has invalid sequence symbols")
+        allowed_directions = {"dna": {"5to3", "3to5"}, "rna": {"5to3", "3to5"}, "protein": {"n_to_c", "c_to_n"}}
+        if "direction" in equation and not _has(allowed_directions[alphabet], equation["direction"]):
+            raise SLDCValidationError(f"{label}.direction does not match its alphabet")
+        if "start_index" in equation:
+            _bounded_int(equation["start_index"], 0, 1_000_000_000, label + ".start_index")
+        annotations = equation.get("annotations", [])
+        if not isinstance(annotations, list) or len(annotations) > MAX_SEQUENCE_NOTES:
+            raise SLDCValidationError(f"{label}.annotations exceeds limit")
+        last_end = 0
+        for n, note in enumerate(annotations):
+            here = f"{label}.annotations[{n}]"
+            if not isinstance(note, dict):
+                raise SLDCValidationError(f"{here} must be an object")
+            _check_keys(note, {"start", "end", "label"}, here)
+            start = _bounded_int(note.get("start"), 0, len(source)-1, here+".start")
+            end = _bounded_int(note.get("end"), start+1, len(source), here+".end")
+            if start < last_end:
+                raise SLDCValidationError(f"{here} overlaps or is out of order")
+            last_end = end
+            _text_field(note, "label", here, 256, required=True)
+    elif set(equation) & {"alphabet", "direction", "start_index", "annotations"}:
+        raise SLDCValidationError(f"{label} sequence fields require syntax=sequence")
+
+
 def _validate_spans(spans: Any, text: str, ctx: _Context, label: str) -> None:
     if not isinstance(spans, list) or len(spans) > MAX_SPANS_PER_BLOCK:
         raise SLDCValidationError(f"{label}.spans must be a list of at most {MAX_SPANS_PER_BLOCK}")
@@ -898,6 +1024,7 @@ def _validate_spans(spans: Any, text: str, ctx: _Context, label: str) -> None:
     if ctx.total_spans > MAX_SPANS:
         raise SLDCValidationError(f"Document has more than {MAX_SPANS} spans")
     previous: tuple[int, int, str] = (0, 0, "")
+    occupied_objects: set[int] = set()
     for index, span in enumerate(spans):
         where = f"{label}.spans[{index}]"
         if not isinstance(span, dict):
@@ -936,6 +1063,16 @@ def _validate_spans(spans: Any, text: str, ctx: _Context, label: str) -> None:
             _check_keys(span, base | {"target"}, where)
             if not _has(ctx.block_ids, span.get("target")):
                 raise SLDCValidationError(f"{where}.target is not a block id")
+        elif kind in ("equation", "image"):
+            if end != start + 1 or text[start:end] != _OBJECT_CHAR or start in occupied_objects:
+                raise SLDCValidationError(f"{where} needs its own U+FFFC placeholder")
+            occupied_objects.add(start)
+            if kind == "equation":
+                _check_keys(span, base | {"equation"}, where)
+                _validate_equation(span.get("equation"), where + ".equation", inline=True)
+            else:
+                _check_keys(span, base | {"figure"}, where)
+                _validate_figure(span.get("figure"), where, ctx, inline=True)
         else:
             raise SLDCValidationError(f"{where} has unknown type {kind!r}")
 
@@ -992,10 +1129,12 @@ def _validate_table(table: Any, label: str, ctx: _Context) -> None:
         raise SLDCValidationError(f"{label}.table has a rowspan that runs past the last row")
 
 
-def _validate_figure(figure: Any, label: str, ctx: _Context) -> None:
+def _validate_figure(figure: Any, label: str, ctx: _Context, *, inline: bool = False, block_id: str | None = None) -> None:
     if not isinstance(figure, dict):
         raise SLDCValidationError(f"{label}.figure must be an object")
-    _check_keys(figure, {"asset", "alt", "decorative", "width_mm", "align"}, f"{label}.figure")
+    _check_keys(figure, {"asset", "alt", "decorative", "width_mm", "height_mm", "align",
+                         "crop", "rotation_deg", "flip_horizontal", "flip_vertical", "placement", "credit", "rights"},
+                f"{label}.figure")
     asset_id = _id_field(figure.get("asset"), f"{label}.figure.asset", _ASSET_ID)
     if ctx.assets is not None and asset_id not in ctx.assets:
         raise SLDCValidationError(f"{label}.figure refers to a missing asset {asset_id!r}")
@@ -1003,12 +1142,57 @@ def _validate_figure(figure: Any, label: str, ctx: _Context) -> None:
     alt = _text_field(figure, "alt", f"{label}.figure", 2000, empty_ok=True) or ""
     decorative = _flag(figure["decorative"], f"{label}.figure.decorative") \
         if "decorative" in figure else False
-    if decorative == bool(alt.strip()):  # Exactly one: a description, or an explicit decorative flag.
+    if decorative == bool(alt.strip()):
         raise SLDCValidationError(f"{label}.figure needs alt text, or decorative=true without it")
-    if "width_mm" in figure:
-        _bounded_number(figure["width_mm"], 1, 5000, f"{label}.figure.width_mm")
-    if "align" in figure and not _has(_ALIGN - {"justify"}, figure["align"]):
-        raise SLDCValidationError(f"{label}.figure.align must be left, center or right")
+    for dimension in ("width_mm", "height_mm"):
+        if dimension in figure:
+            _bounded_number(figure[dimension], 0.1, 5000, f"{label}.figure.{dimension}")
+    if "align" in figure and (inline or not _has(_ALIGN - {"justify"}, figure["align"])):
+        raise SLDCValidationError(f"{label}.figure.align must be left, center or right (block only)")
+    for key, maximum in (("credit", 500), ("rights", 1000)):
+        _text_field(figure, key, f"{label}.figure", maximum)
+    if "rotation_deg" in figure:
+        _bounded_number(figure["rotation_deg"], -360, 360, f"{label}.figure.rotation_deg")
+    for key in ("flip_horizontal", "flip_vertical"):
+        if key in figure:
+            _flag(figure[key], f"{label}.figure.{key}")
+    if "crop" in figure:
+        crop = figure["crop"]
+        if not isinstance(crop, dict) or set(crop) != {"left", "top", "right", "bottom"}:
+            raise SLDCValidationError(f"{label}.figure.crop needs normalized left/top/right/bottom")
+        for key in crop:
+            _bounded_number(crop[key], 0, 1, f"{label}.figure.crop.{key}")
+        if crop["left"] >= crop["right"] or crop["top"] >= crop["bottom"]:
+            raise SLDCValidationError(f"{label}.figure.crop must have a positive viewport")
+    if "placement" in figure:
+        placement = figure["placement"]
+        if inline or not isinstance(placement, dict):
+            raise SLDCValidationError(f"{label}.figure.placement only supports block figures")
+        _check_keys(placement, {"mode", "anchor", "target", "x_mm", "y_mm", "wrap", "layer"},
+                    f"{label}.figure.placement")
+        if placement.get("mode") != "floating":
+            raise SLDCValidationError(f"{label}.figure.placement.mode must be floating")
+        if not _has({"page", "block"}, placement.get("anchor")):
+            raise SLDCValidationError(f"{label}.figure.placement.anchor must be page or block")
+        if placement["anchor"] == "block":
+            target = _id_field(placement.get("target"), f"{label}.figure.placement.target")
+            if target not in ctx.block_ids or target == block_id:
+                raise SLDCValidationError(f"{label}.figure.placement.target is missing/self-referential")
+        elif "target" in placement:
+            raise SLDCValidationError(f"{label}.figure.placement.target requires block anchor")
+        for key in ("x_mm", "y_mm"):
+            _bounded_number(placement.get(key), -5000, 5000, f"{label}.figure.placement.{key}")
+        if not _has({"none", "square", "top_bottom"}, placement.get("wrap", "none")):
+            raise SLDCValidationError(f"{label}.figure.placement.wrap is unsupported")
+        if not _has({"content", "behind_text", "in_front_of_text"},
+                    placement.get("layer", "content")):
+            raise SLDCValidationError(f"{label}.figure.placement.layer is unsupported")
+        if placement.get("layer", "content") != "content" and placement.get("wrap", "none") != "none":
+            raise SLDCValidationError(f"{label}.figure.placement text layering cannot wrap")
+        if placement["anchor"] == "page" and placement.get("wrap", "none") != "none":
+            raise SLDCValidationError(f"{label}.figure.placement page anchoring cannot wrap")
+        if "align" in figure:
+            raise SLDCValidationError(f"{label}.figure.align is incompatible with floating placement")
     ctx.add_text(len(alt))
 
 
@@ -1052,13 +1236,17 @@ def _validate_block_v1(block: Any, index: int, ctx: _Context, seen: set[str]) ->
     if not isinstance(text, str):
         raise SLDCValidationError(f"Block #{index} requires string 'text'")
     ctx.add_text(len(text))
-    for key in ("table", "figure", "embed"):
+    for key in ("table", "figure", "embed", "equation"):
         if (key in block) != (block_type == key):
             raise SLDCValidationError(f"{label}: {key!r} belongs to {key} blocks, and they need it")
+    if block_type == "equation" and text:
+        raise SLDCValidationError(f"{label} equation block text must be empty; source is authoritative")
     if "spans" in block:
+        if block_type in ("code", "equation", "figure", "table", "embed") and any(
+                span.get("type") in ("equation", "image") for span in block["spans"] if isinstance(span, dict)):
+            raise SLDCValidationError(f"{label} inline objects require a text-flow block")
         _validate_spans(block["spans"], text, ctx, label)
-    if "source_ref" in block and (not isinstance(block["source_ref"], str)
-                                  or len(block["source_ref"]) > _MAX_REF_CHARS):
+    if "source_ref" in block and (not isinstance(block["source_ref"], str) or len(block["source_ref"]) > _MAX_REF_CHARS):
         raise SLDCValidationError(f"{label} source_ref must be text <= {_MAX_REF_CHARS} characters")
     if "attributes" in block:
         _validate_attributes(block["attributes"], block_type, label)
@@ -1069,7 +1257,9 @@ def _validate_block_v1(block: Any, index: int, ctx: _Context, seen: set[str]) ->
     if block_type == "table":
         _validate_table(block["table"], label, ctx)
     elif block_type == "figure":
-        _validate_figure(block["figure"], label, ctx)
+        _validate_figure(block["figure"], label, ctx, block_id=block_id)
+    elif block_type == "equation":
+        _validate_equation(block["equation"], label + ".equation", inline=False)
     elif block_type == "embed" and not _has(ctx.embeds, block["embed"]):
         raise SLDCValidationError(f"{label} embed is not an embed id")
     if "extensions" in block:
@@ -1153,8 +1343,7 @@ def _prepare_v1(document: dict[str, Any],
 
 
 def _prepare(document: Mapping[str, Any]) -> bytes:
-    """Validate ``document`` (0.1.0, or 1.x when it has a ``schema`` key) and return its
-    canonical JSON payload, serialised once."""
+    """Validate ``document`` (0.1.0, or 1.x when it has a ``schema`` key) and return its canonical JSON payload, serialised once."""
     if not isinstance(document, Mapping):
         raise SLDCValidationError("Document must be a mapping")
     plain = document if isinstance(document, dict) else dict(document)
@@ -1170,8 +1359,7 @@ def _prepare(document: Mapping[str, Any]) -> bytes:
 def _prepare_legacy(document: Mapping[str, Any]) -> bytes:
     if isinstance(document, Mapping) and "schema" in document:
         raise SLDCUnsupportedError(
-            "This is a 1.x document; write it with dumps_package()/write_package(), or "
-            "export_legacy() for a lossy 0.1.0 copy")
+            "This is a 1.x document; write it with dumps_package()/write_package(), or export_legacy() for a lossy 0.1.0 copy")
     return _prepare(document)
 
 
@@ -1201,6 +1389,14 @@ def block_text(block: Mapping[str, Any]) -> str:
     if block.get("type") == "table" and isinstance(table, Mapping):
         rows = "\n".join("\t".join(cell["text"] for cell in row) for row in table["rows"])
         return f"{text}\n{rows}" if text and rows else (text or rows)
+    if block.get("type") == "equation":
+        return block["equation"]["source"]
+    objects = {span["start"]: span for span in block.get("spans", ())
+               if span["type"] in ("equation", "image")}
+    if objects:
+        return "".join((objects[pos]["equation"]["source"] if objects[pos]["type"] == "equation"
+                        else "[Image: " + objects[pos]["figure"].get("alt", "") + "]")
+                       if pos in objects else char for pos, char in enumerate(text))
     return text
 
 
@@ -1224,8 +1420,7 @@ _PART_NAME = re.compile(
 )
 _ASSET_MEDIA = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
 _MEDIA_EXTENSION = {media: ext for ext, media in _ASSET_MEDIA.items()}
-_MANIFEST_KEYS = frozenset({"format", "version", "profile", "requires", "document_id",
-                            "revision_id", "parts"})
+_MANIFEST_KEYS = frozenset({"format", "version", "profile", "requires", "document_id", "revision_id", "parts"})
 _PART_KEYS = frozenset({"name", "media_type", "role", "size", "sha256"})
 
 
@@ -1339,9 +1534,7 @@ class _Loaded:
 def _read_legacy(archive: zipfile.ZipFile, infos: list[zipfile.ZipInfo], manifest: dict[str, Any],
                  size: int, read_parts: bool) -> _Loaded:
     if [i.filename for i in infos] != list(MEMBERS):
-        raise SLDCValidationError(
-            "SLDC v0.1 requires only mimetype, manifest.json, document.json, in order"
-        )
+        raise SLDCValidationError("SLDC v0.1 requires only mimetype, manifest.json, document.json, in order")
     if size > MAX_ARCHIVE_BYTES:
         raise SLDCValidationError("SLDC must be no larger than 25 MiB")
     limits = (len(_MIMETYPE_BYTES), MAX_MANIFEST_BYTES, MAX_DOCUMENT_BYTES)
@@ -1374,9 +1567,7 @@ def _check_manifest_v1(manifest: dict[str, Any], *, check_requires: bool) -> lis
         raise SLDCValidationError("manifest 'requires' must be a list of distinct feature names")
     unknown = sorted(set(requires) - SUPPORTED_FEATURES)
     if unknown and check_requires:
-        raise SLDCUnsupportedError(
-            f"This document requires features this reader does not understand: {unknown}. "
-            "Open it read-only or with a newer reader; do not save it with this one.")
+        raise SLDCUnsupportedError(f"This document requires features this reader does not understand: {unknown}. Open it read-only or with a newer reader; do not save it with this one.")
     _id_field(manifest.get("document_id"), "manifest document_id")
     if not isinstance(manifest.get("revision_id"), str) or not _HEX_SHA256.fullmatch(manifest["revision_id"]):
         raise SLDCValidationError("manifest revision_id must be 64 hex digits")
@@ -1674,13 +1865,12 @@ def add_asset(package: SLDCPackage, asset: Asset) -> SLDCPackage:
 
 
 def prune_assets(package: SLDCPackage) -> SLDCPackage:
-    """Return a copy without assets that no figure or cover refers to."""
-    referenced = {block["figure"]["asset"] for block in package.document["blocks"]
-                  if block.get("type") == "figure" and isinstance(block.get("figure"), dict)}
-    cover = package.document.get("publication", {}).get("cover_asset")
+    """Remove only assets not referenced by figures, inline images or the cover."""
+    if package.version == LEGACY_VERSION:
+        return package.copy()
+    referenced = _validate_v1(package.document)  # References only, no requirement assets exist.
     result = package.copy()
-    result.assets = {key: asset for key, asset in package.assets.items()
-                     if key in referenced or key == cover}
+    result.assets = {key: asset for key, asset in package.assets.items() if key in referenced}
     return result
 
 
@@ -1818,25 +2008,39 @@ def is_sldc(path: str | os.PathLike[str], *, strict: bool = True) -> bool:
 # Packages (1.x): serialising and reading
 # ----------------------------------------------------------------------------------------------
 def _required_features(document: Mapping[str, Any]) -> list[str]:
-    """Features a reader must understand to present ``document`` faithfully."""
-    by_type = {"table": "tables", "figure": "figures", "embed": "embeds"}
+    """Advertise every feature an older reader would otherwise silently discard."""
+    by_type = {"table": "tables", "figure": "figures", "embed": "embeds", "equation": "scientific"}
     needed = {by_type[b["type"]] for b in document["blocks"] if b["type"] in by_type}
     if document.get("embeds"):
         needed.add("embeds")
+    extra_figure_keys = {"height_mm", "crop", "rotation_deg", "flip_horizontal", "flip_vertical", "placement", "credit", "rights"}
+    for block in document["blocks"]:
+        figure = block.get("figure", {})
+        if isinstance(figure, Mapping) and extra_figure_keys.intersection(figure):
+            needed.add("image-layout")
+        for span in block.get("spans", ()):
+            if span["type"] == "equation":
+                needed.add("scientific")
+            elif span["type"] == "image":
+                needed.update(("inline-media", "figures"))
+                if extra_figure_keys.intersection(span["figure"]):
+                    needed.add("image-layout")
     return sorted(needed)
 
 
 @_guarded
-def _build_parts(package: SLDCPackage) -> dict[str, bytes]:
+def _build_parts(package: SLDCPackage, *, _read_only: bool = False) -> dict[str, bytes]:
     """Validate a 1.x package completely and return its serialised parts in canonical order."""
-    if package.version != FORMAT_VERSION:
-        raise SLDCUnsupportedError(
-            f"Cannot build a {package.version!r} package here; migrate_package() it to "
-            f"{FORMAT_VERSION} first")
+    major, minor, _ = _parse_version(package.version)
+    if major != 1 or (minor > 1 and not _read_only):
+        raise SLDCUnsupportedError(f"Cannot write SLDC {package.version!r} with this version")
     if not isinstance(package.document, Mapping):
         raise SLDCValidationError("Package document must be a mapping")
     plain = package.document if isinstance(package.document, dict) else dict(package.document)
     payload, referenced = _prepare_v1(plain, package.assets)
+    features = set(_required_features(plain))
+    if _parse_version(package.version)[1] == 0 and features - REQUIRED_FEATURES:
+        raise SLDCUnsupportedError("SLDC 1.1 features require an explicit upgrade of package.version")
     _check_assets(package.assets, referenced)
     if not isinstance(package.comments, list) or not isinstance(package.signatures, list):
         raise SLDCValidationError("Package comments and signatures must be lists")
@@ -1870,14 +2074,12 @@ def _inventory(parts: Mapping[str, bytes]) -> list[dict[str, Any]]:
 def _plain_archive(package: SLDCPackage) -> bytes:
     if package.version == LEGACY_VERSION:
         if package.assets or package.comments or package.signatures:
-            raise SLDCUnsupportedError(
-                "Version 0.1.0 holds only a document; migrate_package() before adding "
-                "assets, comments or signatures")
+            raise SLDCUnsupportedError("Version 0.1.0 holds only a document; migrate_package() before adding assets, comments or signatures")
         return dumps_sldc(package.document)
     parts = _build_parts(package)
     entries = _inventory(parts)
     manifest = {
-        "format": FORMAT_ID, "version": FORMAT_VERSION, "profile": "publishing",
+        "format": FORMAT_ID, "version": package.version, "profile": "publishing",
         "requires": _required_features(package.document),
         "document_id": package.document["id"],
         "revision_id": _revision_digest((e["name"], e["size"], e["sha256"]) for e in entries
@@ -1897,7 +2099,7 @@ def dumps_package(package: SLDCPackage, *, recipients: Sequence[Recipient] | Non
                   recovery_policy: str = "none") -> bytes:
     """Serialise a package to a deterministic SLDC archive in memory.
 
-    A 1.0.0 package becomes the publishing format; a 0.1.0 package is written unchanged (and must
+    A 1.x package becomes the publishing format; a 0.1.0 package is written unchanged (and must
     then hold only a document). With ``recipients`` the archive is wrapped in an authenticated
     encryption envelope (see :func:`password_recipient`, :func:`x25519_recipient`); that output
     is intentionally not deterministic, because nonces and wrapping keys are random.
@@ -1911,8 +2113,7 @@ def dumps_package(package: SLDCPackage, *, recipients: Sequence[Recipient] | Non
 def revision_id(package: SLDCPackage) -> str:
     """Identity of the exact content of a package: a SHA-256 over its document and assets.
 
-    Comments and signatures are not part of it. For a 0.1.0 package this is its
-    :func:`document_digest`.
+    Comments and signatures are not part of it. For a 0.1.0 package this is its :func:`document_digest`.
     """
     if package.version == LEGACY_VERSION:
         return document_digest(package.document)
@@ -1948,8 +2149,8 @@ def _package_from_loaded(loaded: _Loaded) -> SLDCPackage:
             if name != f"signatures/{record.get('id')}.json":
                 raise SLDCValidationError(f"Part {name!r} does not match its signature id")
             signatures.append(record)
-    package = SLDCPackage(document, assets, comments, signatures, FORMAT_VERSION)
-    _build_parts(package)  # Full validation: schema, references, assets, comments, signatures.
+    package = SLDCPackage(document, assets, comments, signatures, manifest["version"])
+    _build_parts(package, _read_only=True)  # Validate compatible newer minor editions.
     if not set(_required_features(document)) <= set(manifest["requires"]):
         raise SLDCValidationError("Manifest 'requires' omits a feature the document uses")
     return package
@@ -2090,7 +2291,11 @@ def make_table(rows: Sequence[Sequence[str | Mapping[str, Any]]], *, header_rows
 
 def make_figure(asset: Asset | str, alt: str = "", *, caption: str = "", decorative: bool = False,
                 width_mm: float | None = None, align: str | None = None,
-                block_id: str | None = None) -> dict[str, Any]:
+                block_id: str | None = None, height_mm: float | None = None,
+                crop: Mapping[str, float] | None = None, rotation_deg: float | None = None,
+                flip_horizontal: bool = False, flip_vertical: bool = False,
+                placement: Mapping[str, Any] | None = None, credit: str | None = None,
+                rights: str | None = None) -> dict[str, Any]:
     """Create a figure block that shows ``asset`` (an :class:`Asset` or its id).
 
     ``alt`` describes the image for readers who cannot see it and is required unless
@@ -2103,7 +2308,59 @@ def make_figure(asset: Asset | str, alt: str = "", *, caption: str = "", decorat
         figure["width_mm"] = width_mm
     if align:
         figure["align"] = align
+    if height_mm is not None:
+        figure["height_mm"] = height_mm
+    if crop is not None:
+        figure["crop"] = dict(crop)
+    if rotation_deg is not None:
+        figure["rotation_deg"] = rotation_deg
+    if flip_horizontal:
+        figure["flip_horizontal"] = True
+    if flip_vertical:
+        figure["flip_vertical"] = True
+    if placement is not None:
+        figure["placement"] = dict(placement)
+    if credit is not None:
+        figure["credit"] = credit
+    if rights is not None:
+        figure["rights"] = rights
     return make_block("figure", caption, block_id=block_id, figure=figure)
+
+
+def make_equation(source: str, *, syntax: str = "latex", domain: str = "mathematics",
+                  align: str | None = None, block_id: str | None = None,
+                  numbered: bool = False, **sequence_fields: Any) -> dict[str, Any]:
+    """Create an editable display equation. Source is authoritative (never a bitmap)."""
+    equation = {"syntax": syntax, "source": source, "domain": domain, **sequence_fields}
+    if align is not None:
+        equation["align"] = align
+    if numbered:
+        equation["numbered"] = True
+    _validate_equation(equation, "equation", inline=False)
+    return make_block("equation", "", block_id=block_id, equation=equation)
+
+
+def make_inline_equation(source: str, start: int, *, syntax: str = "latex",
+                         domain: str = "mathematics", **sequence_fields: Any) -> dict[str, Any]:
+    """Create an inline equation span; caller inserts U+FFFC at ``text[start]``."""
+    _bounded_int(start, 0, MAX_TEXT_CHARS - 1, "inline equation start")
+    equation = {"syntax": syntax, "source": source, "domain": domain, **sequence_fields}
+    _validate_equation(equation, "equation", inline=True)
+    return {"type": "equation", "start": start, "end": start + 1, "equation": equation}
+
+
+def make_inline_image(asset: Asset | str, start: int, alt: str = "", *, decorative: bool = False,
+                      width_mm: float | None = None, height_mm: float | None = None) -> dict[str, Any]:
+    """Create an inline image span; caller inserts U+FFFC at ``text[start]``."""
+    _bounded_int(start, 0, MAX_TEXT_CHARS - 1, "inline image start")
+    figure: dict[str, Any] = {"asset": asset.id if isinstance(asset, Asset) else asset, "alt": alt}
+    if decorative:
+        figure["decorative"] = True
+    if width_mm is not None:
+        figure["width_mm"] = width_mm
+    if height_mm is not None:
+        figure["height_mm"] = height_mm
+    return {"type": "image", "start": start, "end": start + 1, "figure": figure}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -2139,7 +2396,8 @@ def make_block(block_type: str, text: str, *, block_id: str | None = None,
                annotations: Sequence[Mapping[str, Any]] | None = None,
                spans: Iterable[Mapping[str, Any]] | None = None, style: str | None = None,
                section: str | None = None, table: Mapping[str, Any] | None = None,
-               figure: Mapping[str, Any] | None = None, embed: str | None = None,
+               figure: Mapping[str, Any] | None = None, equation: Mapping[str, Any] | None = None,
+               embed: str | None = None,
                extensions: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Create one block. Without ``block_id`` the id is left for the document builder to assign.
 
@@ -2161,7 +2419,7 @@ def make_block(block_type: str, text: str, *, block_id: str | None = None,
     for key, value in (("style", style), ("section", section), ("embed", embed)):
         if value:
             block[key] = value
-    for key, mapping in (("table", table), ("figure", figure), ("extensions", extensions)):
+    for key, mapping in (("table", table), ("figure", figure), ("equation", equation), ("extensions", extensions)):
         if mapping is not None and (mapping or key != "extensions"):
             block[key] = copy.deepcopy(dict(mapping))
     return block
@@ -2533,7 +2791,7 @@ def _wrap_markdown(segment: str, spans: Sequence[Mapping[str, Any]]) -> str:
 
 def _inline_markdown(text: str, spans: Sequence[Mapping[str, Any]] | None,
                      references: Mapping[str, Mapping[str, Any]],
-                     notes: dict[str, int]) -> str:
+                     notes: dict[str, int], image_href: Callable[[str], str]) -> str:
     """Render spans as Markdown: bold, italic, strike, code, links, footnote and citation marks.
 
     Underline, colour, super/subscript and named styles have no Markdown form and are dropped
@@ -2552,7 +2810,20 @@ def _inline_markdown(text: str, spans: Sequence[Mapping[str, Any]] | None,
     result: list[str] = []
     offset = 0
     for active, segment in pieces:
-        result.append(_wrap_markdown(segment, [spans[i] for i in active]))
+        media = [spans[i] for i in active if spans[i]["type"] in ("equation", "image")]
+        if media:
+            obj = media[0]
+            if obj["type"] == "equation":
+                eq = obj["equation"]
+                rendered = (eq["source"] if eq["syntax"] == "latex" else "\\ce{" + eq["source"] + "}" if eq["syntax"] == "mhchem" else None)
+                result.append("$" + rendered + "$" if rendered is not None else
+                              "`" + eq["source"].replace("`", "") + "`")
+            else:
+                fig = obj["figure"]
+                alt = fig.get("alt", "").replace("[", "\\[").replace("]", "\\]")
+                result.append(f"![{alt}]({image_href(fig['asset'])})")
+        else:
+            result.append(_wrap_markdown(segment, [spans[i] for i in active]))
         offset += len(segment)
         for i in active:  # The mark goes after the last piece a reference span covers.
             span = spans[i]
@@ -2620,7 +2891,7 @@ def to_markdown(document: Mapping[str, Any] | SLDCPackage, *, validate: bool = T
             for span in spans or ():
                 if span["type"] == "ref" and references.get(span["ref"], {}).get("kind") == "citation":
                     cited[span["ref"]] = None
-            text = _inline_markdown(text, spans, references, notes)
+            text = _inline_markdown(text, spans, references, notes, href)
         if kind == "heading":
             level = attrs.get("level")
             level = level if type(level) is int and 1 <= level <= 6 else 1
@@ -2646,6 +2917,13 @@ def to_markdown(document: Mapping[str, Any] | SLDCPackage, *, validate: bool = T
             figure = block["figure"]
             alt = " ".join(figure.get("alt", "").split()).replace("]", "\\]")
             piece = f"![{alt}]({href(figure['asset'])})" + (f"\n\n*{text}*" if text else "")
+        elif kind == "equation":
+            eq = block["equation"]
+            if eq["syntax"] in ("latex", "mhchem"):
+                source = eq["source"] if eq["syntax"] == "latex" else "\\ce{" + eq["source"] + "}"
+                piece = "$$\n" + source + "\n$$"
+            else:
+                piece = "```" + ("xml" if eq["syntax"] == "mathml" else "text") + "\n" + eq["source"] + "\n```"
         else:  # paragraph, and an embed's static fallback text
             piece = text
         if not piece:
@@ -2780,6 +3058,7 @@ def export_legacy(package: SLDCPackage, *,
     source_revision = revision_id(package)
     dropped = {"spans": 0, "block_styles": 0, "block_extensions": 0, "block_attributes": 0,
                "tables_flattened": 0, "figures_replaced": 0, "embeds_dropped": 0,
+               "equations_flattened": 0, "inline_objects_flattened": 0,
                "styles": sum(len(g) for g in document.get("styles", {}).values()),
                "sections": len(document.get("sections", [])),
                "references": len(document.get("references", [])),
@@ -2790,9 +3069,10 @@ def export_legacy(package: SLDCPackage, *,
     for block in document["blocks"]:
         kind = block["type"]
         dropped["spans"] += len(block.get("spans", ()))
+        dropped["inline_objects_flattened"] += sum(s["type"] in ("equation", "image") for s in block.get("spans", ()))
         dropped["block_styles"] += int("style" in block) + int("section" in block)
         dropped["block_extensions"] += int("extensions" in block)
-        legacy: dict[str, Any] = {"id": block["id"], "text": block["text"]}
+        legacy: dict[str, Any] = {"id": block["id"], "text": block_text(block)}
         attributes: dict[str, Any] = {}
         if kind in BLOCK_TYPES:
             legacy["type"] = kind
@@ -2811,6 +3091,10 @@ def export_legacy(package: SLDCPackage, *,
             legacy.update(type="paragraph", text=figure_label + (f"\n{block['text']}" if block["text"] else ""))
             attributes["exported_from"] = "figure"
             dropped["figures_replaced"] += 1
+        elif kind == "equation":
+            legacy.update(type="paragraph", text=block_text(block))
+            attributes["exported_from"] = "equation"
+            dropped["equations_flattened"] += 1
         else:  # embed: keep its static fallback text, if it has any
             if not block["text"]:
                 dropped["embeds_dropped"] += 1
@@ -2859,9 +3143,8 @@ _ANCHOR_KEYS = frozenset({"block", "start", "end", "block_sha256"})
 
 
 def _require_v1(package: SLDCPackage, action: str) -> None:
-    if package.version != FORMAT_VERSION:
-        raise SLDCUnsupportedError(f"{action} needs a {FORMAT_VERSION} package; "
-                                   "migrate_package() a 0.1.0 one first")
+    if _parse_version(package.version)[0] != 1:
+        raise SLDCUnsupportedError(f"{action} needs an SLDC 1.x package")
 
 
 def next_revision(package: SLDCPackage, *, author: str | None = None, note: str | None = None,
@@ -3106,8 +3389,9 @@ def merge_packages(base: SLDCPackage, ours: SLDCPackage, theirs: SLDCPackage, *,
     document["revision"] = record
     if history:
         document["history"] = list(history.values())
-    merged = prune_assets(SLDCPackage(document, assets,
-                                      _merge_threads(ours.comments, theirs.comments)))
+    merged = prune_assets(SLDCPackage(
+        document, assets, _merge_threads(ours.comments, theirs.comments),
+        version=ours.version if ours.version == theirs.version else FORMAT_VERSION))
     validate_package(merged)
     return merged, conflicts
 
@@ -4167,7 +4451,7 @@ __all__ = [
     # Packages (1.x)
     "read_package", "write_package", "loads_package", "dumps_package", "inspect_package",
     "validate_package", "new_package", "make_asset", "add_asset", "prune_assets", "make_table",
-    "make_figure", "revision_id",
+    "make_figure", "revision_id", "make_equation", "make_inline_equation", "make_inline_image", "revision_id",
     # Migration
     "migrate_package", "migrate_file", "export_legacy",
     # Collaboration
