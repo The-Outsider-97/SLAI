@@ -1,8 +1,9 @@
 """Deterministic, declarative bounded parameters for primitive SGEO families."""
 from __future__ import annotations
 from ..common import ValidationError, require_id, finite, vector
+from .parameters import evaluate_parameters
 
-_TYPES={"length","number","integer"}
+_TYPES={"length","area","volume","angle","number","integer","boolean"}
 _GENERATORS={"builtin.box_v1","builtin.sphere_v1","builtin.cylinder_v1"}
 
 def validate_family(family):
@@ -17,8 +18,14 @@ def validate_family(family):
     for name,spec in parameters.items():
         if not isinstance(name,str) or not name.isidentifier() or len(name)>64:
             raise ValidationError("invalid parameter name")
-        if not isinstance(spec,dict) or set(spec)-{"type","default","min","max"} or spec.get("type") not in _TYPES:
+        if not isinstance(spec,dict) or set(spec)-{"type","default","min","max","expression","read_only","description"} or spec.get("type") not in _TYPES:
             raise ValidationError("invalid family parameter specification")
+        if "expression" in spec:
+            continue
+        if spec["type"]=="boolean":
+            if type(spec.get("default")) is not bool:
+                raise ValidationError("boolean parameter default must be Boolean")
+            continue
         value=finite(spec.get("default"),name)
         if spec["type"]=="integer" and value!=int(value):
             raise ValidationError("integer parameter must have an integer default")
@@ -34,22 +41,11 @@ def validate_family(family):
     resolve_parameters(family)
     return family
 
-def resolve_parameters(family,overrides=None):
-    overrides={} if overrides is None else overrides
-    if not isinstance(overrides,dict):
-        raise ValidationError("instance overrides must be an object")
-    specs=family.get("parameters",{})
-    if set(overrides)-set(specs):
-        raise ValidationError("unknown family override")
-    result={}
-    for name,spec in specs.items():
-        value=finite(overrides.get(name,spec["default"]),name)
-        if spec["type"]=="integer" and value!=int(value):
-            raise ValidationError("integer override must be integral")
-        if not finite(spec.get("min",-1e12))<=value<=finite(spec.get("max",1e12)):
-            raise ValidationError("parameter value exceeds declared bounds")
-        result[name]=int(value) if spec["type"]=="integer" else value
-    return result
+def resolve_parameters(family, overrides=None):
+    """Evaluate a bounded typed parameter DAG without partial writes."""
+    if not isinstance(family,dict) or not isinstance(family.get("parameters"),dict):
+        raise ValidationError("family parameters must be an object")
+    return evaluate_parameters(family["parameters"],overrides)
 
 def generate_geometry(family,overrides=None):
     """Only allowlisted deterministic builtins; arbitrary expressions are never evaluated."""
