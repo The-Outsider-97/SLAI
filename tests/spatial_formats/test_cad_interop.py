@@ -32,7 +32,7 @@ def test_dwg_requires_configured_converter(tmp_path):
         dwg._executable(None)
     with pytest.raises(DependencyUnavailableError):
         dwg._executable(str(tmp_path/"nope.exe"))
-    with pytest.raises(ValidationError):
+    with pytest.raises(DependencyUnavailableError):
         dwg._convert(tmp_path/"broken",executable=None,version="wrong")
 
 def test_dwg_header_validation(tmp_path):
