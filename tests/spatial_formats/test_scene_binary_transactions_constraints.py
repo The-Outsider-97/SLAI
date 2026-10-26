@@ -22,6 +22,12 @@ def test_mesh_asset_serialization_and_hydration(tmp_path):
         assert len([name for name in paths if name.startswith("geometry/")])==2
         assert b"mesh_buffer" in archive.read("scene.json")
         assert len([name for name in paths if name=="scene.json"])==1
+        # The same indexed mesh appears twice, but each typed buffer is
+        # physically stored exactly once and referenced from both objects.
+        import json
+        document=json.loads(archive.read("scene.json"))
+        objects=document["objects"]
+        assert objects[0]["geometry"]["buffers"]==objects[1]["geometry"]["buffers"]
     loaded=Scene.from_package(load_package(path))
     assert loaded.objects==scene.objects
     assert loaded.objects[0]["geometry"]==loaded.objects[1]["geometry"]
@@ -48,9 +54,11 @@ def test_scene_batch_commit_and_conflict():
     assert scene.revision==old+1
     assert scene.objects[0]["name"]=="changed"
     assert len(ids)==2
+    before_conflict=scene.as_dict()
     with pytest.raises(ConflictError):
         apply_scene_operations(scene,[{"op":"rename","id":parent,"value":"oops"}],
                                expected_revision=old)
+    assert scene.as_dict()==before_conflict
 
 def test_scene_batch_rollback_on_invalid_reparent():
     scene=Scene()

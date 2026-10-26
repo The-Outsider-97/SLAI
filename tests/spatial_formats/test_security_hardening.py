@@ -43,6 +43,11 @@ def test_externalized_scene_rejects_extra_asset(tmp_path):
     path=tmp_path/"extra.sgeo"
     with pytest.raises(ValidationError):
         write_package(path,scene.manifest(),scene.as_dict(),assets={"geometry/fake.bin":b"illegal"})
+    assert not path.exists()
+    # Passing an empty explicit override must not bypass codec ownership.
+    with pytest.raises(ValidationError):
+        write_package(path,scene.manifest(),scene.as_dict(),assets={})
+    assert not path.exists()
 
 def test_binary_descriptor_enforces_content_address():
     descriptor={"path":"geometry/sha256-"+"f"*64+".bin","sha256":"0"*64,
