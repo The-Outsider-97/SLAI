@@ -35,6 +35,27 @@ def test_dwg_requires_configured_converter(tmp_path):
     with pytest.raises(DependencyUnavailableError):
         dwg._convert(tmp_path/"broken",executable=None,version="wrong")
 
+
+def test_dwg_backend_validation_precedes_source_validation(tmp_path):
+    """Missing converter is consistently a dependency error, not file error."""
+    absent = tmp_path / "absent.dwg"
+    with pytest.raises(DependencyUnavailableError):
+        dwg.import_dwg(absent, executable=None)
+    # An input with a recognizable header does not waive backend requirements.
+    header = tmp_path / "candidate.dwg"
+    header.write_bytes(b"AC1032" + bytes(64))
+    with pytest.raises(DependencyUnavailableError):
+        dwg.import_dwg(header, executable=None)
+
+
+def test_dwg_valid_backend_still_validates_missing_input(tmp_path):
+    """Once configured, missing/corrupt source files are not treated as valid."""
+    import sys
+    # This only checks input-validation ordering; it never launches Python as
+    # a DWG converter or claims end-to-end ODA compatibility.
+    with pytest.raises(ValidationError, match="DWG input"):
+        dwg.import_dwg(tmp_path / "absent.dwg", executable=sys.executable)
+
 def test_dwg_header_validation(tmp_path):
     bad=tmp_path/"bad.dwg";bad.write_bytes(b"NOTDWG"*3)
     with pytest.raises(UnsupportedFeatureError):
