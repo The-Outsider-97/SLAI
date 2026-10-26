@@ -252,6 +252,13 @@ def parse_json(raw: bytes):
             f"malformed JSON at line {exc.lineno} column {exc.colno}: {exc.msg}",
             context={"line": exc.lineno, "column": exc.colno},
         ) from exc
+    except ValidationError:
+        # Preserve hook-specific diagnostics and structured context.
+        raise
+    except ValueError as exc:
+        # CPython's integer digit guard raises plain ValueError, not
+        # JSONDecodeError. Keep the guard enabled and expose our domain error.
+        raise ValidationError("JSON numeric value exceeds parser limits") from exc
     return json_safe(value)
 
 

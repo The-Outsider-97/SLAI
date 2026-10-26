@@ -158,8 +158,35 @@ def test_compressible_metadata_roundtrip_and_digest(tmp_path):
     digest=write_document(path,drawing)
     assert digest==sha256(path.read_bytes()).hexdigest()
     assert load_package(path).document==drawing.as_dict()
+    from src.utils.spatial_formats.container.reader import MAX_RATIO
     with ZipFile(path) as archive:
-        assert archive.getinfo("drawing.json").compress_type==ZIP_STORED
+        for info in archive.infolist():
+            assert info.file_size <= MAX_RATIO * max(1, info.compress_size)
+
+
+def test_writer_stores_content_to_respect_ratio_limit(tmp_path, monkeypatch):
+    from src.utils.spatial_formats.container import reader, writer
+    # Exercise fallback independently of the production ratio policy and zlib
+    # version. A ratio of one requires repetitive content to be stored.
+    monkeypatch.setattr(reader, "MAX_RATIO", 1)
+    monkeypatch.setattr(writer, "MAX_RATIO", 1)
+    drawing = Drawing(metadata={"test:repetition": "a" * 100_000})
+    path = tmp_path / "stored.sdrw"
+    digest = write_document(path, drawing)
+    assert digest == sha256(path.read_bytes()).hexdigest()
+    assert load_package(path).document == drawing.as_dict()
+    with ZipFile(path) as archive:
+        assert archive.getinfo("drawing.json").compress_type == ZIP_STORED
+
+
+@pytest.mark.parametrize("raw, context", [
+    (b'{"key": 1, "key": 2}', {"key": "key"}),
+    (b'{"value": NaN}', {"token": "NaN"}),
+])
+def test_json_hook_errors_preserve_context(raw, context):
+    with pytest.raises(ValidationError) as caught:
+        parse_json(raw)
+    assert caught.value.context == context
 
 
 def test_no_partial_output_when_atomic_publication_unavailable(tmp_path,monkeypatch):
