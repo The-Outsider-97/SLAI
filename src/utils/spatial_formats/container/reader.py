@@ -129,6 +129,12 @@ def load_package(path, *, max_archive_size=MAX_ARCHIVE_SIZE, max_unpacked=MAX_UN
             if not isinstance(document, dict):
                 raise ValidationError("document must be an object")
             from ..verification.invariants import validate_document
+            if format_id == "slai.sgeo":
+                from .scene_buffers import hydrate_scene, validate_buffer_references
+                validate_buffer_references(document,data)
+                document=hydrate_scene(document,data)
+            elif data:
+                raise IntegrityError("SDRW payload does not support auxiliary assets")
             validate_document(manifest, document)
             return SpatialPackage(manifest, document, data)
     except (BadZipFile, EOFError, RuntimeError) as exc:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 from copy import deepcopy
 from itertools import product
+from threading import RLock
 from ..common import ValidationError, new_id, require_id, assert_unique, require_unit, require_metadata
 from ..common.transforms import IDENTITY, compose, require_transform, transform_point
 from .geometry import validate_geometry, local_bounds
@@ -9,6 +10,7 @@ from .geometry import validate_geometry, local_bounds
 class Scene:
     def __init__(self, name="Untitled", *, unit="m", document_id=None, revision=1,
                  objects=None, metadata=None, document_kind="model", families=None):
+        self._mutation_lock=RLock()
         self.name=name
         self.unit=require_unit(unit)
         self.document_id=document_id or new_id()

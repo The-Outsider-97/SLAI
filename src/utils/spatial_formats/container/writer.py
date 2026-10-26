@@ -1,6 +1,7 @@
 """Deterministic validated ZIP writer with atomic replacement semantics."""
 import os
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED, ZIP_STORED
 from ..common.errors import ConflictError, ValidationError, ResourceLimitError
@@ -25,6 +26,17 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
     if format_id not in MIMES:
         raise ValidationError("unsupported document format")
     payload = PAYLOADS[format_id]
+    # Externalize SGEO indexed meshes after validating the complete in-memory scene.
+    from ..verification.invariants import validate_document
+    from .scene_buffers import externalize_scene, validate_buffer_references, hydrate_scene
+    pre_manifest={**manifest,"parts":[{"path":payload,"size":0,"sha256":"0"*64}]}
+    validate_document(pre_manifest,document)
+    if format_id == "slai.sgeo":
+        encoded_document, generated_assets = externalize_scene(document)
+        if assets:
+            raise ValidationError("SGEO binary assets are managed by the scene codec")
+        assets=generated_assets
+        document=encoded_document
     assets = {} if assets is None else assets
     if not isinstance(assets, dict):
         raise ValidationError("assets must be a path-to-bytes mapping")
@@ -43,8 +55,11 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
         for name, raw in sorted(members.items())
     ]}
     _manifest(final_manifest)
-    from ..verification.invariants import validate_document
-    validate_document(final_manifest, document)
+    if format_id == "slai.sgeo":
+        validate_buffer_references(document, assets)
+        validate_document(final_manifest, hydrate_scene(document,assets))
+    else:
+        validate_document(final_manifest, document)
     manifest_bytes = canonical_json(final_manifest)
     destination = Path(path)
     if destination.exists() and not overwrite:
@@ -73,14 +88,32 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
             except FileExistsError as exc:
                 raise ConflictError("output file already exists") from exc
             except OSError:
-                with open(destination, "xb") as target, open(name, "rb") as source:
-                    while True:
-                        chunk = source.read(1024 * 1024)
-                        if not chunk: break
-                        target.write(chunk)
-                    target.flush()
-                    os.fsync(target.fileno())
-        return digest(destination.read_bytes())
+                # Platform fallback when hardlinks are unavailable. Remove an
+                # incomplete newly-created destination if copying fails.
+                created=False
+                try:
+                    with open(destination, "xb") as target:
+                        created=True
+                        with open(name, "rb") as source:
+                            while True:
+                                chunk = source.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                target.write(chunk)
+                            target.flush()
+                            os.fsync(target.fileno())
+                except FileExistsError as exc:
+                    raise ConflictError("output file already exists") from exc
+                except BaseException:
+                    if created:
+                        destination.unlink(missing_ok=True)
+                    raise
+        # Hash incrementally rather than allocating the whole ZIP again.
+        hasher=sha256()
+        with open(destination, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                hasher.update(chunk)
+        return hasher.hexdigest()
     finally:
         if name is not None and os.path.exists(name):
             os.unlink(name)
