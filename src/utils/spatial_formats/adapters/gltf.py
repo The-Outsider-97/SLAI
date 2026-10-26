@@ -44,6 +44,79 @@ def _conjugate(transform,to_z=True):
     inverse=Z_UP_TO_Y if to_z else Y_UP_TO_Z
     return compose(compose(basis,transform),inverse)
 
+def _map_vertices(vertices, *, to_z: bool):
+    """Apply the exact proper basis change to mesh-local position vectors.
+
+    Conjugating node matrices alone does not change mesh-local coordinates.
+    Transform both positions and local matrices to preserve world geometry.
+    """
+    import numpy as np
+    points=np.asarray(vertices,dtype=np.float64)
+    if points.ndim!=2 or points.shape[1]!=3:
+        raise ValidationError("invalid glTF vertex array")
+    if to_z:
+        converted=np.column_stack((points[:,0],-points[:,2],points[:,1]))
+    else:
+        converted=np.column_stack((points[:,0],points[:,2],-points[:,1]))
+    if not np.isfinite(converted).all():
+        raise ValidationError("nonfinite mesh vertices")
+    return converted
+
+
+def _validate_embedded_glb(data):
+    """Reject external resources, extensions and non-triangle primitives.
+
+    This is an inexpensive structural preflight, not a replacement for
+    trimesh's geometry validation.
+    """
+    import json
+    offset=12
+    model=None
+    binary_chunk_found=False
+    while offset < len(data):
+        if len(data)-offset < 8:
+            raise ValidationError("truncated GLB chunk header")
+        size=int.from_bytes(data[offset:offset+4],"little")
+        chunk_type=data[offset+4:offset+8]
+        offset+=8
+        if size > len(data)-offset:
+            raise ValidationError("GLB chunk exceeds file boundaries")
+        payload=data[offset:offset+size]
+        offset+=size
+        if model is None:
+            if chunk_type!=b"JSON":
+                raise ValidationError("GLB JSON chunk must be first")
+            try:
+                model=json.loads(payload.decode("utf-8").rstrip(" \\x00"))
+            except (UnicodeError,ValueError) as exc:
+                raise ValidationError("invalid GLB JSON") from exc
+        elif chunk_type==b"BIN\\x00":
+            if binary_chunk_found:
+                raise ValidationError("duplicate GLB binary chunk")
+            binary_chunk_found=True
+        else:
+            raise UnsupportedFeatureError("unsupported GLB chunk type")
+    if not isinstance(model,dict) or not isinstance(model.get("asset"),dict) or model["asset"].get("version")!="2.0":
+        raise ValidationError("not a glTF 2.0 asset")
+    if model.get("extensionsRequired") or model.get("extensionsUsed") or model.get("animations") or model.get("skins"):
+        raise UnsupportedFeatureError("GLB extensions, animations and skins are not supported")
+    for buffer in model.get("buffers",[]):
+        if not isinstance(buffer,dict) or "uri" in buffer:
+            raise UnsupportedFeatureError("GLB external or data URI buffers are prohibited")
+    for image in model.get("images",[]):
+        if not isinstance(image,dict) or "uri" in image:
+            raise UnsupportedFeatureError("GLB external image references are prohibited")
+    for mesh in model.get("meshes",[]):
+        for primitive in mesh.get("primitives",[]):
+            if primitive.get("mode",4)!=4:
+                raise UnsupportedFeatureError("only glTF TRIANGLES primitive mode is supported")
+    if len(model.get("nodes",[]))>10000 or len(model.get("meshes",[]))>10000:
+        raise ResourceLimitError("glTF scene node/mesh count exceeds budget")
+    if model.get("materials") or model.get("textures") or model.get("images"):
+        raise UnsupportedFeatureError("glTF material and texture semantics are not yet preserved")
+    return model
+
+
 def import_glb(data:bytes)->dict:
     """Legacy single-mesh import. Rejects scenes that would lose hierarchy."""
     scene=import_glb_scene(data)
@@ -59,6 +132,7 @@ def import_glb_scene(data:bytes)->Scene:
         raise ValidationError("invalid or oversized GLB")
     if int.from_bytes(data[4:8],"little")!=2 or int.from_bytes(data[8:12],"little")!=len(data):
         raise ValidationError("GLB header/version/length mismatch")
+    _validate_embedded_glb(data)
     trimesh=_trimesh()
     import numpy as np
     try: scene=trimesh.load(BytesIO(data),file_type="glb",force="scene",process=False)
@@ -84,7 +158,7 @@ def import_glb_scene(data:bytes)->Scene:
             m=scene.geometry[geometry_key]
             if not isinstance(m,trimesh.Trimesh) or len(m.faces)>2_000_000:
                 raise UnsupportedFeatureError("GLB contains unsupported mesh or face budget")
-            mesh=validate_geometry({"kind":"mesh","vertices":m.vertices.tolist(),"faces":m.faces.tolist()})
+            mesh=validate_geometry({"kind":"mesh","vertices":_map_vertices(m.vertices,to_z=True).tolist(),"faces":m.faces.tolist()})
         entries[name]=(parent,local,mesh)
     if len(entries)>10000: raise ResourceLimitError("GLB hierarchy too large")
     pending=dict(entries);mapped={}
@@ -103,7 +177,7 @@ def export_glb(geometry:dict)->bytes:
     if geometry["kind"]!="mesh":
         raise UnsupportedFeatureError("GLB mesh export requires triangles")
     trimesh=_trimesh()
-    mesh=trimesh.Trimesh(vertices=geometry["vertices"],faces=geometry["faces"],process=False)
+    mesh=trimesh.Trimesh(vertices=_map_vertices(geometry["vertices"],to_z=False),faces=geometry["faces"],process=False)
     return mesh.export(file_type="glb")
 
 def export_glb_scene(scene:Scene)->bytes:
@@ -128,7 +202,7 @@ def export_glb_scene(scene:Scene)->bytes:
                 raise UnsupportedFeatureError("GLB cannot preserve SGEO object semantics or families")
             local=np.array(_conjugate(obj.get("transform",IDENTITY),False)).reshape(4,4)
             if geometry is not None:
-                mesh=trimesh.Trimesh(vertices=geometry["vertices"],faces=geometry["faces"],process=False)
+                mesh=trimesh.Trimesh(vertices=_map_vertices(geometry["vertices"],to_z=False),faces=geometry["faces"],process=False)
                 target.add_geometry(mesh,node_name=oid,geom_name=oid,parent_node_name=existing.get(parent),
                                     transform=local)
             else:
