@@ -1,6 +1,21 @@
 """DXF subset through ezdxf, explicitly optional and restricted to supported entities."""
 from ..common import ValidationError, DependencyUnavailableError, UnsupportedFeatureError
 from ..sdrw import Drawing
+from .contracts import Capabilities
+from ..common.errors import ResourceLimitError
+from pathlib import Path
+
+_MAX_DXF_BYTES=64*1024*1024
+
+def capabilities():
+    try: backend=_ezdxf();available=True
+    except DependencyUnavailableError: available=False
+    return Capabilities("dxf","ezdxf",available,("R2010",) if available else (),
+                        ("R2010",) if available else (),
+                        ("POINT","LINE","LWPOLYLINE","CIRCLE","ARC"),
+                        ("Only model-space planar entities", "Bulges, OCS extrusion and elevated entities refused",
+                         "No block, annotation or DIMENSION preservation"))
+
 
 def _ezdxf():
     try: import ezdxf
@@ -28,7 +43,13 @@ def export_dxf(drawing:Drawing, path):
 
 def import_dxf(path, *, unit="mm"):
     ezdxf=_ezdxf()
+    source=Path(path)
+    if not source.is_file() or source.is_symlink() or not 0<source.stat().st_size<=_MAX_DXF_BYTES:
+        raise ResourceLimitError("invalid or oversized DXF file")
     doc=ezdxf.readfile(str(path))
+    if any(True for _ in doc.layouts if _.name.lower() not in ("model",)):
+        # Paper-space is not part of SDRW v0.1 and must not vanish silently.
+        raise UnsupportedFeatureError("DXF paper-space layouts are not supported")
     drawing=Drawing(unit=unit)
     from math import radians
     for entity in doc.modelspace():
