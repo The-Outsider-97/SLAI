@@ -47,7 +47,7 @@ def import_dxf(path, *, unit="mm"):
     if not source.is_file() or source.is_symlink() or not 0<source.stat().st_size<=_MAX_DXF_BYTES:
         raise ResourceLimitError("invalid or oversized DXF file")
     doc=ezdxf.readfile(str(path))
-    if any(True for _ in doc.layouts if _.name.lower() not in ("model",)):
+    if any(len(layout)>0 for layout in doc.layouts if layout.name.lower() != "model"):
         # Paper-space is not part of SDRW v0.1 and must not vanish silently.
         raise UnsupportedFeatureError("DXF paper-space layouts are not supported")
     drawing=Drawing(unit=unit)
