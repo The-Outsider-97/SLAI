@@ -76,27 +76,31 @@ class Scene:
         return self
 
     def add_object(self, *, name="", geometry=None, parent=None, transform=None, metadata=None):
-        obj={"id":new_id(),"name":name,"parent":parent,
-             "transform":list(transform if transform is not None else IDENTITY),
-             "geometry":deepcopy(geometry),"metadata":deepcopy(metadata or {})}
-        self.objects.append(obj)
-        try:
-            self.validate()
-        except Exception:
-            self.objects.pop()
-            raise
-        self.revision+=1
-        return obj["id"]
+        """Commit an individually validated object under the scene's mutation lock."""
+        with self._mutation_lock:
+            obj={"id":new_id(),"name":name,"parent":parent,
+                 "transform":list(transform if transform is not None else IDENTITY),
+                 "geometry":deepcopy(geometry),"metadata":deepcopy(metadata or {})}
+            self.objects.append(obj)
+            try:
+                self.validate()
+            except BaseException:
+                self.objects.pop()
+                raise
+            self.revision+=1
+            return obj["id"]
 
     def remove_object(self, object_id):
-        require_id(object_id)
-        if any(obj.get("parent")==object_id for obj in self.objects):
-            raise ValidationError("cannot remove scene object with children")
-        pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
-        if pos is None:
-            raise ValidationError("object ID not found")
-        self.objects.pop(pos)
-        self.revision+=1
+        """Remove an unreferenced object without racing another scene mutation."""
+        with self._mutation_lock:
+            require_id(object_id)
+            if any(obj.get("parent")==object_id for obj in self.objects):
+                raise ValidationError("cannot remove scene object with children")
+            pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
+            if pos is None:
+                raise ValidationError("object ID not found")
+            self.objects.pop(pos)
+            self.revision+=1
 
     def world_transform(self, object_id):
         self.validate()
@@ -125,16 +129,18 @@ class Scene:
                 tuple(max(p[i] for p in corners) for i in range(3)))
 
     def as_dict(self):
-        self.validate()
-        return deepcopy({"document_id":self.document_id,"revision":self.revision,"name":self.name,
-                         "objects":self.objects,"families":self.families,"metadata":self.metadata})
+        with self._mutation_lock:
+            self.validate()
+            return deepcopy({"document_id":self.document_id,"revision":self.revision,"name":self.name,
+                             "objects":self.objects,"families":self.families,"metadata":self.metadata})
 
     def manifest(self):
-        self.validate()
-        return {"format_id":"slai.sgeo","format_version":"0.1.0","schema":"slai.sgeo/0.1",
-                "document_kind":self.document_kind,"spatial_dimension":3,"document_id":self.document_id,
-                "revision":self.revision,"units":self.unit,"axis_up":"+Z","handedness":"right",
-                "requires":["scene-graph","analytic-primitives","triangle-mesh"] + (["families"] if self.families else [])}
+        with self._mutation_lock:
+            self.validate()
+            return {"format_id":"slai.sgeo","format_version":"0.1.0","schema":"slai.sgeo/0.1",
+                    "document_kind":self.document_kind,"spatial_dimension":3,"document_id":self.document_id,
+                    "revision":self.revision,"units":self.unit,"axis_up":"+Z","handedness":"right",
+                    "requires":["scene-graph","analytic-primitives","triangle-mesh"] + (["families"] if self.families else [])}
 
     @classmethod
     def from_package(cls,package):
