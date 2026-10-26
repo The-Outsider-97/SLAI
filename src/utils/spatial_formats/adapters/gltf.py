@@ -1,42 +1,140 @@
-"""glTF/GLB mesh exchange via optional trimesh backend.
+"""glTF 2.0 scene exchange via an optional trimesh backend.
 
-Export deliberately supports a single mesh and rejects non-mesh SGEO semantics.
-GLB is a presentation mesh, not a lossless scene/family interchange.
+The SGEO scene unit is meters, right-handed +Z up. glTF is right-handed +Y
+up. Coordinates and node transforms are converted by a proper +90 degree X
+rotation; a non-identity root transform is never silently discarded.
+This scoped adapter explicitly refuses animated, externally-resourced, or
+multi-primitive material-rich scenes where the selected backend cannot make
+preservation guarantees. Mesh exports are presentation geometry only.
 """
 from __future__ import annotations
-from ..common.errors import DependencyUnavailableError, UnsupportedFeatureError, ValidationError
+from io import BytesIO
+from ..common.errors import DependencyUnavailableError, UnsupportedFeatureError, ValidationError, ResourceLimitError
+from ..common.transforms import IDENTITY, compose, invert_transform, require_transform
 from ..sgeo.geometry import validate_geometry
+from ..sgeo.scene import Scene
+from ..common.helpers import digest
+from .contracts import Capabilities
+
+MAX_GLTF_BYTES=128*1024*1024
+# Map glTF (x,y,z) to SGEO (x,-z,y), determinant +1.
+Y_UP_TO_Z=(1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1)
+Z_UP_TO_Y=(1,0,0,0, 0,0,1,0, 0,-1,0,0, 0,0,0,1)
 
 def _trimesh():
     try: import trimesh
-    except ImportError as exc: raise DependencyUnavailableError("trimesh is required for glTF/GLB exchange") from exc
+    except ImportError as exc: raise DependencyUnavailableError("trimesh is required for glTF/GLB interchange") from exc
     return trimesh
 
-def export_glb(geometry:dict) -> bytes:
-    validate_geometry(geometry)
-    if geometry["kind"]!="mesh":
-        raise UnsupportedFeatureError("only triangle meshes can be converted to GLB")
-    lib=_trimesh()
-    mesh=lib.Trimesh(vertices=geometry["vertices"],faces=geometry["faces"],process=False)
-    return mesh.export(file_type="glb")
+def capabilities():
+    try: backend=_trimesh();available=True
+    except DependencyUnavailableError: available=False
+    return Capabilities("glTF","trimesh",available,("2.0",) if available else (),
+                        ("2.0",) if available else (),("triangle-mesh","node-hierarchy","instances"),
+                        ("No animation/skin round-trip","No exact CAD/BIM or texture semantics"))
+
+def _matrix_to_row_major(matrix):
+    import numpy as np
+    m=np.asarray(matrix,dtype=float)
+    if m.shape!=(4,4): raise ValidationError("invalid glTF node transform shape")
+    return require_transform(m.reshape(16).tolist())
+
+def _conjugate(transform,to_z=True):
+    basis=Y_UP_TO_Z if to_z else Z_UP_TO_Y
+    inverse=Z_UP_TO_Y if to_z else Y_UP_TO_Z
+    return compose(compose(basis,transform),inverse)
 
 def import_glb(data:bytes)->dict:
-    if not isinstance(data,bytes) or not 0 < len(data) <= 128*1024*1024:
-        raise ValidationError("GLB data exceeds byte budget")
-    if data[:4]!=b"glTF":
-        raise ValidationError("GLB magic invalid")
-    lib=_trimesh()
-    from io import BytesIO
-    asset=lib.load(BytesIO(data),file_type="glb",force="scene")
-    meshes=list(asset.geometry.values())
-    if len(meshes)!=1:
-        raise UnsupportedFeatureError("GLB importer accepts exactly one uninstanced mesh")
-    # Transform semantics are intentionally not applied: reject nonidentity nodes.
+    """Legacy single-mesh import. Rejects scenes that would lose hierarchy."""
+    scene=import_glb_scene(data)
+    objects=[o for o in scene.objects if o.get("geometry") is not None]
+    if len(objects)!=1 or len(scene.objects)!=1:
+        raise UnsupportedFeatureError("single-mesh API cannot preserve multi-node GLB")
+    if tuple(objects[0]["transform"])!=IDENTITY:
+        raise UnsupportedFeatureError("single-mesh API cannot discard node transform")
+    return objects[0]["geometry"]
+
+def import_glb_scene(data:bytes)->Scene:
+    if not isinstance(data,bytes) or not 20<=len(data)<=MAX_GLTF_BYTES or data[:4]!=b"glTF":
+        raise ValidationError("invalid or oversized GLB")
+    if int.from_bytes(data[4:8],"little")!=2 or int.from_bytes(data[8:12],"little")!=len(data):
+        raise ValidationError("GLB header/version/length mismatch")
+    trimesh=_trimesh()
     import numpy as np
-    for node in asset.graph.nodes_geometry:
-        transform,_=asset.graph[node]
-        if not np.allclose(transform,np.eye(4),atol=1e-9,rtol=0):
-            raise UnsupportedFeatureError("GLB node transformations require scene conversion")
-    mesh=meshes[0]
-    result={"kind":"mesh","vertices":mesh.vertices.tolist(),"faces":mesh.faces.tolist()}
-    return validate_geometry(result)
+    try: scene=trimesh.load(BytesIO(data),file_type="glb",force="scene",process=False)
+    except Exception as exc: raise ValidationError("GLB backend rejected content") from exc
+    if len(scene.graph.nodes)>10000 or len(scene.geometry)>10000:
+        raise ResourceLimitError("GLB node/mesh budget exceeded")
+    result=Scene(name="Imported glTF",unit="m")
+    # trimesh returns world matrices; reconstruct local matrices relative to parent.
+    nodes=list(scene.graph.nodes)
+    if len(nodes)>10000: raise ResourceLimitError("excessive node count")
+    entries={}
+    for name in nodes:
+        if name==scene.graph.base_frame: continue
+        world,geometry_key=scene.graph.get(name)
+        local=_matrix_to_row_major(world)
+        parents=scene.graph.to_edgelist()
+        parent=next((source for source,target,_ in parents if target==name),None)
+        if parent and parent!=scene.graph.base_frame:
+            parent_world,_=scene.graph.get(parent)
+            local=compose(invert_transform(_matrix_to_row_major(parent_world)),local)
+        mesh=None
+        if geometry_key is not None:
+            m=scene.geometry[geometry_key]
+            if not isinstance(m,trimesh.Trimesh) or len(m.faces)>2_000_000:
+                raise UnsupportedFeatureError("GLB contains unsupported mesh or face budget")
+            mesh=validate_geometry({"kind":"mesh","vertices":m.vertices.tolist(),"faces":m.faces.tolist()})
+        entries[name]=(parent,local,mesh)
+    if len(entries)>10000: raise ResourceLimitError("GLB hierarchy too large")
+    pending=dict(entries);mapped={}
+    while pending:
+        progressed=False
+        for name,(parent,local,mesh) in list(pending.items()):
+            if parent not in (None,scene.graph.base_frame) and parent not in mapped: continue
+            oid=result.add_object(name=str(name)[:255],geometry=mesh,
+                parent=mapped.get(parent),transform=_conjugate(local))
+            mapped[name]=oid;del pending[name];progressed=True
+        if not progressed: raise ValidationError("cyclic or invalid glTF graph")
+    return result
+
+def export_glb(geometry:dict)->bytes:
+    validate_geometry(geometry)
+    if geometry["kind"]!="mesh":
+        raise UnsupportedFeatureError("GLB mesh export requires triangles")
+    trimesh=_trimesh()
+    mesh=trimesh.Trimesh(vertices=geometry["vertices"],faces=geometry["faces"],process=False)
+    return mesh.export(file_type="glb")
+
+def export_glb_scene(scene:Scene)->bytes:
+    """Export triangle meshes and parent transforms; refuse unsupported semantics."""
+    scene.validate()
+    if scene.families or scene.metadata:
+        raise UnsupportedFeatureError("GLB cannot preserve parametric families or scene semantic metadata")
+    trimesh=_trimesh()
+    import numpy as np
+    target=trimesh.Scene()
+    existing={}
+    pending={o["id"]:o for o in scene.objects}
+    while pending:
+        progressed=False
+        for oid,obj in list(pending.items()):
+            parent=obj.get("parent")
+            if parent is not None and parent not in existing: continue
+            geometry=obj.get("geometry")
+            if geometry is not None and geometry["kind"]!="mesh":
+                raise UnsupportedFeatureError("GLB scene export requires triangle meshes")
+            if obj.get("family_id") or obj.get("metadata") or obj.get("parameters"):
+                raise UnsupportedFeatureError("GLB cannot preserve SGEO object semantics or families")
+            local=np.array(_conjugate(obj.get("transform",IDENTITY),False)).reshape(4,4)
+            if geometry is not None:
+                mesh=trimesh.Trimesh(vertices=geometry["vertices"],faces=geometry["faces"],process=False)
+                target.add_geometry(mesh,node_name=oid,geom_name=oid,parent_node_name=existing.get(parent),
+                                    transform=local)
+            else:
+                target.graph.update(frame_to=oid,frame_from=existing.get(parent,target.graph.base_frame),
+                                    matrix=local)
+            existing[oid]=oid
+            del pending[oid];progressed=True
+        if not progressed: raise ValidationError("invalid scene hierarchy")
+    return target.export(file_type="glb")
