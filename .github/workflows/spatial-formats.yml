@@ -14,13 +14,14 @@ permissions:
 
 jobs:
   spatial-formats:
-    name: spatial ${{ matrix.os }} py${{ matrix.python }}
+    name: spatial ${{ matrix.os }} py${{ matrix.python }} ${{ matrix.backends }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ['3.12', '3.13']
+        backends: [core, exchange]
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -33,14 +34,17 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install test tools
         run: python -m pip install pytest pytest-cov jsonschema
+      - name: Install optional exchange backends
+        if: matrix.backends == 'exchange'
+        run: python -m pip install numpy ezdxf trimesh
       - name: Compile spatial core
         run: python -m compileall -q src/utils/spatial_formats
       - name: Test spatial formats and coverage
-        run: python -m pytest tests/spatial_formats/ -v --tb=long --cov=src.utils.spatial_formats --cov-report=term-missing --junitxml=spatial-results.xml
+        run: python -m pytest tests/spatial_formats/ -W error -v --tb=long --cov=src.utils.spatial_formats --cov-report=term-missing --junitxml=spatial-results.xml
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: spatial-results-${{ matrix.os }}-${{ matrix.python }}
+          name: spatial-results-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.backends }}
           path: spatial-results.xml
           if-no-files-found: ignore

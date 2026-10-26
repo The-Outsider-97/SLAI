@@ -10,6 +10,7 @@ import math
 import re
 from dataclasses import dataclass
 
+from ..common.helpers import finite
 from ..common.errors import ValidationError, ResourceLimitError
 
 MAX_EXPR_LENGTH = 512
@@ -42,7 +43,7 @@ def _quantity(value, dimension=(0, 0)):
         if dimension != (0, 0):
             raise ValidationError("boolean requires dimensionless type")
         return Quantity(value)
-    if not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > 1e12:
+    if not isinstance(value, (int, float)) or abs(value) > 1e12 or not math.isfinite(value):
         raise ValidationError("expression result exceeds numeric limits")
     return Quantity(float(value), dimension)
 
@@ -96,8 +97,8 @@ def _checked_expression(expression: str) -> ast.Expression:
 
 def expression_dependencies(expression: str) -> frozenset[str]:
     tree = _checked_expression(expression)
-    function_names = {"abs", "min", "max", "sqrt", "sin", "cos", "choose", "clamp", "length", "angle"}
-    return frozenset(n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id not in function_names)
+    functions = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    return frozenset(n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in functions)
 
 
 def evaluate_expression(expression: str, variables: dict[str, Quantity]) -> Quantity:
@@ -184,6 +185,8 @@ def evaluate_expression(expression: str, variables: dict[str, Quantity]) -> Quan
                     raise ValidationError("invalid function arity")
                 for arg in args[1:]:
                     _compatible(args[0],arg)
+                if name=="clamp" and args[1].as_number() > args[2].as_number():
+                    raise ValidationError("clamp minimum exceeds maximum")
                 fn = min if name=="min" else max
                 value=(fn(x.as_number() for x in args) if name!="clamp"
                        else max(args[1].as_number(),min(args[0].as_number(),args[2].as_number())))
@@ -226,8 +229,24 @@ def evaluate_parameters(specifications: dict, overrides: dict | None = None) -> 
     for name,spec in specifications.items():
         if not isinstance(name,str) or not name.isidentifier() or len(name)>64:
             raise ValidationError("invalid parameter name")
-        if not isinstance(spec,dict) or spec.get("type") not in _DIMENSIONS:
+        if not isinstance(spec,dict) or not isinstance(spec.get("type"),str) or spec["type"] not in _DIMENSIONS:
             raise ValidationError("invalid parameter definition")
+        if set(spec)-{"type","default","min","max","expression","read_only","description"}:
+            raise ValidationError("unknown parameter definition field")
+        if type(spec.get("read_only",False)) is not bool:
+            raise ValidationError("read_only must be Boolean")
+        if not isinstance(spec.get("description",""),str) or len(spec.get("description",""))>4096:
+            raise ValidationError("invalid parameter description")
+        if "expression" in spec and "default" in spec:
+            raise ValidationError("derived parameter cannot also declare a default")
+        if spec["type"]=="boolean":
+            if "min" in spec or "max" in spec:
+                raise ValidationError("Boolean parameters cannot have numeric bounds")
+        else:
+            low=finite(spec.get("min",0 if spec["type"] in {"length","area","volume"} else -1e12))
+            high=finite(spec.get("max",1e12))
+            if low>high or (spec["type"] in {"length","area","volume"} and low<0):
+                raise ValidationError("invalid parameter bounds")
         if "expression" in spec and name in overrides:
             raise ValidationError("derived parameters cannot be overridden")
         if spec.get("read_only",False) and name in overrides:
@@ -280,7 +299,7 @@ def evaluate_parameters(specifications: dict, overrides: dict | None = None) -> 
         number=q.as_number()
         if number < spec.get("min",-1e12) or number > spec.get("max",1e12):
             raise ValidationError("parameter outside bounds: "+name)
-        if typ=="length" and number<0:
+        if typ in {"length","area","volume"} and number<0:
             raise ValidationError("length cannot be negative")
         values[name]=Quantity(int(number) if typ=="integer" else number,q.dimension)
     return {name:q.value for name,q in values.items()}

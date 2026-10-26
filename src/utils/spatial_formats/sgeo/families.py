@@ -1,9 +1,8 @@
 """Deterministic, declarative bounded parameters for primitive SGEO families."""
 from __future__ import annotations
-from ..common import ValidationError, require_id, finite, vector
+from ..common import ValidationError, require_id
 from .parameters import evaluate_parameters
 
-_TYPES={"length","area","volume","angle","number","integer","boolean"}
 _GENERATORS={"builtin.box_v1","builtin.sphere_v1","builtin.cylinder_v1"}
 
 def validate_family(family):
@@ -15,28 +14,8 @@ def validate_family(family):
     parameters=family.get("parameters")
     if not isinstance(parameters,dict) or len(parameters)>128:
         raise ValidationError("invalid family parameter table")
-    for name,spec in parameters.items():
-        if not isinstance(name,str) or not name.isidentifier() or len(name)>64:
-            raise ValidationError("invalid parameter name")
-        if not isinstance(spec,dict) or set(spec)-{"type","default","min","max","expression","read_only","description"} or spec.get("type") not in _TYPES:
-            raise ValidationError("invalid family parameter specification")
-        if "expression" in spec:
-            continue
-        if spec["type"]=="boolean":
-            if type(spec.get("default")) is not bool:
-                raise ValidationError("boolean parameter default must be Boolean")
-            continue
-        value=finite(spec.get("default"),name)
-        if spec["type"]=="integer" and value!=int(value):
-            raise ValidationError("integer parameter must have an integer default")
-        low=finite(spec.get("min",-1e12),name+".min")
-        high=finite(spec.get("max",1e12),name+".max")
-        if low>high or not low<=value<=high:
-            raise ValidationError("family default violates parameter bounds")
-        if spec["type"]=="length" and low<0:
-            raise ValidationError("length parameter minimum must be nonnegative")
     generator=family.get("generator")
-    if not isinstance(generator,dict) or set(generator)!={"kind"} or generator["kind"] not in _GENERATORS:
+    if not isinstance(generator,dict) or set(generator)!={"kind"} or not isinstance(generator.get("kind"),str) or generator["kind"] not in _GENERATORS:
         raise ValidationError("untrusted or unsupported family generator")
     resolve_parameters(family)
     return family
@@ -54,7 +33,7 @@ def generate_geometry(family,overrides=None):
     kind=family["generator"]["kind"]
     def positive(name):
         value=p.get(name)
-        if value is None or value<=0:
+        if family["parameters"].get(name, {}).get("type") != "length" or value is None or value<=0:
             raise ValidationError("generator requires positive parameter "+name)
         return value
     if kind=="builtin.box_v1":

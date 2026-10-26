@@ -44,6 +44,8 @@ class Scene:
                 validate_geometry(obj["geometry"])
             require_metadata(obj.get("metadata",{}))
             parent=obj.get("parent")
+            if parent is not None:
+                require_id(parent)
             if parent is not None and (parent not in index or parent==obj["id"]):
                 raise ValidationError("invalid scene parent reference")
         # Iterative three-colour DFS avoids recursion and detects every cycle.
@@ -61,16 +63,19 @@ class Scene:
                 state[key]=2
         if not isinstance(self.families,list) or len(self.families)>10_000:
             raise ValidationError("families must be a list")
-        from .families import validate_family, resolve_parameters
+        from .families import validate_family, generate_geometry
         assert_unique(f.get("id") if isinstance(f,dict) else None for f in self.families)
         fam_index={f["id"]:f for f in self.families}
         for family in self.families:
             validate_family(family)
         for obj in self.objects:
             if "family_id" in obj:
+                require_id(obj["family_id"])
                 if obj["family_id"] not in fam_index:
                     raise ValidationError("unknown family reference")
-                resolve_parameters(fam_index[obj["family_id"]],obj.get("parameters",{}))
+                expected=generate_geometry(fam_index[obj["family_id"]],obj.get("parameters",{}))
+                if obj.get("geometry") != expected:
+                    raise ValidationError("family instance geometry does not match its parameters")
             elif "parameters" in obj:
                 raise ValidationError("parameters require a family reference")
         return self
@@ -102,31 +107,51 @@ class Scene:
             self.objects.pop(pos)
             self.revision+=1
 
+    def world_transforms(self):
+        """Return detached world matrices, computing each parent chain once."""
+        with self._mutation_lock:
+            self.validate()
+            nodes={obj["id"]:obj for obj in self.objects}
+            matrices={}
+            for oid in nodes:
+                chain=[]
+                cursor=oid
+                while cursor is not None and cursor not in matrices:
+                    chain.append(cursor)
+                    cursor=nodes[cursor].get("parent")
+                matrix=matrices.get(cursor,IDENTITY)
+                for key in reversed(chain):
+                    matrix=compose(matrix,nodes[key].get("transform",IDENTITY))
+                    matrices[key]=matrix
+            return matrices
+
     def world_transform(self, object_id):
-        self.validate()
-        nodes={obj["id"]:obj for obj in self.objects}
-        if object_id not in nodes:
+        require_id(object_id)
+        matrices=self.world_transforms()
+        if object_id not in matrices:
             raise ValidationError("unknown object identifier")
-        chain=[]
-        cursor=object_id
-        while cursor is not None:
-            node=nodes[cursor]
-            chain.append(node)
-            cursor=node.get("parent")
-        matrix=IDENTITY
-        for node in reversed(chain):
-            matrix=compose(matrix,node.get("transform",IDENTITY))
-        return matrix
+        return matrices[object_id]
+
+    def bounds_by_object(self):
+        """Snapshot broad-phase world AABBs for all geometric objects."""
+        with self._mutation_lock:
+            matrices=self.world_transforms()
+            bounds={}
+            for obj in self.objects:
+                if obj.get("geometry") is None:
+                    continue
+                minimum,maximum=local_bounds(obj["geometry"])
+                corners=[transform_point(matrices[obj["id"]],p) for p in product(*zip(minimum,maximum))]
+                bounds[obj["id"]]=(tuple(min(p[i] for p in corners) for i in range(3)),
+                                    tuple(max(p[i] for p in corners) for i in range(3)))
+            return bounds
 
     def world_bounds(self, object_id):
-        nodes={obj["id"]:obj for obj in self.objects}
-        if object_id not in nodes or nodes[object_id].get("geometry") is None:
+        require_id(object_id)
+        bounds=self.bounds_by_object()
+        if object_id not in bounds:
             raise ValidationError("object has no geometric representation")
-        minimum,maximum=local_bounds(nodes[object_id]["geometry"])
-        matrix=self.world_transform(object_id)
-        corners=[transform_point(matrix,p) for p in product(*zip(minimum,maximum))]
-        return (tuple(min(p[i] for p in corners) for i in range(3)),
-                tuple(max(p[i] for p in corners) for i in range(3)))
+        return bounds[object_id]
 
     def as_dict(self):
         with self._mutation_lock:

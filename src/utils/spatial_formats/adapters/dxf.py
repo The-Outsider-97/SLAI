@@ -5,6 +5,7 @@ from .contracts import Capabilities
 from ..common.errors import ResourceLimitError
 from pathlib import Path
 
+_UNIT_CODES={"in":1,"ft":2,"mm":4,"cm":5,"m":6,"km":7}
 _MAX_DXF_BYTES=64*1024*1024
 
 def capabilities():
@@ -26,9 +27,11 @@ def export_dxf(drawing:Drawing, path):
     ezdxf=_ezdxf()
     drawing.validate()
     doc=ezdxf.new("R2010")
+    doc.units=_UNIT_CODES[drawing.unit]
     msp=doc.modelspace()
     for layer in drawing.layers:
         if layer["name"]!="0": doc.layers.new(layer["name"])
+        if not layer.get("visible",True): doc.layers.get(layer["name"]).off()
     for entity in drawing.entities:
         kind,g=entity["kind"],entity["geometry"]
         attrs={"layer":entity.get("layer","0")}
@@ -41,7 +44,7 @@ def export_dxf(drawing:Drawing, path):
             msp.add_arc((*g["center"],0),g["radius"],degrees(g["start_angle"]),degrees(g["end_angle"]),dxfattribs=attrs)
     doc.saveas(str(path))
 
-def import_dxf(path, *, unit="mm"):
+def import_dxf(path, *, unit=None):
     ezdxf=_ezdxf()
     source=Path(path)
     if not source.is_file() or source.is_symlink() or not 0<source.stat().st_size<=_MAX_DXF_BYTES:
@@ -50,7 +53,14 @@ def import_dxf(path, *, unit="mm"):
     if any(len(layout)>0 for layout in doc.layouts if layout.name.lower() != "model"):
         # Paper-space is not part of SDRW v0.1 and must not vanish silently.
         raise UnsupportedFeatureError("DXF paper-space layouts are not supported")
-    drawing=Drawing(unit=unit)
+    declared=next((name for name,code in _UNIT_CODES.items() if code==doc.units),None)
+    if unit is None:
+        if declared is None:
+            raise UnsupportedFeatureError("DXF units require an explicit supported unit override")
+        unit=declared
+    drawing=Drawing(unit=unit,layers=[{"name":layer.dxf.name,"visible":not layer.is_off() and not layer.is_frozen()}
+                                    for layer in doc.layers if layer.dxf.name != "Defpoints"])
+
     from math import radians
     for entity in doc.modelspace():
         kind=entity.dxftype()
@@ -67,6 +77,8 @@ def import_dxf(path, *, unit="mm"):
             if any(abs(float(p[2]))>1e-9 for p in values):
                 raise UnsupportedFeatureError("3D/elevated DXF entity cannot be silently projected")
 
+        if tuple(entity.dxf.get("extrusion",(0,0,1))) != (0,0,1):
+            raise UnsupportedFeatureError("DXF OCS extrusion requires explicit conversion")
         if kind not in {"POINT","LINE","LWPOLYLINE","CIRCLE","ARC"}:
             raise UnsupportedFeatureError("unsupported DXF entity: "+kind)
         layer=entity.dxf.layer

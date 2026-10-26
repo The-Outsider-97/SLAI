@@ -17,8 +17,6 @@ def require_id(value: str) -> str:
     return str(parsed)
 
 def assert_unique(values) -> None:
-    ids = list(values)
-    for value in ids:
-        require_id(value)
+    ids = [require_id(value) for value in values]
     if len(ids) != len(set(ids)):
         raise ValidationError("duplicate object identifier")

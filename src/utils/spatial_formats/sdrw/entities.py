@@ -1,6 +1,7 @@
 """Strict native SDRW primitive representation, coordinates in declared drawing units."""
 from __future__ import annotations
 from math import pi
+from copy import deepcopy
 from ..common import ValidationError, finite, vector, require_id, new_id, require_metadata
 
 KINDS = frozenset(("point", "line", "polyline", "circle", "arc"))
@@ -11,7 +12,7 @@ def validate_entity(entity: dict, layers: set[str] | None = None) -> dict:
         raise ValidationError("drawing entity must be an object")
     require_id(entity.get("id"))
     kind = entity.get("kind")
-    if kind not in KINDS:
+    if not isinstance(kind, str) or kind not in KINDS:
         raise ValidationError("unsupported SDRW primitive kind")
     layer = entity.get("layer", "0")
     if not isinstance(layer, str) or not layer or len(layer) > 255:
@@ -75,7 +76,7 @@ def make_entity(kind: str, geometry: dict, *, layer="0", name=None, metadata=Non
         entity["metadata"] = metadata
     if style is not None:
         entity["style"] = style
-    return validate_entity(entity)
+    return validate_entity(deepcopy(entity))
 
 def entity_bounds(entity: dict) -> tuple[tuple[float, float], tuple[float, float]]:
     """Tight analytic bounds for drawing entities, including arc extrema."""

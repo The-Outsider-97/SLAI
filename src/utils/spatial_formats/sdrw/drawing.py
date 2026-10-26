@@ -1,12 +1,14 @@
 """SDRW drawing document model with explicit layers, stable IDs and revisions."""
 from __future__ import annotations
 from copy import deepcopy
+from threading import RLock
 from ..common import ValidationError, new_id, require_id, assert_unique, require_unit, require_metadata
 from .entities import validate_entity, make_entity
 
 class Drawing:
     def __init__(self, name="Untitled", *, unit="mm", document_id=None, revision=1,
                  layers=None, entities=None, metadata=None):
+        self._mutation_lock = RLock()
         self.name = name
         self.unit = require_unit(unit)
         self.document_id = document_id or new_id()
@@ -45,47 +47,52 @@ class Drawing:
         return self
 
     def add_layer(self, name, *, visible=True):
-        if any(x["name"] == name for x in self.layers):
-            raise ValidationError("drawing layer already exists")
-        self.layers.append({"name":name,"visible":visible})
-        try:
-            self.validate()
-        except Exception:
-            self.layers.pop()
-            raise
-        self.revision += 1
-        return name
+        with self._mutation_lock:
+            if any(x["name"] == name for x in self.layers):
+                raise ValidationError("drawing layer already exists")
+            self.layers.append({"name":name,"visible":visible})
+            try:
+                self.validate()
+            except BaseException:
+                self.layers.pop()
+                raise
+            self.revision += 1
+            return name
 
     def add(self, kind, geometry, **options):
-        ent = make_entity(kind, geometry, **options)
-        self.entities.append(ent)
-        try:
-            self.validate()
-        except Exception:
-            self.entities.pop()
-            raise
-        self.revision += 1
-        return ent["id"]
+        with self._mutation_lock:
+            ent = make_entity(kind, geometry, **options)
+            self.entities.append(ent)
+            try:
+                self.validate()
+            except BaseException:
+                self.entities.pop()
+                raise
+            self.revision += 1
+            return ent["id"]
 
     def remove(self, entity_id):
-        require_id(entity_id)
-        found = next((i for i,e in enumerate(self.entities) if e["id"] == entity_id), None)
-        if found is None:
-            raise ValidationError("drawing entity not found")
-        self.entities.pop(found)
-        self.revision += 1
+        with self._mutation_lock:
+            require_id(entity_id)
+            found = next((i for i,e in enumerate(self.entities) if e["id"] == entity_id), None)
+            if found is None:
+                raise ValidationError("drawing entity not found")
+            self.entities.pop(found)
+            self.revision += 1
 
     def as_dict(self):
-        self.validate()
-        return deepcopy({"document_id":self.document_id,"revision":self.revision,
-                         "name":self.name,"layers":self.layers,"entities":self.entities,
-                         "metadata":self.metadata})
+        with self._mutation_lock:
+            self.validate()
+            return deepcopy({"document_id":self.document_id,"revision":self.revision,
+                             "name":self.name,"layers":self.layers,"entities":self.entities,
+                             "metadata":self.metadata})
 
     def manifest(self):
-        self.validate()
-        return {"format_id":"slai.sdrw", "format_version":"0.1.0", "schema":"slai.sdrw/0.1",
-                "spatial_dimension":2,"document_kind":"drawing","document_id":self.document_id,
-                "revision":self.revision,"units":self.unit,"requires":["drawing-primitives"]}
+        with self._mutation_lock:
+            self.validate()
+            return {"format_id":"slai.sdrw", "format_version":"0.1.0", "schema":"slai.sdrw/0.1",
+                    "spatial_dimension":2,"document_kind":"drawing","document_id":self.document_id,
+                    "revision":self.revision,"units":self.unit,"requires":["drawing-primitives"]}
 
     @classmethod
     def from_package(cls, package):

@@ -10,7 +10,7 @@ MAX_NODES = 300_000
 MAX_DEPTH = 64
 
 def finite(value, label="number", *, limit=1e12) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > limit:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(value) > limit or not math.isfinite(value):
         raise ValidationError(label + " must be finite and within bounds")
     return float(value)
 
@@ -64,7 +64,9 @@ def parse_json(raw: bytes):
         raise ValidationError("invalid JSON numeric token: " + token)
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=invalid_number)
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except RecursionError as exc:
+        raise ResourceLimitError("JSON nesting exceeds parser budget") from exc
+    except (UnicodeError, ValueError) as exc:
         raise ValidationError("malformed UTF-8 JSON") from exc
     return json_safe(value)
 

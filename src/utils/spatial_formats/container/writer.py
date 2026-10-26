@@ -1,15 +1,23 @@
 """Deterministic validated ZIP writer with atomic replacement semantics."""
 import os
 import tempfile
+import zlib
 from hashlib import sha256
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED, ZIP_STORED
 from ..common.errors import ConflictError, ValidationError, ResourceLimitError
 from ..common.helpers import canonical_json, digest
-from .reader import MIMES, PAYLOADS, _manifest, _validate_name, MAX_UNPACKED, MAX_MEMBERS
+from .reader import MIMES, PAYLOADS, _manifest, _validate_name, MAX_UNPACKED, MAX_MEMBERS, MAX_RATIO
 
 def _entry(name, raw, archive, compression):
     entry = ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+    # Raw DEFLATE is used by ZIP. Store unusually compressible content so our
+    # own reader's anti-bomb ratio limit never rejects a valid generated file.
+    if compression == ZIP_DEFLATED:
+        compressor = zlib.compressobj(wbits=-15)
+        compressed = compressor.compress(raw) + compressor.flush()
+        if len(raw) > MAX_RATIO * max(1, len(compressed)):
+            compression = ZIP_STORED
     entry.compress_type = compression
     entry.create_system = 3
     entry.external_attr = 0o100644 << 16
@@ -23,7 +31,7 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
     """
     from .reader import load_package
     format_id = manifest.get("format_id") if isinstance(manifest, dict) else None
-    if format_id not in MIMES:
+    if not isinstance(format_id, str) or format_id not in MIMES:
         raise ValidationError("unsupported document format")
     payload = PAYLOADS[format_id]
     # Externalize SGEO indexed meshes after validating the complete in-memory scene.
@@ -83,6 +91,12 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
         # reopen it read/write to commit the completed ZIP bytes to storage.
         with open(name, "r+b") as handle:
             os.fsync(handle.fileno())
+        # Hash the verified temporary file before publication; another writer
+        # may replace the destination immediately after our atomic operation.
+        hasher=sha256()
+        with open(name, "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                hasher.update(chunk)
         if overwrite:
             os.replace(name, destination)
         else:
@@ -90,33 +104,23 @@ def write_package(path, manifest: dict, document: dict, assets=None, *, overwrit
                 os.link(name, destination)
             except FileExistsError as exc:
                 raise ConflictError("output file already exists") from exc
-            except OSError:
-                # Platform fallback when hardlinks are unavailable. Remove an
-                # incomplete newly-created destination if copying fails.
-                created=False
-                try:
-                    with open(destination, "xb") as target:
-                        created=True
-                        with open(name, "rb") as source:
-                            while True:
-                                chunk = source.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                target.write(chunk)
-                            target.flush()
-                            os.fsync(target.fileno())
-                except FileExistsError as exc:
-                    raise ConflictError("output file already exists") from exc
-                except BaseException:
-                    if created:
-                        destination.unlink(missing_ok=True)
-                    raise
-        # Hash incrementally rather than allocating the whole ZIP again.
-        hasher=sha256()
-        with open(destination, "rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                hasher.update(chunk)
+            except OSError as exc:
+                # A streamed copy exposes partial data. Fail without publishing
+                # instead when atomic no-clobber hardlinks are unavailable.
+                raise ConflictError("filesystem does not support atomic no-clobber publication") from exc
         return hasher.hexdigest()
     finally:
         if name is not None and os.path.exists(name):
             os.unlink(name)
+
+
+def write_document(path, document, *, overwrite=False):
+    """Save one consistent model snapshot through the validated package writer."""
+    from ..sgeo.scene import Scene
+    from ..sdrw.drawing import Drawing
+    if not isinstance(document, (Scene, Drawing)):
+        raise ValidationError("expected a Scene or Drawing")
+    with document._mutation_lock:
+        manifest = document.manifest()
+        payload = document.as_dict()
+    return write_package(path, manifest, payload, overwrite=overwrite)

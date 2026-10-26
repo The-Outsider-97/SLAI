@@ -8,7 +8,7 @@ MAX_VERTICES = 1_000_000
 MAX_TRIANGLES = 2_000_000
 
 def validate_geometry(geometry: dict) -> dict:
-    if not isinstance(geometry, dict) or geometry.get("kind") not in GEOMETRIES:
+    if not isinstance(geometry, dict) or not isinstance(geometry.get("kind"), str) or geometry["kind"] not in GEOMETRIES:
         raise ValidationError("invalid or unsupported SGEO geometry kind")
     kind = geometry["kind"]
     if kind == "point":

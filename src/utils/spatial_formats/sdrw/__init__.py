@@ -4,3 +4,4 @@ from .drawing import Drawing
 
 from .operations import entity_length, enclosed_area, transform_entity
 from .operations import entity_bounds as tight_entity_bounds
+from .transactions import apply_drawing_operations
