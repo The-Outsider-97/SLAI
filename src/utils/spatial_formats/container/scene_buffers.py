@@ -33,6 +33,7 @@ def hydrate_scene(document: dict, assets: dict[str,bytes]) -> dict:
         raise ValidationError("scene and assets must be mappings")
     validate_buffer_references(document, assets)
     result=deepcopy(document)
+    decoded={}
     for obj in result.get("objects",[]):
         if not isinstance(obj,dict):
             raise ValidationError("scene object must be an object")
@@ -40,7 +41,13 @@ def hydrate_scene(document: dict, assets: dict[str,bytes]) -> dict:
         if isinstance(geom,dict) and geom.get("kind")=="mesh_buffer":
             if set(geom)!={"kind","buffers"}:
                 raise ValidationError("unknown binary geometry fields")
-            obj["geometry"]=decode_mesh_buffers(geom["buffers"],assets)
+            from ..common.helpers import canonical_json
+            key=canonical_json(geom["buffers"])
+            if key not in decoded:
+                decoded[key]=decode_mesh_buffers(geom["buffers"],assets)
+            # Keep independently editable object geometry while avoiding
+            # redundant binary buffer decoding for repeated mesh instances.
+            obj["geometry"]=deepcopy(decoded[key])
     return result
 
 def validate_buffer_references(document:dict, assets:dict[str,bytes])->None:

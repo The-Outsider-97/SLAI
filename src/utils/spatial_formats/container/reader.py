@@ -1,5 +1,6 @@
 """Defensive bounded decoder for SLAI SGEO/SDRW ZIP artifacts."""
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from zipfile import ZipFile, ZIP_STORED, ZIP_DEFLATED, BadZipFile
 from ..common.errors import ValidationError, IntegrityError, ResourceLimitError, UnsupportedFeatureError
@@ -12,7 +13,7 @@ PAYLOADS = {"slai.sgeo": "scene.json", "slai.sdrw": "drawing.json"}
 MAX_ARCHIVE_SIZE = 256 * 1024 * 1024
 MAX_UNPACKED = 128 * 1024 * 1024
 MAX_MEMBERS = 128
-MAX_RATIO = 100
+MAX_RATIO = 1024  # Absolute decompressed budgets remain authoritative.
 
 @dataclass(frozen=True)
 class SpatialPackage:
@@ -77,65 +78,109 @@ def _manifest(manifest):
         raise ValidationError("required document payload missing")
     return format_id
 
+def _bounded_member(archive: ZipFile, info, limit: int) -> bytes:
+    """Read exactly one indexed member with a hard decompressed byte limit.
+
+    Using an explicitly bounded stream prevents a forged index or malformed
+    deflate stream from allocating arbitrary decompressed buffers.
+    """
+    if info.file_size > limit:
+        raise ResourceLimitError("archive member exceeds decompression budget")
+    with archive.open(info, "r") as member:
+        raw = member.read(limit + 1)
+        if len(raw) > limit:
+            raise ResourceLimitError("decompressed archive member exceeds budget")
+        if member.read(1):
+            raise ResourceLimitError("unexpected trailing decompressed bytes")
+    if len(raw) != info.file_size:
+        raise IntegrityError("decompressed member length differs from ZIP index")
+    return raw
+
+
 def load_package(path, *, max_archive_size=MAX_ARCHIVE_SIZE, max_unpacked=MAX_UNPACKED) -> SpatialPackage:
-    path = Path(path)
-    if path.stat().st_size > min(max_archive_size, MAX_ARCHIVE_SIZE):
-        raise ResourceLimitError("compressed spatial package too large")
+    """Load a validated SGEO/SDRW document, returning *hydrated* native geometry.
+
+    Archive geometry buffers are an on-disk transport detail. Binary descriptors
+    are verified against the complete asset index and decoded before semantic
+    Scene validation, which only accepts in-memory indexed meshes.
+    """
+    if (type(max_archive_size) is not int or type(max_unpacked) is not int
+            or max_archive_size < 1 or max_unpacked < 1):
+        raise ValidationError("archive limits must be positive integers")
+    compressed_limit = min(max_archive_size, MAX_ARCHIVE_SIZE)
+    expanded_limit = min(max_unpacked, MAX_UNPACKED)
     try:
-        with ZipFile(path, "r", allowZip64=False) as archive:
-            infos = archive.infolist()
-            if len(infos) < 3 or len(infos) > MAX_MEMBERS:
-                raise ResourceLimitError("invalid member count")
-            names = [info.filename for info in infos]
-            if len(set(names)) != len(names):
-                raise ValidationError("duplicate archive members")
-            for info in infos:
-                _validate_name(info.filename)
-                if info.compress_type not in (ZIP_STORED, ZIP_DEFLATED):
-                    raise UnsupportedFeatureError('unsupported ZIP compression method')
-                if info.filename in ('mimetype', 'manifest.json') and info.file_size > 1024 * 1024:
-                    raise ResourceLimitError('container header exceeds 1 MiB')
-                if info.flag_bits & 1:
-                    raise ValidationError("encrypted ZIP entries are unsupported")
-                if info.file_size > MAX_UNPACKED or (info.file_size and info.file_size > MAX_RATIO * max(1, info.compress_size)):
-                    raise ResourceLimitError("ZIP member exceeds resource budget")
-                if (info.external_attr >> 16) & 0o170000 == 0o120000:
-                    raise ValidationError("ZIP symlink members are prohibited")
-            if sum(info.file_size for info in infos) > min(max_unpacked, MAX_UNPACKED):
-                raise ResourceLimitError("ZIP expanded data exceeds resource budget")
-            if names[:2] != ["mimetype", "manifest.json"] or infos[0].compress_type != ZIP_STORED:
-                raise ValidationError("spatial file must begin with stored mimetype and manifest")
-            mimetype = archive.read("mimetype")
-            if mimetype not in MIMES.values():
-                raise UnsupportedFeatureError("invalid mimetype marker")
-            manifest = parse_json(archive.read("manifest.json"))
-            format_id = _manifest(manifest)
-            if mimetype != MIMES[format_id]:
-                raise IntegrityError("manifest and MIME identity disagree")
-            parts = {part["path"]: part for part in manifest["parts"]}
-            if set(names) != set(parts) | {"mimetype", "manifest.json"}:
-                raise IntegrityError("archive contents differ from manifest index")
-            data = {}
-            for name, part in parts.items():
-                info = archive.getinfo(name)
-                if info.file_size != part["size"]:
-                    raise IntegrityError("member size mismatch: " + name)
-                raw = archive.read(name)
-                if len(raw) != part["size"] or digest(raw) != part["sha256"]:
-                    raise IntegrityError("member digest mismatch: " + name)
-                data[name] = raw
-            payload = PAYLOADS[format_id]
-            document = parse_json(data.pop(payload))
-            if not isinstance(document, dict):
-                raise ValidationError("document must be an object")
-            from ..verification.invariants import validate_document
-            if format_id == "slai.sgeo":
-                from .scene_buffers import hydrate_scene, validate_buffer_references
-                validate_buffer_references(document,data)
-                document=hydrate_scene(document,data)
-            elif data:
-                raise IntegrityError("SDRW payload does not support auxiliary assets")
-            validate_document(manifest, document)
-            return SpatialPackage(manifest, document, data)
+        # Open exactly once: no separate path.stat followed by an unrelated
+        # file open, avoiding an avoidable replacement race on the path.
+        with open(path, "rb") as source:
+            if os.fstat(source.fileno()).st_size > compressed_limit:
+                raise ResourceLimitError("compressed spatial package too large")
+            with ZipFile(source, "r", allowZip64=False) as archive:
+                infos = archive.infolist()
+                if not 3 <= len(infos) <= MAX_MEMBERS:
+                    raise ResourceLimitError("invalid archive member count")
+                names = [info.filename for info in infos]
+                if len(set(names)) != len(names):
+                    raise ValidationError("duplicate archive members")
+                total = 0
+                for info in infos:
+                    _validate_name(info.filename)
+                    if info.compress_type not in (ZIP_STORED, ZIP_DEFLATED):
+                        raise UnsupportedFeatureError("unsupported ZIP compression method")
+                    if info.flag_bits & 1:
+                        raise ValidationError("encrypted ZIP entries are unsupported")
+                    if info.filename in ("mimetype", "manifest.json") and info.file_size > 1024 * 1024:
+                        raise ResourceLimitError("spatial container header exceeds 1 MiB")
+                    if info.file_size > expanded_limit or (
+                        info.file_size and info.file_size > MAX_RATIO * max(1, info.compress_size)
+                    ):
+                        raise ResourceLimitError("archive member exceeds resource budget")
+                    if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                        raise ValidationError("ZIP symlink members are prohibited")
+                    total += info.file_size
+                    if total > expanded_limit:
+                        raise ResourceLimitError("total archive expansion exceeds budget")
+                if names[:2] != ["mimetype", "manifest.json"] or infos[0].compress_type != ZIP_STORED:
+                    raise ValidationError("expected stored mimetype followed by manifest")
+                mimetype = _bounded_member(archive, infos[0], 1024 * 1024)
+                if mimetype not in MIMES.values():
+                    raise UnsupportedFeatureError("invalid mimetype marker")
+                manifest = parse_json(_bounded_member(archive, infos[1], 1024 * 1024))
+                format_id = _manifest(manifest)
+                if mimetype != MIMES[format_id]:
+                    raise IntegrityError("manifest and MIME identity disagree")
+                parts = {part["path"]: part for part in manifest["parts"]}
+                if set(names) != set(parts) | {"mimetype", "manifest.json"}:
+                    raise IntegrityError("archive contents differ from manifest index")
+
+                # Verify size/hash before JSON parsing, geometry hydration or
+                # returning any data to the caller.
+                payload = PAYLOADS[format_id]
+                data: dict[str, bytes] = {}
+                for info in infos[2:]:
+                    name = info.filename
+                    part = parts[name]
+                    if info.file_size != part["size"]:
+                        raise IntegrityError("member size mismatch: " + name)
+                    limit = min(expanded_limit, part["size"])
+                    raw = _bounded_member(archive, info, limit)
+                    if digest(raw) != part["sha256"]:
+                        raise IntegrityError("member SHA-256 mismatch: " + name)
+                    data[name] = raw
+
+                document = parse_json(data.pop(payload))
+                if not isinstance(document, dict):
+                    raise ValidationError("document must be an object")
+
+                if format_id == "slai.sgeo":
+                    from .scene_buffers import hydrate_scene, validate_buffer_references
+                    validate_buffer_references(document, data)
+                    document = hydrate_scene(document, data)
+                elif data:
+                    raise IntegrityError("SDRW archive contains unsupported auxiliary assets")
+
+                from ..verification.invariants import validate_document
+                validate_document(manifest, document)
+                return SpatialPackage(manifest, document, data)
     except (BadZipFile, EOFError, RuntimeError) as exc:
         raise IntegrityError("invalid or corrupted spatial ZIP package") from exc
