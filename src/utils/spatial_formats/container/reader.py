@@ -30,7 +30,7 @@ def _manifest(manifest):
     if not isinstance(manifest, dict):
         raise ValidationError("manifest must be an object")
     format_id = manifest.get("format_id")
-    if format_id not in MIMES:
+    if not isinstance(format_id, str) or format_id not in MIMES:
         raise UnsupportedFeatureError("unrecognized spatial format")
     if manifest.get("format_version") != "0.1.0":
         raise UnsupportedFeatureError("unsupported spatial format version")

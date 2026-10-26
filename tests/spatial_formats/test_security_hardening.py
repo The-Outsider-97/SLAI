@@ -15,7 +15,8 @@ def test_zip_duplicate_entries_rejected(tmp_path):
     path=tmp_path/"dup.sgeo"
     with ZipFile(path,"w") as z:
         z.writestr("mimetype","application/x-slai-sgeo+zip")
-        z.writestr("mimetype","application/x-slai-sgeo+zip")
+        with pytest.warns(UserWarning, match="Duplicate name: 'mimetype'"):
+            z.writestr("mimetype","application/x-slai-sgeo+zip")
         z.writestr("manifest.json","{}")
     with pytest.raises((ValidationError,ResourceLimitError)):
         load_package(path)

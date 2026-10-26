@@ -4,7 +4,6 @@ Unsupported SVG features fail closed. No external resources, embedded scripts, C
 text, use-elements or general path mini-language are interpreted.
 """
 from __future__ import annotations
-import io
 import math
 import xml.etree.ElementTree as ET
 from ..common import ValidationError, UnsupportedFeatureError, finite
@@ -41,10 +40,16 @@ def export_svg(drawing: Drawing) -> str:
         ET.SubElement(root,tag,attrs)
     return ET.tostring(root,encoding="unicode",short_empty_elements=True)
 
-def import_svg(raw: str|bytes, *, unit="mm") -> Drawing:
+def import_svg(raw: str|bytes, *, unit=None) -> Drawing:
     data=raw.encode("utf-8") if isinstance(raw,str) else raw
     if not isinstance(data,bytes) or len(data)>MAX_SVG_BYTES:
         raise ValidationError("SVG input exceeds byte limit")
+    try:
+        text=data.decode("utf-8-sig")
+    except UnicodeError as exc:
+        raise ValidationError("SVG must be UTF-8") from exc
+    if "\x00" in text:
+        raise ValidationError("SVG must be UTF-8 without NUL bytes")
     if b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
         raise UnsupportedFeatureError("SVG document declarations are prohibited")
     try:
@@ -53,10 +58,16 @@ def import_svg(raw: str|bytes, *, unit="mm") -> Drawing:
         raise ValidationError("invalid SVG XML") from exc
     if root.tag not in (f"{{{NS}}}svg","svg"):
         raise ValidationError("SVG root element required")
-    drawing=Drawing(unit=unit)
+    if set(root.attrib)-{"version","data-unit"}:
+        raise UnsupportedFeatureError("SVG root attributes require explicit viewport/style conversion")
+    if root.text and root.text.strip():
+        raise UnsupportedFeatureError("SVG text is unsupported")
+    drawing=Drawing(unit=unit if unit is not None else root.attrib.get("data-unit","mm"))
     tag_names={"line","circle","polyline","polygon"}
     for child in root:
         tag=child.tag.rsplit("}",1)[-1]
+        if child.tag not in (tag,f"{{{NS}}}{tag}") or len(child) or (child.text and child.text.strip()) or (child.tail and child.tail.strip()):
+            raise UnsupportedFeatureError("SVG nested content or foreign namespaces are unsupported")
         if tag not in tag_names:
             raise UnsupportedFeatureError("unsupported SVG element: "+tag)
         if any(key.lower().startswith("on") or key in {"href","style","transform"} or key.endswith("}href") for key in child.attrib):

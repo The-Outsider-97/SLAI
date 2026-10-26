@@ -6,7 +6,6 @@ deserialization. Descriptors are explicit and validated before allocation.
 from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
-from itertools import product
 from math import prod
 from struct import Struct
 from ..common.errors import ValidationError, ResourceLimitError, IntegrityError
@@ -38,7 +37,7 @@ def validate_descriptor(value)->BufferDescriptor:
     if prod(shape)>_MAX_ELEMENTS:
         raise ResourceLimitError("numeric array element budget exceeded")
     dtype=value["dtype"]
-    if dtype not in _DTYPES or value["byte_order"]!="little":
+    if not isinstance(dtype,str) or dtype not in _DTYPES or value["byte_order"]!="little":
         raise ValidationError("unsupported binary element format")
     path=value["path"]
     digest=value["sha256"]
@@ -51,7 +50,7 @@ def validate_descriptor(value)->BufferDescriptor:
     return BufferDescriptor(path,digest,dtype,tuple(shape))
 
 def encode_buffer(values, *, dtype: str, shape: tuple[int,...]):
-    if dtype not in _DTYPES:
+    if not isinstance(dtype,str) or dtype not in _DTYPES:
         raise ValidationError("unsupported binary dtype")
     if not isinstance(shape,tuple) or len(shape)<1 or len(shape)>4 or any(type(n) is not int or n<1 for n in shape):
         raise ValidationError("invalid binary array shape")
@@ -62,7 +61,7 @@ def encode_buffer(values, *, dtype: str, shape: tuple[int,...]):
         raise ValidationError("numeric array must be flat and match declared shape")
     from math import isfinite
     for v in values:
-        if isinstance(v,bool) or not isinstance(v,(int,float)) or not isfinite(v):
+        if isinstance(v,bool) or not isinstance(v,(int,float)) or abs(v)>1.7976931348623157e308 or not isfinite(v):
             raise ValidationError("invalid numeric array element")
         if dtype=="u32" and (type(v) is not int or not 0<=v<=4294967295):
             raise ValidationError("u32 elements must be unsigned integers")

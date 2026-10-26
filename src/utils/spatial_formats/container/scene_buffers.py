@@ -5,7 +5,7 @@ buffers in geometry/. In-memory Scene objects always use ordinary indexed meshes
 """
 from __future__ import annotations
 from copy import deepcopy
-from ..common.errors import ValidationError, IntegrityError
+from ..common.errors import ValidationError, IntegrityError, ResourceLimitError
 from .buffers import encode_mesh_buffers, decode_mesh_buffers, validate_descriptor
 
 def externalize_scene(document: dict) -> tuple[dict, dict[str,bytes]]:
@@ -31,6 +31,7 @@ def hydrate_scene(document: dict, assets: dict[str,bytes]) -> dict:
     """Reconstruct in-memory mesh objects from verified, local buffer references."""
     if not isinstance(document,dict) or not isinstance(assets,dict):
         raise ValidationError("scene and assets must be mappings")
+    validate_buffer_references(document, assets)
     result=deepcopy(document)
     for obj in result.get("objects",[]):
         if not isinstance(obj,dict):
@@ -44,14 +45,27 @@ def hydrate_scene(document: dict, assets: dict[str,bytes]) -> dict:
 
 def validate_buffer_references(document:dict, assets:dict[str,bytes])->None:
     """Reject orphaned/undeclared assets and invalid geometry references."""
+    from ..common.helpers import MAX_NODES, json_safe
+    if not isinstance(document,dict) or not isinstance(document.get("objects"),list) or not isinstance(assets,dict):
+        raise ValidationError("scene objects must be a list and assets a mapping")
+    json_safe(document)
     expected=set()
-    for obj in document.get("objects",[]):
+    expanded=0
+    for obj in document["objects"]:
+        if not isinstance(obj,dict):
+            raise ValidationError("scene object must be an object")
         geometry=obj.get("geometry")
         if isinstance(geometry,dict) and geometry.get("kind")=="mesh_buffer":
             refs=geometry.get("buffers")
             if not isinstance(refs,dict) or set(refs)!={"vertices","faces"}:
                 raise ValidationError("invalid mesh buffer references")
             for descriptor in refs.values():
-                expected.add(validate_descriptor(descriptor).path)
+                desc=validate_descriptor(descriptor)
+                expected.add(desc.path)
+                # Each row and each scalar becomes a JSON node on hydration.
+                from math import prod
+                expanded += prod(desc.shape) + desc.shape[0]
+                if expanded > MAX_NODES:
+                    raise ResourceLimitError("hydrated scene exceeds structural budget")
     if set(assets)!=expected:
         raise IntegrityError("unreferenced or missing scene binary asset")

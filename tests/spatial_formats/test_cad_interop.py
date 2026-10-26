@@ -54,7 +54,7 @@ def test_dwg_valid_backend_still_validates_missing_input(tmp_path):
     # This only checks input-validation ordering; it never launches Python as
     # a DWG converter or claims end-to-end ODA compatibility.
     with pytest.raises(ValidationError, match="DWG input"):
-        dwg.import_dwg(tmp_path / "absent.dwg", executable=sys.executable)
+        dwg.import_dwg(tmp_path / "absent.dwg", executable=str(Path(sys.executable).resolve()))
 
 def test_dwg_header_validation(tmp_path):
     bad=tmp_path/"bad.dwg";bad.write_bytes(b"NOTDWG"*3)

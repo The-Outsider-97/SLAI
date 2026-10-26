@@ -30,11 +30,56 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
     candidate=Scene(**scene.as_dict(),unit=scene.unit,document_kind=scene.document_kind)
     results=[]
     for op in operations:
-        if not isinstance(op,dict) or op.get("op") not in {
-            "add", "remove", "rename", "transform", "geometry", "reparent", "parameters"
+        if not isinstance(op,dict) or not isinstance(op.get("op"),str) or op.get("op") not in {
+            "add", "remove", "rename", "transform", "geometry", "reparent", "parameters", "add_family", "update_family", "remove_family", "instantiate"
         }:
             raise ValidationError("unknown scene mutation operation")
         kind=op["op"]
+        if kind in {"add_family","update_family","remove_family"}:
+            if set(op)-{"op","id","value"}:
+                raise ValidationError("unexpected family operation arguments")
+            if kind=="add_family":
+                from .families import validate_family
+                family=deepcopy(op.get("value"))
+                validate_family(family)
+                candidate.families.append(family)
+                fid=family["id"]
+            else:
+                fid=require_id(op.get("id"))
+                family=next((f for f in candidate.families if f["id"]==fid),None)
+                if family is None:
+                    raise ValidationError("unknown family identifier")
+                instances=[o for o in candidate.objects if o.get("family_id")==fid]
+                if kind=="remove_family":
+                    if instances:
+                        raise ValidationError("cannot remove an instantiated family")
+                    candidate.families.remove(family)
+                else:
+                    replacement=deepcopy(op.get("value"))
+                    if not isinstance(replacement,dict) or replacement.get("id")!=fid:
+                        raise ValidationError("replacement must preserve family identifier")
+                    candidate.families[candidate.families.index(family)]=replacement
+                    for obj in instances:
+                        obj["geometry"]=generate_geometry(replacement,obj.get("parameters",{}))
+            candidate.validate()
+            results.append(fid)
+            continue
+        if kind=="instantiate":
+            if set(op)-{"op","family_id","parameters","name","parent","transform","metadata"}:
+                raise ValidationError("unexpected instantiate arguments")
+            fid=require_id(op.get("family_id"))
+            family=next((f for f in candidate.families if f["id"]==fid),None)
+            if family is None:
+                raise ValidationError("unknown family identifier")
+            parameters=deepcopy(op.get("parameters",{}))
+            oid=new_id()
+            candidate.objects.append({"id":oid,"family_id":fid,"parameters":parameters,
+                "name":op.get("name",family["name"]),"parent":op.get("parent"),
+                "transform":deepcopy(op.get("transform",list(IDENTITY))),
+                "geometry":generate_geometry(family,parameters),"metadata":deepcopy(op.get("metadata",{}))})
+            candidate.validate()
+            results.append(oid)
+            continue
         if kind=="add":
             if set(op)-{"op","name","parent","geometry","transform","metadata"}:
                 raise ValidationError("unexpected add arguments")
@@ -96,12 +141,8 @@ def objects_within_bounds(scene, minimum, maximum):
     lo,hi=vector(minimum,3),vector(maximum,3)
     if any(a>b for a,b in zip(lo,hi)):
         raise ValidationError("invalid query bounds")
-    scene.validate()
     matches=[]
-    for obj in scene.objects:
-        if obj.get("geometry") is None:
-            continue
-        a,b=scene.world_bounds(obj["id"])
+    for oid,(a,b) in scene.bounds_by_object().items():
         if all(a[i]<=hi[i] and b[i]>=lo[i] for i in range(3)):
-            matches.append(obj["id"])
+            matches.append(oid)
     return matches
