@@ -87,10 +87,10 @@ def _validate_embedded_glb(data):
             if chunk_type!=b"JSON":
                 raise ValidationError("GLB JSON chunk must be first")
             try:
-                model=json.loads(payload.decode("utf-8").rstrip(" \\x00"))
+                model=json.loads(payload.decode("utf-8").rstrip(" \x00"))
             except (UnicodeError,ValueError) as exc:
                 raise ValidationError("invalid GLB JSON") from exc
-        elif chunk_type==b"BIN\\x00":
+        elif chunk_type==b"BIN\x00":
             if binary_chunk_found:
                 raise ValidationError("duplicate GLB binary chunk")
             binary_chunk_found=True
