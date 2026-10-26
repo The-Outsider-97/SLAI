@@ -90,6 +90,13 @@ def _convert(source, *, executable, version="ACAD2018", target_type="DXF", timeo
         return target.read_bytes()
 
 def import_dwg(path, *, executable, unit="mm", version="ACAD2018", timeout=90):
+    """Import through an explicitly configured backend.
+
+    Backend availability is checked first, so callers receive a stable
+    DependencyUnavailableError even when the source file is also absent.
+    Once configured, untrusted DWG input is validated before conversion.
+    """
+    _executable(executable)
     validate_dwg(path)
     data=_convert(Path(path),executable=executable,version=version,target_type="DXF",timeout=timeout)
     with tempfile.TemporaryDirectory(prefix="slai-dwg-read-") as root:
