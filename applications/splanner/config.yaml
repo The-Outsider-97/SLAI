@@ -1,4 +1,0 @@
-app:
-  port: 8769
-  reminder_poll_seconds: 20
-  max_request_bytes: 262144
