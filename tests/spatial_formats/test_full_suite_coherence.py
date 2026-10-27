@@ -21,7 +21,7 @@ MESH={"kind":"mesh","vertices":[[0,0,0],[1,0,0],[0,1,0]],"faces":[[0,1,2]]}
 def test_active_runtime_has_coherent_scene_and_binary_reader():
     """Catch mixed checkouts, source shadowing and outdated source behavior."""
     assert hasattr(Scene(),"_mutation_lock")
-    assert "hydrate_scene" in inspect.getsource(reader.load_package)
+    assert "hydrate_scene" in inspect.getsource(reader._load_stream)
     assert "src.utils.spatial_formats" in Scene.__module__
 
 def test_binary_mesh_archive_reads_as_native_geometry(tmp_path):

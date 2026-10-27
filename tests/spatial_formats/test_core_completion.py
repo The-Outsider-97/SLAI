@@ -206,7 +206,7 @@ def test_repeated_binary_references_fail_before_mesh_allocation(monkeypatch):
     mesh={"kind":"mesh","vertices":[[0,0,0],[1,0,0],[0,1,0]],"faces":[[0,1,2]]}
     descriptors,assets=encode_mesh_buffers(mesh)
     # Large descriptors need no payload allocation to demonstrate preflight.
-    descriptors["vertices"]["shape"]=[100000,3]
+    descriptors["vertices"]["shape"]=[500000,3]
     document={"objects":[{"geometry":{"kind":"mesh_buffer","buffers":descriptors}}]}
     def unexpected(*args):pytest.fail("mesh decoder ran before allocation preflight")
     monkeypatch.setattr(scene_buffers,"decode_mesh_buffers",unexpected)

@@ -141,9 +141,21 @@ def test_svg_rejects_external_dtd_and_script():
         import_svg('<svg xmlns="http://www.w3.org/2000/svg"><line x1="0" y1="0" x2="1" y2="1" onload="alert(1)"/></svg>')
 
 
-def test_svg_arc_export_is_explicitly_not_importable():
+def test_svg_arc_export_round_trips_and_foreign_arc_paths_are_rejected():
     drawing = Drawing()
     drawing.add("arc", {"center": [0, 0], "radius": 1, "start_angle": 0, "end_angle": pi / 2})
     xml = export_svg(drawing)
+    imported = import_svg(xml)
+    geometry = imported.as_dict()["entities"][0]["geometry"]
+    assert imported.as_dict()["entities"][0]["kind"] == "arc"
+    assert geometry["center"] == [0, 0] and geometry["radius"] == 1
+    assert geometry["start_angle"] == 0 and abs(geometry["end_angle"] - pi / 2) < 1e-12
+    # A generic SVG path (no exact SLAI arc parameters) is still refused.
     with pytest.raises(UnsupportedFeatureError):
-        import_svg(xml)
+        import_svg('<svg xmlns="http://www.w3.org/2000/svg"><path d="M 1 0 A 1 1 0 0 1 0 1"/></svg>')
+    # Parameters that disagree with the path data are refused rather than trusted.
+    forged = xml.replace('data-r="1"', 'data-r="2"')
+    assert forged != xml
+    with pytest.raises(Exception) as caught:
+        import_svg(forged)
+    assert getattr(caught.value, "code", "").startswith("spatial.")
