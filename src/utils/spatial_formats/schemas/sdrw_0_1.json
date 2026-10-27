@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slai.local/schemas/sdrw_0_1.json",
+  "type": "object",
+  "required": [
+    "document_id",
+    "revision",
+    "name",
+    "layers",
+    "entities",
+    "metadata"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "document_id": {
+      "$ref": "spatial_core.json#/$defs/uuid"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 255
+    },
+    "metadata": {
+      "$ref": "spatial_core.json#/$defs/metadata"
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "visible": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "entities": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "geometry"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "spatial_core.json#/$defs/uuid"
+          },
+          "kind": {
+            "enum": [
+              "point",
+              "line",
+              "polyline",
+              "circle",
+              "arc"
+            ]
+          },
+          "layer": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "geometry": {
+            "type": "object"
+          },
+          "metadata": {
+            "$ref": "spatial_core.json#/$defs/metadata"
+          },
+          "style": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "description": "Frozen schema of format version 0.1.0; used only to validate files before they are migrated."
+}

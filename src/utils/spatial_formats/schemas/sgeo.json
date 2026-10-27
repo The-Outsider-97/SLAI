@@ -8,7 +8,9 @@
     "name",
     "objects",
     "families",
-    "metadata"
+    "metadata",
+    "materials",
+    "images"
   ],
   "additionalProperties": false,
   "properties": {
@@ -76,9 +78,26 @@
           },
           "parameters": {
             "type": "object"
+          },
+          "material": {
+            "$ref": "spatial_core.json#/$defs/uuid"
           }
         },
         "additionalProperties": false
+      }
+    },
+    "materials": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object"
+      }
+    },
+    "images": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object"
       }
     }
   }

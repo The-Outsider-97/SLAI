@@ -103,12 +103,20 @@ def encode_mesh_buffers(mesh:dict):
     faces=[int(value) for face in mesh["faces"] for value in face]
     v,vr=encode_buffer(vertices,dtype="f64",shape=(len(mesh["vertices"]),3))
     f,fr=encode_buffer(faces,dtype="u32",shape=(len(mesh["faces"]),3))
-    return {"vertices":v.to_dict(),"faces":f.to_dict()}, {v.path:vr,f.path:fr}
+    descriptors,payloads={"vertices":v.to_dict(),"faces":f.to_dict()},{v.path:vr,f.path:fr}
+    if "uvs" in mesh:
+        t,tr=encode_buffer([float(value) for row in mesh["uvs"] for value in row],dtype="f64",shape=(len(mesh["uvs"]),2))
+        descriptors["uvs"]=t.to_dict()
+        payloads[t.path]=tr
+    return descriptors,payloads
 
 def decode_mesh_buffers(descriptors: dict, assets:dict[str,bytes]):
-    if not isinstance(descriptors,dict) or set(descriptors)!={"vertices","faces"}:
+    if not isinstance(descriptors,dict) or set(descriptors) not in ({"vertices","faces"},{"vertices","faces","uvs"}):
         raise ValidationError("invalid binary mesh descriptor")
     v,f=(validate_descriptor(descriptors[name]) for name in ("vertices","faces"))
+    t=validate_descriptor(descriptors["uvs"]) if "uvs" in descriptors else None
+    if t is not None and (t.dtype not in {"f64","f32"} or len(t.shape)!=2 or t.shape[-1]!=2 or t.shape[0]!=v.shape[0]):
+        raise ValidationError("invalid uv buffer shape")
     if v.dtype not in {"f64","f32"} or f.dtype!="u32" or v.shape[-1]!=3 or f.shape[-1]!=3 or len(v.shape)!=2 or len(f.shape)!=2:
         raise ValidationError("invalid indexed geometry buffer shapes")
     try:
@@ -118,5 +126,11 @@ def decode_mesh_buffers(descriptors: dict, assets:dict[str,bytes]):
         raise IntegrityError("missing referenced geometry resource") from exc
     geo={"kind":"mesh","vertices":[vertices[i:i+3] for i in range(0,len(vertices),3)],
          "faces":[indices[i:i+3] for i in range(0,len(indices),3)]}
+    if t is not None:
+        try:
+            coords=decode_buffer(descriptors["uvs"],assets[t.path])
+        except KeyError as exc:
+            raise IntegrityError("missing referenced geometry resource") from exc
+        geo["uvs"]=[coords[i:i+2] for i in range(0,len(coords),2)]
     from ..sgeo.geometry import validate_geometry
     return validate_geometry(geo)

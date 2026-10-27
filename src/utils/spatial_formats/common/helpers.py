@@ -21,6 +21,11 @@ from .errors import ValidationError, ResourceLimitError
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_STRING = 1_000_000
 MAX_NODES = 300_000
+# Full document payloads (drawing.json, scene.json, hydrated meshes) get a larger,
+# separately named structural budget than small untrusted records such as the
+# manifest. 1.5 M nodes admits roughly 250 k mesh triangles or 80 k simple drawing
+# entities while still failing gracefully, with a typed error, on anything larger.
+MAX_DOCUMENT_NODES = 1_500_000
 MAX_DEPTH = 64
 
 
@@ -182,14 +187,15 @@ def json_safe(value, *, max_depth: int = MAX_DEPTH, max_nodes: int = MAX_NODES):
     return walk(value, 0)
 
 
-def canonical_json(value) -> bytes:
+def canonical_json(value, *, max_nodes: int = MAX_NODES) -> bytes:
     """Serialise ``value`` to deterministic UTF-8 JSON bytes.
 
     Uses sorted keys, no whitespace and ``allow_nan=False``. Raises
     :class:`ResourceLimitError` if the encoded result exceeds
-    :data:`MAX_JSON_BYTES`.
+    :data:`MAX_JSON_BYTES` or the structure exceeds ``max_nodes``
+    (pass :data:`MAX_DOCUMENT_NODES` for whole-document payloads).
     """
-    safe = json_safe(value)
+    safe = json_safe(value, max_nodes=max_nodes)
     raw = json.dumps(
         safe,
         ensure_ascii=False,
@@ -205,7 +211,7 @@ def canonical_json(value) -> bytes:
     return raw
 
 
-def parse_json(raw: bytes):
+def parse_json(raw: bytes, *, max_nodes: int = MAX_NODES):
     """Parse UTF-8 JSON bytes under all structural budgets.
 
     Rejects duplicate keys and non-standard numeric constants. A UTF-8 BOM
@@ -259,7 +265,7 @@ def parse_json(raw: bytes):
         # CPython's integer digit guard raises plain ValueError, not
         # JSONDecodeError. Keep the guard enabled and expose our domain error.
         raise ValidationError("JSON numeric value exceeds parser limits") from exc
-    return json_safe(value)
+    return json_safe(value, max_nodes=max_nodes)
 
 
 def digest(data) -> str:
@@ -273,6 +279,7 @@ __all__ = [
     "MAX_JSON_BYTES",
     "MAX_STRING",
     "MAX_NODES",
+    "MAX_DOCUMENT_NODES",
     "MAX_DEPTH",
     "finite",
     "bounded_int",

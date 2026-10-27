@@ -9,3 +9,7 @@ from .tessellation import tessellate
 from .transactions import apply_scene_operations, objects_within_bounds
 
 from .solids import extrude, revolve
+
+from .brep import validate_brep, brep_info, scale_brep
+from .brep_mesh import analyze_brep, tessellate_brep
+from .materials import validate_material, resolve_material

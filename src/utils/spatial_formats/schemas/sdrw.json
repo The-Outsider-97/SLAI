@@ -8,7 +8,9 @@
     "name",
     "layers",
     "entities",
-    "metadata"
+    "metadata",
+    "linetypes",
+    "blocks"
   ],
   "additionalProperties": false,
   "properties": {
@@ -42,6 +44,19 @@
           },
           "visible": {
             "type": "boolean"
+          },
+          "stroke": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "stroke_width": {
+            "type": "number",
+            "minimum": 0
+          },
+          "linetype": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
           }
         },
         "additionalProperties": false
@@ -51,43 +66,127 @@
       "type": "array",
       "maxItems": 100000,
       "items": {
+        "$ref": "#/$defs/entity"
+      }
+    },
+    "linetypes": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
         "type": "object",
         "required": [
-          "id",
-          "kind",
-          "geometry"
+          "name",
+          "pattern"
         ],
         "properties": {
-          "id": {
-            "$ref": "spatial_core.json#/$defs/uuid"
-          },
-          "kind": {
-            "enum": [
-              "point",
-              "line",
-              "polyline",
-              "circle",
-              "arc"
-            ]
-          },
-          "layer": {
-            "type": "string"
-          },
           "name": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
           },
-          "geometry": {
-            "type": "object"
+          "description": {
+            "type": "string",
+            "maxLength": 255
           },
-          "metadata": {
-            "$ref": "spatial_core.json#/$defs/metadata"
-          },
-          "style": {
-            "type": "object"
+          "pattern": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "number"
+            }
           }
         },
         "additionalProperties": false
       }
+    },
+    "blocks": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "base_point",
+          "entities"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "base_point": {
+            "$ref": "spatial_core.json#/$defs/vec2"
+          },
+          "entities": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100000,
+            "items": {
+              "$ref": "#/$defs/entity"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "entity": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "geometry"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "spatial_core.json#/$defs/uuid"
+        },
+        "kind": {
+          "enum": [
+            "point",
+            "line",
+            "polyline",
+            "circle",
+            "arc",
+            "text",
+            "dimension",
+            "hatch",
+            "insert"
+          ]
+        },
+        "layer": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "geometry": {
+          "type": "object"
+        },
+        "metadata": {
+          "$ref": "spatial_core.json#/$defs/metadata"
+        },
+        "style": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "stroke",
+              "stroke_width",
+              "fill",
+              "linetype",
+              "linetype_scale"
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

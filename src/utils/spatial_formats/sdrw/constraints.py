@@ -6,7 +6,8 @@ Constraint references are stable SDRW entity UUIDs; failures are reported.
 from __future__ import annotations
 from dataclasses import dataclass
 from math import atan2, hypot, pi
-from ..common.errors import ValidationError
+
+from ..common.errors import ValidationError, ReferenceError
 from ..common.helpers import finite, vector
 from ..common.ids import require_id
 
@@ -56,9 +57,10 @@ def check_constraints(entities, constraints, *, absolute_tolerance=1e-8, relativ
             raise ValidationError("invalid constraint arity")
         ids=tuple(require_id(v) for v in ids)
         if any(v not in mapping for v in ids):
-            raise ValidationError("broken constraint reference")
-        a,b,u,ulen=segment(ids[0]) if kind not in {"coincident","distance"} else (None,None,None,None)
+            raise ReferenceError("broken constraint reference")
+
         if kind in {"parallel","perpendicular","equal_length","angle"}:
+            _,_,u,ulen=segment(ids[0])
             _,_,v,vlen=segment(ids[1])
             cross=u[0]*v[1]-u[1]*v[0]
             dot=u[0]*v[0]+u[1]*v[1]
@@ -72,13 +74,13 @@ def check_constraints(entities, constraints, *, absolute_tolerance=1e-8, relativ
                 residual=abs(ulen-vlen)
                 target=max(ulen,vlen)
             else:
-                from math import acos
                 angle=finite(constraint.get("value"),"target angle")
                 if not 0<=angle<=pi:
                     raise ValidationError("angle constraint must be between 0 and pi radians")
                 residual=abs(atan2(abs(cross),dot)-angle)
                 target=pi
         elif kind in {"horizontal","vertical"}:
+            _,_,u,ulen=segment(ids[0])
             residual=abs(u[1] if kind=="horizontal" else u[0])
             target=ulen
         else:

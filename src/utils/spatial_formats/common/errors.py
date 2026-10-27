@@ -18,8 +18,17 @@ Hierarchy::
       ├── UnsupportedFeatureError
       │     └── DependencyUnavailableError
       ├── ConflictError
+      │     └── ReadOnlyDocumentError
       ├── MigrationError
       └── ConversionLossError
+
+Every class is also available under the ``Spatial*`` names used by the
+SDRW/SGEO feasibility report (``SpatialSchemaError``, ``SpatialReferenceError``,
+…). Prefer those names in application code: ``ReferenceError`` would shadow
+the Python builtin of the same name. :func:`error_for_code` maps a stable
+``code`` back to its class, which is how a serialized
+:class:`~src.utils.spatial_formats.verification.report.ValidationReport` is
+turned into a real exception again.
 
 Pickling preserves ``args`` and the diagnostic attributes; equality
 remains ``BaseException`` equality (identity based) — callers should
@@ -165,6 +174,17 @@ class ConflictError(SpatialFormatError):
     default_message = "spatial write conflict"
 
 
+class ReadOnlyDocumentError(ConflictError):
+    """A mutation was attempted on a document opened read-only or already closed.
+
+    Inherits :class:`ConflictError` so code that treats "this write cannot
+    happen right now" uniformly keeps working.
+    """
+
+    code = "spatial.read_only"
+    default_message = "document is read-only or closed"
+
+
 class MigrationError(SpatialFormatError):
     """A source document cannot be migrated without semantic loss.
 
@@ -187,6 +207,44 @@ class ConversionLossError(SpatialFormatError):
     default_message = "spatial conversion exceeded permitted loss"
 
 
+# ---------------------------------------------------------------------------
+# Report-compatible names and code lookup
+# ---------------------------------------------------------------------------
+
+SpatialValidationError = ValidationError
+SpatialSchemaError = SchemaError
+SpatialReferenceError = ReferenceError
+SpatialGeometryValidationError = GeometryValidationError
+SpatialIntegrityError = IntegrityError
+SpatialResourceLimitError = ResourceLimitError
+SpatialSecurityLimitError = SecurityLimitError
+SpatialUnsupportedFeature = UnsupportedFeatureError
+SpatialDependencyError = DependencyUnavailableError
+SpatialConflictError = ConflictError
+SpatialReadOnlyError = ReadOnlyDocumentError
+SpatialMigrationError = MigrationError
+SpatialConversionLossError = ConversionLossError
+
+_BY_CODE = {
+    cls.code: cls
+    for cls in (
+        SpatialFormatError, ValidationError, SchemaError, ReferenceError,
+        GeometryValidationError, IntegrityError, ResourceLimitError,
+        SecurityLimitError, UnsupportedFeatureError, DependencyUnavailableError,
+        ConflictError, ReadOnlyDocumentError, MigrationError, ConversionLossError,
+    )
+}
+
+
+def error_for_code(code: str) -> type:
+    """Return the exception class registered for a stable ``code``.
+
+    Unknown codes fall back to :class:`SpatialFormatError`, so a report
+    written by a newer release can still be raised by an older reader.
+    """
+    return _BY_CODE.get(code, SpatialFormatError)
+
+
 __all__ = [
     "SpatialFormatError",
     "ValidationError",
@@ -199,6 +257,21 @@ __all__ = [
     "UnsupportedFeatureError",
     "DependencyUnavailableError",
     "ConflictError",
+    "ReadOnlyDocumentError",
     "MigrationError",
     "ConversionLossError",
+    "SpatialValidationError",
+    "SpatialSchemaError",
+    "SpatialReferenceError",
+    "SpatialGeometryValidationError",
+    "SpatialIntegrityError",
+    "SpatialResourceLimitError",
+    "SpatialSecurityLimitError",
+    "SpatialUnsupportedFeature",
+    "SpatialDependencyError",
+    "SpatialConflictError",
+    "SpatialReadOnlyError",
+    "SpatialMigrationError",
+    "SpatialConversionLossError",
+    "error_for_code",
 ]
