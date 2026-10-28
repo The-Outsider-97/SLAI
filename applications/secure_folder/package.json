@@ -1,0 +1,14 @@
+{
+  "name": "slai-secure-folder",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node ../tools/build/build-static.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "npm run build && python -m applications.secure_folder"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
