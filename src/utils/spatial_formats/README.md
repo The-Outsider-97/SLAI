@@ -144,14 +144,68 @@ tessellation.
   or overlapping loops are refused) and `brep_from_nurbs_surface` (an open sheet). The document
   methods are `add_brep`, `add_brep_box`, `add_brep_cylinder`, `add_brep_sphere`, `add_brep_torus`,
   `add_brep_extrusion` and `add_brep_sheet`.
-* **There is no modelling kernel**: no booleans, fillets or offsets, and STEP geometry is not read
-  (only the optional STEP backend's validation exists). Edits are scaling and rigid transforms of the
-  object, or replacing the whole B-rep.
+* **There is no general B-rep modelling kernel**: no curved-solid booleans, fillets,
+  chamfers or general surface offsets, and STEP geometry is not read (only the
+  optional STEP backend's validation exists). Native B-rep editing remains scaling,
+  rigid transforms and complete replacement. The restricted rectilinear box
+  operations below are separate and do **not** alter this limitation.
 * **Measures are tessellation based.** `volume`, `surface_area` and `analyze` mesh the faces
   (`resolution`, default 64 segments per circle, at most 128). They are exact for planar solids and converge
   for curved ones: about 0.5 % volume error for a sphere at 128 segments. Shared edge samples make the
   mesh watertight; the per-face budget is 60,000 triangles and the whole mesh obeys the scene mesh limits.
   `world_bounds` of a curved B-rep is a conservative box (a few percent loose), exact for flat solids.
+
+### Rectilinear modeling and native animation extension
+
+SGEO exposes two deliberately restricted, deterministic CAD operations:
+
+* `boolean_boxes(first_id, second_id, operation)` accepts only **world-axis-aligned boxes with
+  translation-only world transforms**. `operation` is `union`, `intersection` or `difference`.
+  The result is an indexed mesh with an exact planar polyhedral boundary, not an editable B-rep or
+  a kernel feature history. Empty results return `None` without a revision. Edge/corner-only
+  contact that produces non-manifold geometry is explicitly rejected.
+* `offset_box_faces(object_id, distance)` moves all six box planes inward/outward, preserving
+  sharp, mitered corners. Object/ancestor transforms must be rigid. It creates a *new* object;
+  a collapsing inward offset is rejected. This is not a round-edged Euclidean solid offset.
+
+Neither operation provides fillets, arbitrary rotations in a Boolean operand, NURBS/B-rep
+Booleans, general offset surfaces or STEP conversion. Those require a verified professional
+CAD-kernel backend with explicit topological reference mapping.
+
+Versioned, declarative animation clips can be stored at document metadata key
+`slai.animation.v1` without changing the SGEO 0.2.0 container. This is an **opt-in metadata
+extension**: older readers can open the file but may display only the static pose. Each clip has
+`duration` in seconds and bounded `tracks`, each with target `object_id`, `property`,
+`interpolation`, and strictly increasing `{time, value}` keyframes. Supported properties are:
+
+* `translation`: local translation delta `(x, y, z)`, step/linear interpolation.
+* `rotation_angle`: scalar angle in radians about a fixed local `axis`, step/linear interpolation.
+* `parameter.NAME`: independent numerical family parameter, step/linear interpolation;
+  `integer` parameters require step interpolation.
+* `visibility`: boolean, step interpolation only; visibility inherits to children.
+
+Animation is evaluated with `document.evaluate(time_seconds)` into a **detached state**.
+Static transforms remain authoritative; animation deltas compose after them. Family parameters
+are regenerated only on the detached state; repeated nonsequential evaluation leaves the original
+project unchanged. Time beyond the first/last keyframe is clamped. There is no looping, IK,
+skin deformation, quaternion interpolation, frame-rate playback, temporal constraint solver, or
+continuous collision detection yet. The extension validates target references on load/save and
+rejects malformed or excessive tracks; `set_animation(None)` removes it atomically.
+
+```python
+from src.utils.sgeo import SGEODocument
+
+doc = SGEODocument.new("Moving assembly")
+moving = doc.add_box(size=[1, 1, 1])
+doc.set_animation({
+    "duration": 2.0,
+    "tracks": [{"object_id": moving, "property": "translation", "interpolation": "linear",
+                "keyframes": [{"time": 0.0, "value": [0, 0, 0]},
+                              {"time": 2.0, "value": [2, 0, 0]}]}],
+})
+assert doc.evaluate(1.0).world_bounds(moving)[0][0] == 0.5
+doc.save("moving.sgeo")
+```
 
 **Materials.** A material is a glTF-style metallic-roughness record: `base_color` (linear RGBA),
 `metallic`, `roughness`, `emissive`, `alpha_mode` (`opaque`, `mask` with `alpha_cutoff`, `blend`),

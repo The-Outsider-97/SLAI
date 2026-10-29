@@ -9,6 +9,9 @@ from .tessellation import tessellate
 from .transactions import apply_scene_operations, objects_within_bounds
 
 from .solids import extrude, revolve
+from .box_boolean import boolean_boxes
+from .box_offset import offset_box_faces
+from .animation import EvaluatedScene, validate_animation, evaluate_scene
 
 from .brep import validate_brep, brep_info, scale_brep
 from .brep_mesh import analyze_brep, tessellate_brep
