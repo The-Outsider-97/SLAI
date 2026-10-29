@@ -8,6 +8,7 @@ Spatial session uses its own memory to avoid mixing documents or revisions.
 
 from __future__ import annotations
 
+from .slai_animation import SGEOAnimationAdapter
 from .slai_stem import STEMQuantityAdapter, STEMUnitService
 from .slai_spatial import SpatialSceneAdapter, spatial_reference, to_agent_bundle, to_drawing_bundle
 from .slai_provenance import ProvenanceArtifactAdapter
@@ -72,5 +73,10 @@ def build_provenance_adapter(*, store=None) -> ProvenanceArtifactAdapter:
     selected_store = store if store is not None else ProvenanceStore()
     return ProvenanceArtifactAdapter(selected_store, ProvenanceLineage(store=selected_store))
 
+
+def build_animation_adapter() -> SGEOAnimationAdapter:
+    from ....agents.animations.animation_commands import ANIMATION_KEY
+
+    return SGEOAnimationAdapter(scene: Scene)
 
 __all__ = ["build_stem_adapter", "build_spatial_adapter", "build_provenance_adapter"]

@@ -14,9 +14,9 @@ control who can bind a scene and issue mutations.
 """
 from __future__ import annotations
 
-from logs.logger import get_logger
 from ..sgeo.animation import evaluate_scene, validate_animation
 from ..sgeo.scene import Scene
+from logs.logger import get_logger # type: ignore
 
 logger = get_logger("SGEO SLAI Animation Adapter")
 
