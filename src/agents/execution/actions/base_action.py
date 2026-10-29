@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from collections import deque
 
+from ..execution_guard import require_authorized_action
 from ..utils.execution_error import (ExecutionError, SoftInterrupt, TimeoutError as CustomTimeoutError,
                                         InvalidContextError, ActionFailureError, UnreachableTargetError,
                                         CorruptedContextStateError, ExecutionLoopLockError)
@@ -254,6 +255,7 @@ class BaseAction(ABC):
         self._actuator_callbacks[name] = handler
 
     def actuate(self, command: ActuatorCommand) -> bool:
+        require_authorized_action(self.name)
         """
         Send an actuator command. If blocking, waits for completion or timeout.
         Returns True if successful.
@@ -303,6 +305,7 @@ class BaseAction(ABC):
 
     # ------------------------ Execution Lifecycle ------------------------
     def execute(self) -> bool:
+        require_authorized_action(self.name)
         """
         Main entry point with full lifecycle, retries, and custom error handling.
         Raises appropriate ExecutionError subclasses on failures.

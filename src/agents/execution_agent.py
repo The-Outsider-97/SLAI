@@ -53,6 +53,9 @@ from .execution.execution_recovery import ExecutionRecovery
 from .execution.execution_memory import ExecutionMemory
 from .execution.action_selector import ActionSelector
 from .execution.actions.base_action import BaseAction
+from .execution.command_gateway import CommandGateway, CommandRejected
+from .execution.execution_guard import GuardedRobotAdapter
+from .execution.execution_boundary import ExecutionBoundary
 from .execution.actions.idle import IdleAction
 from .execution.actions.move_to import MoveToAction
 from .execution.actions.pick_object import PickObjectAction
@@ -103,6 +106,7 @@ class ExecutionAgent(BaseAgent):
                  action_selector: Optional[ActionSelector] = None, validator: Optional[ExecutionValidator] = None,
                  recovery: Optional[ExecutionRecovery] = None, scheduler: Optional[DeadlineAwareScheduler] = None,
                  robot: Optional[RobotInterface] = None, action_registry: Optional[Mapping[str, Type[BaseAction]]] = None,
+                 command_gateway: Optional[CommandGateway] = None,
                  *,
                  checkpoint_manager: Any = None,
                  ):
@@ -131,10 +135,10 @@ class ExecutionAgent(BaseAgent):
         self.task_coordinator = (task_coordinator if task_coordinator is not None else TaskCoordinator(memory=self.execution_memory))
         self.action_selector = (action_selector if action_selector is not None else ActionSelector(memory=self.execution_memory))
         self.validator = validator if validator is not None else ExecutionValidator(memory=self.execution_memory)
-        self.recovery = ExecutionRecovery(task_coordinator=self.task_coordinator)
+        self.recovery = recovery if recovery is not None else ExecutionRecovery(task_coordinator=self.task_coordinator)
         self._scheduler_initialization_error: Optional[Exception] = None
         self.scheduler = scheduler if scheduler is not None else DeadlineAwareScheduler()
-        self.robot = robot
+        self.robot = GuardedRobotAdapter(robot) if robot is not None else None
 
         # Local runtime state
         self._current_plan_index = 0
@@ -146,6 +150,10 @@ class ExecutionAgent(BaseAgent):
         self._task_state_lock = threading.RLock()
 
         self._register_actions()
+        self.execution_boundary = ExecutionBoundary(
+            command_gateway, self.action_class_registry,
+            apply_action=self._update_state_from_action, robot=self.robot,
+        )
         logger.info("ExecutionAgent initialized")
 
     def _require_scheduler(self) -> Any:
@@ -189,19 +197,13 @@ class ExecutionAgent(BaseAgent):
             self.validator.register_action_handler(name, cls)
 
     def register_action(self, name: str, action_class: Type[BaseAction]) -> None:
-        """Register an action consistently with selection and validation."""
-        normalized_name = str(name).strip()
-        if not normalized_name:
-            raise ValueError("Action name cannot be empty")
-        if not isinstance(action_class, type) or not issubclass(action_class, BaseAction):
-            raise TypeError("action_class must be a BaseAction subclass")
-        self.action_class_registry[normalized_name] = action_class
-        self.action_selector.register_action(
-            normalized_name,
-            action_class.preconditions,
-            action_class.postconditions,
+        """Reject untrusted runtime code registration.
+
+        Trusted hosts inject vetted classes into action_registry before creation.
+        """
+        raise PermissionError(
+            "runtime registration disabled; register vetted actions during initialization"
         )
-        self.validator.register_action_handler(normalized_name, action_class)
 
     def _initialize_state(self) -> Dict[str, Any]:
         printer.status("EXECUTION", "Initializing states...", "info")
@@ -278,7 +280,15 @@ class ExecutionAgent(BaseAgent):
         return normalized
 
 
-    def perform_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+    def perform_task(self, task_data: Dict[str, Any], *, request_context: Any = None) -> Dict[str, Any]:
+        """A trusted host passes request_context outside the untrusted task payload."""
+        if self.execution_boundary.gateway is None or request_context is None:
+            return {"status": "denied", "reason": "trusted gateway and request context required"}
+        if (not isinstance(task_data, dict)
+                or not isinstance(task_data.get("id"), str)
+                or not task_data["id"].strip()
+                or len(task_data["id"]) > 256):
+            return {"status": "rejected", "reason": "explicit stable task ID required"}
         printer.status("EXECUTION", "Task performer", "info")
         task = self._normalize_task_input(task_data)
 
@@ -307,11 +317,18 @@ class ExecutionAgent(BaseAgent):
 
         try:
             with self._task_state_lock:
-                self._preflight_task(task)
-                self._start_task(task)
-                self._run_task_loop(task)
-                return self._finalize_task_result(task)
-
+                self.execution_boundary.start_task(task["id"], request_context=request_context)
+                try:
+                    self._preflight_task(task)
+                    self._start_task(task)
+                    self._run_task_loop(task)
+                    return self._finalize_task_result(task)
+                except (CommandRejected, PermissionError) as exc:
+                    if self.current_task is not None:
+                        self.task_coordinator.fail_task(task["name"], "command authorization or dispatch rejected")
+                    return {"status": "denied", "task_id": task["id"], "reason": str(exc)}
+                finally:
+                    self.execution_boundary.finish_task()
         finally:
             try:
                 released = self.shared_memory.release_lease(lock_key, owner_token)
@@ -424,6 +441,11 @@ class ExecutionAgent(BaseAgent):
                 self.task_coordinator.update_task_progress(self.current_task["name"], progress)
                 return {"status": "ok", "action": action_name, "progress": progress, "attempt": attempt}
 
+            except (CommandRejected, PermissionError) as exc:
+                # Recovering or retrying a denied, replayed or uncertain operation
+                # would violate the durable dispatch guarantees.
+                self.task_coordinator.fail_task(self.current_task["name"], "command dispatch rejected")
+                return {"status": "failed", "action": action_name, "reason": str(exc)}
             except ActionInterruptionError as exc:
                 logger.warning("Action interrupted (%s): %s", action_name, exc)
                 return {"status": "interrupted", "action": action_name, "reason": str(exc)}
@@ -507,16 +529,12 @@ class ExecutionAgent(BaseAgent):
             raise ActionFailureError(action_name, f"Action validation failed: {errors}")
 
     def _execute_selected_action(self, action_name: str, context: Dict[str, Any]) -> None:
-        action_class = self.action_class_registry.get(action_name)
-        if not action_class:
-            raise ActionFailureError(action_name, "Selected action is not registered")
-
-        action_instance = action_class(context=copy.deepcopy(context))
-        success = action_instance.execute()
-        if not success:
-            raise ActionFailureError(action_name, action_instance.failure_reason or "Execution returned False")
-
-        self._update_state_from_action(action_instance)
+        """The gateway is the mandatory side-effect boundary for every action."""
+        if self.current_task is None:
+            raise PermissionError("no active authorized task")
+        raw_deadline = self.current_task.get("deadline")
+        deadline = float(raw_deadline) if raw_deadline is not None else None
+        self.execution_boundary.dispatch(action_name, context, deadline=deadline)
 
     def _gather_context(
         self,
@@ -549,8 +567,8 @@ class ExecutionAgent(BaseAgent):
                     "target_object": target_object,
                     "object_position": task.get("object_position", destination),
                     "object_properties": task.get("object_properties", context.get("object_properties", {})),
-                    "robot": task.get("robot") or context.get("robot"),
-                    "robot_ready": bool(task.get("robot") or context.get("robot_ready", False)),
+                    "robot": context.get("robot"),
+                    "robot_ready": self.robot is not None,
                 }
             )
 
@@ -644,24 +662,9 @@ class ExecutionAgent(BaseAgent):
         return self.active_tasks.get(task_id)
 
     def alternative_execute(self, task_data, original_error=None):
-        printer.status("EXECUTION", "Alternative execution...", "info")
-        logger.warning("Primary execution failed. Attempting idle recovery.")
-
-        try:
-            recovered_state = self.shared_memory.get(f"agent_state:{self.name}")
-            if isinstance(recovered_state, dict):
-                self.state = recovered_state
-
-            idle_context = self._gather_context()
-            idle_action = IdleAction(context=idle_context)
-            success = idle_action.execute()
-            if success:
-                self._update_state_from_action(idle_action)
-                return {"status": "recovered", "result": "Agent idled and partially recovered."}
-        except Exception as exc:
-            logger.error("Alternative execution failed: %s", exc)
-
-        return super().alternative_execute(task_data, original_error)
+        """Fallback never executes implicit action without new trusted authority."""
+        logger.warning("Implicit fallback execution refused: fresh authorized command required")
+        return {"status": "denied", "reason": "fallback requires fresh trusted authorization"}
 
     def _get_agent_capabilities(self) -> Dict[str, Any]:
         return {
@@ -691,7 +694,8 @@ class ExecutionAgent(BaseAgent):
         """Attach a robot adapter used by enabled hardware actions."""
         if robot is None:
             raise TypeError("robot cannot be None")
-        self.robot = robot
+        self.robot = GuardedRobotAdapter(robot)
+        self.execution_boundary.robot = self.robot
 
     def get_health_report(self) -> Dict[str, Any]:
         report = self.runtime_status()
