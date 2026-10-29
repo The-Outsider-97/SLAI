@@ -58,6 +58,38 @@ For `distance`, `source` and `target` are required; operands can resolve positio
 
 Successful requests return `status: "ok"`, `agent`, `request_id`, canonical `operation`, and serialized `result`. Disabled operation returns a `disabled` envelope with `result: None`. Query and result limits can bound returned data; do not assume a serialized response contains the entire state.
 
+### Time-aware scene queries (deterministic subsystem interface)
+
+`spatial_temporal.py` defines `TemporalSpatialQueries`, which consumes a read-only
+`SceneEvaluatorProtocol` with `evaluate(time_seconds)`. The live SGEO model remains
+owned by the spatial-format subsystem. There is no SGEO import or editable project
+copy in Spatial. The new interface is application-independent; it is not yet a
+`SpatialAgent.perform_task` dispatch operation.
+
+```python
+from src.agents.spatial.spatial_temporal import TemporalSpatialQueries
+from src.utils.sgeo import SGEODocument
+
+scene = SGEODocument.new()
+first = scene.add_box(size=[1, 1, 1])
+second = scene.add_box(size=[1, 1, 1], position=(3, 0, 0))
+queries = TemporalSpatialQueries(scene)
+result = queries.collision_at(first, second, 0.0)
+assert result.classification == "verified_separation"
+```
+
+Available methods: `get_object_state`, `get_bounds_at`, `get_distance_at`,
+`collision_at`, `find_intersections_at` and `query_collision_interval`.
+`get_distance_at` returns an AABB **lower bound**, not an exact shape distance.
+`find_intersections_at` returns broad-phase candidates. `collision_at` reuses
+the existing deterministic collision engine for translation-only boxes and
+rigidly transformed spheres; rotated boxes and meshes remain *potential* overlap.
+The interval method samples up to 1025 instants and reports
+`continuous_verified=False`; even a `clear_at_samples_only` result cannot
+exclude collision between samples. `max_objects` (up to 256) bounds the all-pairs
+broad-phase query. No physics, motion integration or continuous collision solver
+is implied.
+
 ## Processing Workflow
 
 ```mermaid
@@ -141,7 +173,11 @@ ICP is iterative point-cloud registration, not full SLAM or global alignment cer
 
 ## Testing and Verification
 
-There is no dedicated Spatial test suite under `tests/` in this checkout. Use the examples as focused distance/interface smoke checks. Validate frame composition/inversion, dimension mismatch, unsupported geometry pairs, revision invalidation and checkpoint round trips separately when changing runtime code.
+`tests/spatial_formats/test_sgeo_temporal_and_box_boolean.py` tests the evaluated
+scene adapter, primitive temporal collision classification, deterministic
+time queries, and version-compatible SGEO round trips. Further dedicated
+Spatial tests remain necessary for frame composition/inversion, dimension
+mismatch, unsupported geometry pairs, revision invalidation and checkpoint round trips.
 
 A non-importing syntax check from the repository root is:
 

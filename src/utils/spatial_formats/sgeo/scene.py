@@ -126,7 +126,30 @@ class Scene:
                     raise ValidationError("family instance geometry does not match its parameters")
             elif "parameters" in obj:
                 raise ValidationError("parameters require a family reference")
+        if "slai.animation.v1" in self.metadata:
+            from .animation import validate_animation
+            validate_animation(self.metadata["slai.animation.v1"], self)
         return self
+
+    def set_animation(self, animation: dict | None) -> int:
+        """Atomically replace/remove an animation and increment one revision."""
+        from .animation import ANIMATION_KEY, validate_animation
+        with self._mutation_lock:
+            candidate = self._detached_copy()
+            if animation is None:
+                candidate.metadata.pop(ANIMATION_KEY, None)
+            else:
+                candidate.metadata[ANIMATION_KEY] = validate_animation(animation, candidate)
+            candidate.revision += 1
+            candidate.validate()
+            self.metadata = candidate.metadata
+            self.revision = candidate.revision
+            return self.revision
+
+    def evaluate(self, time: float):
+        """Evaluate read-only motion state without changing this scene."""
+        from .animation import evaluate_scene
+        return evaluate_scene(self, time)
 
     def add_object(self, *, name="", geometry=None, parent=None, transform=None, metadata=None, object_id=None,
                    material=None):
@@ -173,6 +196,9 @@ class Scene:
             require_id(object_id)
             if any(obj.get("parent")==object_id for obj in self.objects):
                 raise ValidationError("cannot remove scene object with children")
+            if any(track["object_id"] == object_id for track in
+                   self.metadata.get("slai.animation.v1", {}).get("tracks", [])):
+                raise ValidationError("cannot remove object referenced by animation")
             pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
             if pos is None:
                 raise ValidationError("object ID not found")

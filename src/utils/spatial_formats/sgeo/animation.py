@@ -1,0 +1,237 @@
+"""Versioned SGEO animation metadata and deterministic read-only scene evaluation.
+
+The ``slai.animation.v1`` metadata extension stores bounded *declarative*
+tracks, never executable expressions or full per-frame geometry duplicates.
+Time is seconds, not frame number. Translational/axis-angle tracks are local
+deltas composed after a static object transform. Interpolation is clamped to
+the first/last keyframe; playback/looping and IK are not implied.
+"""
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass, field
+from types import MappingProxyType
+
+from ..common.errors import ReferenceError, ResourceLimitError, ValidationError
+from ..common.transforms import compose, from_axis_angle, from_translation
+from ..common.helpers import finite, vector
+from ..common.ids import require_id
+from .families import generate_geometry
+
+ANIMATION_KEY = "slai.animation.v1"
+MAX_TRACKS = 4096
+MAX_KEYFRAMES = 100_000
+MAX_TIME = 1e9
+
+
+def validate_animation(spec: dict, scene) -> dict:
+    """Validate tracks, targets and native-family parameter compatibility."""
+    if not isinstance(spec, dict) or set(spec) != {"duration", "tracks"}:
+        raise ValidationError("animation must contain exactly duration and tracks")
+    duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
+    if duration <= 0:
+        raise ValidationError("animation duration must be positive")
+    tracks = spec["tracks"]
+    if not isinstance(tracks, list):
+        raise ValidationError("animation tracks must be a list")
+    if len(tracks) > MAX_TRACKS:
+        raise ResourceLimitError("too many animation tracks")
+    objects = {obj["id"]: obj for obj in scene.objects}
+    families = {fam["id"]: fam for fam in scene.families}
+    targets = set()
+    total = 0
+    for track in tracks:
+        if not isinstance(track, dict) or set(track) - {"object_id", "property", "keyframes", "interpolation", "axis"}:
+            raise ValidationError("invalid animation track fields")
+        oid = require_id(track.get("object_id"))
+        obj = objects.get(oid)
+        if obj is None:
+            raise ReferenceError("animation refers to a missing scene object", context={"object_id": oid})
+        prop = track.get("property")
+        if not isinstance(prop, str) or (prop not in {"translation", "rotation_angle", "visibility"}
+                                         and not prop.startswith("parameter.")):
+            raise ValidationError("unsupported animation track property")
+        key = (oid, prop)
+        if key in targets:
+            raise ValidationError("duplicate animation target/property")
+        targets.add(key)
+        if prop == "rotation_angle":
+            if set(track) - {"object_id", "property", "keyframes", "interpolation", "axis"} or "axis" not in track:
+                raise ValidationError("rotation_angle track requires an axis")
+            axis = vector(track["axis"], 3, "rotation axis")
+            if sum(x*x for x in axis) < 1e-24:
+                raise ValidationError("rotation axis is zero")
+        elif "axis" in track:
+            raise ValidationError("only rotation_angle tracks accept axis")
+        if prop.startswith("parameter."):
+            name = prop.removeprefix("parameter.")
+            family = families.get(obj.get("family_id"))
+            if family is None or name not in family["parameters"]:
+                raise ValidationError("animated parameter must exist in target family")
+            definition = family["parameters"][name]
+            if (definition["type"] not in {"length", "angle", "number", "integer"}
+                    or "expression" in definition or definition.get("read_only", False)):
+                raise ValidationError("animated parameter must be an independent numeric family parameter")
+        interpolation = track.get("interpolation", "linear")
+        if interpolation not in {"step", "linear"}:
+            raise ValidationError("unsupported animation interpolation")
+        if prop == "visibility" and interpolation != "step":
+            raise ValidationError("visibility requires step interpolation")
+        frames = track.get("keyframes")
+        if not isinstance(frames, list) or not frames:
+            raise ValidationError("animation track must contain keyframes")
+        total += len(frames)
+        if total > MAX_KEYFRAMES:
+            raise ResourceLimitError("animation keyframe budget exceeded")
+        previous = -1.0
+        for frame in frames:
+            if not isinstance(frame, dict) or set(frame) != {"time", "value"}:
+                raise ValidationError("keyframe must contain exactly time and value")
+            timestamp = finite(frame["time"], "keyframe time", limit=MAX_TIME)
+            if timestamp < 0 or timestamp > duration or timestamp <= previous:
+                raise ValidationError("keyframe timestamps must be strictly increasing within duration")
+            previous = timestamp
+            value = frame["value"]
+            if prop == "translation":
+                vector(value, 3, "translation")
+            elif prop == "visibility":
+                if type(value) is not bool:
+                    raise ValidationError("visibility keyframes must be booleans")
+            else:
+                finite(value, "animation scalar", limit=1e9)
+                if prop.startswith("parameter.") and definition["type"] == "integer" and interpolation != "step":
+                    raise ValidationError("integer parameter animation requires step interpolation")
+                if prop.startswith("parameter."):
+                    if (value < definition.get("min", 0 if definition["type"] == "length" else -1e12)
+                            or value > definition.get("max", 1e12)):
+                        raise ValidationError("animated parameter keyframe is outside its declared bounds")
+                    if definition["type"] == "integer" and not float(value).is_integer():
+                        raise ValidationError("integer animation keyframes require integral values")
+    return deepcopy(spec)
+
+
+def _sample(track: dict, time: float):
+    frames = track["keyframes"]
+    if time <= frames[0]["time"]:
+        return deepcopy(frames[0]["value"])
+    if time >= frames[-1]["time"]:
+        return deepcopy(frames[-1]["value"])
+    # Binary search avoids traversing long animation tracks on every query.
+    low, high = 0, len(frames) - 1
+    while high - low > 1:
+        mid = (low + high) // 2
+        if frames[mid]["time"] <= time:
+            low = mid
+        else:
+            high = mid
+    first, second = frames[low], frames[high]
+    if track.get("interpolation", "linear") == "step":
+        return deepcopy(first["value"])
+    fraction = (time - first["time"]) / (second["time"] - first["time"])
+    a, b = first["value"], second["value"]
+    if track["property"] == "translation":
+        return [a[i] + (b[i] - a[i])*fraction for i in range(3)]
+    return a + (b - a)*fraction
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluatedScene:
+    """Detached scene state with guarded read/query access; never the live scene."""
+
+    time: float
+    revision: int
+    _scene: object
+    _hidden: frozenset[str]
+    _index: object = field(init=False, repr=False)
+    _transforms: object = field(init=False, repr=False)
+    _bounds: object = field(init=False, repr=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "_index", MappingProxyType({obj["id"]: obj for obj in self._scene.objects}))
+        object.__setattr__(self, "_transforms", MappingProxyType(self._scene.world_transforms()))
+        object.__setattr__(self, "_bounds", MappingProxyType(self._scene.bounds_by_object()))
+
+    def ids(self, *, include_hidden: bool = False) -> tuple[str, ...]:
+        return tuple(oid for oid in self._index if include_hidden or oid not in self._hidden)
+
+    def geometric_ids(self) -> tuple[str, ...]:
+        """Return visible geometric objects without copying any mesh payloads."""
+        return tuple(oid for oid in self._bounds if oid not in self._hidden)
+
+    def visible(self, object_id: str) -> bool:
+        if object_id not in self._index:
+            raise ReferenceError("unknown evaluated object")
+        return object_id not in self._hidden
+
+    def get_object_state(self, object_id: str) -> dict:
+        require_id(object_id)
+        found = self._index.get(object_id)
+        if found is None:
+            raise ReferenceError("unknown evaluated object")
+        return {"time": self.time, "revision": self.revision, "visible": object_id not in self._hidden,
+                "object": deepcopy(found), "world_transform": self.world_transform(object_id)}
+
+    def world_transform(self, object_id: str) -> tuple:
+        if object_id not in self._transforms:
+            raise ReferenceError("unknown evaluated object")
+        return self._transforms[object_id]
+
+    def world_bounds(self, object_id: str, *, include_hidden: bool = False):
+        if not include_hidden and not self.visible(object_id):
+            raise ValidationError("object is hidden at the requested time")
+        if object_id not in self._bounds:
+            raise ValidationError("object has no geometric representation")
+        return self._bounds[object_id]
+
+    def snapshot(self):
+        """Return an independent mutable copy for downstream computation."""
+        return self._scene._detached_copy()
+
+
+def evaluate_scene(scene, time: float) -> EvaluatedScene:
+    """Evaluate bounded declarative animation without altering authoritative data."""
+    timestamp = finite(time, "evaluation time", limit=MAX_TIME)
+    if timestamp < 0:
+        raise ValidationError("evaluation time must be nonnegative")
+    with scene._mutation_lock:
+        scene.validate()
+        candidate = scene._detached_copy()
+    spec = candidate.metadata.get(ANIMATION_KEY)
+    if spec is None:
+        return EvaluatedScene(timestamp, candidate.revision, candidate, frozenset())
+    index = {obj["id"]: obj for obj in candidate.objects}
+    families = {f["id"]: f for f in candidate.families}
+    grouped: dict[str, dict[str, tuple[dict, object]]] = {}
+    for track in spec["tracks"]:
+        grouped.setdefault(track["object_id"], {})[track["property"]] = (track, _sample(track, timestamp))
+    invisible: set[str] = set()
+    for oid, tracks in grouped.items():
+        obj = index[oid]
+        if "visibility" in tracks and not tracks["visibility"][1]:
+            invisible.add(oid)
+        transform = obj["transform"]
+        if "translation" in tracks:
+            transform = compose(transform, from_translation(*tracks["translation"][1]))
+        if "rotation_angle" in tracks:
+            track, angle = tracks["rotation_angle"]
+            transform = compose(transform, from_axis_angle(track["axis"], angle))
+        obj["transform"] = list(transform)
+        parameters = {name.removeprefix("parameter."): value for name, (_, value) in tracks.items()
+                      if name.startswith("parameter.")}
+        if parameters:
+            overrides = {**obj.get("parameters", {}), **parameters}
+            obj["geometry"] = generate_geometry(families[obj["family_id"]], overrides)
+            obj["parameters"] = overrides
+    # Visibility inherits through the hierarchy without mutating object data.
+    for oid, obj in index.items():
+        parent = obj.get("parent")
+        while parent is not None:
+            if parent in invisible:
+                invisible.add(oid)
+                break
+            parent = index[parent].get("parent")
+    candidate.validate()
+    return EvaluatedScene(timestamp, candidate.revision, candidate, frozenset(invisible))
+
+
+__all__ = ["ANIMATION_KEY", "EvaluatedScene", "validate_animation", "evaluate_scene"]

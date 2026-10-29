@@ -19,7 +19,7 @@ from ..common.errors import ReferenceError, ResourceLimitError, UnsupportedFeatu
 from ..common.helpers import finite, vector
 from ..common.ids import is_valid_id, new_id, require_id
 from ..common.transforms import (IDENTITY, compose, determinant, from_axis_angle, from_translation,
-                                 invert_transform, is_similarity, require_transform, scale_factors)
+                                 invert_transform, is_rigid, is_similarity, require_transform, scale_factors)
 from ..common.units import convert_area, convert_length, convert_volume, require_unit
 from ..documents import SpatialDocument, _checked_metadata
 from ..verification.report import ValidationReport, check_scene
@@ -35,6 +35,8 @@ from .scene import Scene
 from .solids import extrude, revolve
 from .tessellation import tessellate
 from .transactions import apply_scene_operations
+from .box_boolean import boolean_boxes
+from .box_offset import offset_box_faces
 
 __all__ = ["SceneDocument", "MAX_QUERY_LIMIT"]
 
@@ -224,6 +226,76 @@ class SceneDocument(SpatialDocument):
                 raise ValidationError("uvs must be a sequence of (u, v) pairs")
             geometry["uvs"] = [[finite(c, "uv", limit=1e6) for c in vector(uv, 2, "uv")] for uv in uvs]
         return self.add_object(geometry, **options)
+
+    def boolean_boxes(self, first_id: str, second_id: str, operation: str, *, name: str = "") -> str | None:
+        """Apply a rectilinear Boolean to two *world-axis-aligned* SGEO boxes.
+
+        The resulting mesh stores the exact boundary of the box set operation.
+        This is deliberately not a general CAD/B-rep Boolean implementation.
+        An empty intersection/difference returns ``None`` without an edit.
+        """
+        self._writable()
+        with self._model._mutation_lock:
+            objects = {obj["id"]: obj for obj in self._model.objects}
+            first_id, second_id = require_id(first_id), require_id(second_id)
+            try:
+                a, b = objects[first_id], objects[second_id]
+            except KeyError as exc:
+                raise ReferenceError("Boolean operand object does not exist") from exc
+            transforms = self._model.world_transforms()
+
+            def world_box(obj):
+                geometry = obj.get("geometry")
+                if not isinstance(geometry, dict) or geometry.get("kind") != "box":
+                    raise UnsupportedFeatureError("rectilinear Booleans require box operands")
+                matrix = transforms[obj["id"]]
+                if any(abs(matrix[index] - expected) > 1e-12 for index, expected in
+                       ((0, 1), (1, 0), (2, 0), (4, 0), (5, 1), (6, 0),
+                        (8, 0), (9, 0), (10, 1))):
+                    raise UnsupportedFeatureError("rectilinear Booleans require translation-only world transforms")
+                return {"kind": "box", "size": deepcopy(geometry["size"]),
+                        "center": [geometry["center"][i] + matrix[4*i+3] for i in range(3)]}
+
+            result = boolean_boxes(world_box(a), world_box(b), operation)
+            if result is None:
+                return None
+            # Only commit after all geometry calculations and validation succeed.
+            return self.add_object(result, name=name,
+                                   metadata={"slai.geometry:boolean": {"operation": operation,
+                                                                       "operands": [first_id, second_id],
+                                                                       "representation": "rectilinear-mesh"}})
+
+    def set_animation(self, animation: dict | None) -> int:
+        """Persist a bounded declarative animation (``None`` removes it)."""
+        with self._edit() as model:
+            return model.set_animation(animation)
+
+    def offset_box_faces(self, object_id: str, distance: float, *, name: str = "") -> str:
+        """Create a mitered six-face box offset as a separate SGEO object.
+
+        This operation is valid for arbitrary rigidly oriented boxes; non-rigid
+        inherited transforms are refused so distance remains in document units.
+        """
+        self._writable()
+        with self._model._mutation_lock:
+            obj = self.get(object_id)
+            if not is_rigid(self._model.world_transform(object_id)):
+                raise UnsupportedFeatureError("face offset requires a rigid world transformation")
+            result = offset_box_faces(obj["geometry"], distance)
+            return self.add_object(result, name=name, parent=obj.get("parent"),
+                                   transform=obj["transform"],
+                                   metadata={"slai.geometry:face_offset": {"source": object_id,
+                                                                            "distance": float(distance),
+                                                                            "join": "miter"}})
+
+    def animation(self) -> dict | None:
+        """Get a detached animation definition, not a live reference."""
+        return deepcopy(self._model.metadata.get("slai.animation.v1"))
+
+    def evaluate(self, time: float):
+        """Return the detached evaluated SGEO scene at time in seconds."""
+        self._live()
+        return self._model.evaluate(time)
 
     # -- NURBS and B-rep -----------------------------------------------------------------------------
     def add_nurbs_curve(self, control_points, *, degree: int = 3, knots=None, weights=None, **options) -> str:
