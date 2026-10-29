@@ -20,6 +20,7 @@ _EXPORTS = {
     "RuntimeLifecycle": (".runtime_contracts", "RuntimeLifecycle"),
     "RuntimeStatus": (".runtime_contracts", "RuntimeStatus"),
 
+    "AnimationAgent": (".animation_agent", "AnimationAgent"),
     "AdaptiveAgent": (".adaptive_agent", "AdaptiveAgent"),
     "AlignmentAgent": (".alignment_agent", "AlignmentAgent"),
     "BrowserAgent": (".browser_agent", "BrowserAgent"),
