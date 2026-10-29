@@ -12,3 +12,10 @@ animation:
     blending_enabled: false
     retargeting_enabled: false
     choreography_enabled: false
+  # Applies to editing calls through animation_commands.update_animation.
+  # false preserves the current facade API; true requires caller-supplied CAS.
+  commands:
+    require_expected_revision: false
+  # Used when AnimationMemory(capacity=None) is constructed.
+  memory:
+    max_recent_edits: 256
