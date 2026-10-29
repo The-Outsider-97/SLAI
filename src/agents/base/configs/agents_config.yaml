@@ -420,8 +420,7 @@ adaptive_agent:
   consume_learning_guidance: true
   learning_guidance_min_evidence: 3
 
-# MERGE this top-level mapping into src/agents/base/configs/agents_config.yaml.
-# It replaces the existing animation_agent section, preserving the rest of the file.
+
 animation_agent:
   enabled: true
   max_recent_edits: 256
