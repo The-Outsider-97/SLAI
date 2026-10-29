@@ -7,16 +7,17 @@ not a distributed transaction coordinator or an authorization service.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
-from hashlib import sha256
 import json
 import math
 import sqlite3
+
+from dataclasses import dataclass, field
+from enum import Enum
+from hashlib import sha256
 from pathlib import Path
 from threading import RLock
 from time import time
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, cast
 
 
 class CommandRejected(ValueError):
@@ -86,6 +87,7 @@ class Decision:
 class Authority(Protocol):
     def authorize(self, request_context: Any, command: Command, capability: "Capability") -> Decision:
         """Resolve trustworthy identity and current permissions; deny by default."""
+        ...
 
 
 class CapabilityHandler(Protocol):
@@ -193,7 +195,8 @@ class CommandGateway:
                     # This handler must use ONLY the supplied SQLite connection for
                     # transactional writes; its result and journal share one COMMIT.
                     try:
-                        value = cap.handler(command, self._db)
+                        transactional_handler = cast(Callable[[Command, sqlite3.Connection], Any], cap.handler)
+                        value = transactional_handler(command, self._db)
                         if cap.verifier is not None and not cap.verifier(command, value):
                             raise CommandRejected("transaction postcondition failed")
                         self._db.execute("""INSERT INTO command_journal
