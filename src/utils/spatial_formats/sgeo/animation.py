@@ -5,6 +5,13 @@ tracks, never executable expressions or full per-frame geometry duplicates.
 Time is seconds, not frame number. Translational/axis-angle tracks are local
 deltas composed after a static object transform. Interpolation is clamped to
 the first/last keyframe; playback/looping and IK are not implied.
+
+Ownership
+---------
+This is the authoritative SGEO v1 animation schema and scene evaluator.
+SLAI's Animation Agent may orchestrate calls but must not implement a second
+copy of its interpolation, family evaluation, or scene state. Resource ceilings
+below are SGEO format limits, not application configuration defaults.
 """
 from __future__ import annotations
 
@@ -12,7 +19,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from ..common.errors import ReferenceError, ResourceLimitError, ValidationError
+from ..common.errors import ConflictError, ReferenceError, ResourceLimitError, ValidationError
 from ..common.transforms import compose, from_axis_angle, from_translation
 from ..common.helpers import finite, vector
 from ..common.ids import require_id
@@ -188,12 +195,22 @@ class EvaluatedScene:
         return self._scene._detached_copy()
 
 
-def evaluate_scene(scene, time: float) -> EvaluatedScene:
-    """Evaluate bounded declarative animation without altering authoritative data."""
+def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) -> EvaluatedScene:
+    """Read a consistent, detached scene snapshot and evaluate at ``time``.
+
+    ``expected_revision`` is an optional optimistic check performed under the
+    same SGEO mutation lock as the copy. A mismatched revision raises SGEO's
+    native ``ConflictError``. This intentionally does not change the existing
+    ``Scene.evaluate(time)`` call or the ``slai.animation.v1`` schema.
+    """
     timestamp = finite(time, "evaluation time", limit=MAX_TIME)
     if timestamp < 0:
         raise ValidationError("evaluation time must be nonnegative")
+    if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+        raise ValidationError("expected_revision must be a positive integer")
     with scene._mutation_lock:
+        if expected_revision is not None and scene.revision != expected_revision:
+            raise ConflictError("scene revision does not match expected revision")
         scene.validate()
         candidate = scene._detached_copy()
     spec = candidate.metadata.get(ANIMATION_KEY)
