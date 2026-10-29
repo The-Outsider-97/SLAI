@@ -1646,3 +1646,7 @@ verification_agent:
   error_key_prefix: "verification_agent.error"
   event_key_prefix: "verification_agent.event"
   latest_result_key: "verification_agent.latest"
+
+animation_agent:
+  enabled: true
+  max_recent_edits: 256

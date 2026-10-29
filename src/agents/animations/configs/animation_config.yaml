@@ -1,0 +1,14 @@
+animation:
+  timeline:
+    default_fps_num: 30
+    default_fps_den: 1
+  evaluation:
+    deterministic: true
+  limits:
+    max_tracks: 4096
+    max_keyframes: 100000
+  motion:
+    learned_generation_enabled: false
+    blending_enabled: false
+    retargeting_enabled: false
+    choreography_enabled: false

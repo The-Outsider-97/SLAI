@@ -214,6 +214,7 @@ class AgentFactory:
     """
 
     DEFAULT_AGENT_SPECS: Dict[str, Dict[str, Any]] = {
+        "animation": {"module_path": "src.agents.animation_agent", "class_name": "AnimationAgent"},
         "adaptive": {"module_path": "src.agents.adaptive_agent", "class_name": "AdaptiveAgent"},
         "alignment": {"module_path": "src.agents.alignment_agent", "class_name": "AlignmentAgent"},
         "browser": {"module_path": "src.agents.browser_agent", "class_name": "BrowserAgent"},
@@ -244,6 +245,7 @@ class AgentFactory:
     }
 
     DEFAULT_ALIASES: Dict[str, str] = {
+        "animation_agent": "animation",
         "web": "browser",
         "obs": "observability",
         "net": "network",
