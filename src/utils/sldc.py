@@ -159,6 +159,7 @@ SUPPORTED_FEATURES = REQUIRED_FEATURES | {
     "image-layout",
     "font-runs",
     "native-toc",
+    "paragraph-layout",
 }
 KNOWN_VERSION = "1.1.0"  # The newest 1.x edition whose additions this module understands in full (see inspect_package()["newer_than_known"]).
 
@@ -1235,7 +1236,9 @@ def _validate_figure(figure: Any, label: str, ctx: _Context, *, inline: bool = F
 def _validate_attributes(attributes: Any, block_type: str, label: str) -> None:
     if not isinstance(attributes, dict):
         raise SLDCValidationError(f"{label}.attributes must be an object")
-    _check_keys(attributes, {"level", "language", "ordered", "depth", "align", "page_break_before"},
+    _check_keys(attributes, {"level", "language", "ordered", "depth", "align", "page_break_before",
+                             "line_height", "space_before_pt", "space_after_pt", "indent_mm",
+                             "first_line_indent_mm"},
                 f"{label}.attributes")
     only = {"level": "heading", "language": "code", "ordered": "list_item", "depth": "list_item"}
     for key, value in attributes.items():
@@ -1252,6 +1255,9 @@ def _validate_attributes(attributes: Any, block_type: str, label: str) -> None:
         elif key == "align":
             if value not in _ALIGN:
                 raise SLDCValidationError(f"{where} must be one of {sorted(_ALIGN)}")
+        elif key in _STYLE_RANGES:
+            low, high = _STYLE_RANGES[key]
+            _bounded_number(value, low, high, where)
         else:
             _flag(value, where)
 
@@ -2170,6 +2176,11 @@ def _required_features(document: Mapping[str, Any]) -> list[str]:
     }
 
     for block in document["blocks"]:
+        if (
+            {"line_height", "space_before_pt", "space_after_pt", "indent_mm", "first_line_indent_mm"}
+            .intersection(block.get("attributes", {}))
+        ):
+            needed.add("paragraph-layout")
         figure = block.get("figure", {})
 
         if (
