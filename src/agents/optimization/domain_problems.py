@@ -24,7 +24,7 @@ from .utils.optimization_errors import OptimizationValidationError
 __all__ = [
     "geometry_parameter_problem", "trajectory_problem", "trajectory_samples",
     "camera_pose_problem", "camera_look_at_basis", "animation_curve_problem",
-    "hermite_curve_value",
+    "hermite_curve_value", "robust_scenario_problem", "layout_arrangement_problem",
 ]
 
 
@@ -433,4 +433,94 @@ def animation_curve_problem(
                   "continuity": "C2" if require_c2 else "C1",
                   "monotonicity": "analytic" if monotonic else "unconstrained",
                   "times": ts, "values": vs},
+    )
+
+
+def robust_scenario_problem(
+    name: str,
+    *,
+    variables: Sequence[Variable],
+    scenario_losses: Sequence[Callable[[Mapping[str, Any]], float]],
+    auxiliary_variable: str = "worst_case_loss",
+    metadata: Mapping[str, Any] | None = None,
+) -> OptimizationProblem:
+    """Finite-scenario minimax formulation with a reusable epigraph variable.
+
+    Minimize z subject to loss_i(x) <= z for every supplied scenario.
+    This is *not* distributional robustness or a probabilistic chance
+    constraint; its guarantee covers only the supplied finite scenarios.
+    External callbacks must be trusted and evaluation-pure.
+    """
+    if not variables or any(not isinstance(v, Variable) for v in variables):
+        raise OptimizationValidationError("variables must be a nonempty sequence of Variable")
+    if not scenario_losses or any(not callable(cb) for cb in scenario_losses):
+        raise OptimizationValidationError("scenario_losses must be a nonempty sequence of callables")
+    if not auxiliary_variable or auxiliary_variable in {v.name for v in variables}:
+        raise OptimizationValidationError("auxiliary_variable must be unique and nonempty")
+    aux = Variable(auxiliary_variable, domain=VariableDomain.real(), initial=0.0)
+    rules = tuple(Constraint(
+        name=f"scenario_{i}_epigraph", sense=ConstraintSense.LE, rhs=0.0,
+        function=lambda x, callback=callback: _finite(callback(x), "scenario_loss")
+        - _finite(x[auxiliary_variable], "epigraph"),
+    ) for i, callback in enumerate(scenario_losses))
+    return OptimizationProblem(
+        name=name, variables=(*variables, aux),
+        objectives=(Objective(name="worst_case_scenario_loss",
+                              function=lambda x: _finite(x[auxiliary_variable], "epigraph")),),
+        constraints=rules, deterministic=True,
+        metadata={"domain": "finite_scenario_robust", "scenario_count": len(rules),
+                  "guarantee": "enumerated_scenarios_only", **dict(metadata or {})},
+    )
+
+
+def layout_arrangement_problem(
+    name: str,
+    *,
+    preferred_positions: Sequence[Sequence[float]],
+    minimum_separation: float,
+    bounds: Sequence[tuple[float | None, float | None]] | None = None,
+    radii: Sequence[float] | None = None,
+) -> OptimizationProblem:
+    """Generic finite-point layout optimization using distance *proxies*.
+
+    No polygon containment, shape collision, packing optimality, or physical
+    interpenetration guarantees are implied. Consumers must independently
+    validate native geometry before applying candidate positions.
+    """
+    if not 2 <= len(preferred_positions) <= 64:
+        raise OptimizationValidationError("layout requires 2..64 points")
+    centers = tuple(_vector(p, f"preferred_positions[{i}]") for i, p in enumerate(preferred_positions))
+    dims = len(centers[0])
+    if dims not in (2, 3) or any(len(p) != dims for p in centers):
+        raise OptimizationValidationError("layout points must all be 2D or 3D")
+    sep = _positive(minimum_separation, "minimum_separation", zero=True)
+    domain = _bounds(bounds, dims)
+    if radii is None:
+        radius = (0.0,) * len(centers)
+    else:
+        if len(radii) != len(centers):
+            raise OptimizationValidationError("radii length must match positions")
+        radius = tuple(_positive(r, f"radius[{i}]", zero=True) for i, r in enumerate(radii))
+    variables = tuple(
+        Variable(f"position_{i}_{d}", domain=domain[d], initial=centers[i][d])
+        for i in range(len(centers)) for d in range(dims)
+    )
+    def position(x: Mapping[str, Any], i: int) -> tuple[float, ...]:
+        return tuple(_finite(x[f"position_{i}_{d}"], f"position_{i}_{d}")
+                     for d in range(dims))
+    def cost(x: Mapping[str, Any]) -> float:
+        return sum(_squared(_subtract(position(x, i), center))
+                   for i, center in enumerate(centers))
+    rules = tuple(Constraint(
+        name=f"pair_{i}_{j}_distance", sense=ConstraintSense.GE,
+        rhs=sep + radius[i] + radius[j],
+        function=lambda x, a=i, b=j: math.sqrt(
+            _squared(_subtract(position(x, a), position(x, b)))),
+    ) for i in range(len(centers)) for j in range(i+1, len(centers)))
+    return OptimizationProblem(
+        name=name, variables=variables,
+        objectives=(Objective(name="squared_layout_displacement", function=cost),),
+        constraints=rules, deterministic=True,
+        metadata={"domain": "layout", "objects": len(centers), "dimension": dims,
+                  "collision_guarantee": "distance_proxy_only"},
     )
