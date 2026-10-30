@@ -1622,6 +1622,8 @@ stem_agent:
     - physics
     - engineering
     - computing
+    - parametric
+    - engineering_analysis
   default_domain: numerical_methods
 
   # Dual-memory orchestration policy. SharedMemory remains BaseAgent-owned;
