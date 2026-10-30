@@ -21,6 +21,8 @@ from collections.abc import Callable, Iterable, Mapping, MutableSequence, Sequen
 from numbers import Real
 from typing import Any, TypeVar
 
+from .execution_error import CommandRejected
+
 _T = TypeVar("_T")
 
 _ACTION_TARGET_KEYS = {
@@ -327,6 +329,18 @@ def exponential_backoff(
     return float(delay)
 
 
+def _json_map(value: Mapping[str, Any]) -> str:
+    if not isinstance(value, Mapping) or not all(isinstance(k, str) for k in value):
+        raise CommandRejected("parameters must be a string-keyed mapping")
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if len(encoded.encode("utf-8")) > 262_144:
+            raise CommandRejected("command parameters exceed 256 KiB")
+        return encoded
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise CommandRejected("parameters must be bounded JSON-compatible values") from exc
+
+
 __all__ = [
     "action_target_key",
     "action_target_position",
@@ -348,4 +362,5 @@ __all__ = [
     "safe_divide",
     "stable_digest",
     "stable_json_dumps",
+    "_json_map",
 ]

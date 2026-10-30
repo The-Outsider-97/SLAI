@@ -26,6 +26,7 @@ class ExecutionErrorType(Enum):
     ILLEGAL_STATE_TRANSITION = "Illegal Action State Transition"
     STALE_CHECKPOINT = "Outdated or Invalid Checkpoint Access"
     COOKIE_MISMATCH = "Execution Cookie Verification Failed"
+    COMMAND_REJECTION = "Command Rejected by Gateway"
 
 class SoftInterrupt(Exception):
     """Raised to gracefully interrupt an action without treating it as a hard failure."""
@@ -358,6 +359,152 @@ class ExecutionTimeoutError(ExecutionError):
         )
 
 
+class CommandRejected(ExecutionError):
+    """Invalid command, capability, idempotency conflict, or permission failure.
+
+    Raised by the command gateway, execution boundary, and (indirectly) the
+    execution guard when a command cannot be dispatched. Distinct from
+    ``ActionFailureError`` (which is raised by concrete actions) and from
+    ``InvalidContextError`` (which is raised by context validation). This class
+    is the canonical failure type for the *dispatch pipeline* itself.
+
+    Stable reason codes allow callers to branch on failure class without parsing
+    strings. Every rejection path in the gateway/boundary/guard is expected to
+    supply one of the ``UPPER_SNAKE`` codes below.
+    """
+
+    # -- Stable reason codes ------------------------------------------------
+    INVALID_COMMAND = "invalid_command"
+    INVALID_PARAMETERS = "invalid_parameters"
+    INVALID_ACTION_NAME = "invalid_action_name"
+    INVALID_TASK_ID = "invalid_task_id"
+    INVALID_CAPABILITY = "invalid_capability"
+    UNREGISTERED_CAPABILITY = "unregistered_capability"
+    CAPABILITY_ALREADY_REGISTERED = "capability_already_registered"
+    AUTHORIZATION_DENIED = "authorization_denied"
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    DEADLINE_EXPIRED = "deadline_expired"
+    VERSION_CONFLICT = "version_conflict"
+    VERSION_CHECK_UNSUPPORTED = "version_check_unsupported"
+    REPLAY_DETECTED = "replay_detected"
+    INDETERMINATE_OUTCOME = "indeterminate_outcome"
+    POSTCONDITION_FAILED = "postcondition_failed"
+    RECONCILIATION_DENIED = "reconciliation_denied"
+    DISPATCH_STATE_ERROR = "dispatch_state_error"
+    NO_ACTIVE_TASK = "no_active_task"
+    TASK_ALREADY_ACTIVE = "task_already_active"
+    GATEWAY_UNAVAILABLE = "gateway_unavailable"
+    UNEXPECTED_ERROR = "unexpected_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "unknown",
+        stage: str = "gateway",
+        operation: Optional[str] = None,
+        resource: Optional[str] = None,
+        command_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        principal_id: Optional[str] = None,
+        retryable: bool = False,
+        severity: str = "high",
+        details: Optional[Dict[str, Any]] = None,
+        remediation_guidance: Optional[str] = None,
+        execution_agent_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        reason_code = str(reason_code or "unknown")
+        stage = str(stage or "gateway")
+
+        context: Dict[str, Any] = {
+            "reason_code": reason_code,
+            "stage": stage,
+            "retryable": bool(retryable),
+        }
+        if operation is not None:
+            context["operation"] = str(operation)
+        if resource is not None:
+            context["resource"] = str(resource)
+        if command_id is not None:
+            context["command_id"] = str(command_id)
+        if idempotency_key is not None:
+            context["idempotency_key"] = str(idempotency_key)
+        if principal_id is not None:
+            context["principal_id"] = str(principal_id)
+        if details:
+            context["details"] = dict(details)
+
+        super().__init__(
+            ExecutionErrorType.COMMAND_REJECTION,
+            message,
+            severity=severity,
+            context=context,
+            execution_agent_state=execution_agent_state,
+            remediation_guidance=(
+                remediation_guidance
+                or self._default_remediation(reason_code, retryable)
+            ),
+        )
+        self.reason_code = reason_code
+        self.stage = stage
+        self.operation = operation
+        self.resource = resource
+        self.command_id = command_id
+        self.idempotency_key = idempotency_key
+        self.principal_id = principal_id
+        self.retryable = bool(retryable)
+        self.details = dict(details or {})
+
+    @staticmethod
+    def _default_remediation(reason_code: str, retryable: bool) -> str:
+        suggestions = {
+            CommandRejected.INVALID_COMMAND: "Validate the command structure before dispatch.",
+            CommandRejected.INVALID_PARAMETERS: "Ensure parameters are a bounded, JSON-compatible, string-keyed mapping.",
+            CommandRejected.INVALID_ACTION_NAME: "Use a registered, well-formed action name.",
+            CommandRejected.INVALID_TASK_ID: "Use a nonempty task identifier up to 256 chars.",
+            CommandRejected.INVALID_CAPABILITY: "Inspect the capability registration for invalid effect/risk fields.",
+            CommandRejected.UNREGISTERED_CAPABILITY: "Register the capability before dispatching.",
+            CommandRejected.CAPABILITY_ALREADY_REGISTERED: "Do not re-register an existing capability; use the original handler.",
+            CommandRejected.AUTHORIZATION_DENIED: "Verify principal identity and current permissions.",
+            CommandRejected.IDEMPOTENCY_CONFLICT: "Use a new idempotency key or reconcile the earlier command.",
+            CommandRejected.DEADLINE_EXPIRED: "Retry with a fresh deadline if the effect is still desired.",
+            CommandRejected.VERSION_CONFLICT: "Refresh the resource version and retry.",
+            CommandRejected.VERSION_CHECK_UNSUPPORTED: "Provide a version_reader on the capability or omit expected_version.",
+            CommandRejected.REPLAY_DETECTED: "Do not re-execute; inspect prior outcome via reconciliation.",
+            CommandRejected.INDETERMINATE_OUTCOME: "Reconcile using authoritative external evidence.",
+            CommandRejected.POSTCONDITION_FAILED: "Investigate the capability verifier and the handler output.",
+            CommandRejected.RECONCILIATION_DENIED: "Reconciliation requires trusted administrator and evidence.",
+            CommandRejected.DISPATCH_STATE_ERROR: "Inspect gateway/boundary state; this indicates a pipeline invariant breach.",
+            CommandRejected.NO_ACTIVE_TASK: "Call start_task() with a trusted request context first.",
+            CommandRejected.TASK_ALREADY_ACTIVE: "Finish the active task before starting a new one.",
+            CommandRejected.GATEWAY_UNAVAILABLE: "Attach a trusted command gateway to the boundary.",
+            CommandRejected.UNEXPECTED_ERROR: "Inspect the underlying exception and its stage details.",
+        }
+        base = suggestions.get(reason_code, "Review the command, context, and gateway configuration.")
+        if retryable:
+            return base + " This failure is considered retryable."
+        return base
+
+    def to_audit_format(self) -> Dict[str, Any]:
+        data = super().to_audit_format()
+        data["command_rejection"] = {
+            "reason_code": self.reason_code,
+            "stage": self.stage,
+            "operation": self.operation,
+            "resource": self.resource,
+            "command_id": self.command_id,
+            "idempotency_key": self.idempotency_key,
+            "principal_id": self.principal_id,
+            "retryable": self.retryable,
+            "details": self.details,
+        }
+        return data
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        return f"{base} [code={self.reason_code}, stage={self.stage}]"
+
+
 __all__ = [
     "ExecutionError",
     "ExecutionErrorType",
@@ -378,4 +525,5 @@ __all__ = [
     "CorruptedExecutionStateError",
     "ExecutionMemoryOverflowError",
     "ExecutionTimeoutError",
+    "CommandRejected",
 ]

@@ -89,6 +89,8 @@ _scope_stats: dict[str, int] = {
     "denials": 0,
     "nested_rejections": 0,
     "robot_calls_denied": 0,
+    "invalid_operations": 0,
+    "invalid_command_ids": 0,
 }
 
 
@@ -118,20 +120,36 @@ def reset_scope_stats() -> None:
 def validate_action_name(action_name: str) -> str:
     """Validate an action name for use inside an operation identifier.
 
-    Raises ``ValueError`` with a precise reason rather than silently
-    truncating or replacing characters (fail-closed).
+    Raises ``CommandRejected`` with reason code ``INVALID_ACTION_NAME`` for any
+    structural problem. Rejecting loudly (rather than sanitizing) keeps
+    accidental normalization from masking misuse.
     """
     if not isinstance(action_name, str):
-        raise ValueError("action_name must be a string")
+        raise CommandRejected(
+            "action_name must be a string",
+            reason_code=CommandRejected.INVALID_ACTION_NAME,
+            stage="guard_validation",
+        )
     stripped = action_name.strip()
     if not stripped:
-        raise ValueError("action_name must be nonempty")
+        raise CommandRejected(
+            "action_name must be nonempty",
+            reason_code=CommandRejected.INVALID_ACTION_NAME,
+            stage="guard_validation",
+        )
     if len(stripped) > _ACTION_NAME_MAX_LENGTH:
-        raise ValueError(
-            f"action_name exceeds maximum length ({_ACTION_NAME_MAX_LENGTH})"
+        raise CommandRejected(
+            f"action_name exceeds maximum length ({_ACTION_NAME_MAX_LENGTH})",
+            reason_code=CommandRejected.INVALID_ACTION_NAME,
+            stage="guard_validation",
+            details={"length": len(stripped)},
         )
     if any(ch in stripped for ch in _FORBIDDEN_NAME_CHARS):
-        raise ValueError("action_name contains forbidden control characters")
+        raise CommandRejected(
+            "action_name contains forbidden control characters",
+            reason_code=CommandRejected.INVALID_ACTION_NAME,
+            stage="guard_validation",
+        )
     return stripped
 
 
@@ -170,8 +188,13 @@ def authorized_action(
     or untrusted extension code.
     """
     if not isinstance(operation, str) or not operation.strip():
+        _record_scope_event("invalid_operations")
+        logger.warning("Rejected empty/invalid operation in authorized_action")
         raise PermissionError("execution scope requires a registered operation")
+
     if not isinstance(command_id, str) or not command_id.strip():
+        _record_scope_event("invalid_command_ids")
+        logger.warning("Rejected empty/invalid command_id for operation=%s", operation)
         raise PermissionError("execution scope requires a trusted command identifier")
 
     existing = _CURRENT.get()
@@ -204,6 +227,13 @@ def authorized_action(
     )
     try:
         yield info
+    except Exception as exc:
+        logger.debug(
+            "Exception within scope operation=%s type=%s",
+            operation,
+            type(exc).__name__,
+        )
+        raise
     finally:
         _CURRENT.reset(token)
         _record_scope_event("scopes_exited")
@@ -250,7 +280,9 @@ def require_authorized_action(action_name: str) -> None:
             expected,
             actual,
         )
-        raise PermissionError(f"action {action_name!r} requires a trusted command gateway dispatch")
+        raise PermissionError(
+            f"action {action_name!r} requires a trusted command gateway dispatch"
+        )
 
 
 def require_authorized_robot() -> ScopeInfo:
@@ -280,9 +312,7 @@ def require_operation(operation_prefix: str) -> ScopeInfo:
             operation_prefix,
             actual,
         )
-        raise PermissionError(
-            f"operation requires scope prefix {operation_prefix!r}"
-        )
+        raise PermissionError(f"operation requires scope prefix {operation_prefix!r}")
     return info
 
 
@@ -306,7 +336,7 @@ class GuardedRobotAdapter:
         object.__setattr__(self, "_GuardedRobotAdapter__adapter", adapter)
         object.__setattr__(self, "_GuardedRobotAdapter__capabilities_cache", {})
 
-    # -- Capability introspection -------------------------------------------
+    # -- Capability introspection ------------------------------------------
 
     def supports_capability(self, name: str) -> bool:
         if not isinstance(name, str) or not name:
@@ -316,10 +346,15 @@ class GuardedRobotAdapter:
             return cache[name]
         adapter = self.__adapter
         checker = getattr(adapter, "supports_capability", None)
-        if callable(checker):
-            supported = bool(checker(name))
-        else:
-            supported = callable(getattr(adapter, name, None))
+        try:
+            supported = (
+                bool(checker(name))
+                if callable(checker)
+                else callable(getattr(adapter, name, None))
+            )
+        except Exception:
+            logger.exception("supports_capability raised for capability=%s; assuming unsupported", name)
+            supported = False
         cache[name] = supported
         return supported
 

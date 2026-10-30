@@ -8,11 +8,10 @@ claim inside a user/task dictionary.
 from __future__ import annotations
 
 import copy
-import math
 import threading
 import time
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from .command_gateway import Capability, Command, CommandGateway, CommandRejected, Outcome
@@ -36,6 +35,11 @@ HIGH_RISK_ACTIONS = frozenset({
     "motor", "ackermann", "stop", "spin", "navigate",
     "follow_path", "gripper", "joint", "led", "sequence",
 })
+
+# Keys whose values must never appear in diagnostic logs. Extend via config in
+# a future revision without changing this module's structure.
+_LOG_SENSITIVE_KEYS = frozenset({"password", "token", "secret", "api_key", "private_key"})
+_LOG_OMITTED_KEYS = frozenset({"robot", "map_data"})
 
 
 # ---------------------------------------------------------------------------
@@ -76,16 +80,31 @@ class DispatchStats:
 def _validate_task_id(task_id: str) -> str:
     """Validate a task identifier for use in resource/command IDs."""
     if not isinstance(task_id, str):
-        raise CommandRejected("task_id must be a string")
+        raise CommandRejected(
+            "task_id must be a string",
+            reason_code=CommandRejected.INVALID_TASK_ID,
+            stage="boundary_validation",
+        )
     stripped = task_id.strip()
     if not stripped:
-        raise CommandRejected("task_id must be nonempty")
+        raise CommandRejected(
+            "task_id must be nonempty",
+            reason_code=CommandRejected.INVALID_TASK_ID,
+            stage="boundary_validation",
+        )
     if len(stripped) > MAX_TASK_ID_LENGTH:
         raise CommandRejected(
-            f"task_id exceeds maximum length ({MAX_TASK_ID_LENGTH})"
+            f"task_id exceeds maximum length ({MAX_TASK_ID_LENGTH})",
+            reason_code=CommandRejected.INVALID_TASK_ID,
+            stage="boundary_validation",
+            details={"length": len(stripped)},
         )
     if any(ch in stripped for ch in ("\n", "\r", "\x00")):
-        raise CommandRejected("task_id contains forbidden control characters")
+        raise CommandRejected(
+            "task_id contains forbidden control characters",
+            reason_code=CommandRejected.INVALID_TASK_ID,
+            stage="boundary_validation",
+        )
     return stripped
 
 
@@ -125,7 +144,11 @@ def prepare_private_context(
     the *only* context handed to action constructors.
     """
     if not isinstance(context, Mapping):
-        raise CommandRejected("action context must be a mapping")
+        raise CommandRejected(
+            "action context must be a mapping",
+            reason_code=CommandRejected.INVALID_PARAMETERS,
+            stage="boundary_private_context",
+        )
     sanitized: Dict[str, Any] = {
         key: copy.deepcopy(value)
         for key, value in context.items()
@@ -138,6 +161,30 @@ def prepare_private_context(
         sanitized.pop("robot", None)
         sanitized["robot_ready"] = False
     return sanitized
+
+
+def redacted_context_summary(context: Mapping[str, Any]) -> str:
+    """Return a JSON-safe, redacted, size-bounded context summary for logs.
+
+    Uses the shared :func:`redact_mapping` helper so that this module and the
+    recovery pipeline apply the same sensitive-key policy.
+    """
+    if not isinstance(context, Mapping):
+        return "<non-mapping>"
+    safe = redact_mapping(
+        context,
+        sensitive_keys=_LOG_SENSITIVE_KEYS,
+        omitted_keys=_LOG_OMITTED_KEYS,
+    )
+    # Coerce non-serializable values to their type names.
+    simple: Dict[str, Any] = {}
+    for key, value in safe.items():
+        try:
+            stable_json_dumps({key: value})
+            simple[key] = value
+        except Exception:
+            simple[key] = f"<{type(value).__name__}>"
+    return stable_json_dumps(simple)
 
 
 # ---------------------------------------------------------------------------
@@ -188,18 +235,14 @@ class ExecutionBoundary:
     # -- Construction helpers ----------------------------------------------
 
     @staticmethod
-    def _freeze_registry(
-        action_registry: Mapping[str, type],
-    ) -> Dict[str, type]:
+    def _freeze_registry(action_registry: Mapping[str, type]) -> Dict[str, type]:
         """Validate and copy the injected action registry."""
         if not isinstance(action_registry, Mapping):
             raise TypeError("action_registry must be a mapping")
         frozen: Dict[str, type] = {}
         for name, cls in action_registry.items():
             if not isinstance(name, str) or not name:
-                raise TypeError(
-                    "action registry keys must be nonempty strings"
-                )
+                raise TypeError("action registry keys must be nonempty strings")
             if not isinstance(cls, type):
                 raise TypeError(
                     f"action class for {name!r} must be a class, "
@@ -235,26 +278,32 @@ class ExecutionBoundary:
     def start_task(self, task_id: str, *, request_context: Any) -> None:
         """Open a task scope; only one task may be active at a time."""
         if self.gateway is None:
-            raise PermissionError(
-                "trusted execution gateway required for task start"
+            raise CommandRejected(
+                "trusted execution gateway required for task start",
+                reason_code=CommandRejected.GATEWAY_UNAVAILABLE,
+                stage="boundary_start_task",
             )
         if request_context is None:
-            raise PermissionError("trusted request context required for task start")
+            raise CommandRejected(
+                "trusted request context required for task start",
+                reason_code=CommandRejected.AUTHORIZATION_DENIED,
+                stage="boundary_start_task",
+            )
         task_id = _validate_task_id(task_id)
         with self._lock:
             if self._task_id is not None:
                 raise CommandRejected(
-                    "another authorized task is already active "
-                    f"({self._task_id!r})"
+                    f"another authorized task is already active ({self._task_id!r})",
+                    reason_code=CommandRejected.TASK_ALREADY_ACTIVE,
+                    stage="boundary_start_task",
+                    resource=build_resource_id(self._task_id),
                 )
             self._task_id = task_id
             self._request_context = request_context
             self._step = 0
             self._pending = None
             self._stats.tasks_started += 1
-            logger.info(
-                "Boundary task started task_id=%s step=0", task_id
-            )
+            logger.info("Boundary task started task_id=%s step=0", task_id)
 
     def finish_task(self) -> None:
         """Close the task scope; safe to call when idle."""
@@ -282,29 +331,46 @@ class ExecutionBoundary:
         """Dispatch one non-retriable operation; never return success on replay."""
         try:
             action_name = validate_action_name(action_name)
-        except ValueError as exc:
-            raise CommandRejected(str(exc)) from exc
+        except CommandRejected:
+            # Propagate the guard's structural rejection unchanged.
+            raise
 
         if action_name not in self._registry:
             raise CommandRejected(
-                f"unregistered action: {action_name!r}"
+                f"unregistered action: {action_name!r}",
+                reason_code=CommandRejected.UNREGISTERED_CAPABILITY,
+                stage="boundary_dispatch",
+                operation=build_capability_name(action_name),
             )
         if not isinstance(context, Mapping):
-            raise CommandRejected("action context must be a mapping")
-        if deadline is not None:
-            if (not isinstance(deadline, (int, float))
-                    or not math.isfinite(float(deadline))):
-                raise CommandRejected(
-                    "deadline must be a finite unix timestamp"
-                )
+            raise CommandRejected(
+                "action context must be a mapping",
+                reason_code=CommandRejected.INVALID_PARAMETERS,
+                stage="boundary_dispatch",
+                operation=build_capability_name(action_name),
+            )
+        if deadline is not None and not is_finite_number(deadline):
+            raise CommandRejected(
+                "deadline must be a finite unix timestamp",
+                reason_code=CommandRejected.INVALID_COMMAND,
+                stage="boundary_dispatch",
+                operation=build_capability_name(action_name),
+                details={"field": "deadline"},
+            )
 
         with self._lock:
             if self.gateway is None:
-                raise PermissionError(
-                    "trusted command dispatch not established"
+                raise CommandRejected(
+                    "trusted command dispatch not established",
+                    reason_code=CommandRejected.GATEWAY_UNAVAILABLE,
+                    stage="boundary_dispatch",
                 )
             if self._task_id is None or self._request_context is None:
-                raise PermissionError("no active authorized task")
+                raise CommandRejected(
+                    "no active authorized task",
+                    reason_code=CommandRejected.NO_ACTIVE_TASK,
+                    stage="boundary_dispatch",
+                )
 
             task_id = self._task_id
             step = self._step
@@ -318,32 +384,57 @@ class ExecutionBoundary:
             )
             self._pending = (action_name, dict(context))
             self._stats.dispatches_attempted += 1
+
             logger.debug(
-                "Dispatching action=%s task_id=%s step=%d command_id=%s",
+                "Dispatching action=%s task_id=%s step=%d command_id=%s context_digest=%s",
                 action_name,
                 task_id,
                 step,
                 command.command_id,
+                stable_digest(redacted_context_summary(context), algorithm="blake2b", digest_size=8),
             )
             try:
                 result = self.gateway.execute(
                     command, request_context=self._request_context
                 )
+            except CommandRejected:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "Gateway execute raised unexpectedly action=%s command_id=%s",
+                    action_name,
+                    command.command_id,
+                )
+                self._stats.dispatches_failed += 1
+                self._stats.last_error = f"gateway_unexpected: {type(exc).__name__}"
+                self._stats.last_error_at = time.time()
+                raise CommandRejected(
+                    f"gateway execute failed: {type(exc).__name__}",
+                    reason_code=CommandRejected.DISPATCH_STATE_ERROR,
+                    stage="boundary_dispatch",
+                    operation=command.operation,
+                    resource=command.resource,
+                    command_id=command.command_id,
+                    details={"error_type": type(exc).__name__},
+                ) from exc
             finally:
                 self._pending = None
 
-            self._process_dispatch_result(action_name, result)
+            self._process_dispatch_result(action_name, command, result)
             self._step += 1
 
-    def _process_dispatch_result(self, action_name: str, result: Any) -> None:
+    def _process_dispatch_result(
+        self,
+        action_name: str,
+        command: Command,
+        result: Any,
+    ) -> None:
         """Classify a dispatch outcome and raise on any non-success status."""
-        if getattr(result, "replayed", False):
+        replayed = bool(getattr(result, "replayed", False))
+        if replayed:
             self._stats.dispatch_replays += 1
 
-        if (
-            result.status == Outcome.SUCCEEDED
-            and not getattr(result, "replayed", False)
-        ):
+        if result.status in (Outcome.SUCCEEDED, Outcome.COMMITTED) and not replayed:
             self._stats.dispatches_succeeded += 1
             logger.debug(
                 "Dispatch succeeded action=%s status=%s",
@@ -358,18 +449,48 @@ class ExecutionBoundary:
             self._stats.dispatches_failed += 1
 
         reason = result.reason or "duplicate or unconfirmed outcome"
+        reason_code = (
+            getattr(result, "reason_code", "")
+            or self._default_reason_code(result.status, replayed)
+        )
         self._stats.last_error = f"{result.status.value}: {reason}"
         self._stats.last_error_at = time.time()
         logger.error(
-            "Dispatch rejected action=%s status=%s reason=%s replayed=%s",
+            "Dispatch rejected action=%s status=%s reason=%s reason_code=%s replayed=%s",
             action_name,
             result.status.value,
             reason,
-            getattr(result, "replayed", False),
+            reason_code,
+            replayed,
         )
         raise CommandRejected(
-            f"dispatch {result.status.value}: {reason}"
+            f"dispatch {result.status.value}: {reason}",
+            reason_code=reason_code,
+            stage="dispatch",
+            operation=command.operation,
+            resource=command.resource,
+            command_id=getattr(result, "command_id", command.command_id),
+            idempotency_key=command.idempotency_key,
+            details={
+                "status": result.status.value,
+                "replayed": replayed,
+            },
         )
+
+    @staticmethod
+    def _default_reason_code(status: Outcome, replayed: bool) -> str:
+        """Fallback reason codes when the gateway did not supply one."""
+        if replayed:
+            return CommandRejected.REPLAY_DETECTED
+        if status == Outcome.DENIED:
+            return CommandRejected.AUTHORIZATION_DENIED
+        if status == Outcome.INDETERMINATE:
+            return CommandRejected.INDETERMINATE_OUTCOME
+        if status == Outcome.IN_PROGRESS:
+            return CommandRejected.REPLAY_DETECTED
+        if status == Outcome.REJECTED:
+            return CommandRejected.INVALID_COMMAND
+        return CommandRejected.DISPATCH_STATE_ERROR
 
     # -- Handler (invoked from the gateway) --------------------------------
 
@@ -403,17 +524,30 @@ class ExecutionBoundary:
 
         action_type = self._registry.get(name)
         if action_type is None:
-            raise CommandRejected(f"action {name!r} is not registered")
+            raise CommandRejected(
+                f"action {name!r} is not registered",
+                reason_code=CommandRejected.UNREGISTERED_CAPABILITY,
+                stage="boundary_handler",
+                operation=expected_operation,
+                command_id=getattr(command, "command_id", None),
+            )
 
         private_context = prepare_private_context(context, self.robot)
 
         try:
             action = action_type(context=private_context)
-        except Exception:
-            logger.exception(
-                "Action construction failed action=%s", name
-            )
+        except CommandRejected:
             raise
+        except Exception as exc:
+            logger.exception("Action construction failed action=%s", name)
+            raise CommandRejected(
+                f"action construction failed: {type(exc).__name__}",
+                reason_code=CommandRejected.UNEXPECTED_ERROR,
+                stage="boundary_handler",
+                operation=expected_operation,
+                command_id=getattr(command, "command_id", None),
+                details={"error_type": type(exc).__name__},
+            ) from exc
 
         # Action retry logic is subordinate to the durable dispatch journal.
         action.retry_attempts = 0
@@ -426,16 +560,30 @@ class ExecutionBoundary:
         ):
             try:
                 executed = action.execute()
-            except Exception:
+            except Exception as exc:
                 logger.exception(
-                    "Action execution raised action=%s", name
+                    "Action execution raised action=%s command_id=%s",
+                    name,
+                    getattr(command, "command_id", "<unknown>"),
                 )
-                raise
+                raise CommandRejected(
+                    f"action execution raised: {type(exc).__name__}",
+                    reason_code=CommandRejected.INDETERMINATE_OUTCOME,
+                    stage="boundary_handler",
+                    operation=expected_operation,
+                    command_id=getattr(command, "command_id", None),
+                    details={"error_type": type(exc).__name__},
+                ) from exc
+
             if not executed:
-                raise RuntimeError(
-                    "action failed or was interrupted; "
-                    "effects require reconciliation"
+                raise CommandRejected(
+                    "action failed or was interrupted; effects require reconciliation",
+                    reason_code=CommandRejected.POSTCONDITION_FAILED,
+                    stage="boundary_handler",
+                    operation=expected_operation,
+                    command_id=getattr(command, "command_id", None),
                 )
+
             self._apply_action(action)
         return True
 
@@ -496,4 +644,5 @@ __all__ = [
     "build_resource_id",
     "classify_risk",
     "prepare_private_context",
+    "redacted_context_summary",
 ]
