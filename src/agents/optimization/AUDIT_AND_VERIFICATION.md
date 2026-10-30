@@ -29,7 +29,7 @@ The Optimization Agent façade already provides SLAI `BaseAgent` integration, re
 
 | Finding | Evidence | Action / status |
 | --- | --- | --- |
-| No dedicated general-purpose geometry/trajectory/camera/Hermite curve **problem builders** in enumerated optimization tree | Existing modules and solvers inventory | Added four reusable builders in `domain_problems.py` |
+| No dedicated general-purpose geometry/trajectory/camera/Hermite curve/finite-scenario/layout **problem builders** in enumerated optimization tree | Existing modules and solvers inventory | Added six reusable builders in `domain_problems.py` |
 | Real variable and objective/constraint contracts are **scalar solver-facing** even though `Variable.shape` exists | `Variable`, `ProblemFeatures`; nonlinear and black-box solvers explicitly reject shaped variables | Builders flatten only supported dimensions into named scalar variables; full tensor solver support deferred |
 | Solver backend coverage is not equivalent to arbitrary continuous-time optimal control | Five registered solver strategies and documented bounds | Trajectory is explicit finite-difference discretization; time-continuous guarantees deferred |
 | No generic **native** camera-visibility or swept collision evaluator | Optimization README states no automatic Spatial/Simulation connection | Caller supplies trusted evaluation callback; outputs explicitly report sampled scope |
@@ -42,7 +42,7 @@ No verified numerical defect in an existing SciPy solver is asserted here; not e
 
 ## 4. Implemented changes
 
-- **`src/agents/optimization/domain_problems.py`**: reusable builders for geometric-parameter objectives, finite-difference trajectory waypoint optimization, fixed-target look-at camera position optimization, and cubic-Hermite tangent optimization. Includes explicit boundary derivative constraints, optional sampled clearance/visibility callbacks, fixed tangent limits, C2 constraint checks, analytic monotonicity bounds and exact per-segment jerk integral.
+- **`src/agents/optimization/domain_problems.py`**: reusable builders for geometric-parameter objectives, finite-difference trajectory waypoint optimization, fixed-target look-at camera position optimization, and cubic-Hermite tangent optimization. Includes explicit boundary derivative constraints, optional sampled clearance/visibility callbacks, fixed tangent limits, C2 constraint checks, analytic monotonicity bounds and exact per-segment jerk integral. Also includes finite-scenario minimax and 2D/3D point-layout builders that reuse the canonical contracts.
 - **`src/agents/optimization/__init__.py`**: re-export domain builders without modifying existing solver or façade behavior.
 - **`tests/agents/test_optimization_domain_problems.py`**: 9 mathematical/formulation tests plus 2 real-solver integration tests for SciPy nonlinear solving; the integration tests need full repository environment.
 - **`src/agents/optimization/DOMAIN_OPTIMIZATION.md`**: implemented APIs and exact scope limitations.
@@ -55,8 +55,8 @@ No verified numerical defect in an existing SciPy solver is asserted here; not e
 Local Python 3 environment:
 
 - `py_compile`: passed for new source and tests.
-- Isolated mathematical/regression tests using **minimal injected stubs** for the canonical contract types: **9 passed, 2 real integration tests deselected**. These checks confirm the builder computations under stand-in type contracts only.
-- **Real SLAI solver integration tests:** added, **not locally executed**. They must be run by the new GitHub Actions workflow or a cloned v2.4 environment with its dependencies installed.
+- Isolated mathematical/regression tests using **minimal injected stubs** for the canonical contract types: **11 passed, 2 real integration tests deselected**. These checks confirm the builder computations under stand-in type contracts only.
+- **Real SLAI solver integration tests:** added, **not locally executed**. GitHub Actions attempts on this PR have failed before provisioning a runner (the Actions jobs have no steps and `runner_id=0`); this is **not** test failure evidence and requires an infrastructure/account/Actions investigation before the integration tests can run. They may instead run from a fully provisioned local checkout.
 - Full SLAI regression tests: **not run**.
 - Numerical solver benchmark comparisons: **not run**.
 - Cross-agent factory, memory, real Spatial/Simulation callbacks, and lifecycle integration: **not run**.
@@ -74,7 +74,7 @@ Do **not** count stubbed checks as source repository integration verification.
 
 ## 7. Priority follow-up gates
 
-1. Run v2.4 GitHub CI and repair any real import/integration failures; execute the entire relevant existing test suite.
+1. Resolve the early GitHub Actions runner-start failure, run v2.4 CI, repair any real import/integration failures; execute the entire relevant existing test suite.
 2. Add linear/quadratic/black-box mathematical reference benchmarks, infeasible/unbounded, timeouts/cancellations, feasibility tolerance, resource-bound tests against real engines.
 3. Add metadata for units/dimensions and resource budget contracts aligned to existing STEM utilities, without duplicating their numeric core.
 4. Add robust/scenario optimization, layout and parameter estimation on the canonical contracts; benchmark against trusted reference solvers.
@@ -85,4 +85,4 @@ Do **not** count stubbed checks as source repository integration verification.
 
 ## 8. Production readiness assessment
 
-**NOT READY.** This branch provides reusable native *problem formulations* for the four priority domains and preserves the existing solver architecture, but does not meet the full requested scope of generalized optimal control, camera motion, robust and mixed-variable optimization, full cross-agent integration, or independent production validation. Its claims are limited to the verified actions and tests above.
+**NOT READY.** This branch provides reusable native *problem formulations* for the four priority domains plus scenario-based minimax and point layouts and preserves the existing solver architecture, but does not meet the full requested scope of generalized optimal control, camera motion, distributionally robust/stochastic and mixed-variable optimization, full cross-agent integration, or independent production validation. Its claims are limited to the verified actions and tests above.
