@@ -31,39 +31,19 @@ Example:
 
 from __future__ import annotations
 
-import hashlib
 import html as _html
 import json
 import re
-from dataclasses import dataclass, field, fields, replace
+
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
-__all__ = [
-    "FontSettings",
-    "FontSettingsError",
-    "PRESETS",
-    "GENERIC_FAMILIES",
-    "NAMED_COLORS",
-    "SIZE_UNITS",
-    "parse_color",
-    "format_color",
-    "is_valid_color",
-    "contrast_ratio",
-    "ensure_contrast",
-    "lighten",
-    "darken",
-    "mix_colors",
-    "parse_size",
-    "format_size",
-    "convert_size",
-    "font_stack",
-    "theme",
-]
+from .utils.functions_helpers import _fingerprint
+from .utils.functions_error import *
+from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
-
-class FontSettingsError(ValueError):
-    """Raised when typography settings are invalid."""
-
+logger = get_logger("Font Settings")
+printer = PrettyPrinter()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -332,6 +312,7 @@ def parse_color(value: Any) -> Optional[RGBA]:
         except ValueError:
             return None
 
+    logger.debug("Color could not be parsed", extra={"input": s[:40]})
     return None
 
 
@@ -377,7 +358,7 @@ def format_color(rgba: RGBA, format: str = "hex") -> str:
         if a >= 1.0:
             return f"hsl({round(h_deg)}, {round(s * 100)}%, {round(l * 100)}%)"
         return f"hsla({round(h_deg)}, {round(s * 100)}%, {round(l * 100)}%, {round(a, 3)})"
-    raise FontSettingsError(f"Unknown color format: {format!r}")
+    raise FontColorError(f"Unknown color format: {format!r}", value=format)
 
 
 def relative_luminance(rgba: RGBA) -> float:
@@ -401,17 +382,19 @@ def contrast_ratio(fg: Union[str, RGBA], bg: Union[str, RGBA]) -> float:
     return (l1 + 0.05) / (l2 + 0.05)
 
 
-def ensure_contrast(
-    fg: Union[str, RGBA],
-    bg: Union[str, RGBA],
-    min_ratio: float = 4.5,
-    format: str = "hex",
-) -> str:
+def ensure_contrast(fg: Union[str, RGBA], bg: Union[str, RGBA], min_ratio: float = 4.5, format: str = "hex") -> str:
     """Adjust fg toward black or white until contrast_ratio(fg, bg) >= min_ratio."""
     f = fg if isinstance(fg, tuple) else parse_color(fg)
     b = bg if isinstance(bg, tuple) else parse_color(bg)
     if f is None or b is None:
-        raise FontSettingsError("ensure_contrast requires parseable colors")
+        logger.error(
+            "ensure_contrast: unparseable color",
+            extra={"fg": repr(fg), "bg": repr(bg)},
+        )
+        raise FontColorError(
+            "ensure_contrast requires parseable colors",
+            value=repr((fg, bg)),
+        )
     if contrast_ratio(f, b) >= min_ratio:
         return format_color(f, format)
     target = (255.0, 255.0, 255.0) if relative_luminance(b) < 0.5 else (0.0, 0.0, 0.0)
@@ -429,29 +412,30 @@ def ensure_contrast(
     return format_color((fr + (tr - fr) * hi, fg_ + (tg - fg_) * hi, fb + (tb - fb) * hi, fa), format)
 
 
-def lighten(color: Union[str, RGBA], amount: float = 0.1, format: str = "hex") -> str:
+def lighten(color, amount: float = 0.1, format: str = "hex") -> str:
     c = color if isinstance(color, tuple) else parse_color(color)
     if c is None:
-        raise FontSettingsError(f"Cannot lighten non-color: {color!r}")
+        logger.error("lighten: non-color input", extra={"color": repr(color)})
+        raise FontColorError(f"Cannot lighten non-color: {color!r}", value=color)
     r, g, b, a = c
-    return format_color(
-        (r + (255 - r) * amount, g + (255 - g) * amount, b + (255 - b) * amount, a), format
-    )
+    return format_color((r + (255 - r) * amount, g + (255 - g) * amount, b + (255 - b) * amount, a), format)
 
 
-def darken(color: Union[str, RGBA], amount: float = 0.1, format: str = "hex") -> str:
+def darken(color, amount: float = 0.1, format: str = "hex") -> str:
     c = color if isinstance(color, tuple) else parse_color(color)
     if c is None:
-        raise FontSettingsError(f"Cannot darken non-color: {color!r}")
+        logger.error("darken: non-color input", extra={"color": repr(color)})
+        raise FontColorError(f"Cannot darken non-color: {color!r}", value=color)
     r, g, b, a = c
     return format_color((r * (1 - amount), g * (1 - amount), b * (1 - amount), a), format)
 
 
-def mix_colors(a: Union[str, RGBA], b: Union[str, RGBA], t: float = 0.5, format: str = "hex") -> str:
+def mix_colors(a, b, t: float = 0.5, format: str = "hex") -> str:
     ca = a if isinstance(a, tuple) else parse_color(a)
     cb = b if isinstance(b, tuple) else parse_color(b)
     if ca is None or cb is None:
-        raise FontSettingsError("mix_colors requires parseable colors")
+        logger.error("mix_colors: unparseable color", extra={"a": repr(a), "b": repr(b)})
+        raise FontColorError("mix_colors requires parseable colors", value=repr((a, b)))
     t = _clamp(t, 0.0, 1.0)
     return format_color(tuple(ca[i] * (1 - t) + cb[i] * t for i in range(4)), format)  # type: ignore[arg-type]
 
@@ -524,7 +508,15 @@ def convert_size(
             return n * min(vw, vh) / 100.0
         if u == "vmax":
             return n * max(vw, vh) / 100.0
-        raise FontSettingsError(f"Cannot convert from {u!r}")
+        raise FontSizeError(f"Cannot convert from {u!r}", value=n, from_unit=u)
+
+    try:
+        px = to_px(value, fu)
+    except FontSizeError:
+        raise
+    except Exception as exc:
+        logger.error("convert_size failed", extra={"error": str(exc), "from": fu, "to": tu})
+        raise FontSizeError(str(exc), value=value, from_unit=fu, to_unit=tu) from exc
 
     px = to_px(value, fu)
     if tu in _PX_FACTORS:
@@ -544,7 +536,7 @@ def convert_size(
         return px * 100.0 / min(vw, vh)
     if tu == "vmax":
         return px * 100.0 / max(vw, vh)
-    raise FontSettingsError(f"Cannot convert to {tu!r}")
+    raise FontSizeError(f"Cannot convert to {tu!r}", value=value, from_unit=fu, to_unit=tu)
 
 
 # ---------------------------------------------------------------------------
@@ -567,26 +559,43 @@ def _quote_family(name: str) -> str:
     return n
 
 
+_CSS_WIDE_KEYWORDS = {"inherit", "initial", "unset", "revert", "revert-layer"}
+
+
 def font_stack(family: Union[str, Iterable[str]], generic: str = "sans-serif") -> str:
     """Build a CSS font-family list.
 
     - Accepts a comma-separated string or an iterable of family names.
     - Quotes family names that require it.
-    - Appends `generic` if the last entry isn't already a generic family.
+    - Preserves CSS-wide keywords verbatim (``inherit``, ``initial``, …).
+    - Appends ``generic`` if the last entry isn't already a generic family
+      or a CSS-wide keyword.
     """
     if isinstance(family, str):
-        parts: list[str] = []
-        for chunk in family.split(","):
-            chunk = chunk.strip()
-            if chunk:
-                parts.append(chunk)
+        parts = [c.strip() for c in family.split(",") if c.strip()]
     else:
-        parts = list(family)
+        try:
+            parts = list(family)
+        except TypeError as exc:
+            raise FontSettingsError(
+                f"family must be str or iterable, got {type(family).__name__}",
+                details={"family": repr(family)},
+            ) from exc
+
+    # Preserve CSS-wide keywords verbatim
+    if len(parts) == 1 and parts[0].strip().lower() in _CSS_WIDE_KEYWORDS:
+        return parts[0].strip()
+
     quoted = [_quote_family(p) for p in parts if p]
     if not quoted:
         return generic
+
     last = quoted[-1].strip().lower()
-    if last not in GENERIC_FAMILIES and generic:
+    if (
+        last not in GENERIC_FAMILIES
+        and last not in _CSS_WIDE_KEYWORDS
+        and generic
+    ):
         quoted.append(generic)
     return ", ".join(quoted)
 
@@ -638,11 +647,7 @@ class FontSettings:
         if value is None:
             return None
         if name == "family":
-            return font_stack(value) if not isinstance(value, str) or "," not in value and any(
-                v in (value or "").lower() for v in GENERIC_FAMILIES
-            ) is False and value != value.strip() and False else (
-                value if isinstance(value, str) and "," in value else font_stack(value)
-            )
+            return font_stack(value)
         if name in ("size", "letter_spacing", "word_spacing", "text_indent"):
             if isinstance(value, (int, float)):
                 return format_size(float(value), "px" if name == "size" else "")
@@ -697,8 +702,7 @@ class FontSettings:
         return f'style="{_html.escape(self.to_inline(), quote=True)}"'
 
     def to_hash(self, length: int = 8) -> str:
-        canonical = json.dumps(self.to_props(), sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:length]
+        return _fingerprint(self.to_props())[:length]
 
     def suggest_class(self, prefix: str = "font") -> str:
         return f"{prefix}-{self.to_hash()}"
@@ -730,51 +734,90 @@ class FontSettings:
     # -- Validation -----------------------------------------------------
     def validate(self) -> "FontSettings":
         if self.style is not None and self.style not in STYLE_VALUES:
-            raise FontSettingsError(f"Invalid font-style: {self.style!r}")
+            raise FontSettingsError(
+                f"Invalid font-style: {self.style!r}",
+                details={"field": "style", "value": self.style},
+            )
         if self.stretch is not None and self.stretch not in STRETCH_VALUES:
-            raise FontSettingsError(f"Invalid font-stretch: {self.stretch!r}")
+            raise FontSettingsError(
+                f"Invalid font-stretch: {self.stretch!r}",
+                details={"field": "stretch", "value": self.stretch},
+            )
         if self.text_align is not None and self.text_align not in ALIGN_VALUES:
-            raise FontSettingsError(f"Invalid text-align: {self.text_align!r}")
+            raise FontSettingsError(
+                f"Invalid text-align: {self.text_align!r}",
+                details={"field": "text_align", "value": self.text_align},
+            )
         if self.vertical_align is not None and self.vertical_align not in VERTICAL_ALIGN_VALUES:
-            # allow lengths / percentages
             if parse_size(self.vertical_align) is None:
-                raise FontSettingsError(f"Invalid vertical-align: {self.vertical_align!r}")
+                raise FontSettingsError(
+                    f"Invalid vertical-align: {self.vertical_align!r}",
+                    details={"field": "vertical_align", "value": self.vertical_align},
+                )
         if self.direction is not None and self.direction not in DIRECTION_VALUES:
-            raise FontSettingsError(f"Invalid direction: {self.direction!r}")
+            raise FontSettingsError(
+                f"Invalid direction: {self.direction!r}",
+                details={"field": "direction", "value": self.direction},
+            )
         if self.text_transform is not None and self.text_transform not in TRANSFORM_VALUES:
-            raise FontSettingsError(f"Invalid text-transform: {self.text_transform!r}")
+            raise FontSettingsError(
+                f"Invalid text-transform: {self.text_transform!r}",
+                details={"field": "text_transform", "value": self.text_transform},
+            )
         if self.white_space is not None and self.white_space not in WHITE_SPACE_VALUES:
-            raise FontSettingsError(f"Invalid white-space: {self.white_space!r}")
-
+            raise FontSettingsError(
+                f"Invalid white-space: {self.white_space!r}",
+                details={"field": "white_space", "value": self.white_space},
+            )
+    
         if self.size is not None:
             p = parse_size(self.size)
             if p is None or p[0] < 0:
-                raise FontSettingsError(f"Invalid font-size: {self.size!r}")
-
+                raise FontSizeError(
+                    f"Invalid font-size: {self.size!r}",
+                    value=self.size,
+                )
+    
         if self.weight is not None:
             w = self.weight
             if isinstance(w, int):
                 if not (1 <= w <= 1000):
-                    raise FontSettingsError(f"Invalid font-weight: {w!r}")
+                    raise FontSettingsError(
+                        f"Invalid font-weight: {w!r}",
+                        details={"field": "weight", "value": w},
+                    )
             else:
                 low = str(w).strip().lower()
                 if low not in WEIGHT_KEYWORDS and low not in WEIGHT_RELATIVE:
                     if not re.fullmatch(r"\d{1,4}", low) or not (1 <= int(low) <= 1000):
-                        raise FontSettingsError(f"Invalid font-weight: {w!r}")
-
+                        raise FontSettingsError(
+                            f"Invalid font-weight: {w!r}",
+                            details={"field": "weight", "value": w},
+                        )
+    
         for name in ("color", "background_color"):
             v = getattr(self, name)
             if v is not None and not is_valid_color(v):
-                raise FontSettingsError(f"Invalid {_CSS_NAME[name]}: {v!r}")
-
+                raise FontColorError(
+                    f"Invalid {_CSS_NAME[name]}: {v!r}",
+                    value=v,
+                )
+    
         if self.text_decoration is not None:
             for tok in str(self.text_decoration).split():
                 if tok in DECORATION_LINE_VALUES or tok in DECORATION_STYLE_VALUES:
                     continue
                 if is_valid_color(tok) or parse_size(tok) is not None:
                     continue
-                raise FontSettingsError(f"Invalid text-decoration token: {tok!r}")
-
+                raise FontSettingsError(
+                    f"Invalid text-decoration token: {tok!r}",
+                    details={"field": "text_decoration", "token": tok},
+                )
+    
+        logger.debug(
+            "FontSettings validated",
+            extra={"fields_set": len(self.to_props())},
+        )
         return self
 
     # -- Construction from other representations ------------------------
@@ -802,57 +845,66 @@ class FontSettings:
 
     @classmethod
     def from_css(cls, css: str) -> "FontSettings":
-        """Parse from an inline style string or a full CSS rule.
-
-        Accepts:
-            "font-size: 16px; color: #333"
-            "h2 { font-size: 24px; color: red; }"
-        """
+        if not isinstance(css, str):
+            raise FontSettingsError(f"from_css requires a string, got {type(css).__name__}")
         text = css.strip()
         m = re.search(r"\{([^{}]*)\}", text)
         body = m.group(1) if m else text
+    
         props: Dict[str, str] = {}
-        # Split declarations naively but respecting quotes/parentheses.
         buf, depth, quote = "", 0, ""
-        for ch in body:
-            if quote:
+        try:
+            for ch in body:
+                if quote:
+                    buf += ch
+                    if ch == quote:
+                        quote = ""
+                    continue
+                if ch in "\"'":
+                    quote = ch
+                    buf += ch
+                    continue
+                if ch == "(":
+                    depth += 1
+                    buf += ch
+                    continue
+                if ch == ")":
+                    depth = max(0, depth - 1)
+                    buf += ch
+                    continue
+                if ch == ";" and depth == 0:
+                    _add_decl(buf, props)
+                    buf = ""
+                    continue
                 buf += ch
-                if ch == quote:
-                    quote = ""
-                continue
-            if ch in "\"'":
-                quote = ch
-                buf += ch
-                continue
-            if ch == "(":
-                depth += 1
-                buf += ch
-                continue
-            if ch == ")":
-                depth = max(0, depth - 1)
-                buf += ch
-                continue
-            if ch == ";" and depth == 0:
+            if buf.strip():
                 _add_decl(buf, props)
-                buf = ""
-                continue
-            buf += ch
-        if buf.strip():
-            _add_decl(buf, props)
+        except Exception as exc:
+            logger.error("from_css parse failed", extra={"error": str(exc)})
+            raise FontSettingsError(f"Failed to parse CSS: {exc}", details={"css_hint": css[:120]}) from exc
+    
+        logger.debug("Parsed FontSettings from CSS", extra={"props_parsed": len(props)})
         return cls.from_props(props)
 
 
 def _add_decl(chunk: str, out: Dict[str, str]) -> None:
     chunk = chunk.strip()
-    if not chunk or ":" not in chunk:
+    if not chunk:
+        return
+    if ":" not in chunk:
+        logger.debug("Skipping malformed declaration", extra={"chunk": chunk[:80]})
         return
     name, _, value = chunk.partition(":")
     name = name.strip()
     value = value.strip()
-    # Strip !important — the flag has no representation in FontSettings
     value = re.sub(r"\s*!important\s*$", "", value, flags=re.IGNORECASE)
     if name and value:
         out[name] = value
+    else:
+        logger.debug(
+            "Skipping empty declaration",
+            extra={"name": name, "value": value},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -919,6 +971,7 @@ def theme(name: str = "light") -> Dict[str, FontSettings]:
     name = name.lower()
 
     if name == "light":
+        logger.debug("Resolving theme", extra={"theme": "light"})
         return base
 
     if name == "dark":
@@ -936,6 +989,7 @@ def theme(name: str = "light") -> Dict[str, FontSettings]:
         )
         out["caption"] = out["caption"].merge(FontSettings(color="#9ca3af"))
         out["quote"] = out["quote"].merge(FontSettings(color="#d1d5db"))
+        logger.debug("Resolving theme", extra={"theme": "dark"})
         return out
 
     if name == "print":
@@ -952,6 +1006,7 @@ def theme(name: str = "light") -> Dict[str, FontSettings]:
             family="'Courier New', Courier, monospace",
             size="0.9em", color="#000000", background_color=None,
         )
+        logger.debug("Resolving theme", extra={"theme": "print"})
         return out
 
     if name == "high-contrast":
@@ -965,14 +1020,39 @@ def theme(name: str = "light") -> Dict[str, FontSettings]:
                 )
             )
         out["link"] = out["link"].merge(FontSettings(color="#0000ee", text_decoration="underline"))
+        logger.debug("Resolving theme", extra={"theme": "high-contrast"})
         return out
 
-    raise FontSettingsError(f"Unknown theme: {name!r}")
+    logger.error("Unknown theme requested", extra={"theme": name})
+    raise FontSettingsError(
+        f"Unknown theme: {name!r}",
+        details={"available": ["light", "dark", "print", "high-contrast"]},
+    )
 
 
-# ---------------------------------------------------------------------------
-# Demo
-# ---------------------------------------------------------------------------
+__all__ = [
+    "FontSettings",
+    "FontSettingsError",
+    "PRESETS",
+    "GENERIC_FAMILIES",
+    "NAMED_COLORS",
+    "SIZE_UNITS",
+    "parse_color",
+    "format_color",
+    "is_valid_color",
+    "contrast_ratio",
+    "ensure_contrast",
+    "lighten",
+    "darken",
+    "mix_colors",
+    "parse_size",
+    "format_size",
+    "convert_size",
+    "font_stack",
+    "theme",
+]
+
+
 if __name__ == "__main__":
     body = PRESETS["body"].merge(
         FontSettings(size="1.125rem", line_height=1.65, color="#0f172a")

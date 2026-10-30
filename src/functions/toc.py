@@ -25,17 +25,18 @@ import html as _html
 import json
 import re
 import unicodedata
+
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any, Callable, Iterable, Iterator, Optional
 
-__all__ = [
-    "TocOptions",
-    "TocItem",
-    "Toc",
-    "TocBuilder",
-    "default_slugify",
-]
+from .utils.functions_helpers import _fingerprint
+from .utils.functions_error import *
+from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
+
+logger = get_logger("Table of Content")
+printer = PrettyPrinter()
+
 
 SlugifyFn = Callable[[str], str]
 
@@ -57,14 +58,32 @@ def default_slugify(text: str, separator: str = "-") -> str:
     - Whitespace/underscores collapsed to `separator`
     - Repeated separators collapsed to one
     """
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in text if not unicodedata.combining(c))
-    text = text.lower()
-    text = _PUNCT_RE.sub("", text)
-    text = _WS_RE.sub(separator, text)
-    if separator:
+    if not isinstance(separator, str) or not separator:
+        raise TocOptionsError(
+            "slug_separator must be a non-empty string",
+            details={"separator": repr(separator)},
+        )
+    if not isinstance(text, str):
+        logger.debug(
+            "slugify received non-string input; coercing",
+            extra={"input_type": type(text).__name__},
+        )
+        text = "" if text is None else str(text)
+
+    try:
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(c for c in text if not unicodedata.combining(c))
+        text = text.lower()
+        text = _PUNCT_RE.sub("", text)
+        text = _WS_RE.sub(separator, text)
         text = re.sub(re.escape(separator) + "+", separator, text)
-    return text.strip(separator)
+        return text.strip(separator)
+    except Exception as exc:
+        logger.error("Slugification failed", extra={"error": str(exc)})
+        raise TocError(
+            f"Slugification failed: {exc}",
+            details={"raw": text[:200]},
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -73,22 +92,83 @@ def default_slugify(text: str, separator: str = "-") -> str:
 
 @dataclass
 class TocOptions:
-    """Configuration for TocBuilder / Toc."""
+    """Configuration for TocBuilder / Toc.
 
-    min_level: int = 1                # Lowest heading level included
-    max_level: int = 6                # Highest heading level included
+    Validated on construction; raises :class:`TocOptionsError` on bad input.
+    """
+
+    min_level: int = 1
+    max_level: int = 6
     slugify: Optional[SlugifyFn] = None
-    slug_separator: str = "-"         # Used for slug and dedupe suffix
-    unique_slugs: bool = True         # Append -1, -2, ... on collision
-    use_existing_ids: bool = True     # Reuse `id="..."` when present
-    numbered: bool = False            # Emit "1.2.3" style numbers
-    ordered_list: bool = False        # Use <ol> instead of <ul>
+    slug_separator: str = "-"
+    unique_slugs: bool = True
+    use_existing_ids: bool = True
+    numbered: bool = False
+    ordered_list: bool = False
     list_class: str = "toc"
     item_class: str = "toc-item"
     link_class: str = "toc-link"
-    active_class: str = "toc-active"  # Used by scroll-spy in TS sibling
-    max_depth: Optional[int] = None   # Truncate deeper items (None = unlimited)
-    scrollspy: bool = True            # Emit data-toc-id/level attributes
+    active_class: str = "toc-active"
+    max_depth: Optional[int] = None
+    scrollspy: bool = True
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> "TocOptions":
+        if not isinstance(self.min_level, int) or isinstance(self.min_level, bool):
+            raise TocOptionsError(
+                "min_level must be an integer",
+                details={"min_level": repr(self.min_level)},
+            )
+        if not isinstance(self.max_level, int) or isinstance(self.max_level, bool):
+            raise TocOptionsError(
+                "max_level must be an integer",
+                details={"max_level": repr(self.max_level)},
+            )
+        if not (1 <= self.min_level <= self.max_level <= 6):
+            raise TocOptionsError(
+                f"Requires 1 <= min_level <= max_level <= 6, got "
+                f"min_level={self.min_level}, max_level={self.max_level}",
+                details={
+                    "min_level": self.min_level,
+                    "max_level": self.max_level,
+                },
+            )
+        if not isinstance(self.slug_separator, str) or not self.slug_separator:
+            raise TocOptionsError(
+                "slug_separator must be a non-empty string",
+                details={"slug_separator": repr(self.slug_separator)},
+            )
+        if self.max_depth is not None and (
+            not isinstance(self.max_depth, int) or self.max_depth < 1
+        ):
+            raise TocOptionsError(
+                "max_depth must be None or a positive integer",
+                details={"max_depth": repr(self.max_depth)},
+            )
+        if self.slugify is not None and not callable(self.slugify):
+            raise TocOptionsError(
+                "slugify must be callable",
+                details={"slugify": repr(self.slugify)},
+            )
+        for name in ("list_class", "item_class", "link_class", "active_class"):
+            if not isinstance(getattr(self, name), str):
+                raise TocOptionsError(f"{name} must be a string")
+        return self
+
+    def fingerprint(self) -> str:
+        """Stable hash of the rendered TOC shape — useful for caching."""
+        return _fingerprint({
+            "min_level": self.min_level,
+            "max_level": self.max_level,
+            "slug_separator": self.slug_separator,
+            "unique_slugs": self.unique_slugs,
+            "use_existing_ids": self.use_existing_ids,
+            "numbered": self.numbered,
+            "ordered_list": self.ordered_list,
+            "max_depth": self.max_depth,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +200,7 @@ class TocItem:
 
 
 # ---------------------------------------------------------------------------
-# Toc — holds the built tree and renders it
+# Toc
 # ---------------------------------------------------------------------------
 
 class Toc:
@@ -130,9 +210,7 @@ class Toc:
         self.items = items
         self.options = options
 
-    # -- Iteration --------------------------------------------------------
     def flat(self) -> Iterator[TocItem]:
-        """Depth-first, document-order iteration over every item."""
         for item in self.items:
             yield from self._walk(item)
 
@@ -218,7 +296,6 @@ class Toc:
         return out
 
     def render_links(self) -> str:
-        """Flat list of links (handy for compact sidebars)."""
         return "\n".join(
             f'<a class="{_esc(self.options.link_class)}" href="#{_esc(i.id)}">'
             f"{_esc(i.text)}</a>"
@@ -259,8 +336,9 @@ class _HeadingExtractor(HTMLParser):
             {"skip": False, "level": level, "attrs": attr_dict, "text_parts": []}
         )
 
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
-        # Rare self-closing heading; treat as empty heading.
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, Optional[str]]]
+    ) -> None:
         self.handle_starttag(tag, attrs)
         self.handle_endtag(tag)
 
@@ -270,12 +348,13 @@ class _HeadingExtractor(HTMLParser):
             return
         level = int(m.group(1))
         if self._stack[-1].get("level") != level:
-            return  # ignore stray close tags
+            return
         top = self._stack.pop()
         if top.get("skip"):
             return
         text = re.sub(r"\s+", " ", "".join(top["text_parts"]).strip())
         if not text:
+            logger.debug("Heading with empty text skipped", extra={"level": level})
             return
         self.headings.append(
             {
@@ -310,10 +389,12 @@ def _extract_markdown_headings(md: str, options: TocOptions) -> list[dict[str, A
         if not (options.min_level <= level <= options.max_level):
             continue
         text = m.group(2).strip()
-        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # links -> text
-        text = re.sub(r"[*_`~]+", "", text)                    # inline emphasis
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"[*_`~]+", "", text)
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
+            logger.debug("Markdown heading with empty text skipped",
+                         extra={"level": level})
             continue
         headings.append({"level": level, "text": text, "id": ""})
     return headings
@@ -327,55 +408,123 @@ class TocBuilder:
     """Parses sources and builds a Toc."""
 
     def __init__(self, options: Optional[TocOptions] = None):
-        self.options = options or TocOptions()
-        if not (1 <= self.options.min_level <= self.options.max_level <= 6):
-            raise ValueError("Requires 1 <= min_level <= max_level <= 6")
+        self.options = options if options is not None else TocOptions()
+        logger.debug(
+            "TocBuilder initialized",
+            extra={
+                "min_level": self.options.min_level,
+                "max_level": self.options.max_level,
+                "numbered": self.options.numbered,
+                "max_depth": self.options.max_depth,
+            },
+        )
 
     # -- Public --------------------------------------------------------
     def from_html(self, html: str) -> Toc:
-        parser = _HeadingExtractor(self.options)
-        parser.feed(html)
-        parser.close()
+        if not isinstance(html, str):
+            raise TocParseError("html", f"expected str, got {type(html).__name__}")
+        logger.debug("Parsing TOC from HTML", extra={"length": len(html)})
+        try:
+            parser = _HeadingExtractor(self.options)
+            parser.feed(html)
+            parser.close()
+        except Exception as exc:
+            logger.error("HTML parse failed", extra={"error": str(exc)})
+            raise TocParseError("html", str(exc)) from exc
         return self._build(parser.headings)
 
     def from_markdown(self, md: str) -> Toc:
-        return self._build(_extract_markdown_headings(md, self.options))
+        if not isinstance(md, str):
+            raise TocParseError("markdown",
+                                f"expected str, got {type(md).__name__}")
+        logger.debug("Parsing TOC from Markdown", extra={"length": len(md)})
+        try:
+            headings = _extract_markdown_headings(md, self.options)
+        except Exception as exc:
+            logger.error("Markdown parse failed", extra={"error": str(exc)})
+            raise TocParseError("markdown", str(exc)) from exc
+        return self._build(headings)
 
     def from_headings(self, headings: Iterable[dict[str, Any]]) -> Toc:
-        return self._build(list(headings))
+        if not isinstance(headings, Iterable) or isinstance(headings, (str, bytes)):
+            raise TocParseError(
+                "headings",
+                "expected an iterable of {level, text, id?} dicts",
+            )
+        try:
+            as_list = list(headings)
+        except Exception as exc:
+            raise TocParseError("headings", str(exc)) from exc
+        return self._build(as_list)
 
     def from_auto(self, content: str) -> Toc:
-        """Auto-detect: HTML if any <hN> tag present, else Markdown."""
         if re.search(r"<h[1-6]\b", content, re.IGNORECASE):
             return self.from_html(content)
         return self.from_markdown(content)
 
     # -- ID injection --------------------------------------------------
     def inject_ids(self, html: str, toc: Toc) -> str:
-        """Best-effort insertion of `id` attributes into heading tags.
+        """Best-effort insertion of ``id`` attributes into heading tags.
 
-        - Matches `<hN ...>` in document order against toc.flat().
-        - Skips tags that already have an `id="..."` attribute.
-        - Requires that `toc` was built from the same HTML (same options).
-        - Attribute values containing `>` are not supported.
+        Matches each ``<hN>…</hN>`` against ``toc.flat()`` in document order
+        using **both level and text** so headings that were filtered out
+        during TOC construction (empty text, out of range) do not desync
+        subsequent matches. Headings that already carry an ``id`` are left
+        alone and their slot in ``toc.flat()`` is preserved.
         """
+        if not isinstance(html, str):
+            raise TocInjectError("html must be a string")
+        if not isinstance(toc, Toc):
+            raise TocInjectError("toc must be a Toc instance")
+
         items = list(toc.flat())
         idx = 0
 
         def repl(m: re.Match) -> str:
             nonlocal idx
-            if idx >= items.length if False else idx >= len(items):
+            if idx >= len(items):
                 return m.group(0)
             level = int(m.group(1))
-            if items[idx].level != level:
-                return m.group(0)  # this heading wasn't in the TOC
+            attrs = m.group(2)
+            inner = m.group(3)
+            plain = _html.unescape(
+                re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", inner)).strip()
+            )
             item = items[idx]
-            idx += 1
-            if re.search(r"\bid\s*=", m.group(2), re.IGNORECASE):
+            if item.level != level or item.text != plain:
                 return m.group(0)
-            return f'<h{level}{m.group(2)} id="{_esc(item.id)}">'
+            idx += 1
+            if re.search(r"\bid\s*=", attrs, re.IGNORECASE):
+                return m.group(0)
+            return f'<h{level}{attrs} id="{_esc(item.id)}">{inner}</h{level}>'
 
-        return re.sub(r"<h([1-6])\b([^>]*)>", repl, html, flags=re.IGNORECASE)
+        try:
+            result = re.sub(
+                r"<h([1-6])\b([^>]*)>([\s\S]*?)</h\1\s*>",
+                repl,
+                html,
+                flags=re.IGNORECASE,
+            )
+        except re.error as exc:
+            logger.error("ID injection regex failed", extra={"error": str(exc)})
+            raise TocInjectError(
+                f"Regex error: {exc}", html_hint=html[:80]
+            ) from exc
+
+        logger.info(
+            "Injected IDs into HTML",
+            extra={
+                "injected": idx,
+                "total_items": len(items),
+                "html_length": len(html),
+            },
+        )
+        if idx != len(items):
+            logger.warning(
+                "ID injection matched only a subset of TOC items",
+                extra={"injected": idx, "expected": len(items)},
+            )
+        return result
 
     # -- Internal ------------------------------------------------------
     def _build(self, raw: list[dict[str, Any]]) -> Toc:
@@ -387,11 +536,21 @@ class TocBuilder:
             try:
                 level = int(h["level"])
             except (KeyError, TypeError, ValueError):
+                logger.debug("Skipping heading with invalid level",
+                             extra={"heading": repr(h)[:120]})
                 continue
             if not (o.min_level <= level <= o.max_level):
+                logger.debug(
+                    "Skipping heading outside level range",
+                    extra={"level": level,
+                           "min_level": o.min_level,
+                           "max_level": o.max_level},
+                )
                 continue
             text = (h.get("text") or "").strip()
             if not text:
+                logger.debug("Skipping heading with empty text",
+                             extra={"level": level})
                 continue
 
             existing = ((h.get("id") or "").strip() if o.use_existing_ids else "")
@@ -405,7 +564,12 @@ class TocBuilder:
             if o.unique_slugs:
                 if slug in used:
                     used[slug] += 1
+                    original = slug
                     slug = f"{slug}{o.slug_separator}{used[slug]}"
+                    logger.debug(
+                        "Duplicate slug disambiguated",
+                        extra={"original": original, "resolved": slug},
+                    )
                 else:
                     used[slug] = 0
 
@@ -417,6 +581,16 @@ class TocBuilder:
         tree = self._treeify(flat)
         if o.max_depth:
             self._truncate(tree, 1)
+
+        logger.info(
+            "TOC built",
+            extra={
+                "items": len(flat),
+                "roots": len(tree),
+                "max_level": max((i.level for i in flat), default=0),
+                "options_fingerprint": o.fingerprint()[:12],
+            },
+        )
         return Toc(tree, o)
 
     @staticmethod
@@ -454,9 +628,15 @@ class TocBuilder:
                 self._truncate(item.children, depth + 1)
 
 
-# ---------------------------------------------------------------------------
-# Demo
-# ---------------------------------------------------------------------------
+__all__ = [
+    "TocOptions",
+    "TocItem",
+    "Toc",
+    "TocBuilder",
+    "default_slugify",
+]
+
+
 if __name__ == "__main__":
     sample = """
     <h1>Guide</h1>
