@@ -52,6 +52,8 @@ from .stem import (
     STEMMemory,
     UnitSystem,
     Uncertainty,
+    EngineeringAnalysis,
+    ParametricMath,
     combined_standard_uncertainty,
     covariance_propagation,
     coverage_interval,
@@ -212,6 +214,22 @@ class STEMAgent(BaseAgent):
             "gcd", "lcm", "factorial", "binomial", "recurrence", "breadth_first_search",
             "dijkstra", "topological_sort",
         ),
+        "parametric": (
+            "evaluate_expression",
+            "evaluate",
+            "evaluate_serializable",
+            "evaluate_series",
+            "derivative",
+            "validate_constraints",
+        ),
+
+        "engineering_analysis": (
+            "axial_stress",
+            "heat_conduction_1d",
+            "electrical_power",
+            "kinetic_energy",
+            "beam_response",
+        ),
     }
 
     _CONFIG_ATTRS: Mapping[str, str] = {
@@ -296,6 +314,8 @@ class STEMAgent(BaseAgent):
         self.physics = Physics(memory=self.local_memory)
         self.engineering = Engineering(memory=self.local_memory)
         self.computing = Computing(memory=self.local_memory)
+        self.parametric = ParametricMath(units=self.units, numerical_methods=self.numerical_methods)
+        self.engineering_analysis = EngineeringAnalysis(units=self.units, engineering=self.engineering, physics=self.physics)
 
         self._dispatch = self._build_dispatch_registry()
         self._requests_total = 0
@@ -378,6 +398,8 @@ class STEMAgent(BaseAgent):
             "physics": self.physics,
             "engineering": self.engineering,
             "computing": self.computing,
+            "parametric": self.parametric,
+            "engineering_analysis": self.engineering_analysis,
         }
         uncertainty_ops: Mapping[str, Callable[..., Any]] = {
             "standard_uncertainty": standard_uncertainty,
@@ -513,6 +535,8 @@ class STEMAgent(BaseAgent):
             "physics": self.physics,
             "engineering": self.engineering,
             "computing": self.computing,
+            "parametric": self.parametric,
+            "engineering_analysis": self.engineering_analysis,
         }[domain]
 
     def _component_config_digest(self, domain: str) -> Optional[str]:
@@ -1103,5 +1127,17 @@ if __name__ == "__main__":
     restored._import_checkpoint_state(checkpoint_state)
     after_restore = restored.perform_task(unit_task)
     assert after_restore["cache_hit"] is True
+
+    try:
+        agent = agent_factory.create("stem")
+
+        print("Parametric operations:")
+        print(agent.available_operations("parametric"))
+
+        print("\nEngineering analysis operations:")
+        print(agent.available_operations("engineering_analysis"))
+
+    finally:
+        agent_factory.shutdown()
 
     printer.status("SUCCESS", "STEMAgent numerical, cache, template, and local checkpoint checks passed", "success")
