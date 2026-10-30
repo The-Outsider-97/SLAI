@@ -1,0 +1,51 @@
+name: SLAI v2.4 Optimization Domain Regression
+
+on:
+  pull_request:
+    branches:
+      - SLAI-v.2.4
+    paths:
+      - 'src/agents/optimization/**'
+      - 'tests/agents/test_optimization_domain_problems.py'
+      - '.github/workflows/optimization-v24.yml'
+  push:
+    branches:
+      - 'opt-v24-domain-problem-builders-20261030'
+    paths:
+      - 'src/agents/optimization/**'
+      - 'tests/agents/test_optimization_domain_problems.py'
+      - '.github/workflows/optimization-v24.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: optimization-v24-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  domain-optimization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d
+        with:
+          version: '0.11.33'
+          python-version: '3.10'
+          enable-cache: true
+      - name: Provision pinned LSTP
+        run: python setup_lstp.py --no-install
+      - name: Verify lock and install
+        run: |
+          uv lock --check
+          uv sync --frozen --group dev --all-extras
+      - name: Compile domain module
+        run: uv run python -m py_compile src/agents/optimization/domain_problems.py
+      - name: Run canonical domain and solver integration tests
+        run: uv run python -m pytest -q tests/agents/test_optimization_domain_problems.py
