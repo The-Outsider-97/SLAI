@@ -74,9 +74,18 @@ def build_provenance_adapter(*, store=None) -> ProvenanceArtifactAdapter:
     return ProvenanceArtifactAdapter(selected_store, ProvenanceLineage(store=selected_store))
 
 
-def build_animation_adapter() -> SGEOAnimationAdapter:
-    from ....agents.animations.animation_commands import ANIMATION_KEY
+def build_animation_adapter(scene: Scene) -> SGEOAnimationAdapter:
+    """Bind the native animation provider to an existing authoritative SGEO scene.
 
-    return SGEOAnimationAdapter(scene: Scene)
+    The caller retains ownership of the scene.  This factory does not create,
+    mutate, or persist animation state, or initialize an SLAI agent.
+    """
+    return SGEOAnimationAdapter(scene)
 
-__all__ = ["build_stem_adapter", "build_spatial_adapter", "build_provenance_adapter"]
+
+__all__ = [
+    "build_stem_adapter",
+    "build_spatial_adapter",
+    "build_provenance_adapter",
+    "build_animation_adapter",
+]
