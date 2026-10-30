@@ -137,3 +137,22 @@ def test_real_solver_animation_smoke():
     assert result.solution is not None
     assert result.solution.primal_solution is not None
     assert result.solution.primal_solution["m_1"] == pytest.approx(1, abs=1e-3)
+
+
+def test_trajectory_boundary_derivative_constraints():
+    p = trajectory_problem("boundary", start=(0, 0), end=(2, 0), duration=2,
+                           intervals=4, initial_velocity=(1, 0), final_velocity=(1, 0),
+                           initial_acceleration=(0, 0), final_acceleration=(0, 0))
+    linear = {f"p_{i}_{j}": (0.5*i if j == 0 else 0.0)
+              for i in range(1,4) for j in range(2)}
+    checks = [c for c in p.constraints if c.name.startswith(('initial_', 'final_'))]
+    assert len(checks) == 4
+    assert all(c.function(linear) == pytest.approx(0, abs=1e-12) for c in checks)
+    with pytest.raises(OptimizationValidationError):
+        trajectory_problem("bad_dimension", start=(0,0), end=(2,0), duration=2,
+                           initial_velocity=(1,))
+
+def test_animation_fixed_tangent_cannot_override_slope_bound():
+    with pytest.raises(OptimizationValidationError):
+        animation_curve_problem("bad", times=(0,1), values=(0,1),
+                                fixed_tangents={0:4}, max_abs_slope=2)
