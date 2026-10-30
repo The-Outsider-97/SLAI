@@ -1,8 +1,3 @@
-from __future__ import annotations
-import math
-
-__version__ = "2.2.0"
-
 """
 SLAI Execution Agent:
 
@@ -35,12 +30,18 @@ Real-World Application:
     where tasks have dependencies, retries, and require stateful agents.
 """
 
+from __future__ import annotations
+
+__version__ = "2.4.0"
+
 import copy
 import json
 import time
 import uuid
 import numpy as np # type: ignore
 import threading
+import math
+
 
 from datetime import datetime, timedelta
 from typing import Any, Dict, Mapping, Optional, Sequence, Type
@@ -53,7 +54,7 @@ from .execution.execution_recovery import ExecutionRecovery
 from .execution.execution_memory import ExecutionMemory
 from .execution.action_selector import ActionSelector
 from .execution.actions.base_action import BaseAction
-from .execution.command_gateway import CommandGateway, CommandRejected
+from .execution.command_gateway import CommandGateway
 from .execution.execution_guard import GuardedRobotAdapter
 from .execution.execution_boundary import ExecutionBoundary
 from .execution.actions.idle import IdleAction
@@ -160,10 +161,7 @@ class ExecutionAgent(BaseAgent):
         if self.scheduler is None:
             self.scheduler
         if self.scheduler is None:
-            raise ActionFailureError(
-                "scheduler",
-                "Planning scheduler is unavailable; inspect runtime degradation details",
-            )
+            raise ActionFailureError("scheduler", "Planning scheduler is unavailable; inspect runtime degradation details")
         self._mark_runtime_recovered("dependency", "execution.scheduler.initialize")
         return self.scheduler
 
