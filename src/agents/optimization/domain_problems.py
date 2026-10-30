@@ -132,6 +132,10 @@ def trajectory_problem(
     max_velocity: float | None = None,
     max_acceleration: float | None = None,
     max_jerk: float | None = None,
+    initial_velocity: Sequence[float] | None = None,
+    final_velocity: Sequence[float] | None = None,
+    initial_acceleration: Sequence[float] | None = None,
+    final_acceleration: Sequence[float] | None = None,
     clearance_evaluator: Callable[[tuple[tuple[float, ...], ...]], float] | None = None,
     minimum_clearance: float | None = None,
 ) -> OptimizationProblem:
@@ -178,6 +182,25 @@ def trajectory_problem(
             bound = _positive(limit, label)
             constraints.append(Constraint(name=label, sense=ConstraintSense.LE, rhs=bound,
                                           function=lambda x, o=order: max(derivative_norms(x, o))))
+    for order, initial, final, label in (
+        (1, initial_velocity, final_velocity, "velocity"),
+        (2, initial_acceleration, final_acceleration, "acceleration"),
+    ):
+        for which, desired in (("initial", initial), ("final", final)):
+            if desired is None:
+                continue
+            target = _vector(desired, f"{which}_{label}", size=len(a))
+            def residual(x: Mapping[str, Any], *, d=order, side=which,
+                         expected=target) -> float:
+                seq = points(x)
+                for _ in range(d):
+                    seq = tuple(tuple((seq[i+1][k] - seq[i][k]) / h
+                                      for k in range(len(a))) for i in range(len(seq)-1))
+                actual = seq[0] if side == "initial" else seq[-1]
+                return math.sqrt(_squared(_subtract(actual, expected)))
+            constraints.append(Constraint(name=f"{which}_{label}",
+                                          sense=ConstraintSense.EQ, rhs=0.0,
+                                          function=residual))
     if minimum_clearance is not None:
         min_clearance = _positive(minimum_clearance, "minimum_clearance", zero=True)
         if not callable(clearance_evaluator):
@@ -348,6 +371,8 @@ def animation_curve_problem(
     variables: list[Variable] = []
     for i, estimate in enumerate(estimates):
         if i in prescribed:
+            if limit is not None and abs(prescribed[i]) > limit:
+                raise OptimizationValidationError("fixed tangent violates max_abs_slope")
             d = VariableDomain.real(prescribed[i], prescribed[i])
             initial = prescribed[i]
         else:
