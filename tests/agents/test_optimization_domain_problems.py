@@ -156,3 +156,34 @@ def test_animation_fixed_tangent_cannot_override_slope_bound():
     with pytest.raises(OptimizationValidationError):
         animation_curve_problem("bad", times=(0,1), values=(0,1),
                                 fixed_tangents={0:4}, max_abs_slope=2)
+
+
+def test_finite_scenario_robust_epigraph_formulation():
+    from src.agents.optimization.domain_problems import robust_scenario_problem
+    p = robust_scenario_problem("minimax", variables=[Variable("x", VariableDomain.real(-5, 5), initial=0)],
+                                scenario_losses=[lambda z: (z["x"]-1)**2,
+                                                 lambda z: (z["x"]+1)**2])
+    assert len(p.variables) == 2
+    assert p.metadata["guarantee"] == "enumerated_scenarios_only"
+    feasible = {"x": 0., "worst_case_loss": 1.}
+    assert all(c.function(feasible) <= 1e-12 for c in p.constraints)
+    infeasible = dict(feasible, worst_case_loss=0.)
+    assert any(c.function(infeasible) > 0 for c in p.constraints)
+    assert p.objectives[0].function(feasible) == 1.
+    with pytest.raises(OptimizationValidationError):
+        robust_scenario_problem("bad", variables=[Variable("x")], scenario_losses=[])
+
+
+def test_layout_arrangement_constraints_and_goal():
+    from src.agents.optimization.domain_problems import layout_arrangement_problem
+    p = layout_arrangement_problem("layout", preferred_positions=[(0.,0.),(3.,0.)],
+                                   minimum_separation=1., radii=[0.5,0.5])
+    x = {"position_0_0":0.,"position_0_1":0., "position_1_0":3.,"position_1_1":0.}
+    assert p.objectives[0].function(x) == 0.
+    assert len(p.constraints) == 1
+    assert p.constraints[0].rhs == 2.
+    assert p.constraints[0].function(x) == 3.
+    bad = dict(x, position_1_0=1.)
+    assert p.constraints[0].function(bad) < p.constraints[0].rhs
+    with pytest.raises(OptimizationValidationError):
+        layout_arrangement_problem("bad", preferred_positions=[(0,0),(1,)], minimum_separation=0)
