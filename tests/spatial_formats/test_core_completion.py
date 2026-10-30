@@ -189,13 +189,20 @@ def test_json_hook_errors_preserve_context(raw, context):
     assert caught.value.context == context
 
 
-def test_no_partial_output_when_atomic_publication_unavailable(tmp_path,monkeypatch):
+def test_no_partial_output_when_atomic_publication_unavailable(tmp_path, monkeypatch):
     from src.utils.spatial_formats.container import writer
-    def unavailable(*args):raise OSError("hardlinks unsupported")
-    monkeypatch.setattr(writer.os,"link",unavailable)
-    path=tmp_path/"new.sdrw"
-    with pytest.raises(ConflictError,match="atomic"):
-        write_document(path,Drawing())
+
+    def unavailable(*args, **kwargs):
+        raise OSError("atomic publication unavailable")
+
+    # Windows legitimately falls back to a no-clobber rename when hard links
+    # are unsupported. Disable *both* publication mechanisms to exercise the
+    # intended failure/cleanup invariant on every supported operating system.
+    monkeypatch.setattr(writer.os, "link", unavailable)
+    monkeypatch.setattr(writer.os, "rename", unavailable)
+    path = tmp_path / "new.sdrw"
+    with pytest.raises(ConflictError, match="atomic"):
+        write_document(path, Drawing())
     assert not path.exists()
     assert not list(tmp_path.iterdir())
 
