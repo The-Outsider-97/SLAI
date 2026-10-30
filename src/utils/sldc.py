@@ -160,6 +160,7 @@ SUPPORTED_FEATURES = REQUIRED_FEATURES | {
     "font-runs",
     "native-toc",
     "paragraph-layout",
+    "page-bands",
 }
 KNOWN_VERSION = "1.1.0"  # The newest 1.x edition whose additions this module understands in full (see inspect_package()["newer_than_known"]).
 
@@ -2163,6 +2164,15 @@ def _required_features(document: Mapping[str, Any]) -> list[str]:
 
     if document.get("embeds"):
         needed.add("embeds")
+
+    # Header/footer positions are a versioned SLDC 1.1 page-layout feature.
+    # Advertising them in requires prevents older readers from silently
+    # discarding the layout semantics of a newer document.
+    for section in document.get("sections", ()):
+        if isinstance(section, Mapping):
+            page = section.get("page")
+            if isinstance(page, Mapping) and ("header_mm" in page or "footer_mm" in page):
+                needed.add("page-bands")
 
     extra_figure_keys = {
         "height_mm",
