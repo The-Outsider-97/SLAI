@@ -20,8 +20,10 @@ Versions
            citations and footnotes, publication metadata, revisions, review comments, declarative
            EMBED records, detached signatures and an authenticated-encryption envelope. All of it
            is inventoried in the manifest with per-part size and SHA-256.
-           Adds editable scientific equations, inline scientific/image objects and declarative
-           image transforms/placement. New mandatory features are declared in ``requires``.
+           Adds editable scientific equations, inline scientific/image objects, declarative
+           image transforms/placement and ``page-bands`` (``page.header_mm`` / ``page.footer_mm``:
+           where a section's header and footer text sit, in millimetres from the top and bottom
+           edge of the page). New mandatory features are declared in ``requires``.
            Old 1.0.0 packages retain their version when read and saved unchanged.
            
 Compatibility rules (1.x)
@@ -151,7 +153,14 @@ MEMBERS = ("mimetype", "manifest.json", "document.json")  # The fixed 0.1.0 memb
 BLOCK_TYPES = frozenset({"heading", "paragraph", "list_item", "quote", "code"})  # 0.1.0
 BLOCK_TYPES_V1 = BLOCK_TYPES | {"table", "figure", "embed", "equation"}
 REQUIRED_FEATURES = frozenset({"tables", "figures", "embeds"})
-SUPPORTED_FEATURES = REQUIRED_FEATURES | {"scientific", "inline-media", "image-layout"}
+SUPPORTED_FEATURES = REQUIRED_FEATURES | {
+    "scientific",
+    "inline-media",
+    "image-layout",
+    "font-runs",
+    "native-toc",
+}
+KNOWN_VERSION = "1.1.0"  # The newest 1.x edition whose additions this module understands in full (see inspect_package()["newer_than_known"]).
 
 # --- Limits, 0.1.0 (unchanged) ---------------------------------------------------------------
 MAX_ARCHIVE_BYTES = 25 * 1024 * 1024
@@ -612,8 +621,9 @@ _PAGE_SIZES_MM = {"A3": (297.0, 420.0), "A4": (210.0, 297.0), "A5": (148.0, 210.
                   "Tabloid": (279.4, 431.8)}
 _NUMBER_FORMATS = frozenset({"decimal", "lower-roman", "upper-roman", "lower-alpha", "upper-alpha"})
 _TEMPLATE_TOKENS = frozenset({"{page}", "{pages}", "{title}"})
-_FORMAT_FLAGS = frozenset({"bold", "italic", "underline", "strike", "code", "superscript",
-                           "subscript"})
+_FORMAT_FLAGS = frozenset({"bold", "italic", "underline", "strike", "code", "superscript", "subscript"})
+_INLINE_FONT_PROPS = frozenset({"font_family", "font_size_pt"})
+_TOC_EXTENSION = "slai.sldc.toc"
 _REVISION_KEYS = frozenset({"number", "parents", "created", "author", "note"})
 _PUBLICATION_KEYS = frozenset({"subtitle", "authors", "publisher", "published", "identifier",
                                "rights", "keywords", "abstract", "edition", "cover_asset"})
@@ -745,7 +755,7 @@ def _validate_sections(sections: Any, ctx: _Context) -> None:
 def _validate_page(page: Any, label: str) -> None:
     if not isinstance(page, dict):
         raise SLDCValidationError(f"{label} must be an object")
-    _check_keys(page, {"size", "width_mm", "height_mm", "orientation", "margins_mm"}, label)
+    _check_keys(page, {"size", "width_mm", "height_mm", "orientation", "margins_mm", "header_mm", "footer_mm"}, label)
     if "size" in page:
         if not _has(_PAGE_SIZES_MM, page["size"]) or "width_mm" in page or "height_mm" in page:
             raise SLDCValidationError(f"{label}.size must be one of {sorted(_PAGE_SIZES_MM)} "
@@ -770,6 +780,13 @@ def _validate_page(page: Any, label: str) -> None:
     if width - margins.get("left", 0) - margins.get("right", 0) < 20 \
             or height - margins.get("top", 0) - margins.get("bottom", 0) < 20:
         raise SLDCValidationError(f"{label} margins leave less than 20 mm of content area")
+    # SLDC 1.1 "page-bands": where the header and footer text sit, in millimetres from the top and from the bottom edge of the page.
+    for key in ("header_mm", "footer_mm"):
+        if key in page:
+            _bounded_number(page[key], 0, 500, f"{label}.{key}")
+    if "header_mm" in page or "footer_mm" in page:
+        if page.get("header_mm", 0) + page.get("footer_mm", 0) >= height:
+            raise SLDCValidationError(f"{label}.header_mm and footer_mm leave no room between them")
 
 
 def _validate_references(references: Any, ctx: _Context) -> None:
@@ -1037,16 +1054,35 @@ def _validate_spans(spans: Any, text: str, ctx: _Context, label: str) -> None:
         previous = (start, end, str(kind))
         base = {"type", "start", "end"}
         if kind == "format":
-            _check_keys(span, base | _FORMAT_FLAGS | {"color", "background"}, where)
+            _check_keys(span, base | _FORMAT_FLAGS | _INLINE_FONT_PROPS | {"color", "background"}, where)
             props = set(span) - base
             if not props:
                 raise SLDCValidationError(f"{where} sets no formatting")
+        
             for key in props & _FORMAT_FLAGS:
                 _flag(span[key], f"{where}.{key}")
+        
             for key in props & {"color", "background"}:
-                if not isinstance(span[key], str) or not _COLOR.fullmatch(span[key]):
+                if (
+                    not isinstance(span[key], str)
+                    or not _COLOR.fullmatch(span[key])
+                ):
                     raise SLDCValidationError(f"{where}.{key} must be a #rrggbb colour")
-            if span.get("superscript") is True and span.get("subscript") is True:
+        
+            if "font_family" in span:
+                if (
+                    not isinstance(span["font_family"], str)
+                    or not _FONT_FAMILY.fullmatch(span["font_family"])
+                ):
+                    raise SLDCValidationError(f"{where}.font_family must be a plain font family name")
+        
+            if "font_size_pt" in span:
+                _bounded_number(span["font_size_pt"], 4, 400, where + ".font_size_pt")
+        
+            if (
+                span.get("superscript") is True
+                and span.get("subscript") is True
+            ):
                 raise SLDCValidationError(f"{where} cannot be superscript and subscript")
         elif kind == "style":
             _check_keys(span, base | {"style"}, where)
@@ -1264,6 +1300,72 @@ def _validate_block_v1(block: Any, index: int, ctx: _Context, seen: set[str]) ->
         raise SLDCValidationError(f"{label} embed is not an embed id")
     if "extensions" in block:
         _check_extensions(block["extensions"], label)
+        toc = block["extensions"].get(_TOC_EXTENSION)
+        if toc is not None:
+            _validate_toc_extension(
+                toc,
+                block,
+                label,
+                ctx,
+            )
+
+
+def _validate_toc_extension(toc: Any, block: dict[str, Any], label: str, ctx: _Context) -> None:
+    """
+    Validate an optional SLDC 1.1 TOC annotation.
+
+    The TOC annotation identifies generated content
+    and its configuration.
+
+    The document's semantic heading blocks remain
+    authoritative.
+    """
+
+    if not isinstance(toc, dict):
+        raise SLDCValidationError(f"{label} TOC data must be an object")
+
+    _check_keys(
+        toc,
+        {
+            "id",
+            "role",
+            "depth",
+            "heading",
+        },
+        label + ".toc",
+    )
+
+    toc_id = toc.get("id")
+
+    if (
+        not isinstance(toc_id, str)
+        or not re.fullmatch(r"[0-9a-f]{24}", toc_id)
+    ):
+        raise SLDCValidationError(f"{label} TOC id must be 24 lowercase hexadecimal characters")
+
+    role = toc.get("role")
+
+    if role == "title":
+        if (
+            block["type"] != "paragraph"
+            or "heading" in toc
+        ):
+            raise SLDCValidationError(f"{label} TOC title must be a paragraph")
+
+        _bounded_int(toc.get("depth"), 1, 6, label + ".toc.depth")
+
+    elif role == "entry":
+        if (
+            block["type"] != "list_item"
+            or "depth" in toc
+        ):
+            raise SLDCValidationError(f"{label} TOC entry must be a list item")
+
+        if not _has(ctx.block_ids, toc.get("heading")):
+            raise SLDCValidationError(f"{label} TOC entry refers to an unknown heading")
+
+    else:
+        raise SLDCValidationError(f"{label} TOC role must be 'title' or 'entry'")
 
 
 def _validate_v1(document: dict[str, Any], assets: Mapping[str, Any] | None = None) -> set[str]:
@@ -1321,9 +1423,34 @@ def _validate_v1(document: dict[str, Any], assets: Mapping[str, Any] | None = No
         if "section" in block:
             position = ctx.sections[block["section"]]
             if position < current_section:
-                raise SLDCValidationError(f"Block #{index} returns to an earlier section; "
-                                          "each section must be contiguous")
+                raise SLDCValidationError(f"Block #{index} returns to an earlier section; each section must be contiguous")
             current_section = position
+    toc_titles: dict[str, int] = {}
+    toc_entries: set[str] = set()
+    
+    heading_ids = {
+        b["id"]
+        for b in blocks
+        if b["type"] == "heading"
+    }
+    
+    for block in blocks:
+        toc = block.get("extensions", {}).get(_TOC_EXTENSION)
+    
+        if not toc:
+            continue
+    
+        if toc["role"] == "title":
+            toc_titles[toc["id"]] = (toc_titles.get(toc["id"], 0) + 1)
+    
+        else:
+            toc_entries.add(toc["id"])
+    
+            if toc["heading"] not in heading_ids:
+                raise SLDCValidationError("A TOC entry must reference a semantic heading")
+    
+    if (any(count != 1 for count in toc_titles.values()) or toc_entries - toc_titles.keys()):
+        raise SLDCValidationError("A managed TOC needs exactly one title for every entry group")
     cover = document.get("publication", {}).get("cover_asset")
     if cover is not None:
         if assets is not None and cover not in assets:
@@ -2008,23 +2135,68 @@ def is_sldc(path: str | os.PathLike[str], *, strict: bool = True) -> bool:
 # Packages (1.x): serialising and reading
 # ----------------------------------------------------------------------------------------------
 def _required_features(document: Mapping[str, Any]) -> list[str]:
-    """Advertise every feature an older reader would otherwise silently discard."""
-    by_type = {"table": "tables", "figure": "figures", "embed": "embeds", "equation": "scientific"}
-    needed = {by_type[b["type"]] for b in document["blocks"] if b["type"] in by_type}
+    """
+    Identify SLDC features required by this document.
+
+    Older readers must not silently discard
+    unsupported semantic information.
+    """
+
+    by_type = {
+        "table": "tables",
+        "figure": "figures",
+        "embed": "embeds",
+        "equation": "scientific",
+    }
+
+    needed = {
+        by_type[b["type"]]
+        for b in document["blocks"]
+        if b["type"] in by_type
+    }
+
     if document.get("embeds"):
         needed.add("embeds")
-    extra_figure_keys = {"height_mm", "crop", "rotation_deg", "flip_horizontal", "flip_vertical", "placement", "credit", "rights"}
+
+    extra_figure_keys = {
+        "height_mm",
+        "crop",
+        "rotation_deg",
+        "flip_horizontal",
+        "flip_vertical",
+        "placement",
+        "credit",
+        "rights",
+    }
+
     for block in document["blocks"]:
         figure = block.get("figure", {})
-        if isinstance(figure, Mapping) and extra_figure_keys.intersection(figure):
+
+        if (
+            isinstance(figure, Mapping)
+            and extra_figure_keys.intersection(figure)
+        ):
             needed.add("image-layout")
+
         for span in block.get("spans", ()):
+            if (
+                span["type"] == "format"
+                and _INLINE_FONT_PROPS.intersection(span)
+            ):
+                needed.add("font-runs")
+
             if span["type"] == "equation":
                 needed.add("scientific")
+
             elif span["type"] == "image":
                 needed.update(("inline-media", "figures"))
+
                 if extra_figure_keys.intersection(span["figure"]):
                     needed.add("image-layout")
+
+        if _TOC_EXTENSION in block.get("extensions", {}):
+            needed.add("native-toc")
+
     return sorted(needed)
 
 
@@ -2032,7 +2204,7 @@ def _required_features(document: Mapping[str, Any]) -> list[str]:
 def _build_parts(package: SLDCPackage, *, _read_only: bool = False) -> dict[str, bytes]:
     """Validate a 1.x package completely and return its serialised parts in canonical order."""
     major, minor, _ = _parse_version(package.version)
-    if major != 1 or (minor > 1 and not _read_only):
+    if major != 1 or (minor > _parse_version(KNOWN_VERSION)[1] and not _read_only):
         raise SLDCUnsupportedError(f"Cannot write SLDC {package.version!r} with this version")
     if not isinstance(package.document, Mapping):
         raise SLDCValidationError("Package document must be a mapping")
@@ -2201,6 +2373,8 @@ def inspect_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
 
     Returns ``container`` (``legacy``, ``package`` or ``encrypted``), ``version``, ``supported``,
     ``requires``, ``unsupported_requires`` (features this reader lacks: open read-only, never save),
+    ``newer_than_known`` (the file is a newer 1.x edition than ``KNOWN_VERSION``: it may read fine, but if a full read fails,
+    fall back to :func:`preview_package` rather than calling the file damaged),
     ``document_id``, ``revision_id``, ``parts`` and, for encrypted files, ``encryption`` with the
     recipient list. Raises :class:`SLDCError` if the container itself is malformed.
     """
@@ -2211,7 +2385,8 @@ def inspect_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
     report: dict[str, Any] = {"container": loaded.kind, "format": FORMAT_ID,
                               "version": manifest["version"], "supported": True, "requires": [],
                               "unsupported_requires": [], "document_id": None,
-                              "revision_id": None, "parts": []}
+                              "revision_id": None, "parts": [],
+                              "newer_than_known": _parse_version(manifest["version"]) > _parse_version(KNOWN_VERSION)}
     if loaded.kind == "legacy":
         report["parts"] = [{"name": "document.json", "role": "content",
                             "media_type": "application/json",
@@ -2226,6 +2401,160 @@ def inspect_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
     else:
         report["encryption"] = _describe_encryption(manifest)
     return report
+
+
+def version_key(version: str) -> tuple[int, int, int]:
+    """``"1.1.0"`` -> ``(1, 1, 0)``, for comparing versions (raises :class:`SLDCValidationError` for a malformed one)."""
+    return _parse_version(version)
+
+
+def newest_version(*versions: str) -> str:
+    """The highest of several 1.x versions. Use it whenever content from several packages is combined, so the result
+    never claims an older format than the newest content in it needs."""
+    return max(versions, key=_parse_version)
+
+
+_PREVIEW_BLOCK_TYPES = BLOCK_TYPES_V1 - {"embed"}
+_PREVIEW_MAX_BLOCKS = 20_000
+
+
+def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[str], *, password: str | None = None,
+                    private_key: Any = None) -> dict[str, Any]:
+    """A read-only, text-only look at a file that :func:`read_package` refuses because it needs features this module lacks.
+
+    Use it so an application can still *show* a newer document instead of failing, and say plainly that it is incomplete.
+    It is for display only: never edit, sign or save from it.
+
+    The container is checked exactly as for a normal read (sizes, ZIP rules, manifest, checksums, revision id, decryption), but
+    the content is not validated against this module's schema, because by definition it may use things this module does not
+    know. Nothing in it is trusted: only strings, lists and numbers are read, in the shape they are expected, and anything
+    else is skipped. Returns::
+
+        {"version", "requires", "unsupported_requires", "complete": False, "title", "language",
+         "blocks": [{"id", "type", "level"?, "text"}], "skipped": <number of blocks that could not be read>,
+         "notes": [<what is missing, in plain words>], "document_id", "revision_id"}
+
+    For a file this module *can* read in full, ``complete`` is True and the result is the same text view. Use
+    :func:`preview_to_package` to turn the result into an ordinary valid package (headings and paragraphs only).
+    """
+    data = bytes(source) if isinstance(source, (bytes, bytearray, memoryview)) else _read_file_bytes(source, MAX_PACKAGE_BYTES)
+    loaded = _load_container(data, check_requires=False)
+    if loaded.kind == "encrypted":
+        loaded = _load_container(_decrypt(loaded, password=password, private_key=private_key), check_requires=False)
+        if loaded.kind == "encrypted":
+            raise SLDCValidationError("Nested encryption is not supported")
+    manifest = loaded.manifest
+    version = manifest["version"]
+    if loaded.kind == "legacy":
+        package = _package_from_loaded(loaded)
+        document, requires = package.document, []
+    else:
+        requires = list(manifest["requires"])
+        document = _decode_json(loaded.parts["document.json"], "document")
+    unsupported = sorted(set(requires) - SUPPORTED_FEATURES)
+    notes: list[str] = []
+    complete = not unsupported
+    if unsupported:
+        notes.append("This document needs features this program does not understand ("
+                     + ", ".join(unsupported) + "). Only its text is shown; parts that depend on those features are missing or "
+                     "approximated, and it must not be edited or saved from this view.")
+    title = document.get("title")
+    language = document.get("language")
+    out_blocks: list[dict[str, Any]] = []
+    skipped = 0
+    raw_blocks = document.get("blocks")
+    if not isinstance(raw_blocks, list):
+        raw_blocks, skipped = [], 1
+        notes.append("The document body could not be read.")
+    for raw in raw_blocks[:_PREVIEW_MAX_BLOCKS]:
+        block = _preview_block(raw)
+        if block is None:
+            skipped += 1
+        else:
+            out_blocks.append(block)
+    if len(raw_blocks) > _PREVIEW_MAX_BLOCKS:
+        skipped += len(raw_blocks) - _PREVIEW_MAX_BLOCKS
+    if skipped:
+        notes.append(f"{skipped} part(s) of the document could not be shown.")
+        complete = False
+    return {"version": version, "requires": requires, "unsupported_requires": unsupported, "complete": complete,
+            "title": title if isinstance(title, str) and title.strip() else "Untitled document",
+            "language": language if isinstance(language, str) and 2 <= len(language) <= 35 else "en",
+            "blocks": out_blocks, "skipped": skipped, "notes": notes,
+            "document_id": manifest.get("document_id"), "revision_id": manifest.get("revision_id")}
+
+
+def _preview_block(raw: Any) -> dict[str, Any] | None:
+    """One block of a preview: its type, id and plain text, or None if there is nothing readable in it."""
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("type")
+    text = raw.get("text")
+    block_id = raw.get("id") if isinstance(raw.get("id"), str) and _ID.fullmatch(raw["id"]) else None
+    if kind == "equation" and isinstance(raw.get("equation"), dict) and isinstance(raw["equation"].get("source"), str):
+        text = raw["equation"]["source"]
+    elif kind == "table" and isinstance(raw.get("table"), dict) and isinstance(raw["table"].get("rows"), list):
+        rows = []
+        for row in raw["table"]["rows"][:2_000]:
+            cells: list[str] = []
+            if isinstance(row, list):
+                for cell in row[:200]:
+                    if isinstance(cell, dict):
+                        cell_text = cell.get("text")
+                        if isinstance(cell_text, str):
+                            cells.append(cell_text)
+            rows.append("\t".join(cells))
+        text = "\n".join(x for x in ((text if isinstance(text, str) else ""), "\n".join(rows)) if x)
+    elif kind == "figure" and not (isinstance(text, str) and text):
+        figure = raw.get("figure")
+        alt = figure.get("alt") if isinstance(figure, dict) else None
+        text = f"[Image: {alt}]" if isinstance(alt, str) and alt else "[Image]"
+    elif isinstance(text, str) and isinstance(raw.get("spans"), list):
+        objects = {}
+        for span in raw["spans"]:
+            if isinstance(span, dict) and span.get("type") in ("equation", "image") and isinstance(span.get("start"), int):
+                objects[span["start"]] = span
+        if objects:
+            def _object_text(span: dict[str, Any]) -> str:
+                if span.get("type") == "equation" and isinstance(span.get("equation"), dict) and isinstance(span["equation"].get("source"), str):
+                    return span["equation"]["source"]
+                figure = span.get("figure")
+                alt = figure.get("alt") if isinstance(figure, dict) else ""
+                return "[Image: " + (alt if isinstance(alt, str) else "") + "]"
+            text = "".join(_object_text(objects[i]) if i in objects else ch for i, ch in enumerate(text))
+    if not isinstance(text, str):
+        return None
+    if len(text) > 200_000:
+        text = text[:200_000]
+    out: dict[str, Any] = {"id": block_id, "type": kind if kind in _PREVIEW_BLOCK_TYPES else "paragraph", "text": text}
+    attributes = raw.get("attributes")
+    level = attributes.get("level") if isinstance(attributes, dict) else None
+    if kind == "heading" and isinstance(level, int) and not isinstance(level, bool) and 1 <= level <= 6:
+        out["level"] = level
+    return out
+
+
+def preview_to_package(preview: Mapping[str, Any]) -> SLDCPackage:
+    """An ordinary, valid package holding only the text of a :func:`preview_package` result.
+
+    Headings, paragraphs, list items, quotes and code keep their type; tables, equations, figures and anything newer become
+    paragraphs of their text. It carries no pictures, styles, sections, comments or signatures, so it is a *view*, never a
+    substitute for the original file: do not save it over the original.
+    """
+    blocks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in preview["blocks"]:
+        kind = item["type"] if item["type"] in BLOCK_TYPES else "paragraph"
+        block_id = item.get("id")
+        if block_id in seen:
+            block_id = None
+        if block_id:
+            seen.add(block_id)
+        attributes = {"level": item["level"]} if kind == "heading" and item.get("level") else None
+        if kind == "heading" and not attributes:
+            kind = "paragraph"
+        blocks.append(make_block(kind, item["text"], block_id=block_id, attributes=attributes))
+    return new_package(preview["title"], blocks, language=preview.get("language", "en"))
 
 
 # ----------------------------------------------------------------------------------------------
@@ -3391,7 +3720,7 @@ def merge_packages(base: SLDCPackage, ours: SLDCPackage, theirs: SLDCPackage, *,
         document["history"] = list(history.values())
     merged = prune_assets(SLDCPackage(
         document, assets, _merge_threads(ours.comments, theirs.comments),
-        version=ours.version if ours.version == theirs.version else FORMAT_VERSION))
+        version=newest_version(ours.version, theirs.version)))
     validate_package(merged)
     return merged, conflicts
 
@@ -4450,7 +4779,7 @@ __all__ = [
     "Asset", "Recipient", "Signer",
     # Packages (1.x)
     "read_package", "write_package", "loads_package", "dumps_package", "inspect_package",
-    "validate_package", "new_package", "make_asset", "add_asset", "prune_assets", "make_table",
+    "validate_package", "KNOWN_VERSION", "preview_package", "preview_to_package", "version_key", "newest_version", "new_package", "make_asset", "add_asset", "prune_assets", "make_table",
     "make_figure", "revision_id", "make_equation", "make_inline_equation", "make_inline_image", "revision_id",
     # Migration
     "migrate_package", "migrate_file", "export_legacy",
