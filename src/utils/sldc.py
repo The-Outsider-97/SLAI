@@ -2374,7 +2374,7 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
                 "text": "\n\n".join(item["text"] for item in content),
                 "blocks": content, "skipped": 0, "skipped_blocks": 0,
                 "unsupported_requires": [], "newer_than_known": False,
-                "read_only": True}
+                "notes": [], "read_only": True}
 
     if loaded.kind != "package":
         raise SLDCUnsupportedError("SLDC container cannot be previewed as plaintext")
