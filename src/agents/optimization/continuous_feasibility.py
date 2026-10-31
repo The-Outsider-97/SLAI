@@ -268,9 +268,58 @@ def certify_polynomial_sphere_separation(
     )
 
 
+
+
+def verify_continuous_certificate(certificate: ContinuousTimeCertificate) -> bool:
+    """Independently replay certificate evidence using exact fractions.
+
+    For a feasibility certificate, the claimed Bernstein hull intervals must
+    cover the entire original domain with no gaps. For a violation, a rational
+    time/value witness must evaluate below zero. Inconclusive is never proof.
+    """
+    if not isinstance(certificate, ContinuousTimeCertificate):
+        return False
+    if certificate.guarantee != "exact_rational_polynomial_over_closed_interval":
+        return False
+    if certificate.inequality != "p(t) >= 0":
+        return False
+    try:
+        coefficients = _coefficients(certificate.polynomial, "certificate.polynomial")
+        begin = _rational(certificate.interval[0], "begin")
+        finish = _rational(certificate.interval[1], "finish")
+        if begin >= finish:
+            return False
+        if certificate.status == "certified_violated":
+            if certificate.witness_time is None or certificate.witness_value is None:
+                return False
+            t = _rational(certificate.witness_time, "witness_time")
+            value = _rational(certificate.witness_value, "witness_value")
+            return begin <= t <= finish and value < 0 and _eval(coefficients, t) == value
+        if certificate.status != "certified_feasible" or certificate.unresolved_boxes:
+            return False
+        intervals: list[tuple[Fraction, Fraction]] = []
+        for left_raw, right_raw, low_raw, high_raw in certificate.certified_boxes:
+            left, right = _rational(left_raw, "segment_start"), _rational(right_raw, "segment_end")
+            low, high = _rational(low_raw, "bernstein_min"), _rational(high_raw, "bernstein_max")
+            if left >= right or low < 0:
+                return False
+            control = _bernstein(coefficients, left, right)
+            if min(control) != low or max(control) != high:
+                return False
+            intervals.append((left, right))
+        if not intervals:
+            return False
+        intervals.sort()
+        if intervals[0][0] != begin or intervals[-1][1] != finish:
+            return False
+        return all(a[1] == b[0] for a, b in zip(intervals[:-1], intervals[1:]))
+    except (OptimizationValidationError, TypeError, ValueError, IndexError, OverflowError):
+        return False
+
 __all__ = [
     "ContinuousTimeCertificate",
     "certify_polynomial_nonnegative",
     "certify_polynomial_trajectory_limits",
     "certify_polynomial_sphere_separation",
+    "verify_continuous_certificate",
 ]
