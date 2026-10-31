@@ -240,7 +240,8 @@ class BlackBoxSolver(BaseSolver):
             signed, violation, _ = evaluate_vector(x)
             if not math.isfinite(signed) or not math.isfinite(violation):
                 return self.failure_penalty
-            return signed + self.constraint_penalty * max(0.0, violation)
+            score = signed + self.constraint_penalty * max(0.0, violation)
+            return score if math.isfinite(score) else self.failure_penalty
 
         started = time.perf_counter()
         limit_reason: TerminationReason | None = None
@@ -353,11 +354,17 @@ class BlackBoxSolver(BaseSolver):
         x = np.asarray(options.get("x0", initial_vector(problem)), dtype=float)
         lower = np.asarray([bound[0] for bound in bounds], dtype=float)
         upper = np.asarray([bound[1] for bound in bounds], dtype=float)
+        if x.shape != lower.shape or not np.all(np.isfinite(x)):
+            raise OptimizationValidationError("pattern_search x0 has invalid shape or nonfinite values")
         x = np.minimum(np.maximum(x, lower), upper)
         span = np.maximum(upper - lower, 1.0)
         mesh = float(options.get("initial_mesh", self.pattern_initial_mesh))
         reduction = float(options.get("mesh_reduction", self.pattern_mesh_reduction))
         minimum = float(options.get("min_mesh", self.pattern_min_mesh))
+        if not (math.isfinite(mesh) and math.isfinite(reduction)
+                and math.isfinite(minimum) and mesh > 0
+                and 0 < reduction < 1 and minimum > 0):
+            raise OptimizationValidationError("pattern_search mesh configuration must be positive, finite and contractive")
         iterations = 0
         if journal is not None and journal.progress is not None:
             previous = journal.progress
