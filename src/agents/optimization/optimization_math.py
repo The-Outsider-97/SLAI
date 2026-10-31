@@ -183,6 +183,47 @@ def max_constraint_violation(problem: OptimizationProblem, point: Mapping[str, A
     return max(violations.values(), default=0.0)
 
 
+def feasibility_evidence(
+    problem: OptimizationProblem, point: Mapping[str, Any], *,
+    tolerance: float = 1e-8,
+) -> tuple[float, bool]:
+    """Evaluate each constraint once and return raw max violation + feasibility.
+
+    Preserve each constraint's tolerance and strict/open domain semantics.
+    Intended for expensive candidate evaluators needing *both* diagnostics.
+    """
+    tol = require_finite(tolerance, "tolerance")
+    if tol < 0:
+        raise OptimizationValidationError("feasibility tolerance must be non-negative")
+    domain_values: list[float] = []
+    feasible = True
+    for variable in problem.variables:
+        if variable.name not in point:
+            return math.inf, False
+        value = point[variable.name]
+        violation = domain_violation(variable, value)
+        domain_values.append(violation)
+        if not math.isfinite(violation) or violation > tol:
+            feasible = False
+        numeric = to_finite_float(value)
+        domain = variable.domain
+        if numeric is not None and not (
+            domain.kind in {DomainKind.SEMI_CONTINUOUS, DomainKind.SEMI_INTEGER}
+            and numeric == 0.0
+        ):
+            if domain.strict_lower and domain.lower is not None and numeric <= domain.lower:
+                feasible = False
+            if domain.strict_upper and domain.upper is not None and numeric >= domain.upper:
+                feasible = False
+    residuals: list[float] = []
+    for constraint in problem.constraints:
+        violation = constraint_violation(constraint, point)
+        residuals.append(violation)
+        if not math.isfinite(violation) or violation > max(tol, constraint.tolerance):
+            feasible = False
+    return max((*domain_values, *residuals), default=0.0), feasible
+
+
 def is_feasible(problem: OptimizationProblem, point: Mapping[str, Any], *, tolerance: float = 1e-8) -> bool:
     """Evaluate feasibility once, applying each tolerance exactly once.
 
