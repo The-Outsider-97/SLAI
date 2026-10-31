@@ -20,6 +20,7 @@ from src.agents.optimization.domain_problems import (
     trajectory_problem,
 )
 from src.agents.optimization.evaluation_runtime import EvaluationJournal
+from src.agents.optimization.derivative_checks import verify_objective_gradient
 from src.agents.optimization.optimization_math import (
     evaluate_objective,
     is_feasible,
@@ -182,3 +183,41 @@ def test_resume_is_not_claimed_for_differential_evolution(tmp_path):
         solver.solve(_black_box(), method="differential_evolution",
                      resume=True, checkpoint_path=tmp_path / "other.json",
                      evaluator_revision="v1")
+
+
+def test_gradient_check_uses_stem_differentiation_and_detects_bad_gradient():
+    variable = Variable("x", VariableDomain.real(-5, 5), initial=1.5)
+    objective = Objective(
+        "quadratic", function=lambda p: (p["x"] - 3.)**2,
+        gradient=lambda p: {"x": 2. * (p["x"] - 3.)},
+    )
+    problem = OptimizationProblem("gradient", (variable,), (objective,))
+    evidence = verify_objective_gradient(problem, {"x": 1.5})
+    assert evidence["passes"]
+    assert evidence["variables"]["x"]["numerical"] == pytest.approx(-3., abs=1e-4)
+    bad_problem = OptimizationProblem("bad_gradient", (variable,),
+        (Objective("quadratic", function=objective.function,
+                   gradient=lambda p: {"x": 123.}),))
+    assert not verify_objective_gradient(bad_problem, {"x": 1.5})["passes"]
+
+
+def test_mixed_variable_black_box_uses_existing_canonical_solver():
+    problem = OptimizationProblem(
+        "mixed_variable", variables=(
+            Variable("continuous", VariableDomain.real(-2, 2), initial=0.),
+            Variable("integer", VariableDomain.integer(0, 3), initial=0),
+            Variable("flag", VariableDomain.binary(), initial=0),
+        ),
+        objectives=(Objective("loss", function=lambda p:
+            (p["continuous"] - 0.5)**2
+            + (p["integer"] - 2)**2
+            + 4.0 * (p["flag"] - 1)**2),),
+        problem_class=ProblemClass.BLACK_BOX,
+    )
+    result = BlackBoxSolver({"method": "pattern_search", "max_evaluations": 250}).solve(
+        problem, method="pattern_search", max_evaluations=250,
+    )
+    assert result.primal_solution is not None
+    assert result.feasibility.value == "feasible"
+    assert result.primal_solution["integer"] == int(result.primal_solution["integer"])
+    assert result.primal_solution["flag"] in (0, 1)
