@@ -2371,7 +2371,7 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
                    for block in document["blocks"]]
         title = document["title"]
         return {"title": title, "version": LEGACY_VERSION, "complete": True,
-                "text": "\\n\\n".join(item["text"] for item in content),
+                "text": "\n\n".join(item["text"] for item in content),
                 "blocks": content, "skipped": 0, "skipped_blocks": 0,
                 "unsupported_requires": [], "newer_than_known": False,
                 "read_only": True}
@@ -2438,15 +2438,15 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
                         else:
                             skipped += 1
                     if cells:
-                        rows.append("\\t".join(cells))
+                        rows.append("\t".join(cells))
                 if rows:
-                    text = (text + "\\n" if text else "") + "\\n".join(rows)
+                    text = (text + "\n" if text else "") + "\n".join(rows)
             else:
                 skipped += 1
         if kind == "figure":
             figure = block.get("figure")
             if isinstance(figure, dict) and isinstance(figure.get("alt"), str):
-                text = (text + "\\n" if text else "") + figure["alt"]
+                text = (text + "\n" if text else "") + figure["alt"]
         if len(text) > budget:
             text = text[:budget]
             skipped += 1
@@ -2458,7 +2458,7 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
     complete = not (unknown_features or future_version or skipped)
     return {
         "title": title, "version": loaded.manifest["version"],
-        "complete": complete, "text": "\\n\\n".join(item["text"] for item in preview_blocks),
+        "complete": complete, "text": "\n\n".join(item["text"] for item in preview_blocks),
         "blocks": preview_blocks, "skipped": skipped, "skipped_blocks": skipped,
         "unsupported_requires": unknown_features,
         "newer_than_known": future_version, "read_only": True,
