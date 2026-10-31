@@ -22,7 +22,7 @@ from .utils.optimization_errors import OptimizationValidationError
 
 
 class EvaluationJournal:
-    """Crash-safe evaluation cache with explicit caller-supplied identity.
+    """Best-effort crash-resistant local cache with explicit identity.
 
     Identity MUST capture the mathematical problem, evaluator implementation,
     authoritative model revision, and solver options that affect search progress.
