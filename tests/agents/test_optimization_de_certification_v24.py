@@ -5,6 +5,7 @@ No claims about arbitrary mesh collision or general black-box continuous time.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 import threading
@@ -17,6 +18,7 @@ from src.agents.optimization.continuous_feasibility import (
     certify_polynomial_nonnegative,
     certify_polynomial_sphere_separation,
     certify_polynomial_trajectory_limits,
+    verify_continuous_certificate,
 )
 from src.agents.optimization.de_checkpoint import SUPPORTED_SCIPY_DE_VERSIONS
 from src.agents.optimization.evaluation_runtime import EvaluationJournal
@@ -38,6 +40,10 @@ def test_exact_polynomial_nonnegativity_certified_on_entire_interval():
     assert proof.unresolved_boxes == ()
     assert proof.guarantee == "exact_rational_polynomial_over_closed_interval"
     assert proof.certified_boxes
+    assert verify_continuous_certificate(proof)
+    assert not verify_continuous_certificate(replace(
+        proof, certified_boxes=(("0", "1", "0", "999"),),
+    ))
 
 
 def test_interior_violation_is_proven_even_when_endpoints_pass():
@@ -46,6 +52,8 @@ def test_interior_violation_is_proven_even_when_endpoints_pass():
     assert proof.status == "certified_violated"
     assert Fraction(proof.witness_value) < 0
     assert Fraction(proof.witness_time) == Fraction(1, 2)
+    assert verify_continuous_certificate(proof)
+    assert not verify_continuous_certificate(replace(proof, witness_value="0"))
 
 
 def test_non_dyadic_double_root_is_inconclusive_not_certified():
@@ -55,6 +63,7 @@ def test_non_dyadic_double_root_is_inconclusive_not_certified():
     assert proof.status == "inconclusive"
     assert proof.unresolved_boxes
     assert not proof.feasible
+    assert not verify_continuous_certificate(proof)
 
 
 def test_exact_polynomial_derivative_limits():
