@@ -154,6 +154,56 @@ def test_preview_does_not_accept_boolean_levels_or_unsafe_ids():
     ]
 
 
+def test_hostile_shape_preview_keeps_safe_structure_and_omits_unsafe_content():
+    """Reproduce PreviewOfNewerFiles.test_only_text_is_read_from_hostile_shapes.
+
+    The source archive is internally checksummed but its future-version
+    document has a hostile title, traversal-like identifier, boolean heading
+    level, malformed table cells, and a non-list table row.
+    """
+    original = sldc.new_package("Hostile preview", [
+        sldc.make_block("heading", "Title", block_id="b1",
+                        attributes={"level": 1}),
+        sldc.make_block("paragraph", "Original", block_id="b2"),
+        sldc.make_block("paragraph", "Before replacement", block_id="b3"),
+    ])
+    def mutate(document):
+        document["title"] = ["not", "text"]
+        document["blocks"][1] = {
+            "id": "../x", "type": "heading", "text": "A",
+            "attributes": {"level": True},
+        }
+        document["blocks"][2] = {
+            "id": "b3", "type": "table", "text": "cap",
+            "table": {
+                "rows": [[{"text": "a"}, 5, {"text": "b"}], "x"],
+            },
+        }
+    future = _reseal(sldc.dumps_package(original), version="1.7.0", mutate=mutate)
+    preview = sldc.preview_package(future)
+    assert preview["title"] == "Untitled document"
+    assert not preview["complete"]
+    assert len(preview["blocks"]) == 3
+    assert preview["blocks"][0]["id"] == "b1"
+    assert preview["blocks"][0]["level"] == 1
+    assert preview["blocks"][1]["text"] == "A"
+    assert preview["blocks"][1]["id"] is None
+    assert preview["blocks"][1]["level"] is None
+    assert preview["blocks"][2]["id"] == "b3"
+    assert preview["blocks"][2]["text"] == "cap\\na\\tb"
+    assert "5" not in preview["blocks"][2]["text"]
+    assert "x" not in preview["blocks"][2]["text"]
+    assert "../x" not in repr(preview)
+    assert all(b["type"] == "paragraph" for b in preview["blocks"])
+    clean = sldc.preview_to_package(preview)
+    assert clean.version == "1.0.0"
+    assert clean.assets == {}
+    assert all(b["id"] not in {"b1", "b3", "../x"}
+               for b in clean.document["blocks"])
+
+
+
+
 def test_preview_to_package_rebuilds_without_unknown_original_fields():
     data = _reseal(
         sldc.dumps_package(_modern()), version="1.7.0",
