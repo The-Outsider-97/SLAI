@@ -6,6 +6,7 @@ permissioned and must retain external evidence. It reuses a single canonical
 KnowledgeRepository rather than starting a second standards database.
 """
 from __future__ import annotations
+from .contracts import AuthorizationDenied, NotFound, json_object
 
 from dataclasses import replace
 from typing import Any, Mapping
@@ -220,3 +221,73 @@ __all__ = [
     "_contextual_applicability",
     "StandardsRegistry",
 ]
+
+class PublisherUpdateReview:
+    ALLOWED_STATUS = frozenset({"draft", "published", "amended", "withdrawn",
+                                "superseded", "unknown"})
+
+    def __init__(self, repository: KnowledgeRepository):
+        self.repository = repository
+
+    def propose(self, *, edition_record_id: str, observed_status: str,
+                observation_source_id: str, observation_evidence_id: str,
+                observation_method: str, access: AccessContext,
+                observed_at: str | None = None,
+                record_id: str | None = None) -> Any:
+        validate_id(edition_record_id, "edition_record_id")
+        validate_id(observation_source_id, "observation_source_id")
+        validate_id(observation_evidence_id, "observation_evidence_id")
+        if observed_status not in self.ALLOWED_STATUS:
+            raise ValidationFailure("Unknown publication state")
+        if not isinstance(observation_method, str) or not observation_method.strip():
+            raise ValidationFailure("Observation method required")
+        edition = self.repository.get(edition_record_id, access)
+        if edition is None or edition.draft.kind != "standard_edition":
+            raise NotFound("standard_edition", edition_record_id, details={"reason": "Accessible edition required"})
+        draft = RecordDraft(
+            kind="publisher_update_proposal", scope=edition.draft.scope,
+            project_id=edition.draft.project_id, organization_id=edition.draft.organization_id,
+            source_ids=(observation_source_id,),
+            status=Lifecycle.DRAFT,
+            payload={"edition_record_id": edition_record_id,
+                     "old_status": edition.draft.payload.get("publication_status", "unknown"),
+                     "observed_status": observed_status,
+                     "observation_evidence_id": observation_evidence_id,
+                     "observation_method": observation_method.strip()[:500],
+                     "observed_at": normalize_time(observed_at or utc_now(), "observed_at"),
+                     "proposed_by": access.principal_id,
+                     "review": None,
+                     "automatic_normative_change": False},
+            evidence=({"evidence_ref": observation_evidence_id,
+                       "role": "external_observation_unverified"},),
+        )
+        proposal = self.repository.create(draft, access, record_id=record_id,
+                                          reason="publisher metadata observation proposed")
+        self.repository.link(proposal.record_id, edition_record_id, access)
+        return proposal
+
+    def review(self, record_id: str, expected_revision: int, *, reviewer_evidence_id: str,
+               access: AccessContext, decision: str, reason: str):
+        if not access.can_write or not access.can_review:
+            raise AuthorizationDenied(access.principal_id if access is not None else "anonymous", "knowledge_access", details={"reason": "Independent reviewer required"})
+        if decision not in {"accept_observation", "reject_observation", "needs_evidence"}:
+            raise ValidationFailure("Invalid review decision")
+        validate_id(reviewer_evidence_id, "reviewer_evidence_id")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValidationFailure("Review rationale required")
+        rec = self.repository.get(record_id, access)
+        if rec is None or rec.draft.kind != "publisher_update_proposal":
+            raise NotFound("publisher_update_proposal", record_id, details={"reason": "Proposal unavailable"})
+        if rec.draft.payload["proposed_by"] == access.principal_id:
+            raise AuthorizationDenied(access.principal_id if access is not None else "anonymous", "knowledge_access", details={"reason": "Cannot review own publisher observation"})
+        data = dict(rec.draft.payload)
+        data["review"] = {"decision": decision, "reason": reason.strip(),
+                          "reviewer_id": access.principal_id,
+                          "evidence_id": reviewer_evidence_id}
+        updated = replace(rec.draft, payload=data, status=Lifecycle.REVIEWED,
+                          evidence=(*rec.draft.evidence,
+                                    {"evidence_ref": reviewer_evidence_id,
+                                     "role": "observation_review"}))
+        # Review intentionally does not revise the standard edition itself.
+        return self.repository.revise(record_id, expected_revision, updated, access,
+                                      reason="publisher observation reviewed")
