@@ -353,7 +353,6 @@ class BlackBoxSolver(BaseSolver):
         mesh = float(options.get("initial_mesh", self.pattern_initial_mesh))
         reduction = float(options.get("mesh_reduction", self.pattern_mesh_reduction))
         minimum = float(options.get("min_mesh", self.pattern_min_mesh))
-        current = merit(x)
         iterations = 0
         if journal is not None and journal.progress is not None:
             previous = journal.progress
@@ -366,8 +365,12 @@ class BlackBoxSolver(BaseSolver):
                 raise OptimizationValidationError("corrupt pattern-search progress checkpoint") from exc
             if len(x) != len(bounds) or not np.all(np.isfinite(x)) or not math.isfinite(mesh) or not math.isfinite(current) or mesh <= 0 or iterations < 0:
                 raise OptimizationValidationError("invalid pattern-search progress checkpoint")
-        elif journal is not None:
-            journal.set_progress({"x": x.tolist(), "mesh": mesh, "current": current, "iterations": iterations})
+            if not np.all(x >= lower) or not np.all(x <= upper):
+                raise OptimizationValidationError("checkpoint point violates solver bounds")
+        else:
+            current = merit(x)
+            if journal is not None:
+                journal.set_progress({"x": x.tolist(), "mesh": mesh, "current": current, "iterations": iterations})
         while mesh > minimum:
             if cancel_event is not None and cancel_event.is_set():
                 raise _BudgetStop(TerminationReason.INTERRUPTED)
