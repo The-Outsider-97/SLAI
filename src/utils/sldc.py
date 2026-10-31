@@ -2455,7 +2455,19 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
             preview_blocks.append({"type": "paragraph", "text": text})
         else:
             skipped += 1
-    complete = not (unknown_features or future_version or skipped)
+    # "complete" must agree with the normal reader: if this module can
+    # fully read and validate a known edition, the preview is complete even
+    # when a non-textual known block has no displayable text. Conversely, a
+    # malformed known edition cannot be called complete merely because it
+    # happens to contain some strings.
+    complete = False
+    if not unknown_features and not future_version:
+        try:
+            _package_from_loaded(loaded)
+        except SLDCError:
+            complete = False
+        else:
+            complete = True
     return {
         "title": title, "version": loaded.manifest["version"],
         "complete": complete, "text": "\n\n".join(item["text"] for item in preview_blocks),
