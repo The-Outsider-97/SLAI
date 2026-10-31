@@ -221,7 +221,7 @@ Full factory, agent and solver integration validation remains a separate gate.
 
 ## Testing and Verification
 
-There is no dedicated Optimization test suite under `tests/` in this checkout. The low-level example checks one installed HiGHS path; it does not establish availability or correctness of every solver. Use `OptimizationRegistries.summary(problem)` and `registry_summary()` to inspect compatibility/coverage without claiming that uncovered problem classes are supported.
+Targeted Optimization regression suites now exist under `tests/agents/`, including domain-problem formulation and numerical-contract tests. Passing these targeted suites alone does not establish availability or correctness of every solver. Use `OptimizationRegistries.summary(problem)` and `registry_summary()` to inspect compatibility/coverage without claiming that uncovered problem classes are supported.
 
 A non-importing syntax check from the repository root is:
 
