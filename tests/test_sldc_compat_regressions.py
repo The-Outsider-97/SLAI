@@ -111,8 +111,47 @@ def test_hostile_future_blocks_are_reduced_to_plain_text():
     assert "Future words" in preview["text"]
     assert "first" in preview["text"]
     assert "last" in preview["text"]
-    assert all(set(b) == {"type", "text"} for b in preview["blocks"])
+    assert all(set(b) <= {"type", "text", "id", "level"} for b in preview["blocks"])
+    assert all(b.get("id") is None or sldc._ID.fullmatch(b["id"]) for b in preview["blocks"])
+    assert all(b.get("level") is None or (type(b["level"]) is int and 1 <= b["level"] <= 6)
+               for b in preview["blocks"])
     assert not any("unknown_shape" in repr(b) for b in preview["blocks"])
+
+
+def test_preview_preserves_valid_heading_level_and_sanitizes_invalid_identifiers():
+    package = sldc.new_package("Metadata", [
+        sldc.make_block("heading", "Title", block_id="heading-1",
+                        attributes={"level": 1}),
+        sldc.make_block("paragraph", "Body", block_id="paragraph-1"),
+    ])
+    preview = sldc.preview_package(sldc.dumps_package(package))
+    assert preview["complete"]
+    assert preview["blocks"][0]["id"] == "heading-1"
+    assert preview["blocks"][0]["level"] == 1
+    assert preview["blocks"][1]["id"] == "paragraph-1"
+    assert "level" not in preview["blocks"][1]
+    assert all(b["type"] == "paragraph" for b in preview["blocks"])
+    converted = sldc.preview_to_package(preview)
+    assert [b["text"] for b in converted.document["blocks"]] == ["Title", "Body"]
+    assert [b["id"] for b in converted.document["blocks"]] != [
+        "heading-1", "paragraph-1",
+    ]
+    assert all("level" not in b for b in converted.document["blocks"])
+
+
+def test_preview_does_not_accept_boolean_levels_or_unsafe_ids():
+    def mutate(document):
+        document["blocks"][0]["id"] = "../escape"
+        document["blocks"][0]["attributes"] = {"level": True}
+        document["blocks"][1]["id"] = ["not", "an", "id"]
+    data = _reseal(sldc.dumps_package(_modern()), version="1.7.0", mutate=mutate)
+    preview = sldc.preview_package(data)
+    assert preview["blocks"][0]["id"] is None
+    assert preview["blocks"][0]["level"] is None
+    assert preview["blocks"][1]["id"] is None
+    assert [b["text"] for b in preview["blocks"]] == [
+        "Introduction", "Known content",
+    ]
 
 
 def test_preview_to_package_rebuilds_without_unknown_original_fields():
