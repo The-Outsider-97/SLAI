@@ -171,6 +171,8 @@ class BlackBoxSolver(BaseSolver):
                 "tolerance": options.get("tolerance", self.tolerance),
                 "constraint_penalty": self.constraint_penalty,
                 "failure_penalty": self.failure_penalty,
+                "feasibility_tolerance": self.feasibility_tolerance,
+                "optimality_tolerance": self.optimality_tolerance,
                 "pattern_initial_mesh": options.get("initial_mesh", self.pattern_initial_mesh),
                 "pattern_mesh_reduction": options.get("mesh_reduction", self.pattern_mesh_reduction),
                 "pattern_min_mesh": options.get("min_mesh", self.pattern_min_mesh),
