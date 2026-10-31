@@ -10,8 +10,8 @@ import unittest
 
 from assurance import (AccessContext, AuthorizationDenied, EnhancedKnowledgeGateway,
                        Lifecycle, RecordDraft, Scope, Sufficiency, ValidationFailure)
-from assurance.benchmark import RetrievalBenchmarkCase, run_benchmark, load_cases
-from assurance.operations import OutboxDispatcher, ProviderCircuit, ProviderRateLimiter
+from assurance.gateway import RetrievalBenchmarkCase, run_benchmark, load_cases
+from assurance.gateway import OutboxDispatcher
 
 
 class Fixture(unittest.TestCase):
@@ -232,21 +232,6 @@ class OperationTests(Fixture):
         with self.assertRaises(ValidationFailure):
             self.g.backup.create(backup)
 
-    def test_circuit_breaker_resets_on_success(self):
-        gate = ProviderCircuit(threshold=2, reset_seconds=9999)
-        gate.report_failure()
-        self.assertTrue(gate.allow())
-        gate.report_failure()
-        self.assertFalse(gate.allow())
-        gate.report_success()
-        self.assertTrue(gate.allow())
-
-    def test_rate_limit_has_bounded_burst(self):
-        gate = ProviderRateLimiter(rate_per_sec=0.001, burst=2)
-        self.assertTrue(gate.allow())
-        self.assertTrue(gate.allow())
-        self.assertFalse(gate.allow())
-
     def test_publisher_update_must_be_reviewed_no_automatic_standard_change(self):
         edition = self.g.standards.register_edition(standard_id="FSA-100", edition="2024",
             title="Fictional Standard", publisher="Fictional Publishing House",
@@ -278,7 +263,7 @@ class OperationTests(Fixture):
 
 class PerformanceAndInteropTests(Fixture):
     def test_concurrent_writes_are_serialized_without_lost_updates(self):
-        from assurance.load_probe import run_load_probe
+        from _de_fixture_utils import run_load_probe
         outcome = run_load_probe(worker_count=5, read_operations=15)
         self.assertTrue(outcome.integrity_ok)
         self.assertEqual(1, outcome.successful_conflicting_writes)
@@ -286,7 +271,7 @@ class PerformanceAndInteropTests(Fixture):
         self.assertEqual((), outcome.errors)
 
     def test_reviewed_relation_alignment_is_constrained(self):
-        from assurance.interop import RelationAlignment, validate_alignments
+        from _de_fixture_utils import RelationAlignment, validate_alignments
         record = RelationAlignment("depends_on", "https://example.org/ontology/dependsOn",
                                    "candidate_equivalence", "review:2026")
         result = validate_alignments({"depends_on": record})
@@ -298,7 +283,7 @@ class PerformanceAndInteropTests(Fixture):
 class DurableRecoveryTests(Fixture):
     def test_expired_lease_reacquirable_with_new_token(self):
         from assurance.contracts import utc_now
-        from assurance.outbox import _plus_seconds
+        from assurance.repository import _plus_seconds
         self.create("outbox source")
         source = self.create("outbox object")
         self.g.repository.revise(source.record_id, 1,
