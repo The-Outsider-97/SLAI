@@ -2412,13 +2412,14 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
     ignored_fields = set(document) - known_document_keys
     if ignored_fields:
         notes.append("Unknown document fields were omitted from the preview.")
-    preview_blocks: list[dict[str, str]] = []
+    preview_blocks: list[dict[str, Any]] = []
     budget = MAX_TEXT_CHARS
     for index, block in enumerate(source_blocks):
         if not isinstance(block, dict):
             skipped += 1
             continue
         kind = block.get("type")
+        known_kind = isinstance(kind, str) and kind in BLOCK_TYPES_V1
         raw_text = block.get("text")
         if not isinstance(raw_text, str):
             # The plain text contract never coerces arbitrary data to text.
@@ -2471,7 +2472,23 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
             skipped += 1
         budget -= len(text)
         if text:
-            preview_blocks.append({"type": "paragraph", "text": text})
+            # Only a tiny, validated subset of structural metadata survives
+            # previewing. Unknown block types get *only* plain text; recognized
+            # blocks may retain a safe navigation identifier. Nothing here is
+            # copied into the editable package by preview_to_package().
+            item: dict[str, Any] = {"type": "paragraph", "text": text}
+            if known_kind:
+                original_id = block.get("id")
+                item["id"] = (original_id if isinstance(original_id, str)
+                              and _ID.fullmatch(original_id) else None)
+                if kind == "heading":
+                    attributes = block.get("attributes")
+                    candidate_level = (attributes.get("level")
+                                       if isinstance(attributes, dict) else None)
+                    item["level"] = (candidate_level
+                                     if type(candidate_level) is int
+                                     and 1 <= candidate_level <= 6 else None)
+            preview_blocks.append(item)
         else:
             skipped += 1
     # "complete" must agree with the normal reader: if this module can
