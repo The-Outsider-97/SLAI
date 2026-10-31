@@ -8,40 +8,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
+
 import datetime as dt
 import hashlib
 import json
 import re
 
-
-class KnowledgeAssuranceError(Exception):
-    """Base error for the canonical knowledge service."""
-
-
-class AuthorizationDenied(KnowledgeAssuranceError):
-    pass
+from ..utils.config_loader import get_config_section, load_global_config
+from ..utils.knowledge_errors import *
+from ..utils.knowledge_helpers import *
+from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
 
 
-class ValidationFailure(KnowledgeAssuranceError):
-    pass
+logger = get_logger("assurance Contracts")
+printer = PrettyPrinter()
 
 
-class RevisionConflict(KnowledgeAssuranceError):
-    pass
-
-
-class NotFound(KnowledgeAssuranceError):
-    pass
-
-
-class UnsupportedEvaluation(KnowledgeAssuranceError):
-    pass
-
-
-class MissingInput(KnowledgeAssuranceError):
-    def __init__(self, fields: set[str]):
-        self.fields = frozenset(fields)
-        super().__init__(", ".join(sorted(fields)))
+IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+KIND = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class Scope(str, Enum):
@@ -66,55 +50,6 @@ class RuleOutcome(str, Enum):
     UNDETERMINED = "undetermined"
     EVALUATION_ERROR = "evaluation_error"
     UNSUPPORTED = "unsupported_evaluation_method"
-
-
-IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
-KIND = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-
-
-def validate_id(value: str, field_name: str) -> str:
-    if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
-        raise ValidationFailure(f"Invalid {field_name}: required nonempty safe identifier (max 128 characters)")
-    return value
-
-
-def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
-def normalize_time(value: str | None, field_name: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValidationFailure(f"{field_name} must be an ISO-8601 UTC timestamp")
-    try:
-        x = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValidationFailure(f"Invalid {field_name}") from exc
-    if x.tzinfo is None or x.utcoffset() != dt.timedelta(0):
-        raise ValidationFailure(f"{field_name} must specify UTC")
-    return x.astimezone(dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
-def json_object(value: Any, field_name: str, max_bytes: int = 524288) -> dict[str, Any]:
-    if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
-        raise ValidationFailure(f"{field_name} must be an object with string keys")
-    try:
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                             allow_nan=False, default=lambda _: (_ for _ in ()).throw(TypeError()))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValidationFailure(f"{field_name} must contain only finite JSON-compatible values") from exc
-    if len(encoded.encode("utf-8")) > max_bytes:
-        raise ValidationFailure(f"{field_name} exceeds {max_bytes} bytes")
-    return json.loads(encoded)
-
-
-def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-
-
-def digest_json(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,3 +145,15 @@ class Applicability:
     outcome: str  # applicable / not_applicable / undetermined
     reasons: tuple[str, ...]
     assumptions: tuple[str, ...] = ()
+
+
+__all__ = [
+    "Scope",
+    "Lifecycle",
+    "RuleOutcome",
+    "AccessContext",
+    "RecordDraft",
+    "RecordRevision",
+    "RuleEvaluation",
+    "Applicability",
+]

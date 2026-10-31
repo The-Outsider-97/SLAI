@@ -8,20 +8,27 @@ TRUSTED AccessContext. SQL storage encryption is not provided by this module.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import asdict, replace
 import datetime as dt
 import json
-from pathlib import Path
 import sqlite3
 import threading
 import uuid
+
+from contextlib import contextmanager
+from dataclasses import asdict, replace
+from pathlib import Path
 from typing import Any, Iterator
 
 from .acl import can_read, require_write
-from .contracts import (AccessContext, Lifecycle, NotFound, RecordDraft, RecordRevision,
-                        RevisionConflict, Scope, ValidationFailure, canonical_json,
-                        digest_json, json_object, normalize_time, utc_now, validate_id)
+from .contracts import *
+from ..utils.config_loader import get_config_section, load_global_config
+from ..utils.knowledge_errors import *
+from ..utils.knowledge_helpers import *
+from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
+
+
+logger = get_logger("Assurance Repository")
+printer = PrettyPrinter()
 
 
 SCHEMA_VERSION = 1
@@ -36,6 +43,8 @@ class KnowledgeRepository:
         self._lock = threading.RLock()
         with self._connect() as db:
             self._schema(db)
+
+        logger.info(f"Knowledge Repository initialized")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -173,7 +182,7 @@ class KnowledgeRepository:
                 db.commit()
             except sqlite3.IntegrityError as exc:
                 db.rollback()
-                raise RevisionConflict("record_id already exists") from exc
+                raise RevisionConflict("record_id already exists", expected_revision=0, actual_revision=1) from exc
             except Exception:
                 db.rollback()
                 raise
@@ -201,13 +210,15 @@ class KnowledgeRepository:
             try:
                 old_row = self._latest_row(db, record_id)
                 if old_row is None:
-                    raise NotFound("Knowledge record not found")
+                    raise NotFound("Knowledge record not found", entity_id=record_id)
                 old = self._decode(old_row)
                 # Editing an approved record back into a draft may be performed by
                 # its authorized owner; entering reviewed/active still requires review.
                 require_write(replace(old.draft, status=Lifecycle.DRAFT), access)
                 if old.revision != expected_revision:
-                    raise RevisionConflict(f"Expected revision {expected_revision}, found {old.revision}")
+                    raise RevisionConflict(f"Expected revision {expected_revision}, found {old.revision}",
+                                           expected_revision=expected_revision,
+                                           actual_revision=old.revision)
                 if (old.draft.kind != draft.kind or old.draft.scope != draft.scope
                         or old.draft.project_id != draft.project_id
                         or old.draft.organization_id != draft.organization_id):
@@ -217,8 +228,7 @@ class KnowledgeRepository:
                     previous = dt.datetime.fromisoformat(old.recorded_at.replace("Z", "+00:00"))
                     current_time = (previous + dt.timedelta(microseconds=1)).isoformat(timespec="microseconds").replace("+00:00", "Z")
                 new_revision = old.revision + 1
-                self._insert_revision(db, self._values(draft, record_id, new_revision,
-                                                      current_time, access.principal_id, reason))
+                self._insert_revision(db, self._values(draft, record_id, new_revision, current_time, access.principal_id, reason))
                 db.execute("UPDATE knowledge_heads SET current_revision=? WHERE record_id=?", (new_revision, record_id))
                 for dependent in self._dependent_ids(db, record_id):
                     db.execute("INSERT INTO impact_events VALUES (?,?,?,?,?)",
@@ -335,11 +345,12 @@ class KnowledgeRepository:
                 dep_row = self._latest_row(db, dependent_id)
                 base_row = self._latest_row(db, dependency_id)
                 if dep_row is None or base_row is None:
-                    raise NotFound("One or more relationship endpoints do not exist")
+                    missing_id = dependent_id if dep_row is None else dependency_id
+                    raise NotFound("One or more relationship endpoints do not exist", entity_id=missing_id)
                 dependent, dependency = self._decode(dep_row), self._decode(base_row)
                 require_write(dependent.draft, access)
                 if not can_read(dependency.draft, access):
-                    raise AuthorizationDenied("Dependency is not accessible")
+                    raise AuthorizationDenied("Dependency is not accessible", action="read")
                 # A globally available record may not acquire a private dependency.
                 if dependent.draft.scope == Scope.GLOBAL and dependency.draft.scope != Scope.GLOBAL:
                     raise ValidationFailure("Global knowledge cannot depend on private scope")
@@ -383,3 +394,8 @@ class KnowledgeRepository:
 
     def close(self) -> None:
         """SQLite connections are per-operation, so there is no persistent handle to close."""
+
+
+__all__ = [
+    "KnowledgeRepository"
+]

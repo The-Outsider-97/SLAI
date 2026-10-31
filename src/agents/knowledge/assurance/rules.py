@@ -11,10 +11,16 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
-from .contracts import (AccessContext, Lifecycle, MissingInput, RecordDraft, RecordRevision,
-                        RuleEvaluation, RuleOutcome, Scope, UnsupportedEvaluation,
-                        ValidationFailure, digest_json, utc_now)
+from .contracts import *
 from .repository import KnowledgeRepository
+from ..utils.config_loader import get_config_section, load_global_config
+from ..utils.knowledge_errors import *
+from ..utils.knowledge_helpers import *
+from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
+
+
+logger = get_logger("Assurance Rules")
+printer = PrettyPrinter()
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +80,8 @@ class DeclarativeRuleEvaluator:
         self.max_nodes = max_nodes
         self.max_depth = max_depth
 
+        logger.info(f"Declarative Rule Evaluator initialized")
+
     def _quantity(self, item: Any, default_unit: str = "1") -> Any:
         if isinstance(item, Mapping) and "value" in item:
             unit = item.get("unit", default_unit)
@@ -118,18 +126,27 @@ class DeclarativeRuleEvaluator:
             if left.dimension != right.dimension:
                 raise ValueError("Dimension mismatch")
             lhs, rhs = left.amount, right.amount
+            if operation == "eq":
+                return lhs == rhs
+            if operation == "ne":
+                return lhs != rhs
+            if operation == "lt":
+                return lhs < rhs
+            if operation == "le":
+                return lhs <= rhs
+            if operation == "gt":
+                return lhs > rhs
+            if operation == "ge":
+                return lhs >= rhs
         elif isinstance(left, str) and isinstance(right, str) and operation in {"eq", "ne"}:
-            lhs, rhs = left, right
+            return left == right if operation == "eq" else left != right
         elif isinstance(left, bool) and isinstance(right, bool) and operation in {"eq", "ne"}:
-            lhs, rhs = left, right
+            return left == right if operation == "eq" else left != right
         else:
             raise ValueError("Incompatible compared types")
-        return {"eq": lambda: lhs == rhs, "ne": lambda: lhs != rhs,
-                "lt": lambda: lhs < rhs, "le": lambda: lhs <= rhs,
-                "gt": lambda: lhs > rhs, "ge": lambda: lhs >= rhs}[operation]()
+        raise KeyError(operation)
 
-    def _eval(self, expr: Any, inputs: Mapping[str, Any],
-              units: Mapping[str, str], depth: int, counter: list[int]) -> bool:
+    def _eval(self, expr: Any, inputs: Mapping[str, Any], units: Mapping[str, str], depth: int, counter: list[int]) -> bool:
         if depth > self.max_depth:
             raise UnsupportedEvaluation("Rule expression nesting limit exceeded")
         counter[0] += 1
@@ -274,6 +291,8 @@ class RulesRegistry:
         self.repository = repository
         self.evaluator = evaluator or DeclarativeRuleEvaluator()
 
+        logger.info(f"Rules Registry initialized")
+
     def register_rule(self, *, spec: dict[str, Any], access: AccessContext,
                       source_requirement_id: str | None = None,
                       scope: Scope = Scope.GLOBAL,
@@ -293,8 +312,7 @@ class RulesRegistry:
                              "review_status": "candidate"},
                             source_ids=requirement.draft.source_ids if requirement else (),
                             status=Lifecycle.DRAFT)
-        record = self.repository.create(draft, access, record_id=record_id,
-                                        reason="declarative rule candidate registered")
+        record = self.repository.create(draft, access, record_id=record_id, reason="declarative rule candidate registered")
         if source_requirement_id:
             self.repository.link(record.record_id, source_requirement_id, access)
         return record
@@ -333,7 +351,15 @@ class RulesRegistry:
                                      "evaluated_at": evaluation.evaluated_at,
                                      "compliance_certification": False},
                             source_ids=rule.draft.source_ids)
-        result = self.repository.create(draft, access, record_id=record_id,
-                                        reason="scope-bounded declarative rule assessment")
+        result = self.repository.create(draft, access, record_id=record_id, reason="scope-bounded declarative rule assessment")
         self.repository.link(result.record_id, evaluation.rule_id, access)
         return result
+
+
+__all__ = [
+    "UnitDefinition",
+    "DEFAULT_UNITS",
+    "Number",
+    "DeclarativeRuleEvaluator",
+    "RulesRegistry",
+]

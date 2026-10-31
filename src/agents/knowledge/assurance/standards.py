@@ -10,23 +10,22 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Mapping
 
-from .contracts import (AccessContext, Applicability, Lifecycle, RecordDraft,
-                        RecordRevision, Scope, ValidationFailure, normalize_time,
-                        validate_id, utc_now)
+from .contracts import *
 from .repository import KnowledgeRepository
+from ..utils.config_loader import get_config_section, load_global_config
+from ..utils.knowledge_errors import *
+from ..utils.knowledge_helpers import *
+from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
+
+
+logger = get_logger("Assurance Standards")
+printer = PrettyPrinter()
 
 
 STANDARD_STATES = frozenset({"draft", "published", "amended", "withdrawn", "superseded", "unknown"})
 REQUIREMENT_MODALITY = frozenset({"mandatory", "advisory", "conditional", "informative", "undetermined"})
 EVIDENCE_DIMENSIONS = frozenset({"authenticity", "edition", "integrity", "currency", "applicability", "interpretation"})
 EVIDENCE_VERDICTS = frozenset({"supported", "rejected", "inconclusive"})
-
-
-def _nonblank(payload: Mapping[str, Any], field: str, limit: int = 256) -> str:
-    value = payload.get(field)
-    if not isinstance(value, str) or not value.strip() or len(value) > limit:
-        raise ValidationFailure(f"{field} must be a nonempty string of at most {limit} characters")
-    return value.strip()
 
 
 def _contextual_applicability(criteria: Mapping[str, Any], context: Mapping[str, Any]) -> Applicability:
@@ -55,9 +54,9 @@ def _contextual_applicability(criteria: Mapping[str, Any], context: Mapping[str,
             normalized_at = normalize_time(str(at), "context.at")
             starts = normalize_time(effective_at.get("from"), "effective_at.from")
             ends = normalize_time(effective_at.get("until"), "effective_at.until")
-            if starts and normalized_at < starts:
+            if normalized_at is not None and starts is not None and normalized_at < starts:
                 reasons.append("Context precedes the specified effective period")
-            if ends and normalized_at >= ends:
+            if normalized_at is not None and ends is not None and normalized_at >= ends:
                 reasons.append("Context follows the specified effective period")
     if reasons:
         return Applicability("not_applicable", tuple(reasons))
@@ -71,6 +70,8 @@ class StandardsRegistry:
 
     def __init__(self, repository: KnowledgeRepository):
         self.repository = repository
+
+        logger.info(f"Standard registry initialized")
 
     def register_edition(self, *, standard_id: str, edition: str,
                          title: str, publisher: str, source_id: str,
@@ -117,8 +118,7 @@ class StandardsRegistry:
                verified_at: str | None = None, details: str = "") -> RecordRevision:
         """Record review evidence; a verified label is not generated from AI confidence."""
         if not access.can_attest or not access.can_write or not access.can_review:
-            from .contracts import AuthorizationDenied
-            raise AuthorizationDenied("Independent attestation permission required")
+            raise AuthorizationDenied("Independent attestation permission required", action="attest")
         if dimension not in EVIDENCE_DIMENSIONS or verdict not in EVIDENCE_VERDICTS:
             raise ValidationFailure("Invalid verification dimension or outcome")
         for name, value in (("source_id", source_id), ("evidence_id", evidence_id)):
@@ -130,8 +130,7 @@ class StandardsRegistry:
             raise ValidationFailure("Attestation target is not an accessible standard/requirement")
         data = dict(rec.draft.payload)
         if data.get("registered_by", data.get("extracted_by")) == access.principal_id:
-            from .contracts import AuthorizationDenied
-            raise AuthorizationDenied("Independent reviewer must differ from the original author")
+            raise AuthorizationDenied("Independent reviewer must differ from the original author", action="attest")
         previous = dict(data.get("verification", {}))
         attestation = {"dimension": dimension, "verdict": verdict,
                        "source_id": source_id, "evidence_id": evidence_id,
@@ -211,3 +210,13 @@ class StandardsRegistry:
                             "standard_verification": std.draft.payload.get("verification", {}),
                             "disclaimer": "Candidate match; not an assessment of legal obligation or compliance"})
         return outputs
+
+
+__all__ = [
+    "STANDARD_STATES",
+    "REQUIREMENT_MODALITY",
+    "EVIDENCE_DIMENSIONS",
+    "EVIDENCE_VERDICTS",
+    "_contextual_applicability",
+    "StandardsRegistry",
+]

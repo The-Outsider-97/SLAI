@@ -15,6 +15,12 @@ from .project import ProjectKnowledgeService
 from .repository import KnowledgeRepository
 from .rules import RulesRegistry
 from .standards import StandardsRegistry
+from ..utils.config_loader import get_config_section, load_global_config
+from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
+
+
+logger = get_logger("Assurance Gateway")
+printer = PrettyPrinter()
 
 
 class KnowledgeAssuranceGateway:
@@ -30,8 +36,9 @@ class KnowledgeAssuranceGateway:
         self.provenance_agent = provenance_agent
         self.verification_agent = verification_agent
 
-    def put_knowledge(self, draft: RecordDraft, access: AccessContext,
-                      *, record_id: str | None = None) -> RecordRevision:
+        logger.info(f"Knowledge Assurance Gateway initialized")
+
+    def put_knowledge(self, draft: RecordDraft, access: AccessContext, *, record_id: str | None = None) -> RecordRevision:
         return self.repository.create(draft, access, record_id=record_id)
 
     def revise_knowledge(self, record_id: str, expected_revision: int,
@@ -64,3 +71,6 @@ class KnowledgeAssuranceGateway:
         if self.verification_agent is None:
             raise RuntimeError("VerificationAgent not attached; cannot verify formal property")
         return self.verification_agent.verify(request)
+
+
+__all__ = ["KnowledgeAssuranceGateway"]

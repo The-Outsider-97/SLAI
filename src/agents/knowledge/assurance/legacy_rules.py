@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import ast
 import math
+
 from typing import Any, Mapping
 
-from .contracts import ValidationFailure, json_object
+from ..utils.config_loader import get_config_section, load_global_config
+from ..utils.knowledge_errors import *
+from ..utils.knowledge_helpers import *
+from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
 
 
-class UnsafeLegacyRule(ValidationFailure):
-    pass
+logger = get_logger("Assurance Legacy Rules")
+printer = PrettyPrinter()
 
 
 _MAX_SCRIPT = 8000
@@ -23,18 +27,6 @@ _MAX_NODES = 180
 _MAX_STEPS = 300
 _MAX_FACTS = 32
 _MAX_STRING = 1024
-
-
-def _reject(message: str) -> None:
-    raise UnsafeLegacyRule(f"Unsupported legacy rule: {message}")
-
-
-def _safe_number(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        _reject("numeric expression expected")
-    if not math.isfinite(float(value)) or abs(float(value)) > 1e12:
-        _reject("non-finite or oversized numeric expression")
-    return float(value)
 
 
 def _expr(node: ast.AST, kb: Mapping[str, Any], steps: list[int], depth: int = 0) -> Any:
@@ -139,10 +131,14 @@ def _statements(body: list[ast.stmt], kb: Mapping[str, Any],
             continue
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
             target = stmt.targets[0]
-            if (not isinstance(target, ast.Subscript) or not isinstance(target.value, ast.Name)
-                    or target.value.id != "inferred"):
+            key: Any = None
+            if isinstance(target, ast.Subscript):
+                if isinstance(target.value, ast.Name) and target.value.id == "inferred":
+                    key = _expr(target.slice, kb, steps, depth + 1)
+                else:
+                    _reject("assignment target")
+            else:
                 _reject("assignment target")
-            key = _expr(target.slice, kb, steps, depth + 1)
             if not isinstance(key, str) or not key or len(key) > 128:
                 _reject("fact identifier")
             value = _safe_number(_expr(stmt.value, kb, steps, depth + 1))
@@ -178,3 +174,10 @@ def interpret_legacy_rule_code(rule_code: str, knowledge_base: Mapping[Any, Any]
     inferred: dict[str, float] = {}
     _statements(tree.body, kb, inferred, [0])
     return inferred
+
+
+__all__ = [
+    "_expr",
+    "_statements",
+    "interpret_legacy_rule_code",
+]

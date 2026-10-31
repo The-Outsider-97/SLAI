@@ -9,9 +9,16 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Mapping
 
-from .contracts import (AccessContext, Lifecycle, RecordDraft, RecordRevision,
-                        Scope, ValidationFailure, validate_id)
+from .contracts import AccessContext, Lifecycle, RecordDraft, RecordRevision, Scope
 from .repository import KnowledgeRepository
+from ..utils.config_loader import get_config_section, load_global_config
+from ..utils.knowledge_errors import *
+from ..utils.knowledge_helpers import *
+from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
+
+
+logger = get_logger("Assurance Project")
+printer = PrettyPrinter()
 
 
 PROJECT_KINDS = frozenset({
@@ -24,6 +31,8 @@ PROJECT_KINDS = frozenset({
 class ProjectKnowledgeService:
     def __init__(self, repository: KnowledgeRepository):
         self.repository = repository
+
+        logger.info(f"Project Knowledge Service initialized")
 
     def register(self, *, project_id: str, kind: str, statement: str,
                  access: AccessContext, rationale: str = "", status: Lifecycle = Lifecycle.DRAFT,
@@ -45,31 +54,27 @@ class ProjectKnowledgeService:
         draft = RecordDraft(kind=kind, scope=Scope.PROJECT, project_id=project_id,
                             organization_id=organization_id, payload=payload,
                             source_ids=source_ids, evidence=evidence, status=status)
-        return self.repository.create(draft, access, record_id=record_id,
-                                      reason="project-scoped knowledge registered")
+        return self.repository.create(draft, access, record_id=record_id, reason="project-scoped knowledge registered")
 
     def approve(self, record_id: str, expected_revision: int, access: AccessContext,
                 *, approval_evidence_id: str, reason: str) -> RecordRevision:
         if not access.can_review:
             from .contracts import AuthorizationDenied
-            raise AuthorizationDenied("Approval permission required")
+            raise AuthorizationDenied("Approval permission required", action="approve project knowledge")
         validate_id(approval_evidence_id, "approval_evidence_id")
         existing = self.repository.get(record_id, access)
         if existing is None or existing.draft.kind not in PROJECT_KINDS:
             raise ValidationFailure("Accessible project knowledge required")
         if existing.draft.payload.get("author") == access.principal_id:
             from .contracts import AuthorizationDenied
-            raise AuthorizationDenied("Approval requires a reviewer distinct from original author")
+            raise AuthorizationDenied("Approval requires a reviewer distinct from original author",
+                                       action="approve project knowledge")
         updated = dict(existing.draft.payload)
-        updated["approval"] = {"reviewer": access.principal_id,
-                               "evidence_id": approval_evidence_id,
-                               "reason": reason}
+        updated["approval"] = {"reviewer": access.principal_id, "evidence_id": approval_evidence_id, "reason": reason}
         draft = replace(existing.draft, payload=updated, status=Lifecycle.ACTIVE)
-        return self.repository.revise(record_id, expected_revision, draft, access,
-                                      reason=f"independently approved: {reason}")
+        return self.repository.revise(record_id, expected_revision, draft, access, reason=f"independently approved: {reason}")
 
-    def revise(self, record_id: str, expected_revision: int, statement: str,
-               access: AccessContext, *, reason: str) -> RecordRevision:
+    def revise(self, record_id: str, expected_revision: int, statement: str, access: AccessContext, *, reason: str) -> RecordRevision:
         existing = self.repository.get(record_id, access)
         if existing is None or existing.draft.kind not in PROJECT_KINDS:
             raise ValidationFailure("Accessible project knowledge required")
@@ -79,20 +84,17 @@ class ProjectKnowledgeService:
         payload["statement"] = statement.strip()
         payload["approval"] = None  # Changing an approved statement invalidates its approval.
         return self.repository.revise(record_id, expected_revision,
-                                      replace(existing.draft, payload=payload,
-                                              status=Lifecycle.DRAFT),
+                                      replace(existing.draft, payload=payload, status=Lifecycle.DRAFT),
                                       access, reason=reason)
 
-    def project_records(self, project_id: str, access: AccessContext, *,
-                        kind: str | None = None, limit: int = 100) -> list[RecordRevision]:
+    def project_records(self, project_id: str, access: AccessContext, *, kind: str | None = None, limit: int = 100) -> list[RecordRevision]:
         validate_id(project_id, "project_id")
         return self.repository.query(access, kind=kind, project_id=project_id, limit=limit)
 
     def affected_by(self, record_id: str, access: AccessContext) -> list[dict[str, Any]]:
         return self.repository.impacts(record_id, access)
 
-    def inherited_rule_candidates(self, project_id: str, access: AccessContext,
-                                  *, limit: int = 200) -> list[dict[str, Any]]:
+    def inherited_rule_candidates(self, project_id: str, access: AccessContext, *, limit: int = 200) -> list[dict[str, Any]]:
         """Return visible candidates; NEVER silently override law/safety priority."""
         validate_id(project_id, "project_id")
         result: list[dict[str, Any]] = []
@@ -106,3 +108,6 @@ class ProjectKnowledgeService:
                            "precedence": "unresolved",
                            "verification_required": True})
         return result
+
+
+__all__ = ["ProjectKnowledgeService"]
