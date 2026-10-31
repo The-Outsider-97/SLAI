@@ -48,6 +48,7 @@ class RTHealth:
         self._lock = threading.RLock()
         self._component_health: Dict[str, ComponentHealth] = {}
         self._component_checks: Dict[str, Callable[[], ComponentHealth]] = {}
+        self._bound_components: Dict[str, Any] = {}  # explicit live references
         self._liveness_check = None
         self._readiness_check = None
 
@@ -162,7 +163,7 @@ class RTHealth:
         core = ["memory", "cache", "rule_engine", "governor"]
         for comp in core:
             health = self.get_component_health(comp)
-            if health is None or health.status == HealthStatus.UNHEALTHY:
+            if health is None or health.status != HealthStatus.HEALTHY:
                 logger.warning(f"Readiness failed: {comp} unhealthy")
                 return False
         return True
@@ -179,116 +180,66 @@ class RTHealth:
     # a global registry or dependency injection. In production, you would
     # inject references to the actual components.
     # -------------------------------------------------------------------------
-    def _check_memory(self) -> ComponentHealth:
-        """Check knowledge memory health."""
+    def bind_component(self, name: str, instance: Any) -> None:
+        """Bind a real live instance; default import-based checks are forbidden."""
+        if name not in self._component_checks:
+            raise KeyError(f"Unknown health component: {name}")
+        with self._lock:
+            self._bound_components[name] = instance
+
+    def _probe_bound(self, name: str) -> ComponentHealth:
+        with self._lock:
+            instance = self._bound_components.get(name)
+        if instance is None:
+            return ComponentHealth(component=name, status=HealthStatus.UNHEALTHY,
+                                   message="No live instance bound; health not established")
         try:
-            # This would call knowledge_memory.get_statistics() etc.
-            # For now, assume memory is healthy if we can import and config exists.
-            from ..knowledge_memory import KnowledgeMemory
-            # Simulate: if memory instance is available, check size
-            # In real code, access via orchestrator or global registry.
-            return ComponentHealth(
-                component="memory",
-                status=HealthStatus.HEALTHY,
-                message="Memory operational"
-            )
-        except Exception as e:
-            return ComponentHealth(
-                component="memory",
-                status=HealthStatus.UNHEALTHY,
-                message=f"Memory check failed: {e}"
-            )
+            if name == "memory":
+                stats = instance.get_statistics()
+                if not isinstance(stats, dict):
+                    raise RuntimeError("No valid live memory statistics")
+                return ComponentHealth(name, HealthStatus.HEALTHY, "Live memory probe successful",
+                                       details={"total_entries": stats.get("total_entries", 0)})
+            if name == "cache":
+                count = len(instance)
+                return ComponentHealth(name, HealthStatus.HEALTHY, "Live cache probe successful",
+                                       details={"entries": count})
+            if name == "ontology":
+                with instance._connect() as conn:
+                    conn.execute("SELECT count(*) FROM ontology").fetchone()
+                return ComponentHealth(name, HealthStatus.HEALTHY, "Live ontology database probe successful")
+            if name == "rule_engine":
+                if not hasattr(instance, "get_failure_stats"):
+                    raise RuntimeError("No live rule failure metrics")
+                instance.get_failure_stats()
+                return ComponentHealth(name, HealthStatus.DEGRADED,
+                                       "Instance bound, but safety/evaluation readiness not independently proven")
+            return ComponentHealth(name, HealthStatus.DEGRADED,
+                                   "Instance bound; no side-effect-free independent readiness probe")
+        except Exception as exc:
+            return ComponentHealth(name, HealthStatus.UNHEALTHY,
+                                   message=f"Live probe failed: {type(exc).__name__}: {exc}")
+
+    def _check_memory(self) -> ComponentHealth:
+        return self._probe_bound("memory")
 
     def _check_cache(self) -> ComponentHealth:
-        try:
-            from ..knowledge_cache import KnowledgeCache
-            return ComponentHealth(
-                component="cache",
-                status=HealthStatus.HEALTHY,
-                message="Cache operational"
-            )
-        except Exception as e:
-            return ComponentHealth(
-                component="cache",
-                status=HealthStatus.UNHEALTHY,
-                message=f"Cache check failed: {e}"
-            )
+        return self._probe_bound("cache")
 
     def _check_rule_engine(self) -> ComponentHealth:
-        try:
-            from ..modules.rule_engine import RuleEngine
-            # In production, check if rule engine has loaded rules and no excessive failures
-            return ComponentHealth(
-                component="rule_engine",
-                status=HealthStatus.HEALTHY,
-                message="Rule engine operational"
-            )
-        except Exception as e:
-            return ComponentHealth(
-                component="rule_engine",
-                status=HealthStatus.UNHEALTHY,
-                message=f"Rule engine check failed: {e}"
-            )
+        return self._probe_bound("rule_engine")
 
     def _check_governor(self) -> ComponentHealth:
-        try:
-            from ..governor import Governor
-            return ComponentHealth(
-                component="governor",
-                status=HealthStatus.HEALTHY,
-                message="Governor operational"
-            )
-        except Exception as e:
-            return ComponentHealth(
-                component="governor",
-                status=HealthStatus.UNHEALTHY,
-                message=f"Governor check failed: {e}"
-            )
+        return self._probe_bound("governor")
 
     def _check_sync(self) -> ComponentHealth:
-        try:
-            from ..knowledge_sync import KnowledgeSynchronizer
-            return ComponentHealth(
-                component="sync",
-                status=HealthStatus.HEALTHY,
-                message="Sync operational"
-            )
-        except Exception as e:
-            return ComponentHealth(
-                component="sync",
-                status=HealthStatus.UNHEALTHY,
-                message=f"Sync check failed: {e}"
-            )
+        return self._probe_bound("sync")
 
     def _check_action_executor(self) -> ComponentHealth:
-        try:
-            from ..perform_action import PerformAction
-            return ComponentHealth(
-                component="action_executor",
-                status=HealthStatus.HEALTHY,
-                message="Action executor operational"
-            )
-        except Exception as e:
-            return ComponentHealth(
-                component="action_executor",
-                status=HealthStatus.UNHEALTHY,
-                message=f"Action executor check failed: {e}"
-            )
+        return self._probe_bound("action_executor")
 
     def _check_ontology(self) -> ComponentHealth:
-        try:
-            from ..ontology_manager import OntologyManager
-            return ComponentHealth(
-                component="ontology",
-                status=HealthStatus.HEALTHY,
-                message="Ontology manager operational"
-            )
-        except Exception as e:
-            return ComponentHealth(
-                component="ontology",
-                status=HealthStatus.UNHEALTHY,
-                message=f"Ontology check failed: {e}"
-            )
+        return self._probe_bound("ontology")
 
 
 if __name__ == "__main__":

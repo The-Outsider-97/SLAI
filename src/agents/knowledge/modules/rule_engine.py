@@ -15,6 +15,7 @@ from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeou
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from .inference_result import InferenceResult, InferenceTrace
+from ..assurance.legacy_rules import interpret_legacy_rule_code
 from ..utils.knowledge_errors import *
 from ..utils.knowledge_helpers import *
 from ..utils.config_loader import load_global_config, get_config_section
@@ -28,29 +29,11 @@ printer = PrettyPrinter()
 # Worker function – runs in a separate process (must be at module level for pickling)
 # -----------------------------------------------------------------------------
 def _run_rule_code(rule_code: str, knowledge_base: Dict[Any, Any]) -> Dict[Any, Any]:
-    """
-    Execute rule code in a restricted environment.
-    Returns inferred facts dict.
-    """
-    safe_globals = {
-        '__builtins__': {
-            'abs': abs, 'all': all, 'any': any, 'bool': bool,
-            'dict': dict, 'enumerate': enumerate, 'float': float,
-            'int': int, 'len': len, 'list': list, 'max': max,
-            'min': min, 'range': range, 'round': round, 'set': set,
-            'str': str, 'sum': sum, 'tuple': tuple, 'zip': zip,
-            'True': True, 'False': False, 'None': None,
-        },
-        'kb': knowledge_base,
-    }
-    local_ns = {'inferred': {}}
-    exec(rule_code, safe_globals, local_ns)
-    result = local_ns.get('inferred', {})
-    if not isinstance(result, dict):
-        raise TypeError(f"Rule returned {type(result)}, expected dict")
-    return result
+    """P0: interpret only a bounded data-only legacy subset. Never exec Python."""
+    return interpret_legacy_rule_code(rule_code, knowledge_base)
 
 
+# -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # Rule Engine - Production Ready (no daemonic nesting)
 # -----------------------------------------------------------------------------

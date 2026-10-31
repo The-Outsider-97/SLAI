@@ -224,6 +224,32 @@ class Deadline:
         return max(0.0, self.expires_at - time.monotonic())
 
 
+_GUARDED_POW = "__guarded_pow__"
+
+
+def _guarded_pow(base: Any, exponent: Any) -> Any:
+    """Exponentiation on floats only.
+
+    Plain ``int ** int`` is unbounded (``9**9**9`` never finishes). Converting both
+    operands to ``float`` makes the cost constant; results that do not fit a float
+    raise ``OverflowError`` (an ``ArithmeticError``, reported as an evaluation error).
+    """
+    return float(base) ** float(exponent)
+
+
+class _PowerGuard(ast.NodeTransformer):
+    """Rewrite ``a ** b`` into ``__guarded_pow__(a, b)`` after validation."""
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.op, ast.Pow):
+            return ast.copy_location(
+                ast.Call(func=ast.Name(id=_GUARDED_POW, ctx=ast.Load()), args=[node.left, node.right], keywords=[]),
+                node,
+            )
+        return node
+
+
 class _ExpressionVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.names: set[str] = set()
@@ -272,6 +298,9 @@ def compile_expression(
                     context={"source": source},
                 )
 
+    if _GUARDED_POW in visitor.names:
+        raise OptimizationValidationError("Reserved identifier in expression", context={"source": source})
+    tree = ast.fix_missing_locations(_PowerGuard().visit(tree))
     code = compile(tree, filename="<optimization-expression>", mode="eval")
     references = frozenset(
         name
@@ -288,6 +317,7 @@ def compile_expression(
                     context={"reference": name, "source": source},
                 )
             namespace[name] = require_finite(values[name], name)
+        namespace[_GUARDED_POW] = _guarded_pow
         try:
             raw = eval(code, {"__builtins__": {}}, namespace)
         except OptimizationEvaluationError:

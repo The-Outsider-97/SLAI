@@ -186,23 +186,15 @@ class PerformAction:
             logger.error("Failed to load action history: %s", exc)
 
     def from_knowledge(self, knowledge_batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process a document batch with bounded concurrency and explicit result locking."""
-        results: List[Dict[str, Any]] = []
-        threads: List[threading.Thread] = []
+        """P0 fail-closed: untrusted document text cannot authorize side effects.
 
-        for doc in knowledge_batch or []:
-            thread = threading.Thread(
-                target=self._process_document,
-                args=(doc, results, self._result_lock),
-                daemon=True,
-            )
-            thread.start()
-            threads.append(thread)
-
-        for thread in threads:
-            thread.join()
-
-        return results
+        External trusted actions belong to the explicit Execution/Handler boundary.
+        The legacy convenience route is intentionally disabled.
+        """
+        if not isinstance(knowledge_batch, list):
+            raise TypeError("knowledge_batch must be a list")
+        return [{"status": "rejected", "reason": "knowledge_document_actions_disabled"}
+                for _ in knowledge_batch]
 
     def _process_document(
         self,
