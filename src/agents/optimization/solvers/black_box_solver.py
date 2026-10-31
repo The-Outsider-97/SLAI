@@ -49,6 +49,7 @@ class _BudgetStop(RuntimeError):
 @dataclass
 class _EvaluationState:
     evaluations: int = 0
+    restored_evaluations: int = 0
     cache_hits: int = 0
     failures: int = 0
     best_feasible_point: dict[str, Any] | None = None
@@ -190,6 +191,7 @@ class BlackBoxSolver(BaseSolver):
                 point = dict(entry["point"])
                 cache[cache_key] = (entry["signed"], entry["violation"], point)
                 state.evaluations += 1
+                state.restored_evaluations += 1
                 if entry["failed"]:
                     state.failures += 1
                 else:
@@ -425,6 +427,7 @@ class BlackBoxSolver(BaseSolver):
             "message": backend_message,
             "evaluation_budget": budget,
             "unique_evaluations": state.evaluations,
+            "restored_evaluations": state.restored_evaluations,
             "cache_hits": state.cache_hits,
             "evaluation_failures": state.failures,
             "cached_points": len(cache),
