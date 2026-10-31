@@ -81,9 +81,9 @@ class EvaluationJournal:
             failed = item.get("failed")
             if (
                 not isinstance(point, dict)
-                or any(not isinstance(k, str) or isinstance(v, bool) or
-                       not isinstance(v, (float, int, str)) or
-                       (isinstance(v, float) and not math.isfinite(v))
+                or any(not isinstance(k, str)
+                       or not isinstance(v, (type(None), bool, float, int, str))
+                       or (isinstance(v, float) and not math.isfinite(v))
                        for k, v in point.items())
                 or isinstance(signed, bool) or not isinstance(signed, (int, float))
                 or not math.isfinite(signed)
@@ -117,10 +117,17 @@ class EvaluationJournal:
             raise OptimizationValidationError("evaluation cache key must be nonempty")
         if not math.isfinite(signed) or not math.isfinite(violation) or violation < 0:
             raise OptimizationValidationError("evaluation cache cannot store nonfinite scores")
+        if any(not isinstance(k, str)
+               or not isinstance(v, (type(None), bool, float, int, str))
+               or (isinstance(v, float) and not math.isfinite(v))
+               for k, v in point.items()):
+            raise OptimizationValidationError(
+                "checkpoint point supports only JSON scalar values; structured categories are unsupported"
+            )
         entry = {"point": dict(point), "signed": float(signed),
                  "violation": float(violation), "failed": bool(failed)}
-        # Serialization validation precedes mutation, so an unsupported
-        # categorical value cannot corrupt an otherwise valid checkpoint.
+        # Validate before mutation so unsupported values cannot partially
+        # replace an existing durable checkpoint.
         json.dumps(entry, allow_nan=False)
         self.entries[key] = entry
         self.save()
