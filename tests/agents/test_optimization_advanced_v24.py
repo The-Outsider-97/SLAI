@@ -123,7 +123,8 @@ def test_cvar_epigraph_matches_finite_empirical_distribution():
 def test_checkpoint_save_load_rejects_wrong_identity_and_tampering(tmp_path):
     path = tmp_path / "evaluation_checkpoint.json"
     journal = EvaluationJournal(path, identity="problem-v1")
-    journal.record("key", point={"x": 0.5}, signed=0.25, violation=0., failed=False)
+    journal.record("key", point={"x": 0.5}, signed=0.25, violation=0.,
+                   failed=False, feasible=True)
     journal.set_progress({"x": [0.5], "mesh": 0.5, "current": 0.25, "iterations": 3})
     restored = EvaluationJournal(path, identity="problem-v1", resume=True)
     assert restored.lookup("key")["signed"] == pytest.approx(0.25)
@@ -241,3 +242,38 @@ def test_real_scipy_solver_on_finite_scenario_expected_loss():
     assert result.solution.primal_solution is not None
     assert result.solution.primal_solution["x"] == pytest.approx(0.0, abs=1e-3)
     assert result.solution.feasibility.value == "feasible"
+
+
+def test_feasibility_evidence_evaluates_expensive_constraints_once():
+    from src.agents.optimization.optimization_math import feasibility_evidence
+    from src.agents.optimization.optimization_types import Constraint
+    evaluations = {"count": 0}
+    def costly_constraint(point):
+        evaluations["count"] += 1
+        return point["x"]
+    problem = OptimizationProblem(
+        "single_pass",
+        (Variable("x", VariableDomain.real(-5, 5)),),
+        (Objective("f", linear={"x": 1.}),),
+        constraints=(Constraint("budget", sense=ConstraintSense.LE,
+                                rhs=2., function=costly_constraint, tolerance=1e-4),),
+    )
+    maximum, feasible = feasibility_evidence(problem, {"x": 2.00005}, tolerance=1e-8)
+    assert maximum == pytest.approx(5e-5)
+    assert feasible
+    assert evaluations["count"] == 1
+    maximum, feasible = feasibility_evidence(problem, {"x": 3.}, tolerance=1e-8)
+    assert maximum == pytest.approx(1.)
+    assert not feasible
+    assert evaluations["count"] == 2
+
+
+def test_checkpoint_rejects_nonroundtrippable_categorical_values(tmp_path):
+    journal = EvaluationJournal(tmp_path / "categorical.json", identity="rev1")
+    with pytest.raises(OptimizationValidationError):
+        journal.record("object-key", point={"category": ("nested", 3)},
+                       signed=0., violation=0., failed=False, feasible=True)
+    journal.record("primitive", point={"category": "red", "enabled": True},
+                   signed=0., violation=0., failed=False, feasible=True)
+    restored = EvaluationJournal(journal.path, identity="rev1", resume=True)
+    assert restored.lookup("primitive")["point"] == {"category": "red", "enabled": True}
