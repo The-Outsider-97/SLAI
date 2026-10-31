@@ -2323,7 +2323,7 @@ def inspect_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
     manifest = loaded.manifest
     report: dict[str, Any] = {"container": loaded.kind, "format": FORMAT_ID,
                               "version": manifest["version"],
-                              "newer_than_known": _parse_version(manifest["version"]) > _parse_version(LATEST_KNOWN_VERSION)
+                              "newer_than_known": _parse_version(manifest["version"])[:2] > _parse_version(LATEST_KNOWN_VERSION)[:2]
                                   if loaded.kind != "legacy" else False,
                               "supported": True, "requires": [],
                               "unsupported_requires": [], "document_id": None,
@@ -2390,7 +2390,7 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
     title = document.get("title") if isinstance(document.get("title"), str) else ""
     title = title[:2048]
     unknown_features = sorted(set(loaded.manifest["requires"]) - SUPPORTED_FEATURES)
-    future_version = _parse_version(loaded.manifest["version"]) > _parse_version(LATEST_KNOWN_VERSION)
+    future_version = _parse_version(loaded.manifest["version"])[:2] > _parse_version(LATEST_KNOWN_VERSION)[:2]
     known_document_keys = {
         "schema", "id", "title", "language", "blocks", "publication", "metadata",
         "provenance", "styles", "sections", "references", "embeds", "history",
