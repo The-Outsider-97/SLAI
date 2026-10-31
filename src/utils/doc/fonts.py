@@ -49,6 +49,23 @@ def _name(font: Any, *ids: int) -> str | None:
     return None
 
 
+def _license_for(path: Path, root: Path) -> Path | None:
+    """Find the redistributed family's licence, including deeper static/face folders.
+
+    A missing licence does not mean that a font is free to redistribute. We
+    deliberately exclude such faces from the public bundled-font catalogue.
+    """
+    names = ("OFL.txt", "LICENSE.txt", "LICENCE.txt", "LICENSE", "LICENCE", "COPYING.txt", "COPYING")
+    directory = path.parent
+    while directory != root and directory.is_relative_to(root):
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file() and not candidate.is_symlink() and candidate.resolve().is_relative_to(root):
+                return candidate
+        directory = directory.parent
+    return None
+
+
 def _read_face(path: Path, root: Path) -> FontFace | None:
     try:
         from fontTools.ttLib import TTFont
@@ -67,11 +84,14 @@ def _read_face(path: Path, root: Path) -> FontFace | None:
         logging.getLogger(__name__).warning("Skipping invalid document font %s: %s", path.name, exc)
         return None
     rel = path.relative_to(root).as_posix()
-    license_path = next((p for p in (path.parent / "OFL.txt", path.parent.parent / "OFL.txt")
-                         if p.is_file() and p.resolve().is_relative_to(root)), None)
+    license_path = _license_for(path, root)
+    if license_path is None:
+        import logging
+        logging.getLogger(__name__).warning("Skipping bundled font without a licence file: %s", rel)
+        return None
     return FontFace(sha256(rel.encode("utf-8")).hexdigest()[:24], family, subfamily,
                     weight, italic, _FORMATS[path.suffix.casefold()], path, axes, coverage,
-                    license_path.relative_to(root).as_posix() if license_path else None)
+                    license_path.relative_to(root).as_posix())
 
 
 @lru_cache(maxsize=4)
