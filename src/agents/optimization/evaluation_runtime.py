@@ -61,7 +61,10 @@ class EvaluationJournal:
         if not isinstance(data, dict) or data.get("version") != self.SCHEMA_VERSION:
             raise OptimizationValidationError("unsupported evaluation checkpoint schema")
         checksum = data.pop("sha256", None)
-        encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        try:
+            encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise OptimizationValidationError("evaluation checkpoint contains non-JSON-safe data") from exc
         if not isinstance(checksum, str) or hashlib.sha256(encoded.encode("utf-8")).hexdigest() != checksum:
             raise OptimizationValidationError("evaluation checkpoint checksum mismatch")
         if data.get("identity") != self.identity:
