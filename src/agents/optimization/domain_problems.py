@@ -195,11 +195,8 @@ def trajectory_problem(
     def points(x: Mapping[str, Any]) -> tuple[tuple[float, ...], ...]:
         return trajectory_samples(x, a, b, intervals)
     def derivative_norms(x: Mapping[str, Any], order: int) -> tuple[float, ...]:
-        ps = points(x)
-        seq: tuple[tuple[float, ...], ...] = ps
-        for _ in range(order):
-            seq = tuple(tuple((seq[i + 1][k] - seq[i][k]) / h for k in range(len(a))) for i in range(len(seq) - 1))
-        return tuple(math.sqrt(_squared(v)) for v in seq)
+        sequence = sampled_trajectory_derivatives(points(x), duration, order=order)
+        return tuple(math.sqrt(_squared(v)) for v in sequence)
     def cost(x: Mapping[str, Any]) -> float:
         return h * (aw * sum(v * v for v in derivative_norms(x, 2))
                     + jw * sum(v * v for v in derivative_norms(x, 3)))
