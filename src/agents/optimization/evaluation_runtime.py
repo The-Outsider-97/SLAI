@@ -9,6 +9,7 @@ All callbacks must be trusted. Persistence is synchronous and single-writer.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -59,6 +60,10 @@ class EvaluationJournal:
             raise OptimizationValidationError("evaluation checkpoint is missing or invalid") from exc
         if not isinstance(data, dict) or data.get("version") != self.SCHEMA_VERSION:
             raise OptimizationValidationError("unsupported evaluation checkpoint schema")
+        checksum = data.pop("sha256", None)
+        encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if not isinstance(checksum, str) or hashlib.sha256(encoded.encode("utf-8")).hexdigest() != checksum:
+            raise OptimizationValidationError("evaluation checkpoint checksum mismatch")
         if data.get("identity") != self.identity:
             raise OptimizationValidationError("evaluation checkpoint identity mismatch; refusing stale reuse")
         raw = data.get("entries")
@@ -130,6 +135,8 @@ class EvaluationJournal:
             "entries": self.entries,
             "progress": self.progress,
         }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        payload["sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         data = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
         if len(data.encode("utf-8")) > self.maximum_bytes:
             raise OptimizationValidationError("evaluation checkpoint exceeds configured size limit")
