@@ -221,3 +221,23 @@ def test_mixed_variable_black_box_uses_existing_canonical_solver():
     assert result.feasibility.value == "feasible"
     assert result.primal_solution["integer"] == int(result.primal_solution["integer"])
     assert result.primal_solution["flag"] in (0, 1)
+
+
+def test_real_scipy_solver_on_finite_scenario_expected_loss():
+    from src.agents.optimization.optimization_solver import OptimizationSolver
+    from src.agents.optimization.optimization_math import with_classification
+    problem = expected_scenario_problem(
+        "quadratic_finite_scenarios",
+        variables=(Variable("x", VariableDomain.real(-3., 3.), initial=1.),),
+        scenario_losses=(lambda p: (p["x"] - 1.)**2,
+                         lambda p: (p["x"] + 1.)**2),
+    )
+    result = OptimizationSolver(config={"use_memory_warm_start": False}).solve_single_detailed(
+        with_classification(problem), solver="scipy_nonlinear",
+        options={"max_iterations": 150},
+    )
+    assert result.solution is not None
+    assert result.solution.success
+    assert result.solution.primal_solution is not None
+    assert result.solution.primal_solution["x"] == pytest.approx(0.0, abs=1e-3)
+    assert result.solution.feasibility.value == "feasible"
