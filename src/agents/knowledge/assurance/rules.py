@@ -6,6 +6,12 @@ engine, optimizer, arbitrary program runner, or substitute for VerificationAgent
 Domain-specific methods must use explicitly reviewed external adapters.
 """
 from __future__ import annotations
+from .contracts import AuthorizationDenied, NotFound, RevisionConflict, normalize_time, validate_id, json_object
+from .acl import can_read
+import uuid
+import json
+import sqlite3
+from typing import Iterable
 
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
@@ -363,3 +369,179 @@ __all__ = [
     "DeclarativeRuleEvaluator",
     "RulesRegistry",
 ]
+
+@dataclass(frozen=True, slots=True)
+class AssessmentSnapshot:
+    assessment_id: str
+    project_id: str
+    object_record_id: str
+    object_revision: int
+    rule_record_id: str
+    rule_revision: int
+    outcome: RuleOutcome
+    evaluator: str
+    input_digest: str
+    context_digest: str
+    valid_at: str
+    evaluated_at: str
+    recorded_at: str
+    actor_id: str
+    evidence_refs: tuple[str, ...]
+    assessment_digest: str
+    stale: bool = False
+    stale_causes: tuple[str, ...] = ()
+
+
+class AssessmentService:
+    def __init__(self, repository: KnowledgeRepository, rules: RulesRegistry):
+        self.repository = repository
+        self.rules = rules
+
+    @staticmethod
+    def _from_row(db: sqlite3.Connection, row: sqlite3.Row,
+                  as_known: str | None = None) -> AssessmentSnapshot:
+        query = """SELECT changed_record_id, changed_revision, reason FROM assessment_stale_events
+                   WHERE assessment_id=?"""
+        params: list[Any] = [row["assessment_id"]]
+        if as_known:
+            query += " AND recorded_at<=?"
+            params.append(as_known)
+        query += " ORDER BY recorded_at, changed_record_id, changed_revision"
+        causes = db.execute(query, params).fetchall()
+        return AssessmentSnapshot(
+            assessment_id=row["assessment_id"], project_id=row["project_id"],
+            object_record_id=row["object_record_id"], object_revision=row["object_revision"],
+            rule_record_id=row["rule_record_id"], rule_revision=row["rule_revision"],
+            outcome=RuleOutcome(row["outcome"]), evaluator=row["evaluator"],
+            input_digest=row["input_digest"], context_digest=row["context_digest"],
+            valid_at=row["valid_at"], evaluated_at=row["evaluated_at"],
+            recorded_at=row["recorded_at"], actor_id=row["actor_id"],
+            evidence_refs=tuple(json.loads(row["evidence_refs_json"])),
+            assessment_digest=row["assessment_digest"], stale=bool(causes),
+            stale_causes=tuple(f"{r['reason']}:{r['changed_record_id']}:{r['changed_revision']}" for r in causes),
+        )
+
+    def evaluate_and_record(self, *, project_id: str, object_record_id: str,
+                            rule_record_id: str, inputs: dict[str, Any],
+                            access: AccessContext, valid_at: str,
+                            context: Mapping[str, Any] | None = None,
+                            evidence_refs: Iterable[str] = (),
+                            additional_dependencies: Iterable[str] = (),
+                            assessment_id: str | None = None) -> AssessmentSnapshot:
+        """Evaluate an approved rule and pin its exact revision and input digest.
+
+        `access` MUST originate from a trusted application authentication boundary;
+        merely providing an AccessContext object is not identity verification.
+        """
+        validate_id(project_id, "project_id")
+        validate_id(object_record_id, "object_record_id")
+        validate_id(rule_record_id, "rule_record_id")
+        if project_id not in access.project_ids or not access.can_write:
+            raise AuthorizationDenied(access.principal_id if access is not None else "anonymous", "knowledge_access", details={"reason": "Project write permission required"})
+        valid_at = normalize_time(valid_at, "valid_at")
+        if valid_at is None:
+            raise ValidationFailure("valid_at is required")
+        serialized_inputs = json_object(inputs, "inputs", max_bytes=131072)
+        serialized_context = json_object(dict(context or {}), "context", max_bytes=16384)
+        extra = tuple(sorted(set(validate_id(x, "dependency_id") for x in additional_dependencies)))
+        evidence = tuple(sorted(set(validate_id(x, "evidence_ref") for x in evidence_refs)))
+        if len(extra) > 64 or len(evidence) > 64:
+            raise ValidationFailure("Too many dependencies or evidence references")
+        assessment_id = validate_id(assessment_id or f"assessment:{uuid.uuid4().hex}", "assessment_id")
+        object_record = self.repository.get(object_record_id, access, as_valid=valid_at)
+        rule_record = self.repository.get(rule_record_id, access, as_valid=valid_at)
+        if object_record is None or rule_record is None:
+            raise NotFound("object_or_rule", object_record_id, details={"reason": "Accessible object and rule valid at assessment time are required"})
+        if object_record.draft.scope != Scope.PROJECT or object_record.draft.project_id != project_id:
+            raise ValidationFailure("Assessed object must belong to the selected project")
+        if rule_record.draft.kind != "design_rule":
+            raise ValidationFailure("Assessment rule must be a design_rule")
+        if (rule_record.draft.scope == Scope.PROJECT and rule_record.draft.project_id != project_id):
+            raise ValidationFailure("Another project's rule cannot be used")
+        outcome = self.rules.evaluate(rule_record_id, inputs=serialized_inputs, access=access)
+        if outcome.rule_revision != rule_record.revision:
+            raise RevisionConflict(rule_record_id, rule_record.revision, outcome.rule_revision)
+        if not outcome.input_digest:
+            raise ValidationFailure("Inputs cannot be represented reproducibly")
+        if outcome.evaluator != self.rules.evaluator.VERSION:
+            raise ValidationFailure("Unexpected rule evaluator version")
+        now = utc_now()
+        body = {
+            "assessment_id": assessment_id, "project_id": project_id,
+            "object_record_id": object_record_id, "object_revision": object_record.revision,
+            "rule_record_id": rule_record_id, "rule_revision": rule_record.revision,
+            "outcome": outcome.outcome.value, "evaluator": outcome.evaluator,
+            "input_digest": outcome.input_digest,
+            "context_digest": digest_json(serialized_context),
+            "valid_at": valid_at, "evaluated_at": outcome.evaluated_at,
+            "recorded_at": now, "actor_id": access.principal_id,
+            "evidence_refs": evidence,
+        }
+        with self.repository._lock, self.repository._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                deps = {object_record_id: object_record.revision, rule_record_id: rule_record.revision}
+                for dep_id in extra:
+                    dep_row = self.repository._latest_row(db, dep_id)
+                    if dep_row is None:
+                        raise NotFound("assessment_dependency", dep_id, details={"reason": "Assessment dependency unavailable"})
+                    dep = self.repository._decode(dep_row)
+                    if not can_read(dep.draft, access):
+                        raise NotFound("assessment_dependency", dep_id, details={"reason": "Assessment dependency unavailable"})
+                    if dep.draft.scope == Scope.PROJECT and dep.draft.project_id != project_id:
+                        raise ValidationFailure("Cannot bind cross-project assessment evidence")
+                    deps[dep_id] = dep.revision
+                for record_id, revision in deps.items():
+                    current = self.repository._latest_row(db, record_id)
+                    if current is None or current["revision"] != revision:
+                        raise RevisionConflict(record_id, revision, current["revision"] if current is not None else -1)
+                db.execute("""INSERT INTO assessment_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           (assessment_id, project_id, object_record_id, object_record.revision,
+                            rule_record_id, rule_record.revision, outcome.outcome.value,
+                            outcome.evaluator, outcome.input_digest, body["context_digest"], valid_at,
+                            outcome.evaluated_at, now, access.principal_id,
+                            json.dumps(evidence), digest_json(body)))
+                db.executemany("INSERT INTO assessment_dependencies VALUES(?,?,?)",
+                               [(assessment_id, rid, rev) for rid, rev in deps.items()])
+                db.commit()
+            except sqlite3.IntegrityError as exc:
+                db.rollback()
+                raise RevisionConflict(assessment_id, 0, 1) from exc
+            except Exception:
+                db.rollback()
+                raise
+        snapshot = self.get(assessment_id, access)
+        assert snapshot is not None
+        return snapshot
+
+    def get(self, assessment_id: str, access: AccessContext,
+            *, as_known: str | None = None) -> AssessmentSnapshot | None:
+        validate_id(assessment_id, "assessment_id")
+        as_known = normalize_time(as_known, "as_known")
+        with self.repository._connect() as db:
+            row = db.execute("SELECT * FROM assessment_snapshots WHERE assessment_id=?" +
+                             (" AND recorded_at<=?" if as_known else ""),
+                             (assessment_id, as_known) if as_known else (assessment_id,)).fetchone()
+            if row is None or row["project_id"] not in access.project_ids:
+                return None
+            return self._from_row(db, row, as_known)
+
+    def list_project(self, project_id: str, access: AccessContext,
+                     *, as_known: str | None = None, stale_only: bool = False,
+                     limit: int = 100) -> list[AssessmentSnapshot]:
+        validate_id(project_id, "project_id")
+        if project_id not in access.project_ids:
+            return []
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ValidationFailure("limit must be 1..1000")
+        as_known = normalize_time(as_known, "as_known")
+        sql = "SELECT * FROM assessment_snapshots WHERE project_id=?"
+        args: list[Any] = [project_id]
+        if as_known:
+            sql += " AND recorded_at<=?"
+            args.append(as_known)
+        sql += " ORDER BY recorded_at DESC,assessment_id LIMIT ?"
+        args.append(limit)
+        with self.repository._connect() as db:
+            snapshots = [self._from_row(db, r, as_known) for r in db.execute(sql, args)]
+        return [r for r in snapshots if r.stale] if stale_only else snapshots
