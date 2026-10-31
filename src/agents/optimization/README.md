@@ -189,6 +189,36 @@ Backend fallback is handled by `OptimizationSolver`. `OptimizationAgent.alternat
 
 Historical memory influences selection and initial values but is not a trained ranking model. Full multiobjective coverage, general mixed-integer nonlinear optimization, arbitrary tensor variables and global guarantees must not be inferred from the general problem representation.
 
+## Numerical Contract Corrections (2026-10-31)
+
+The canonical optimization arithmetic now treats open/strict variable bounds as
+**excluded endpoints**, even when a caller supplies a positive numerical
+feasibility tolerance. The numeric feasibility tolerance is still applied to
+non-strict constraints and ordinary residuals. Strict-bound endpoints cannot
+be made feasible by increasing tolerance; backends that do not represent
+strict inequalities must explicitly reject such inputs or use an authorized
+reformulation.
+
+The distance diagnostic for semi-continuous and semi-integer domains measures
+distance to the union of the isolated zero point and the permitted interval
+(or permitted integer lattice), instead of treating the lower bound as if it
+also constrained zero-adjacent values. These are domain diagnostics, not proofs
+that a full nonconvex problem is feasible.
+
+Unspecified initial values for bounded intervals now avoid overflow from
+adding large finite endpoints, and initial points for open half-lines use an
+interior representable candidate when one exists. An empty set of
+machine-representable interior values still raises a validation error.
+
+Weighted multi-objective scalarization now scales finite non-negative weights
+before summing them to avoid overflow. This correction does **not**
+automatically normalize objective magnitudes or physical units: callers remain
+responsible for supplying meaningful objective scales and preferences.
+
+Relevant regression tests:
+`tests/agents/test_optimization_numerical_contracts.py`.
+Full factory, agent and solver integration validation remains a separate gate.
+
 ## Testing and Verification
 
 There is no dedicated Optimization test suite under `tests/` in this checkout. The low-level example checks one installed HiGHS path; it does not establish availability or correctness of every solver. Use `OptimizationRegistries.summary(problem)` and `registry_summary()` to inspect compatibility/coverage without claiming that uncovered problem classes are supported.
