@@ -7,6 +7,9 @@ append-only relationship/impact history. An authenticated caller supplies a
 TRUSTED AccessContext. SQL storage encryption is not provided by this module.
 """
 from __future__ import annotations
+import os
+from contextlib import nullcontext
+from dataclasses import dataclass
 
 import datetime as dt
 import json
@@ -120,6 +123,7 @@ class KnowledgeRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_impacts_dependent ON impact_events(dependent_record_id, recorded_at);
                 """)
+                ensure_extended_schema(db)
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 db.commit()
             except Exception:
@@ -230,9 +234,11 @@ class KnowledgeRepository:
                 new_revision = old.revision + 1
                 self._insert_revision(db, self._values(draft, record_id, new_revision, current_time, access.principal_id, reason))
                 db.execute("UPDATE knowledge_heads SET current_revision=? WHERE record_id=?", (new_revision, record_id))
-                for dependent in self._dependent_ids(db, record_id):
+                downstream = self._dependent_ids(db, record_id)
+                for dependent in downstream:
                     db.execute("INSERT INTO impact_events VALUES (?,?,?,?,?)",
                                (uuid.uuid4().hex, record_id, new_revision, dependent, current_time))
+                record_revision_effects(db, record_id, new_revision, downstream, current_time)
                 db.commit()
             except Exception:
                 db.rollback()
@@ -265,7 +271,9 @@ class KnowledgeRepository:
               as_known: str | None = None, as_valid: str | None = None,
               text: str | None = None, project_id: str | None = None,
               include_inactive: bool = False,
-              limit: int = 100, offset: int = 0) -> list[RecordRevision]:
+              limit: int = 100, offset: int = 0,
+              scope_context_project: str | None = None,
+              _connection: sqlite3.Connection | None = None) -> list[RecordRevision]:
         """Scope filtering occurs in SQL BEFORE contents are considered/ranked."""
         if not isinstance(limit, int) or not 1 <= limit <= 1000 or offset < 0:
             raise ValidationFailure("limit must be 1..1000 and offset nonnegative")
@@ -295,6 +303,15 @@ class KnowledgeRepository:
             validate_id(project_id, "project_id")
             sql += " AND r.scope='project' AND r.project_id=?"
             bindings.append(project_id)
+        if scope_context_project is not None:
+            if scope_context_project:
+                validate_id(scope_context_project, "scope_context_project")
+                if access is None or scope_context_project not in access.project_ids:
+                    raise AuthorizationDenied(access.principal_id if access else "anonymous", "query_project")
+                sql += " AND (r.scope!='project' OR r.project_id=?)"
+                bindings.append(scope_context_project)
+            else:
+                sql += " AND r.scope!='project'"
         if not include_inactive:
             sql += " AND r.status NOT IN ('invalidated','superseded','archived')"
         if as_valid:
@@ -307,7 +324,7 @@ class KnowledgeRepository:
             bindings.append("%" + escaped + "%")
         sql += " ORDER BY r.recorded_at DESC, r.record_id LIMIT ? OFFSET ?"
         bindings.extend((limit, offset))
-        with self._connect() as db:
+        with (nullcontext(_connection) if _connection is not None else self._connect()) as db:
             rows = db.execute(sql, bindings).fetchall()
         return [rev for row in rows if can_read((rev := self._decode(row)).draft, access)]
 
@@ -362,8 +379,46 @@ class KnowledgeRepository:
                     # Existing downstream closure: adding this edge would close a cycle.
                     raise ValidationFailure("Dependency cycle prohibited")
                 event_id = uuid.uuid4().hex
+                recorded_at = utc_now()
                 db.execute("INSERT INTO relation_events VALUES (?,?,?,?,?,?,?)",
-                           (event_id, dependent_id, dependency_id, relation_type, 1, utc_now(), access.principal_id))
+                           (event_id, dependent_id, dependency_id, relation_type, 1, recorded_at, access.principal_id))
+                record_relation_effects(db, event_id, dependent_id, recorded_at)
+                db.commit()
+                return event_id
+            except Exception:
+                db.rollback()
+                raise
+
+    def unlink(self, dependent_id: str, dependency_id: str, access: AccessContext,
+               *, relation_type: str = "depends_on") -> str:
+        """Append a deactivation event rather than deleting historical relation data."""
+        from .contracts import AuthorizationDenied
+        validate_id(dependent_id, "dependent_id")
+        validate_id(dependency_id, "dependency_id")
+        if relation_type not in {"depends_on", "supported_by", "refers_to", "supersedes", "implements"}:
+            raise ValidationFailure("Unknown relationship type")
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                dep_row = self._latest_row(db, dependent_id)
+                base_row = self._latest_row(db, dependency_id)
+                if dep_row is None or base_row is None:
+                    raise NotFound("knowledge_relation", dependent_id)
+                require_write(self._decode(dep_row).draft, access)
+                if not can_read(self._decode(base_row).draft, access):
+                    raise AuthorizationDenied(access.principal_id, "read", resource=dependency_id)
+                state = db.execute("""SELECT active FROM relation_events
+                    WHERE source_id=? AND target_id=? AND relation_type=?
+                    ORDER BY rowid DESC LIMIT 1""",
+                    (dependent_id, dependency_id, relation_type)).fetchone()
+                if state is None or not state["active"]:
+                    raise NotFound("knowledge_relation", dependent_id)
+                event_id = uuid.uuid4().hex
+                recorded_at = utc_now()
+                db.execute("INSERT INTO relation_events VALUES(?,?,?,?,?,?,?)",
+                           (event_id, dependent_id, dependency_id, relation_type,
+                            0, recorded_at, access.principal_id))
+                record_relation_effects(db, event_id, dependent_id, recorded_at)
                 db.commit()
                 return event_id
             except Exception:
@@ -399,3 +454,268 @@ class KnowledgeRepository:
 __all__ = [
     "KnowledgeRepository"
 ]
+
+def ensure_extended_schema(db: sqlite3.Connection) -> None:
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS assessment_snapshots (
+        assessment_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        object_record_id TEXT NOT NULL,
+        object_revision INTEGER NOT NULL CHECK(object_revision>0),
+        rule_record_id TEXT NOT NULL,
+        rule_revision INTEGER NOT NULL CHECK(rule_revision>0),
+        outcome TEXT NOT NULL,
+        evaluator TEXT NOT NULL,
+        input_digest TEXT NOT NULL,
+        context_digest TEXT NOT NULL,
+        valid_at TEXT NOT NULL,
+        evaluated_at TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        assessment_digest TEXT NOT NULL,
+        FOREIGN KEY(object_record_id) REFERENCES knowledge_heads(record_id),
+        FOREIGN KEY(rule_record_id) REFERENCES knowledge_heads(record_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_assessments_project ON assessment_snapshots(project_id, recorded_at);
+    CREATE TABLE IF NOT EXISTS assessment_dependencies (
+        assessment_id TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        pinned_revision INTEGER NOT NULL CHECK(pinned_revision>0),
+        PRIMARY KEY(assessment_id,record_id),
+        FOREIGN KEY(assessment_id) REFERENCES assessment_snapshots(assessment_id),
+        FOREIGN KEY(record_id) REFERENCES knowledge_heads(record_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_assessment_dependencies_record ON assessment_dependencies(record_id);
+    CREATE TABLE IF NOT EXISTS assessment_stale_events (
+        assessment_id TEXT NOT NULL,
+        changed_record_id TEXT NOT NULL,
+        changed_revision INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        PRIMARY KEY(assessment_id,changed_record_id,changed_revision,reason),
+        FOREIGN KEY(assessment_id) REFERENCES assessment_snapshots(assessment_id)
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_outbox (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_retry_at TEXT NOT NULL,
+        leased_until TEXT,
+        lease_token TEXT,
+        delivered_at TEXT,
+        dead_letter_at TEXT,
+        last_error_code TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_outbox_pending
+        ON knowledge_outbox(delivered_at,dead_letter_at,next_retry_at,leased_until);
+    CREATE TABLE IF NOT EXISTS promotion_audit (
+        public_record_id TEXT PRIMARY KEY,
+        origin_record_id TEXT NOT NULL,
+        origin_revision INTEGER NOT NULL,
+        reviewer_id TEXT NOT NULL,
+        privacy_evidence_id TEXT NOT NULL,
+        licence_evidence_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(public_record_id) REFERENCES knowledge_heads(record_id),
+        FOREIGN KEY(origin_record_id) REFERENCES knowledge_heads(record_id)
+    );
+    CREATE TRIGGER IF NOT EXISTS immutable_assessment_update BEFORE UPDATE ON assessment_snapshots
+        BEGIN SELECT RAISE(ABORT,'assessment snapshot is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_assessment_delete BEFORE DELETE ON assessment_snapshots
+        BEGIN SELECT RAISE(ABORT,'assessment snapshot is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_assessment_dep_update BEFORE UPDATE ON assessment_dependencies
+        BEGIN SELECT RAISE(ABORT,'assessment dependency is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_assessment_dep_delete BEFORE DELETE ON assessment_dependencies
+        BEGIN SELECT RAISE(ABORT,'assessment dependency is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_stale_update BEFORE UPDATE ON assessment_stale_events
+        BEGIN SELECT RAISE(ABORT,'stale event is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_stale_delete BEFORE DELETE ON assessment_stale_events
+        BEGIN SELECT RAISE(ABORT,'stale event is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_promotion_update BEFORE UPDATE ON promotion_audit
+        BEGIN SELECT RAISE(ABORT,'promotion event is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS immutable_promotion_delete BEFORE DELETE ON promotion_audit
+        BEGIN SELECT RAISE(ABORT,'promotion event is immutable'); END;
+    """)
+
+
+def _enqueue(db: sqlite3.Connection, event_type: str, key: str, payload: dict, now: str) -> None:
+    event_id = digest_json({"namespace": "slai.assurance.v1", "event_type": event_type, "key": key})
+    db.execute("""INSERT OR IGNORE INTO knowledge_outbox
+        (event_id,event_type,payload_json,created_at,next_retry_at)
+        VALUES(?,?,?,?,?)""", (event_id, event_type,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")), now, now))
+
+
+def record_revision_effects(db: sqlite3.Connection, record_id: str, revision: int,
+                            downstream: Iterable[str], now: str) -> None:
+    """Invoked INSIDE KnowledgeRepository.revise's BEGIN IMMEDIATE transaction."""
+    affected = sorted(set(downstream) | {record_id})
+    for dependency in affected:
+        db.execute("""INSERT OR IGNORE INTO assessment_stale_events
+            (assessment_id,changed_record_id,changed_revision,reason,recorded_at)
+            SELECT d.assessment_id,?,?,?,?
+              FROM assessment_dependencies d
+              JOIN assessment_snapshots s ON s.assessment_id=d.assessment_id
+             WHERE d.record_id=? AND s.recorded_at<=?""",
+             (record_id, revision, "knowledge_revision", now, dependency, now))
+    _enqueue(db, "knowledge.revised", f"{record_id}:{revision}",
+             {"record_id": record_id, "revision": revision,
+              "affected_dependency_count": len(affected)}, now)
+
+
+def record_relation_effects(db: sqlite3.Connection, event_id: str,
+                            source_record_id: str, now: str) -> None:
+    # Relation changes may alter an assessment's derivation even without a
+    # document revision. `-1` is a typed graph event marker, not a revision.
+    db.execute("""INSERT OR IGNORE INTO assessment_stale_events
+         (assessment_id,changed_record_id,changed_revision,reason,recorded_at)
+         SELECT d.assessment_id,?,-1,?,?
+           FROM assessment_dependencies d
+           JOIN assessment_snapshots s ON s.assessment_id=d.assessment_id
+          WHERE d.record_id=? AND s.recorded_at<=?""",
+        (source_record_id, f"relation_changed:{event_id}", now, source_record_id, now))
+    _enqueue(db, "knowledge.relation_changed", event_id,
+             {"source_record_id": source_record_id, "relation_event_id": event_id}, now)
+
+@dataclass(frozen=True, slots=True)
+class OutboxDelivery:
+    event_id: str
+    event_type: str
+    payload: dict[str, Any]
+    attempts: int
+    lease_token: str
+
+
+def _plus_seconds(now: str, seconds: int) -> str:
+    value = dt.datetime.fromisoformat(now.replace("Z", "+00:00"))
+    return (value + dt.timedelta(seconds=seconds)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+class KnowledgeOutbox:
+    """Internal-use only; do not expose lease/ack endpoints to client apps."""
+
+    def __init__(self, repository: KnowledgeRepository, *, max_attempts: int = 7):
+        if not 1 <= max_attempts <= 100:
+            raise ValidationFailure("max_attempts must be 1..100")
+        self.repository = repository
+        self.max_attempts = max_attempts
+
+    def lease(self, *, batch_size: int = 25, lease_seconds: int = 60,
+              now: str | None = None) -> list[OutboxDelivery]:
+        if not isinstance(batch_size, int) or not 1 <= batch_size <= 100:
+            raise ValidationFailure("batch size must be 1..100")
+        if not isinstance(lease_seconds, int) or not 1 <= lease_seconds <= 3600:
+            raise ValidationFailure("lease duration must be 1..3600")
+        now = normalize_time(now or utc_now(), "now")
+        leased_until = _plus_seconds(now, lease_seconds)
+        with self.repository._lock, self.repository._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = db.execute("""SELECT * FROM knowledge_outbox
+                    WHERE delivered_at IS NULL AND dead_letter_at IS NULL
+                      AND next_retry_at<=? AND (leased_until IS NULL OR leased_until<=?)
+                      AND attempts<?
+                    ORDER BY created_at,event_id LIMIT ?""",
+                    (now, now, self.max_attempts, batch_size)).fetchall()
+                result = []
+                for row in rows:
+                    token = uuid.uuid4().hex
+                    db.execute("""UPDATE knowledge_outbox SET leased_until=?,lease_token=?,attempts=attempts+1
+                        WHERE event_id=?""", (leased_until, token, row["event_id"]))
+                    result.append(OutboxDelivery(row["event_id"], row["event_type"],
+                                                 json.loads(row["payload_json"]),
+                                                 row["attempts"] + 1, token))
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+        return result
+
+    def ack(self, event_id: str, lease_token: str, *, now: str | None = None) -> bool:
+        validate_id(event_id, "event_id")
+        validate_id(lease_token, "lease_token")
+        now = normalize_time(now or utc_now(), "now")
+        with self.repository._lock, self.repository._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = db.execute("""UPDATE knowledge_outbox
+                SET delivered_at=?,leased_until=NULL,lease_token=NULL
+                WHERE event_id=? AND lease_token=? AND delivered_at IS NULL
+                  AND dead_letter_at IS NULL AND leased_until>?""",
+                (now, event_id, lease_token, now))
+            db.commit()
+        return result.rowcount == 1
+
+    def fail(self, event_id: str, lease_token: str, *,
+             error_code: str = "delivery_failed", now: str | None = None) -> bool:
+        validate_id(event_id, "event_id")
+        validate_id(lease_token, "lease_token")
+        validate_id(error_code, "error_code")
+        now = normalize_time(now or utc_now(), "now")
+        with self.repository._lock, self.repository._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("""SELECT attempts FROM knowledge_outbox
+                WHERE event_id=? AND lease_token=? AND delivered_at IS NULL
+                  AND dead_letter_at IS NULL AND leased_until>?""",
+                (event_id, lease_token, now)).fetchone()
+            if row is None:
+                db.rollback()
+                return False
+            attempts = row["attempts"]
+            next_attempt = _plus_seconds(now, min(3600, 2 ** min(attempts, 11)))
+            db.execute("""UPDATE knowledge_outbox SET lease_token=NULL,leased_until=NULL,
+                next_retry_at=?,dead_letter_at=?,last_error_code=? WHERE event_id=?""",
+                (next_attempt, now if attempts >= self.max_attempts else None,
+                 error_code, event_id))
+            db.commit()
+            return True
+
+    def status(self) -> dict[str, int]:
+        with self.repository._connect() as db:
+            row = db.execute("""SELECT
+                SUM(CASE WHEN delivered_at IS NOT NULL THEN 1 ELSE 0 END) delivered,
+                SUM(CASE WHEN delivered_at IS NULL AND dead_letter_at IS NULL THEN 1 ELSE 0 END) pending,
+                SUM(CASE WHEN dead_letter_at IS NOT NULL THEN 1 ELSE 0 END) dead_letter
+                FROM knowledge_outbox""").fetchone()
+        return {name: row[name] or 0 for name in ("delivered", "pending", "dead_letter")}
+
+class KnowledgeBackupService:
+    def __init__(self, repository: KnowledgeRepository):
+        self.repository = repository
+
+    @staticmethod
+    def validate(path: str | Path) -> bool:
+        path = Path(path)
+        if not path.is_file():
+            raise ValidationFailure("Backup file not found")
+        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=10) as db:
+            integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+            head_count = db.execute("SELECT COUNT(*) FROM knowledge_heads").fetchone()[0]
+            db.execute("SELECT COUNT(*) FROM assessment_snapshots").fetchone()
+        if integrity != "ok" or head_count < 0:
+            raise ValidationFailure("Backup integrity validation failed")
+        return True
+
+    def create(self, destination: str | Path, *, overwrite: bool = False) -> Path:
+        destination = Path(destination).expanduser().resolve()
+        if destination == self.repository.path:
+            raise ValidationFailure("Backup cannot overwrite active database")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() and not overwrite:
+            raise ValidationFailure("Backup destination exists; refusing overwrite")
+        temp = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with sqlite3.connect(str(self.repository.path)) as source:
+                with sqlite3.connect(str(temp)) as target:
+                    source.backup(target)
+            if os.name == "posix":
+                os.chmod(temp, 0o600)
+            self.validate(temp)
+            os.replace(temp, destination)
+            return destination
+        finally:
+            if temp.exists():
+                temp.unlink()
