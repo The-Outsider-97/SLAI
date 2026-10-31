@@ -177,13 +177,18 @@ def test_resume_pattern_search_with_same_identity_and_larger_total_budget(tmp_pa
                      evaluator_revision="changed-revision")
 
 
-def test_resume_is_not_claimed_for_differential_evolution(tmp_path):
-    solver = BlackBoxSolver({"method": "differential_evolution"})
+def test_de_resume_requires_an_existing_checkpoint(tmp_path):
+    import scipy
+    from src.agents.optimization.de_checkpoint import SUPPORTED_SCIPY_DE_VERSIONS
     from src.agents.optimization.utils.optimization_errors import UnsupportedProblemError
-    with pytest.raises(UnsupportedProblemError):
+    solver = BlackBoxSolver({"method": "differential_evolution"})
+    path = tmp_path / "missing.json"
+    error = OptimizationValidationError if scipy.__version__ in SUPPORTED_SCIPY_DE_VERSIONS else UnsupportedProblemError
+    with pytest.raises(error):
         solver.solve(_black_box(), method="differential_evolution",
-                     resume=True, checkpoint_path=tmp_path / "other.json",
+                     resume=True, checkpoint_path=path,
                      evaluator_revision="v1")
+    assert not path.exists()
 
 
 def test_gradient_check_uses_stem_differentiation_and_detects_bad_gradient():
