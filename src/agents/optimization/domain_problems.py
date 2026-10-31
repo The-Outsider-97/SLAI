@@ -25,6 +25,8 @@ __all__ = [
     "geometry_parameter_problem", "trajectory_problem", "trajectory_samples",
     "camera_pose_problem", "camera_look_at_basis", "animation_curve_problem",
     "hermite_curve_value", "robust_scenario_problem", "layout_arrangement_problem",
+    "expected_scenario_problem", "cvar_scenario_problem",
+    "sampled_trajectory_derivatives",
 ]
 
 
@@ -121,6 +123,32 @@ def trajectory_samples(
     return (first, *middle, last)
 
 
+def sampled_trajectory_derivatives(
+    positions: Sequence[Sequence[float]], duration: float, *, order: int = 1,
+) -> tuple[tuple[float, ...], ...]:
+    """Consistent forward differences for a *uniformly sampled* trajectory.
+
+    Exact for polynomials of degree <= order at the corresponding stencil;
+    no assertion about derivatives between samples. Repeated differencing
+    amplifies observation noise, especially for jerk.
+    """
+    values = tuple(_vector(p, f"positions[{i}]") for i, p in enumerate(positions))
+    if len(values) < 2 or any(len(v) != len(values[0]) for v in values):
+        raise OptimizationValidationError("trajectory samples must share a dimension")
+    if isinstance(order, bool) or not isinstance(order, int) or order not in (1, 2, 3):
+        raise OptimizationValidationError("derivative order must be 1, 2, or 3")
+    if len(values) <= order:
+        raise OptimizationValidationError("too few trajectory samples for derivative order")
+    step = _positive(duration, "duration") / (len(values) - 1)
+    sequence = values
+    for _ in range(order):
+        sequence = tuple(
+            tuple((sequence[i + 1][j] - sequence[i][j]) / step for j in range(len(sequence[0])))
+            for i in range(len(sequence) - 1)
+        )
+    return sequence
+
+
 def trajectory_problem(
     name: str,
     *,
@@ -138,6 +166,9 @@ def trajectory_problem(
     final_acceleration: Sequence[float] | None = None,
     clearance_evaluator: Callable[[tuple[tuple[float, ...], ...]], float] | None = None,
     minimum_clearance: float | None = None,
+    sampled_state_constraints: Sequence[
+        tuple[str, Callable[[float, tuple[float, ...]], float], ConstraintSense, float]
+    ] = (),
 ) -> OptimizationProblem:
     """Knot-discretized Cartesian trajectory optimization in SI units.
 
@@ -201,6 +232,32 @@ def trajectory_problem(
             constraints.append(Constraint(name=f"{which}_{label}",
                                           sense=ConstraintSense.EQ, rhs=0.0,
                                           function=residual))
+    # The caller supplies state-dependent restrictions at each sample time.
+    # This supports time-varying limits and moving obstacles *at knots only*.
+    # Every callable is trusted; no continuous-time guarantee is inferred.
+    names = {rule.name for rule in constraints}
+    for item in sampled_state_constraints:
+        if not isinstance(item, (tuple, list)) or len(item) != 4:
+            raise OptimizationValidationError("sampled state constraint must be (name, evaluator, sense, rhs)")
+        label, evaluator, sense, rhs_raw = item
+        if not isinstance(label, str) or not label.strip() or not callable(evaluator):
+            raise OptimizationValidationError("sampled state constraint needs a name and callable")
+        if not isinstance(sense, ConstraintSense):
+            raise OptimizationValidationError("sampled state constraint sense must be ConstraintSense")
+        rhs = _finite(rhs_raw, f"{label}.rhs")
+        for i in range(intervals + 1):
+            identifier = f"sample:{label}:{i}"
+            if identifier in names:
+                raise OptimizationValidationError("duplicate sampled-state constraint name")
+            names.add(identifier)
+            at = i * h
+            constraints.append(Constraint(
+                name=identifier, sense=sense, rhs=rhs,
+                function=lambda x, idx=i, t=at, fn=evaluator: _finite(
+                    fn(t, points(x)[idx]), "sampled_state_constraint"
+                ),
+                metadata={"time_seconds": at, "sample_index": i, "sampled_only": True},
+            ))
     if minimum_clearance is not None:
         min_clearance = _positive(minimum_clearance, "minimum_clearance", zero=True)
         if not callable(clearance_evaluator):
@@ -216,7 +273,8 @@ def trajectory_problem(
         constraints=tuple(constraints), deterministic=True,
         metadata={"domain": "trajectory", "dimension": len(a), "intervals": intervals,
                   "duration_seconds": h * intervals, "time_step_seconds": h,
-                  "collision_certification": "sampled_only"},
+                  "collision_certification": "sampled_only",
+                  "sampled_state_constraint_count": len(sampled_state_constraints)},
     )
 
 
@@ -523,4 +581,106 @@ def layout_arrangement_problem(
         constraints=rules, deterministic=True,
         metadata={"domain": "layout", "objects": len(centers), "dimension": dims,
                   "collision_guarantee": "distance_proxy_only"},
+    )
+
+def _scenario_distribution(
+    losses: Sequence[Callable[[Mapping[str, Any]], float]],
+    probabilities: Sequence[float] | None,
+) -> tuple[tuple[Callable[[Mapping[str, Any]], float], ...], tuple[float, ...]]:
+    """Normalize an explicit finite probability distribution, not a sampler."""
+    if not losses or any(not callable(fn) for fn in losses):
+        raise OptimizationValidationError("scenario losses require nonempty trusted callbacks")
+    weights = (tuple(1.0 for _ in losses) if probabilities is None
+               else tuple(_positive(v, "probability", zero=True) for v in probabilities))
+    if len(weights) != len(losses) or not any(v > 0 for v in weights):
+        raise OptimizationValidationError("scenario probabilities must match losses and have positive mass")
+    scale = max(weights)
+    from math import fsum
+    scaled = tuple(v / scale for v in weights)
+    denom = fsum(scaled)
+    return tuple(losses), tuple(v / denom for v in scaled)
+
+
+def expected_scenario_problem(
+    name: str, *, variables: Sequence[Variable],
+    scenario_losses: Sequence[Callable[[Mapping[str, Any]], float]],
+    probabilities: Sequence[float] | None = None,
+    constraints: Sequence[Constraint] = (),
+) -> OptimizationProblem:
+    """Finite-distribution expected loss (exact for listed scenarios only).
+
+    Stochastic generators, empirical calibration and uncertainty distributions
+    remain caller-owned. No Monte-Carlo confidence guarantee is asserted.
+    """
+    callbacks, weights = _scenario_distribution(scenario_losses, probabilities)
+    if not variables or any(not isinstance(x, Variable) for x in variables):
+        raise OptimizationValidationError("variables must be nonempty Variables")
+    if any(not isinstance(x, Constraint) for x in constraints):
+        raise OptimizationValidationError("constraints must be canonical Constraint objects")
+    def expected(point: Mapping[str, Any]) -> float:
+        return math.fsum(w * _finite(fn(point), "scenario loss")
+                         for fn, w in zip(callbacks, weights))
+    return OptimizationProblem(
+        name=name, variables=tuple(variables),
+        objectives=(Objective(name="expected_scenario_loss", function=expected),),
+        constraints=tuple(constraints), deterministic=True,
+        metadata={"domain": "finite_scenario_expectation",
+                  "scenario_count": len(callbacks),
+                  "scenario_probabilities": weights,
+                  "guarantee": "enumerated_scenarios_only"},
+    )
+
+
+def cvar_scenario_problem(
+    name: str, *, variables: Sequence[Variable],
+    scenario_losses: Sequence[Callable[[Mapping[str, Any]], float]],
+    confidence: float = 0.95,
+    probabilities: Sequence[float] | None = None,
+    constraints: Sequence[Constraint] = (),
+) -> OptimizationProblem:
+    """Finite-scenario CVaR minimization via Rockafellar-Uryasev epigraph.
+
+    Minimize eta + sum(p_i * slack_i)/(1-alpha), subject to
+    slack_i >= loss_i(x) - eta and slack_i >= 0.
+    The result addresses the enumerated empirical distribution only.
+    """
+    alpha = _finite(confidence, "confidence")
+    if not 0.0 < alpha < 1.0:
+        raise OptimizationValidationError("confidence must be strictly between 0 and 1")
+    callbacks, weights = _scenario_distribution(scenario_losses, probabilities)
+    if not variables or any(not isinstance(x, Variable) for x in variables):
+        raise OptimizationValidationError("variables must be nonempty Variables")
+    if any(not isinstance(x, Constraint) for x in constraints):
+        raise OptimizationValidationError("constraints must be canonical Constraint objects")
+    used = {v.name for v in variables}
+    aux_names = ["cvar_eta"] + [f"cvar_excess_{i}" for i in range(len(callbacks))]
+    if any(n in used for n in aux_names):
+        raise OptimizationValidationError("CVaR auxiliary variable collides with application variable")
+    aux = [Variable("cvar_eta", VariableDomain.real(), initial=0.0)]
+    aux.extend(Variable(name, VariableDomain.nonnegative(), initial=0.0)
+               for name in aux_names[1:])
+    def cost(point: Mapping[str, Any]) -> float:
+        return _finite(point["cvar_eta"], "eta") + math.fsum(
+            w * _finite(point[aux_names[i + 1]], "excess") / (1.0 - alpha)
+            for i, w in enumerate(weights)
+        )
+    risk_constraints = [
+        Constraint(
+            name=f"cvar_scenario_{i}",
+            sense=ConstraintSense.LE, rhs=0.0,
+            function=lambda point, fn=fn, slack=aux_names[i + 1]:
+                _finite(fn(point), "scenario loss")
+                - _finite(point["cvar_eta"], "eta")
+                - _finite(point[slack], "excess"),
+        ) for i, fn in enumerate(callbacks)
+    ]
+    return OptimizationProblem(
+        name=name, variables=(*variables, *aux),
+        objectives=(Objective(name="scenario_cvar", function=cost),),
+        constraints=(*constraints, *risk_constraints),
+        deterministic=True,
+        metadata={"domain": "finite_scenario_cvar",
+                  "scenario_count": len(callbacks), "confidence": alpha,
+                  "scenario_probabilities": weights,
+                  "guarantee": "enumerated_scenarios_only"},
     )
