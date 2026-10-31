@@ -277,3 +277,17 @@ def test_checkpoint_rejects_nonroundtrippable_categorical_values(tmp_path):
                    signed=0., violation=0., failed=False, feasible=True)
     restored = EvaluationJournal(journal.path, identity="rev1", resume=True)
     assert restored.lookup("primitive")["point"] == {"category": "red", "enabled": True}
+
+
+def test_checkpoint_identity_includes_feasibility_tolerances(tmp_path):
+    checkpoint = tmp_path / "tolerance_revision.json"
+    first = BlackBoxSolver({"method": "pattern_search",
+                            "feasibility_tolerance": 1e-8})
+    first.solve(_black_box(), method="pattern_search", max_evaluations=8,
+                checkpoint_path=checkpoint, evaluator_revision="same-model")
+    second = BlackBoxSolver({"method": "pattern_search",
+                             "feasibility_tolerance": 1e-4})
+    with pytest.raises(OptimizationValidationError):
+        second.solve(_black_box(), method="pattern_search", max_evaluations=40,
+                     checkpoint_path=checkpoint, evaluator_revision="same-model",
+                     resume=True)
