@@ -144,6 +144,7 @@ from urllib.parse import urlsplit
 FORMAT_ID = "slai.sldc"
 LEGACY_VERSION = "0.1.0"
 FORMAT_VERSION = "1.0.0"  # What new documents are written as.
+LATEST_KNOWN_VERSION = "1.1.0"  # Most recent minor schema this reader understands.
 SCHEMA = "slai.sldc/1"  # Value of ``document["schema"]`` in 1.x documents.
 MIMETYPE = "application/x-slai-sldc+zip"  # Provisional; not an IANA-registered media type.
 EXTENSIONS = frozenset({".sldc"})
@@ -1582,6 +1583,17 @@ def _parse_version(value: Any) -> tuple[int, int, int]:
     return int(match[1]), int(match[2]), int(match[3])
 
 
+def newest_version(*versions: str) -> str:
+    """Choose the numerically newest SemVer-like SLDC version; never compare text.
+
+    This is used for merge compatibility and must not silently downgrade newer
+    1.x content to FORMAT_VERSION. The caller still validates write support.
+    """
+    if not versions:
+        raise SLDCValidationError("newest_version needs at least one version")
+    return max(versions, key=_parse_version)
+
+
 def _part_role(name: str) -> str:
     if name == "document.json":
         return "content"
@@ -2300,6 +2312,7 @@ def inspect_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
     """Describe a file from its manifest alone, without decompressing, decrypting or trusting it.
 
     Returns ``container`` (``legacy``, ``package`` or ``encrypted``), ``version``, ``supported``,
+    ``newer_than_known`` (whether this module knows the declared 1.x minor/patch edition),
     ``requires``, ``unsupported_requires`` (features this reader lacks: open read-only, never save),
     ``document_id``, ``revision_id``, ``parts`` and, for encrypted files, ``encryption`` with the
     recipient list. Raises :class:`SLDCError` if the container itself is malformed.
@@ -2309,7 +2322,10 @@ def inspect_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
     loaded = _load_container(data, read_parts=False, check_requires=False)
     manifest = loaded.manifest
     report: dict[str, Any] = {"container": loaded.kind, "format": FORMAT_ID,
-                              "version": manifest["version"], "supported": True, "requires": [],
+                              "version": manifest["version"],
+                              "newer_than_known": _parse_version(manifest["version"]) > _parse_version(LATEST_KNOWN_VERSION)
+                                  if loaded.kind != "legacy" else False,
+                              "supported": True, "requires": [],
                               "unsupported_requires": [], "document_id": None,
                               "revision_id": None, "parts": []}
     if loaded.kind == "legacy":
@@ -3491,7 +3507,7 @@ def merge_packages(base: SLDCPackage, ours: SLDCPackage, theirs: SLDCPackage, *,
         document["history"] = list(history.values())
     merged = prune_assets(SLDCPackage(
         document, assets, _merge_threads(ours.comments, theirs.comments),
-        version=ours.version if ours.version == theirs.version else FORMAT_VERSION))
+        version=newest_version(base.version, ours.version, theirs.version)))
     validate_package(merged)
     return merged, conflicts
 
@@ -4540,7 +4556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     # Identity, versions, limits
-    "FORMAT_ID", "FORMAT_VERSION", "LEGACY_VERSION", "SCHEMA", "MIMETYPE", "EXTENSIONS", "MEMBERS",
+    "FORMAT_ID", "FORMAT_VERSION", "LATEST_KNOWN_VERSION", "LEGACY_VERSION", "SCHEMA", "MIMETYPE", "EXTENSIONS", "MEMBERS",
     "BLOCK_TYPES", "BLOCK_TYPES_V1", "SUPPORTED_FEATURES", "ENCRYPTION_SCHEME", "SIGNATURE_SCHEMA",
     "COMMENTS_SCHEMA", "MAX_ARCHIVE_BYTES", "MAX_PACKAGE_BYTES", "MAX_DOCUMENT_BYTES", "MAX_BLOCKS",
     "MAX_TEXT_CHARS", "MAX_ASSETS", "MAX_ASSET_BYTES", "MAX_SIGNATURES", "MAX_RECIPIENTS",
@@ -4550,6 +4566,7 @@ __all__ = [
     "Asset", "Recipient", "Signer",
     # Packages (1.x)
     "read_package", "write_package", "loads_package", "dumps_package", "inspect_package",
+    "newest_version",
     "validate_package", "new_package", "make_asset", "add_asset", "prune_assets", "make_table",
     "make_figure", "revision_id", "make_equation", "make_inline_equation", "make_inline_image", "revision_id",
     # Migration
