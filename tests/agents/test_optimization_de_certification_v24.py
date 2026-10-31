@@ -166,6 +166,34 @@ def test_de_complete_generation_resume_bitwise_matches_uninterrupted(tmp_path):
 
 @pytest.mark.skipif(scipy.__version__ not in SUPPORTED_SCIPY_DE_VERSIONS,
                     reason="verified SciPy DE checkpoint backend version unavailable")
+def test_de_interrupted_mid_generation_recovers_exact_population(tmp_path):
+    """Candidate cache replays the last *incomplete* generation without drift."""
+    complete_path = tmp_path / "complete.json"
+    interrupted_path = tmp_path / "interrupted.json"
+    full = _run_de(complete_path, generations=7)
+    solver = BlackBoxSolver({
+        "method": "differential_evolution", "max_evaluations": 1000,
+        "seed": 1729, "popsize": 6, "tolerance": 1e-12,
+    })
+    first = solver.solve(
+        _problem(), method="differential_evolution",
+        max_evaluations=17, max_generations=7,
+        checkpoint_path=interrupted_path, evaluator_revision="frozen-v1",
+    )
+    assert first.termination_reason is TerminationReason.EVALUATION_LIMIT
+    interrupted_snapshot = json.loads(interrupted_path.read_text())
+    assert interrupted_snapshot["progress"]["generation"] == 0
+    restarted = _run_de(interrupted_path, generations=7, resume=True)
+    uninterrupted_snapshot = json.loads(complete_path.read_text())
+    resumed_snapshot = json.loads(interrupted_path.read_text())
+    assert resumed_snapshot["progress"]["population"] == uninterrupted_snapshot["progress"]["population"]
+    assert resumed_snapshot["progress"]["energies"] == uninterrupted_snapshot["progress"]["energies"]
+    assert resumed_snapshot["progress"]["rng_state"] == uninterrupted_snapshot["progress"]["rng_state"]
+    assert restarted.primal_solution == full.primal_solution
+
+
+@pytest.mark.skipif(scipy.__version__ not in SUPPORTED_SCIPY_DE_VERSIONS,
+                    reason="verified SciPy DE checkpoint backend version unavailable")
 def test_de_checkpoint_rejects_stale_model_revision(tmp_path):
     path = tmp_path / "evolution.json"
     _run_de(path, generations=2)
