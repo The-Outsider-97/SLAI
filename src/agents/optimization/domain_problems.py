@@ -26,7 +26,7 @@ __all__ = [
     "camera_pose_problem", "camera_look_at_basis", "animation_curve_problem",
     "hermite_curve_value", "robust_scenario_problem", "layout_arrangement_problem",
     "expected_scenario_problem", "cvar_scenario_problem",
-    "sampled_trajectory_derivatives",
+    "sampled_trajectory_derivatives", "orientation_geodesic_distance", "orientation_path_metrics",
 ]
 
 
@@ -684,3 +684,43 @@ def cvar_scenario_problem(
                   "scenario_probabilities": weights,
                   "guarantee": "enumerated_scenarios_only"},
     )
+
+
+def orientation_geodesic_distance(
+    first: Any, second: Any,
+) -> float:
+    """Shortest relative rotation angle in radians, with Spatial SO(3) semantics.
+
+    Uses the authoritative Spatial transform utilities; Optimization does not
+    maintain another quaternion, Euler or rotation-matrix implementation.
+    """
+    import numpy as np
+    from src.agents.spatial.modules.transform import validate_rotation_matrix, so3_log
+
+    left = validate_rotation_matrix(first)
+    right = validate_rotation_matrix(second)
+    return float(np.linalg.norm(so3_log(left.T @ right)))
+
+
+def orientation_path_metrics(
+    rotations: Sequence[Any], duration: float,
+) -> Mapping[str, Any]:
+    """Sampled SO(3) geodesic angles and angular *speed magnitudes*.
+
+    This is not angular acceleration or jerk. Subtracting instantaneous
+    angular velocities requires transporting them to a common frame.
+    It does not certify any between-sample angular-rate limit.
+    """
+    samples = tuple(rotations)
+    if len(samples) < 2:
+        raise OptimizationValidationError("orientation path needs at least two rotations")
+    interval = _positive(duration, "duration") / (len(samples) - 1)
+    angles = tuple(orientation_geodesic_distance(a, b)
+                   for a, b in zip(samples[:-1], samples[1:]))
+    return {
+        "step_angles_rad": angles,
+        "angular_speeds_rad_per_s": tuple(angle / interval for angle in angles),
+        "maximum_sampled_angular_speed_rad_per_s": max(angles) / interval,
+        "total_geodesic_angle_rad": math.fsum(angles),
+        "continuous_time_certified": False,
+    }
