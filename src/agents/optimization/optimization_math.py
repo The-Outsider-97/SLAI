@@ -740,6 +740,7 @@ __all__ = [
     "enumerable_domain",
     "evaluate_constraint_value",
     "evaluate_objective",
+    "feasibility_evidence",
     "finite_difference_gradient",
     "initial_point",
     "initial_vector",
