@@ -8,10 +8,13 @@ on:
       - 'src/agents/optimization/**'
       - 'tests/agents/test_optimization_domain_problems.py'
       - 'tests/agents/test_optimization_numerical_contracts.py'
+      - 'tests/agents/test_optimization_advanced_v24.py'
+      - 'benchmarks/optimization_advanced_v24.py'
       - '.github/workflows/optimization-v24.yml'
   push:
     branches:
       - 'opt-v24-domain-problem-builders-20261030'
+      - 'opt-v24-temporal-stochastic-runtime-20261031'
     paths:
       - 'src/agents/optimization/**'
       - 'tests/agents/test_optimization_domain_problems.py'
@@ -48,6 +51,6 @@ jobs:
           uv lock --check
           uv sync --frozen --group dev --all-extras
       - name: Compile domain module
-        run: uv run python -m py_compile src/agents/optimization/domain_problems.py
+        run: uv run python -m py_compile src/agents/optimization/domain_problems.py src/agents/optimization/derivative_checks.py src/agents/optimization/evaluation_runtime.py benchmarks/optimization_advanced_v24.py
       - name: Run canonical domain and solver integration tests
-        run: uv run python -m pytest -q tests/agents/test_optimization_domain_problems.py tests/agents/test_optimization_numerical_contracts.py
+        run: uv run python -m pytest -q tests/agents/test_optimization_domain_problems.py tests/agents/test_optimization_numerical_contracts.py tests/agents/test_optimization_advanced_v24.py
