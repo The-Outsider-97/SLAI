@@ -29,7 +29,7 @@ class EvaluationJournal:
     Reopening with a different identity fails closed; no stale reuse.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -79,6 +79,7 @@ class EvaluationJournal:
             point = item.get("point")
             signed, violation = item.get("signed"), item.get("violation")
             failed = item.get("failed")
+            feasible = item.get("feasible")
             if (
                 not isinstance(point, dict)
                 or any(not isinstance(k, str)
@@ -90,10 +91,13 @@ class EvaluationJournal:
                 or isinstance(violation, bool) or not isinstance(violation, (int, float))
                 or not math.isfinite(violation) or violation < 0
                 or not isinstance(failed, bool)
+                or not isinstance(feasible, bool)
+                or (failed and feasible)
             ):
                 raise OptimizationValidationError("invalid numeric evaluation checkpoint entry")
             cleaned[key] = {"point": point, "signed": float(signed),
-                            "violation": float(violation), "failed": failed}
+                            "violation": float(violation), "failed": failed,
+                            "feasible": feasible}
         progress = data.get("progress")
         if progress is not None and not isinstance(progress, dict):
             raise OptimizationValidationError("invalid pattern search checkpoint state")
@@ -112,6 +116,7 @@ class EvaluationJournal:
         signed: float,
         violation: float,
         failed: bool,
+        feasible: bool,
     ) -> None:
         if not isinstance(key, str) or not key:
             raise OptimizationValidationError("evaluation cache key must be nonempty")
@@ -124,8 +129,11 @@ class EvaluationJournal:
             raise OptimizationValidationError(
                 "checkpoint point supports only JSON scalar values; structured categories are unsupported"
             )
+        if not isinstance(failed, bool) or not isinstance(feasible, bool) or (failed and feasible):
+            raise OptimizationValidationError("checkpoint evaluation flags are inconsistent")
         entry = {"point": dict(point), "signed": float(signed),
-                 "violation": float(violation), "failed": bool(failed)}
+                 "violation": float(violation), "failed": failed,
+                 "feasible": feasible}
         # Validate before mutation so unsupported values cannot partially
         # replace an existing durable checkpoint.
         json.dumps(entry, allow_nan=False)
