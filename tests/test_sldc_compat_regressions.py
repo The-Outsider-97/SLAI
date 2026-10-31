@@ -190,7 +190,7 @@ def test_hostile_shape_preview_keeps_safe_structure_and_omits_unsafe_content():
     assert preview["blocks"][1]["id"] is None
     assert preview["blocks"][1]["level"] is None
     assert preview["blocks"][2]["id"] == "b3"
-    assert preview["blocks"][2]["text"] == "cap\\na\\tb"
+    assert preview["blocks"][2]["text"] == "cap\na\tb"
     assert "5" not in preview["blocks"][2]["text"]
     assert "x" not in preview["blocks"][2]["text"]
     assert "../x" not in repr(preview)
