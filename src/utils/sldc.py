@@ -2345,6 +2345,163 @@ def inspect_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
 
 
 # ----------------------------------------------------------------------------------------------
+# Forward-compatible, validated, data-only text preview
+# ----------------------------------------------------------------------------------------------
+@_guarded
+def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[str]) -> dict[str, Any]:
+    """Inspect an intact SLDC archive without interpreting unknown features as editable.
+
+    Unlike a normal read, this path deliberately permits future minor versions
+    and unknown required-feature names. It still validates the ZIP inventory,
+    CRC, per-member SHA-256, revision identity and canonical known data budgets
+    before extracting *only* plain strings from the document.
+
+    The returned preview is inert display data. It never retains the original
+    document dictionary, assets, signatures, executable content or permissions.
+    """
+    data = (bytes(source) if isinstance(source, (bytes, bytearray, memoryview))
+            else _read_file_bytes(source, MAX_PACKAGE_BYTES))
+    loaded = _load_container(data, check_requires=False)
+    if loaded.kind == "encrypted":
+        raise SLDCUnsupportedError("Encrypted SLDC requires authorized decryption before preview")
+    if loaded.kind == "legacy":
+        document = _decode_json(loaded.parts["document.json"], "document")
+        _validate_structure(document)
+        content = [{"type": block["type"], "text": block["text"]}
+                   for block in document["blocks"]]
+        title = document["title"]
+        return {"title": title, "version": LEGACY_VERSION, "complete": True,
+                "text": "\\n\\n".join(item["text"] for item in content),
+                "blocks": content, "skipped": 0, "skipped_blocks": 0,
+                "unsupported_requires": [], "newer_than_known": False,
+                "read_only": True}
+
+    if loaded.kind != "package":
+        raise SLDCUnsupportedError("SLDC container cannot be previewed as plaintext")
+    document = _decode_json(loaded.parts["document.json"], "document")
+    _check_json_tree(document)
+    # Source-byte and decompression budgets are enforced by _load_container;
+    # these additional limits constrain the potentially hostile preview shape.
+    source_blocks = document.get("blocks")
+    if not isinstance(source_blocks, list):
+        raise SLDCValidationError("Preview document requires a blocks array")
+    if len(source_blocks) > MAX_BLOCKS:
+        raise SLDCValidationError("Preview document exceeds maximum block count")
+    title = document.get("title") if isinstance(document.get("title"), str) else ""
+    title = title[:2048]
+    unknown_features = sorted(set(loaded.manifest["requires"]) - SUPPORTED_FEATURES)
+    future_version = _parse_version(loaded.manifest["version"]) > _parse_version(LATEST_KNOWN_VERSION)
+    known_document_keys = {
+        "schema", "id", "title", "language", "blocks", "publication", "metadata",
+        "provenance", "styles", "sections", "references", "embeds", "history",
+        "revision", "extensions",
+    }
+    known_block_keys = {
+        "id", "type", "text", "source_ref", "attributes", "annotations",
+        "spans", "style", "section", "table", "figure", "equation", "embed",
+        "extensions",
+    }
+    skipped = len(set(document) - known_document_keys)
+    preview_blocks: list[dict[str, str]] = []
+    budget = MAX_TEXT_CHARS
+    for block in source_blocks:
+        if not isinstance(block, dict):
+            skipped += 1
+            continue
+        kind = block.get("type")
+        raw_text = block.get("text")
+        text = raw_text if isinstance(raw_text, str) else ""
+        if not isinstance(raw_text, str):
+            skipped += 1
+        if not isinstance(kind, str) or kind not in BLOCK_TYPES_V1:
+            skipped += 1
+            kind = "paragraph"
+        skipped += len(set(block) - known_block_keys)
+        if kind == "equation":
+            equation = block.get("equation")
+            if isinstance(equation, dict) and isinstance(equation.get("source"), str):
+                text = equation["source"]
+            elif not text:
+                skipped += 1
+        if kind == "table":
+            table = block.get("table")
+            if isinstance(table, dict) and isinstance(table.get("rows"), list):
+                rows: list[str] = []
+                for row in table["rows"][:MAX_TABLE_ROWS]:
+                    if not isinstance(row, list):
+                        skipped += 1
+                        continue
+                    cells: list[str] = []
+                    for cell in row[:MAX_TABLE_COLUMNS]:
+                        if isinstance(cell, dict) and isinstance(cell.get("text"), str):
+                            cells.append(cell["text"])
+                        else:
+                            skipped += 1
+                    if cells:
+                        rows.append("\\t".join(cells))
+                if rows:
+                    text = (text + "\\n" if text else "") + "\\n".join(rows)
+            else:
+                skipped += 1
+        if kind == "figure":
+            figure = block.get("figure")
+            if isinstance(figure, dict) and isinstance(figure.get("alt"), str):
+                text = (text + "\\n" if text else "") + figure["alt"]
+        if len(text) > budget:
+            text = text[:budget]
+            skipped += 1
+        budget -= len(text)
+        if text:
+            preview_blocks.append({"type": "paragraph", "text": text})
+        else:
+            skipped += 1
+    complete = not (unknown_features or future_version or skipped)
+    return {
+        "title": title, "version": loaded.manifest["version"],
+        "complete": complete, "text": "\\n\\n".join(item["text"] for item in preview_blocks),
+        "blocks": preview_blocks, "skipped": skipped, "skipped_blocks": skipped,
+        "unsupported_requires": unknown_features,
+        "newer_than_known": future_version, "read_only": True,
+    }
+
+
+@_guarded
+def preview_to_package(preview: Mapping[str, Any]) -> SLDCPackage:
+    """Build a *fresh*, text-only 1.0.0 package from inert preview strings.
+
+    This explicitly discards all source ids, styles, non-text blocks, assets,
+    comments, signatures, extensions, provenance and future-version features.
+    It never mutates or saves the source document.
+    """
+    if not isinstance(preview, Mapping):
+        raise SLDCValidationError("preview must be an object")
+    title = preview.get("title")
+    if not isinstance(title, str) or not title.strip():
+        title = "SLDC text preview"
+    if len(title) > 2048:
+        title = title[:2048]
+    source_blocks = preview.get("blocks")
+    if not isinstance(source_blocks, list) or len(source_blocks) > MAX_BLOCKS:
+        raise SLDCValidationError("preview must contain a bounded blocks array")
+    new_blocks: list[dict[str, Any]] = []
+    total = 0
+    for item in source_blocks:
+        if not isinstance(item, Mapping) or not isinstance(item.get("text"), str):
+            raise SLDCValidationError("preview blocks must be text records")
+        raw = item["text"]
+        total += len(raw)
+        if total > MAX_TEXT_CHARS:
+            raise SLDCValidationError("preview text exceeds permitted limit")
+        if raw:
+            new_blocks.append(make_block("paragraph", raw))
+    if not new_blocks:
+        new_blocks.append(make_block("paragraph", ""))
+    package = new_package(title, new_blocks)
+    validate_package(package)
+    return package
+
+
+# ----------------------------------------------------------------------------------------------
 # Building packages (1.x)
 # ----------------------------------------------------------------------------------------------
 def new_block_id() -> str:
@@ -4566,7 +4723,7 @@ __all__ = [
     "Asset", "Recipient", "Signer",
     # Packages (1.x)
     "read_package", "write_package", "loads_package", "dumps_package", "inspect_package",
-    "newest_version",
+    "newest_version", "preview_package", "preview_to_package",
     "validate_package", "new_package", "make_asset", "add_asset", "prune_assets", "make_table",
     "make_figure", "revision_id", "make_equation", "make_inline_equation", "make_inline_image", "revision_id",
     # Migration
