@@ -198,7 +198,7 @@ class BlackBoxSolver(BaseSolver):
                     if entry["violation"] < state.best_violation:
                         state.best_violation = entry["violation"]
                         state.best_violation_point = dict(point)
-                    if is_feasible(problem, point, tolerance=self.feasibility_tolerance) and entry["signed"] < state.best_feasible_signed:
+                    if entry["feasible"] and entry["signed"] < state.best_feasible_signed:
                         state.best_feasible_signed = entry["signed"]
                         state.best_feasible_point = dict(point)
 
@@ -216,26 +216,33 @@ class BlackBoxSolver(BaseSolver):
                 raise _BudgetStop(TerminationReason.EVALUATION_LIMIT)
             state.evaluations += 1
             failed = False
+            feasible = False
             try:
                 raw = evaluate_objective(objective, point)
                 signed = raw if objective.sense is ObjectiveSense.MINIMIZE else -raw
-                violation = max_constraint_violation(problem, point)
-                if violation is None or not math.isfinite(violation):
+                violation, feasible = feasibility_evidence(
+                    problem, point, tolerance=self.feasibility_tolerance
+                )
+                if not math.isfinite(violation):
                     raise OptimizationEvaluationError("black-box constraint evaluation produced invalid violation")
             except OptimizationEvaluationError:
                 state.failures += 1
                 failed = True
                 signed, violation = self.failure_penalty, self.failure_penalty
+                feasible = False
             if violation < state.best_violation:
                 state.best_violation = violation
                 state.best_violation_point = dict(point)
-            if not failed and is_feasible(problem, point, tolerance=self.feasibility_tolerance) and signed < state.best_feasible_signed:
+            if not failed and feasible and signed < state.best_feasible_signed:
                 state.best_feasible_signed = signed
                 state.best_feasible_point = dict(point)
             result = (signed, violation, dict(point))
             cache[key] = result
             if journal is not None:
-                journal.record(key, point=point, signed=signed, violation=violation, failed=failed)
+                journal.record(
+                    key, point=point, signed=signed, violation=violation,
+                    failed=failed, feasible=feasible,
+                )
             return result
 
         def merit(x: Sequence[float]) -> float:
