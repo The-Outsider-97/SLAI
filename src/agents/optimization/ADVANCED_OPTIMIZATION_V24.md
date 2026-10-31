@@ -121,8 +121,15 @@ It is not a Hessian verifier or proof of differentiability.
 - Checkpoint identity includes the existing `OptimizationMemory` problem
   fingerprint, explicit evaluator revision, method and relevant solver
   configuration. A mismatch is rejected.
+- JSON schema v2 checkpoints include each candidate's feasibility classification,
+  avoiding reevaluation of expensive external constraint callbacks on resume.
+  Candidate evidence is derived from the shared canonical feasibility evaluator.
 - JSON checkpoints are atomically replaced and SHA-256 checksummed to catch
-  accidental corruption. Checksums are *not* authenticity signatures.
+  accidental corruption. Checksums are *not* authenticity signatures; the
+  approach is best-effort crash resilience, not a guarantee against all
+  filesystem/power failures.
+- Checkpoints are unencrypted plaintext; applications must select appropriate
+  protected storage and retention policies for sensitive designs.
 - Failed evaluations can be cached but can never become feasible incumbents.
 - The same parameter vector is evaluated at most once per matching cache
   identity except for interrupted in-flight calls. A crash between actual
