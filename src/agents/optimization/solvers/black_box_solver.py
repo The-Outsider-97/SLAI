@@ -29,6 +29,7 @@ from scipy.optimize import differential_evolution # type: ignore
 from ..utils.config_loader import get_config_section, load_global_config
 from ..utils.optimization_errors import *
 from ..utils.optimization_helpers import *
+from ..utils.optimization_helpers import stable_fingerprint
 from ..optimization_math import *
 from ..optimization_memory import OptimizationMemory
 from ..evaluation_runtime import EvaluationJournal
@@ -161,7 +162,6 @@ class BlackBoxSolver(BaseSolver):
             revision = options.get("evaluator_revision")
             if not isinstance(revision, str) or not revision.strip():
                 raise OptimizationValidationError("checkpoint requires explicit evaluator_revision")
-            from ..utils.optimization_helpers import stable_fingerprint
             identity = stable_fingerprint({
                 "problem": OptimizationMemory.problem_fingerprint(problem),
                 "revision": revision,

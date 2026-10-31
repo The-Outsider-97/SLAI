@@ -202,6 +202,23 @@ def test_gradient_check_uses_stem_differentiation_and_detects_bad_gradient():
     assert not verify_objective_gradient(bad_problem, {"x": 1.5})["passes"]
 
 
+
+def test_black_box_without_checkpoint_does_not_shadow_fingerprint_import():
+    """Regression: the cache helper must resolve without checkpoint_path."""
+    problem = OptimizationProblem(
+        "fingerprint_scope",
+        variables=(Variable("x", VariableDomain.real(-1, 1), initial=0.),),
+        objectives=(Objective("loss", function=lambda p: (p["x"] - 0.25)**2),),
+        problem_class=ProblemClass.BLACK_BOX,
+    )
+    result = BlackBoxSolver({"method": "pattern_search", "max_evaluations": 50}).solve(
+        problem, method="pattern_search", max_evaluations=50,
+    )
+    assert result.primal_solution is not None
+    assert result.feasibility.value == "feasible"
+
+
+
 def test_mixed_variable_black_box_uses_existing_canonical_solver():
     problem = OptimizationProblem(
         "mixed_variable", variables=(
