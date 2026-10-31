@@ -110,7 +110,7 @@ It is not a Hessian verifier or proof of differentiability.
 | `cancel_event` | Object exposing `is_set()`, e.g. `threading.Event`. Checked cooperatively before evaluations and at pattern-search iterations. |
 | `checkpoint_path` | File path for persistent candidate evaluation evidence. |
 | `evaluator_revision` | Required explicit stable identifier for the exact caller-owned evaluator and model state. |
-| `resume` | Boolean, default false. **Only pattern_search** supports algorithm-state resume. |
+| `resume` | Boolean, default false. Native `pattern_search` or version-gated SciPy `differential_evolution` with generation checkpointing. |
 | `checkpoint_max_bytes` | Maximum serialized checkpoint file size (default 32 MiB). |
 | `max_evaluations` | **Total unique** evaluation budget, counting restored checkpoint evaluations. |
 
@@ -136,8 +136,30 @@ It is not a Hessian verifier or proof of differentiability.
   external work and durable evidence may re-execute that work.
 - **Pattern-search** resumes from its last durable completed iteration with
   cached evaluations reused, and may receive a larger total budget.
-- SciPy differential evolution may persist candidate cache records, but
-  cannot resume its exact population/RNG state: `resume=True` is rejected.
+- SciPy differential evolution can persist and restore **complete-generation**
+  state through the existing SciPy backend when the installed SciPy private API
+  matches a validated version. Current tested gate: **SciPy 1.17.0**.
+  A checkpoint stores the normalized population, energy scores, feasibility
+  state, constraint violations, population random permutation, PCG64 state,
+  current mutation scale, SciPy evaluation count and generation number.
+- An interrupted generation is **not** certified as committed. The last
+  complete generation is restored, and previously completed candidate
+  evaluations from that interrupted generation are reused from the journal
+  before new computations. The resulting history can match uninterrupted
+  serial execution when all inputs and backend versions are identical.
+- `max_generations` may increase on resume, as may the **total**
+  `max_evaluations` budget. Changing solver strategy, population size, seed,
+  initial point, tolerance, numerical backend, or evaluator revision
+  invalidates reuse. No parallel workers, non-default DE mutation/
+  recombination, custom callback or polishing are supported in this
+  checkpointed mode. The uncheckpointed public SciPy DE method remains
+  available under its existing behavior.
+- Exact state resume is supported only at **whole-generation boundaries**;
+  continuation after interruption mid-generation uses cache replay.
+  Checkpoint corruption or SciPy/NumPy version mismatch fails closed.
+- The implementation depends on SciPy's private
+  `DifferentialEvolutionSolver` interface. Its version gate must be retested
+  against each new SciPy release before compatibility is expanded.
 - Cancellation is cooperative; neither SciPy backends nor arbitrary blocked
   external callbacks are forcibly terminated. Hard resource/process isolation
   remains an external execution-layer responsibility.
@@ -149,13 +171,57 @@ when any material input, geometry/model revision, solver objective semantics,
 simulation binary, random seed, or environment setting changes. Reuse cannot
 be safe when external state changes behind an unchanged identity.
 
-## 8. Benchmarks and reproducibility
+## 8. Exact-rational continuous-time feasibility certification
+
+`continuous_feasibility.py` introduces a deliberately restricted,
+mathematically checkable contract. Polynomial coefficients and time endpoints
+must be supplied as exact `int`, `fractions.Fraction`, or rational/decimal
+**strings**, not ambiguous binary `float` inputs. Coefficients are in
+ascending order, e.g. `("1/4", "-1", "1")` represents
+`(t - 1/2)^2`.
+
+- `certify_polynomial_nonnegative(coefficients, start="0", end="1")`
+  attempts to prove `p(t) >= 0` **for every real time** in the closed
+  interval. It converts the polynomial to the Bernstein basis and applies
+  exact-rational de Casteljau subdivision; a nonnegative Bernstein lower
+  bound proves an entire subinterval. A rational negative witness proves
+  a violation. Unresolved subintervals produce `inconclusive`, **not**
+  an optimistic success claim.
+- `certify_polynomial_trajectory_limits(position_coefficients, ...)`
+  proves supported continuous-time speed, acceleration and jerk norm
+  bounds for polynomial paths by checking the polynomial inequality
+  `limit^2 - sum_i (d^k x_i/dt^k)^2 >= 0`. It uses exact differentiation
+  and multiplication of rational polynomials.
+- `certify_polynomial_sphere_separation(center_a, center_b, radius_a,
+  radius_b, clearance, ...)` proves separation of two **modeled spheres**
+  whose centers follow rational polynomials. It checks the squared
+  center-distance inequality over the entire interval.
+- `verify_continuous_certificate(certificate)` independently reconstructs
+  the exact Bernstein hull or violation witness and rejects missing, tampered
+  or incomplete proof intervals.
+
+Three outcome states are possible:
+`certified_feasible`, `certified_violated`, `inconclusive`.
+Proof validity is for the exact **supplied polynomial model and units**
+only. Neither a discrete simulation nor an AI-generated path description
+automatically qualifies. Complex meshes, unknown interpolation, spline
+intervals not converted to rational-polynomial segments, arbitrary 3D
+rotation, nonlinear dynamics, and arbitrary external collision callbacks
+**cannot be certified by this subsystem**.
+
+A certified polynomial path is not an authorized change to any application's
+authoritative model; applications remain responsible for selecting the
+actual modeled geometry, ensuring matching units/timebases, and applying
+only validated results. Any mismatch between analyzed and executed motion
+invalidates the certificate.
+
+## 9. Benchmarks and reproducibility
 
 Run from the SLAI repository root:
 
 ```powershell
 py -m compileall -q src/agents/optimization
-py -m pytest -v tests/agents/test_optimization_advanced_v24.py
+py -m pytest -v tests/agents/test_optimization_advanced_v24.py tests/agents/test_optimization_de_certification_v24.py
 py -m pytest -q
 py -m benchmarks.optimization_advanced_v24 --repeat 3 --json benchmark.json
 ```
@@ -166,19 +232,26 @@ mixed-variable and finite-distribution cases. Report measured hardware and
 software versions. There are no invented speedup figures and benchmark
 completion is not proof of optimality.
 
-## 9. Explicit remaining gaps
+## 10. Explicit remaining gaps
 
 - End-to-end validation under full SLAI runtime has not yet been executed
   for this implementation.
-- General nonlinear optimal control, nonuniform-grid dynamic solvers and
-  continuous-time constraint certification are not provided.
+- General nonlinear optimal control and nonuniform-grid dynamic solvers
+  remain unavailable. **Exact rational-polynomial continuous-time
+  feasibility certificates** are supported for limited analytic cases,
+  including vector polynomial derivative limits and moving spheres, as
+  documented below. General geometry/black-box trajectories remain
+  sampled-only or uncertified.
 - Accurate angular acceleration/jerk require common-frame transport and
   independently validated dynamics; not included here.
 - Advanced Bayesian optimization, surrogates and global MINLP methods have
   not been added; available established solvers should be reused where feasible.
 - Out-of-process evaluator isolation, strict CPU/memory quota enforcement,
   multi-writer checkpoint locking and distributed resume remain unimplemented.
-- Differential evolution full-state deterministic restart remains unsupported.
+- Differential evolution full-state restart is **version-gated**; SciPy
+  versions other than the explicitly verified version are rejected.
+  Crash/restart continues from the last durably committed generation, with
+  in-generation candidate evaluations replayed from cache.
 - End-to-end Spatial, STEM, Simulation, Handler and Provenance execution
   bindings still require dedicated integration tests.
 - Solver performance improvements must be substantiated through measured
