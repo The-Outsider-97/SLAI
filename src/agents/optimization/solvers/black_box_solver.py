@@ -33,6 +33,7 @@ from ..utils.optimization_helpers import stable_fingerprint
 from ..optimization_math import *
 from ..optimization_memory import OptimizationMemory
 from ..evaluation_runtime import EvaluationJournal
+from ..de_checkpoint import require_supported_scipy, run_checkpointed_de
 from ..optimization_types import *
 from .base_solver import BaseSolver
 from logs.logger import configure_logging, get_logger,  PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -151,8 +152,12 @@ class BlackBoxSolver(BaseSolver):
         if not isinstance(resume, bool):
             raise OptimizationValidationError("resume must be boolean")
         checkpoint_path = options.get("checkpoint_path")
-        if resume and (checkpoint_path is None or method != "pattern_search"):
-            raise UnsupportedProblemError("resume requires checkpoint_path and pattern_search")
+        if resume and checkpoint_path is None:
+            raise UnsupportedProblemError("resume requires checkpoint_path")
+        if checkpoint_path is not None and method == "differential_evolution":
+            # Private SciPy API is explicitly version gated, before touching
+            # any on-disk checkpoint.
+            require_supported_scipy()
         if checkpoint_path is not None and not problem.deterministic:
             raise UnsupportedProblemError("checkpoint caching requires deterministic evaluator semantics")
         journal = None
@@ -176,6 +181,13 @@ class BlackBoxSolver(BaseSolver):
                 "pattern_initial_mesh": options.get("initial_mesh", self.pattern_initial_mesh),
                 "pattern_mesh_reduction": options.get("mesh_reduction", self.pattern_mesh_reduction),
                 "pattern_min_mesh": options.get("min_mesh", self.pattern_min_mesh),
+                "de_strategy": options.get("strategy", "best1bin"),
+                "de_popsize": options.get("popsize", self.popsize),
+                "de_absolute_tolerance": options.get("absolute_tolerance", 0.0),
+                "de_polish": options.get("polish", self.polish),
+                "de_x0": options.get("x0"),
+                "de_configuration": "serial_immediate_PCG64_default_mutation",
+                "numpy_version": np.__version__,
             })
             journal = EvaluationJournal(
                 checkpoint_path, identity=identity, resume=resume,
@@ -262,7 +274,32 @@ class BlackBoxSolver(BaseSolver):
         try:
             if method == "differential_evolution":
                 maxiter = max(1, int(math.ceil(budget / max(1, self.popsize * len(bounds)))) - 1)
-                result = differential_evolution(
+                if journal is not None:
+                    requested_generations = options.get("max_generations", maxiter)
+                    if (isinstance(requested_generations, bool)
+                        or not isinstance(requested_generations, int)
+                        or requested_generations < 1):
+                        raise OptimizationValidationError("max_generations must be positive integer")
+                    iterations, converged = run_checkpointed_de(
+                        merit, bounds, integrality, options=options,
+                        journal=journal, seed=self.seed, popsize=self.popsize,
+                        tolerance=self.tolerance,
+                        maximum_generations=requested_generations,
+                        cancel_event=cancel_event, deadline=deadline,
+                    )
+                    backend_message = (
+                        "SciPy differential evolution converged"
+                        if converged else "SciPy DE generation limit reached"
+                    )
+                    if not converged:
+                        if cancel_event is not None and cancel_event.is_set():
+                            limit_reason = TerminationReason.INTERRUPTED
+                        elif deadline.expired():
+                            limit_reason = TerminationReason.TIME_LIMIT
+                        else:
+                            limit_reason = TerminationReason.ITERATION_LIMIT
+                else:
+                    result = differential_evolution(
                     merit,
                     bounds,
                     strategy=str(options.get("strategy", "best1bin")),
@@ -277,8 +314,8 @@ class BlackBoxSolver(BaseSolver):
                     integrality=np.asarray(integrality, dtype=bool),
                     x0=np.asarray(options["x0"], dtype=float) if "x0" in options else None,
                 )
-                backend_message = str(result.message)
-                iterations = int(getattr(result, "nit", 0))
+                    backend_message = str(result.message)
+                    iterations = int(getattr(result, "nit", 0))
             else:
                 iterations = self._pattern_search(
                     problem, bounds, integrality, merit, evaluate_vector, options,
