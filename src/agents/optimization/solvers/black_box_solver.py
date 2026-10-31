@@ -29,6 +29,8 @@ from ..utils.config_loader import get_config_section, load_global_config
 from ..utils.optimization_errors import *
 from ..utils.optimization_helpers import *
 from ..optimization_math import *
+from ..optimization_memory import OptimizationMemory
+from ..evaluation_runtime import EvaluationJournal
 from ..optimization_types import *
 from .base_solver import BaseSolver
 from logs.logger import configure_logging, get_logger,  PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -139,11 +141,63 @@ class BlackBoxSolver(BaseSolver):
         if budget <= 0:
             raise ValueError("max_evaluations must be positive")
         deadline = Deadline.from_seconds(self.effective_time_limit(options))
+        cancel_event = options.get("cancel_event")
+        if cancel_event is not None and not callable(getattr(cancel_event, "is_set", None)):
+            raise OptimizationValidationError("cancel_event must expose is_set()")
+        resume = options.get("resume", False)
+        if not isinstance(resume, bool):
+            raise OptimizationValidationError("resume must be boolean")
+        checkpoint_path = options.get("checkpoint_path")
+        if resume and (checkpoint_path is None or method != "pattern_search"):
+            raise UnsupportedProblemError("resume requires checkpoint_path and pattern_search")
+        if checkpoint_path is not None and not problem.deterministic:
+            raise UnsupportedProblemError("checkpoint caching requires deterministic evaluator semantics")
+        journal = None
+        if checkpoint_path is not None:
+            if not isinstance(checkpoint_path, (str, __import__("os").PathLike)):
+                raise OptimizationValidationError("checkpoint_path must be a filesystem path")
+            revision = options.get("evaluator_revision")
+            if not isinstance(revision, str) or not revision.strip():
+                raise OptimizationValidationError("checkpoint requires explicit evaluator_revision")
+            from ..utils.optimization_helpers import stable_fingerprint
+            identity = stable_fingerprint({
+                "problem": OptimizationMemory.problem_fingerprint(problem),
+                "revision": revision,
+                "method": method,
+                "solver_version": self.solver_version(),
+                "seed": options.get("seed", self.seed),
+                "tolerance": options.get("tolerance", self.tolerance),
+                "constraint_penalty": self.constraint_penalty,
+                "failure_penalty": self.failure_penalty,
+                "pattern_initial_mesh": options.get("initial_mesh", self.pattern_initial_mesh),
+                "pattern_mesh_reduction": options.get("mesh_reduction", self.pattern_mesh_reduction),
+                "pattern_min_mesh": options.get("min_mesh", self.pattern_min_mesh),
+            })
+            journal = EvaluationJournal(
+                checkpoint_path, identity=identity, resume=resume,
+                maximum_bytes=int(options.get("checkpoint_max_bytes", 32 * 1024 * 1024)),
+            )
         state = _EvaluationState()
         cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
         objective = problem.objectives[0]
+        if journal is not None and resume:
+            for cache_key, entry in journal.entries.items():
+                point = dict(entry["point"])
+                cache[cache_key] = (entry["signed"], entry["violation"], point)
+                state.evaluations += 1
+                if entry["failed"]:
+                    state.failures += 1
+                else:
+                    if entry["violation"] < state.best_violation:
+                        state.best_violation = entry["violation"]
+                        state.best_violation_point = dict(point)
+                    if is_feasible(problem, point, tolerance=self.feasibility_tolerance) and entry["signed"] < state.best_feasible_signed:
+                        state.best_feasible_signed = entry["signed"]
+                        state.best_feasible_point = dict(point)
 
         def evaluate_vector(x: Sequence[float]) -> tuple[float, float, dict[str, Any]]:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _BudgetStop(TerminationReason.INTERRUPTED)
             if deadline.expired():
                 raise _BudgetStop(TerminationReason.TIME_LIMIT)
             point = point_from_vector(problem, x)
@@ -154,6 +208,7 @@ class BlackBoxSolver(BaseSolver):
             if state.evaluations >= budget:
                 raise _BudgetStop(TerminationReason.EVALUATION_LIMIT)
             state.evaluations += 1
+            failed = False
             try:
                 raw = evaluate_objective(objective, point)
                 signed = raw if objective.sense is ObjectiveSense.MINIMIZE else -raw
@@ -162,15 +217,18 @@ class BlackBoxSolver(BaseSolver):
                     raise OptimizationEvaluationError("black-box constraint evaluation produced invalid violation")
             except OptimizationEvaluationError:
                 state.failures += 1
+                failed = True
                 signed, violation = self.failure_penalty, self.failure_penalty
             if violation < state.best_violation:
                 state.best_violation = violation
                 state.best_violation_point = dict(point)
-            if violation <= self.feasibility_tolerance and signed < state.best_feasible_signed:
+            if not failed and is_feasible(problem, point, tolerance=self.feasibility_tolerance) and signed < state.best_feasible_signed:
                 state.best_feasible_signed = signed
                 state.best_feasible_point = dict(point)
             result = (signed, violation, dict(point))
             cache[key] = result
+            if journal is not None:
+                journal.record(key, point=point, signed=signed, violation=violation, failed=failed)
             return result
 
         def merit(x: Sequence[float]) -> float:
@@ -205,7 +263,10 @@ class BlackBoxSolver(BaseSolver):
                 backend_message = str(result.message)
                 iterations = int(getattr(result, "nit", 0))
             else:
-                iterations = self._pattern_search(problem, bounds, integrality, merit, evaluate_vector, options)
+                iterations = self._pattern_search(
+                    problem, bounds, integrality, merit, evaluate_vector, options,
+                    journal=journal, cancel_event=cancel_event,
+                )
                 backend_message = "pattern mesh converged"
         except _BudgetStop as stop:
             limit_reason = stop.reason
@@ -219,7 +280,11 @@ class BlackBoxSolver(BaseSolver):
             primal = None
 
         if limit_reason is not None:
-            status = SolverStatus.TIMEOUT if limit_reason is TerminationReason.TIME_LIMIT else SolverStatus.LIMIT_REACHED
+            status = (
+                SolverStatus.TIMEOUT if limit_reason is TerminationReason.TIME_LIMIT
+                else SolverStatus.INTERRUPTED if limit_reason is TerminationReason.INTERRUPTED
+                else SolverStatus.LIMIT_REACHED
+            )
             return self._solution(
                 problem,
                 status=status,
@@ -276,6 +341,9 @@ class BlackBoxSolver(BaseSolver):
         merit: Any,
         evaluate_vector: Any,
         options: Mapping[str, Any],
+        *,
+        journal: EvaluationJournal | None = None,
+        cancel_event: Any = None,
     ) -> int:
         x = np.asarray(options.get("x0", initial_vector(problem)), dtype=float)
         lower = np.asarray([bound[0] for bound in bounds], dtype=float)
@@ -287,7 +355,22 @@ class BlackBoxSolver(BaseSolver):
         minimum = float(options.get("min_mesh", self.pattern_min_mesh))
         current = merit(x)
         iterations = 0
+        if journal is not None and journal.progress is not None:
+            previous = journal.progress
+            try:
+                x = np.asarray(previous["x"], dtype=float)
+                mesh = float(previous["mesh"])
+                iterations = int(previous["iterations"])
+                current = float(previous["current"])
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise OptimizationValidationError("corrupt pattern-search progress checkpoint") from exc
+            if len(x) != len(bounds) or not np.all(np.isfinite(x)) or not math.isfinite(mesh) or not math.isfinite(current) or mesh <= 0 or iterations < 0:
+                raise OptimizationValidationError("invalid pattern-search progress checkpoint")
+        elif journal is not None:
+            journal.set_progress({"x": x.tolist(), "mesh": mesh, "current": current, "iterations": iterations})
         while mesh > minimum:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _BudgetStop(TerminationReason.INTERRUPTED)
             iterations += 1
             improved = False
             for axis in range(len(x)):
@@ -309,6 +392,8 @@ class BlackBoxSolver(BaseSolver):
                     break
             if not improved:
                 mesh *= reduction
+            if journal is not None:
+                journal.set_progress({"x": x.tolist(), "mesh": mesh, "current": current, "iterations": iterations})
         evaluate_vector(x)
         return iterations
 
