@@ -158,6 +158,10 @@ class BlackBoxSolver(BaseSolver):
             # Private SciPy API is explicitly version gated, before touching
             # any on-disk checkpoint.
             require_supported_scipy()
+            if bool(options.get("polish", self.polish)):
+                raise UnsupportedProblemError(
+                    "checkpointed differential evolution cannot resume post-optimization polishing"
+                )
         if checkpoint_path is not None and not problem.deterministic:
             raise UnsupportedProblemError("checkpoint caching requires deterministic evaluator semantics")
         journal = None
@@ -300,20 +304,20 @@ class BlackBoxSolver(BaseSolver):
                             limit_reason = TerminationReason.ITERATION_LIMIT
                 else:
                     result = differential_evolution(
-                    merit,
-                    bounds,
-                    strategy=str(options.get("strategy", "best1bin")),
-                    maxiter=maxiter,
-                    popsize=int(options.get("popsize", self.popsize)),
-                    tol=float(options.get("tolerance", self.tolerance)),
-                    atol=float(options.get("absolute_tolerance", 0.0)),
-                    rng=np.random.default_rng(int(options.get("seed", self.seed))),
-                    polish=bool(options.get("polish", self.polish)),
-                    updating="immediate",
-                    workers=1,
-                    integrality=np.asarray(integrality, dtype=bool),
-                    x0=np.asarray(options["x0"], dtype=float) if "x0" in options else None,
-                )
+                        merit,
+                        bounds,
+                        strategy=str(options.get("strategy", "best1bin")),
+                        maxiter=maxiter,
+                        popsize=int(options.get("popsize", self.popsize)),
+                        tol=float(options.get("tolerance", self.tolerance)),
+                        atol=float(options.get("absolute_tolerance", 0.0)),
+                        rng=np.random.default_rng(int(options.get("seed", self.seed))),
+                        polish=bool(options.get("polish", self.polish)),
+                        updating="immediate",
+                        workers=1,
+                        integrality=np.asarray(integrality, dtype=bool),
+                        x0=np.asarray(options["x0"], dtype=float) if "x0" in options else None,
+                    )
                     backend_message = str(result.message)
                     iterations = int(getattr(result, "nit", 0))
             else:
