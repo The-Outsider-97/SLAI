@@ -132,9 +132,22 @@ def domain_violation(variable: Variable, value: Any) -> float:
     if domain.kind is DomainKind.BINARY:
         violation = max(violation, min(abs(finite), abs(finite - 1.0)))
 
-    # Semi domains contain the isolated point zero in addition to [lower, upper].
-    if domain.kind in {DomainKind.SEMI_CONTINUOUS, DomainKind.SEMI_INTEGER} and finite == 0.0:
-        return violation
+    # Semi domains are the union {0} U [lower, upper], not an ordinary
+    # bounded interval. Report distance to the nearest *permitted* branch.
+    # The previous max(bound_violation, integrality_violation) overreported
+    # values near the isolated zero branch.
+    if domain.kind is DomainKind.SEMI_CONTINUOUS:
+        assert domain.lower is not None and domain.upper is not None
+        interval_distance = max(0.0, domain.lower - finite, finite - domain.upper)
+        return min(abs(finite), interval_distance)
+    if domain.kind is DomainKind.SEMI_INTEGER:
+        assert domain.lower is not None and domain.upper is not None
+        first = int(domain.lower) + int(domain.strict_lower)
+        last = int(domain.upper) - int(domain.strict_upper)
+        if first > last:
+            return abs(finite)
+        nearest = min(max(round(finite), first), last)
+        return min(abs(finite), abs(finite - nearest))
 
     if domain.lower is not None:
         if domain.strict_lower:
@@ -183,6 +196,19 @@ def is_feasible(problem: OptimizationProblem, point: Mapping[str, Any], *, toler
     for variable in problem.variables:
         if variable.name not in point:
             return False
+        # A strict bound excludes its endpoint exactly. A positive numerical
+        # tolerance may relax residuals, but must not legalize an excluded
+        # endpoint or a point beyond an open bound.
+        domain = variable.domain
+        numeric = to_finite_float(point[variable.name])
+        if numeric is not None and not (
+            domain.kind in {DomainKind.SEMI_CONTINUOUS, DomainKind.SEMI_INTEGER}
+            and numeric == 0.0
+        ):
+            if domain.strict_lower and domain.lower is not None and numeric <= domain.lower:
+                return False
+            if domain.strict_upper and domain.upper is not None and numeric >= domain.upper:
+                return False
         violation = domain_violation(variable, point[variable.name])
         if not math.isfinite(violation) or violation > tol:
             return False
@@ -205,14 +231,40 @@ def initial_point(problem: OptimizationProblem) -> dict[str, Any]:
         elif domain.kind is DomainKind.BINARY:
             point[variable.name] = 0
         elif domain.lower is not None and domain.upper is not None:
-            midpoint = (domain.lower + domain.upper) / 2.0
+            # Halving before addition avoids overflow for large same-sign
+            # finite bounds. For strict bounds, do not seed the excluded edge
+            # if floating-point rounding collapses the midpoint onto it.
+            midpoint = domain.lower / 2.0 + domain.upper / 2.0
             if domain.kind in {DomainKind.INTEGER, DomainKind.SEMI_INTEGER}:
                 midpoint = int(round(midpoint))
+                if domain.strict_lower and midpoint <= domain.lower:
+                    midpoint = int(domain.lower) + 1
+                if domain.strict_upper and midpoint >= domain.upper:
+                    midpoint = int(domain.upper) - 1
+            else:
+                if domain.strict_lower and midpoint <= domain.lower:
+                    midpoint = math.nextafter(domain.lower, math.inf)
+                if domain.strict_upper and midpoint >= domain.upper:
+                    midpoint = math.nextafter(domain.upper, -math.inf)
             point[variable.name] = variable.validate_value(midpoint)
         elif domain.lower is not None:
-            point[variable.name] = variable.validate_value(max(domain.lower, 0.0))
+            candidate = max(domain.lower, 0.0)
+            if domain.strict_lower and candidate <= domain.lower:
+                candidate = (
+                    int(domain.lower) + 1
+                    if domain.kind in {DomainKind.INTEGER, DomainKind.SEMI_INTEGER}
+                    else math.nextafter(domain.lower, math.inf)
+                )
+            point[variable.name] = variable.validate_value(candidate)
         elif domain.upper is not None:
-            point[variable.name] = variable.validate_value(min(domain.upper, 0.0))
+            candidate = min(domain.upper, 0.0)
+            if domain.strict_upper and candidate >= domain.upper:
+                candidate = (
+                    int(domain.upper) - 1
+                    if domain.kind in {DomainKind.INTEGER, DomainKind.SEMI_INTEGER}
+                    else math.nextafter(domain.upper, -math.inf)
+                )
+            point[variable.name] = variable.validate_value(candidate)
         else:
             point[variable.name] = 0.0
     return point
