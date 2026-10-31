@@ -2374,7 +2374,7 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
                 "text": "\n\n".join(item["text"] for item in content),
                 "blocks": content, "skipped": 0, "skipped_blocks": 0,
                 "unsupported_requires": [], "newer_than_known": False,
-                "read_only": True}
+                "notes": [], "read_only": True}
 
     if loaded.kind != "package":
         raise SLDCUnsupportedError("SLDC container cannot be previewed as plaintext")
@@ -2387,10 +2387,17 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
         raise SLDCValidationError("Preview document requires a blocks array")
     if len(source_blocks) > MAX_BLOCKS:
         raise SLDCValidationError("Preview document exceeds maximum block count")
-    title = document.get("title") if isinstance(document.get("title"), str) else ""
-    title = title[:2048]
+    raw_title = document.get("title")
+    title = raw_title[:2048] if isinstance(raw_title, str) and raw_title.strip() else "Untitled document"
     unknown_features = sorted(set(loaded.manifest["requires"]) - SUPPORTED_FEATURES)
     future_version = _parse_version(loaded.manifest["version"])[:2] > _parse_version(LATEST_KNOWN_VERSION)[:2]
+    notes: list[str] = []
+    if unknown_features:
+        notes.append("Unsupported required features: " + ", ".join(unknown_features))
+    if future_version:
+        notes.append("This document uses a newer SLDC minor version; preview is text-only and read-only.")
+    if not isinstance(raw_title, str) or not raw_title.strip():
+        notes.append("Invalid or missing document title replaced with 'Untitled document'.")
     known_document_keys = {
         "schema", "id", "title", "language", "blocks", "publication", "metadata",
         "provenance", "styles", "sections", "references", "embeds", "history",
@@ -2401,52 +2408,64 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
         "spans", "style", "section", "table", "figure", "equation", "embed",
         "extensions",
     }
-    skipped = len(set(document) - known_document_keys)
+    skipped = 0  # Count unusable blocks, not ignored metadata or text-only fallbacks.
+    ignored_fields = set(document) - known_document_keys
+    if ignored_fields:
+        notes.append("Unknown document fields were omitted from the preview.")
     preview_blocks: list[dict[str, str]] = []
     budget = MAX_TEXT_CHARS
-    for block in source_blocks:
+    for index, block in enumerate(source_blocks):
         if not isinstance(block, dict):
             skipped += 1
             continue
         kind = block.get("type")
         raw_text = block.get("text")
-        text = raw_text if isinstance(raw_text, str) else ""
         if not isinstance(raw_text, str):
+            # The plain text contract never coerces arbitrary data to text.
             skipped += 1
+            continue
+        text = raw_text
         if not isinstance(kind, str) or kind not in BLOCK_TYPES_V1:
-            skipped += 1
+            # A future block with a usable text field is displayable even
+            # though its behavior and formatting are not understood.
+            notes.append(f"Block {index} has an unknown type; displayed as plain text.")
             kind = "paragraph"
-        skipped += len(set(block) - known_block_keys)
+        if set(block) - known_block_keys:
+            notes.append(f"Block {index} has unknown fields; non-text data was omitted.")
         if kind == "equation":
             equation = block.get("equation")
             if isinstance(equation, dict) and isinstance(equation.get("source"), str):
                 text = equation["source"]
             elif not text:
-                skipped += 1
+                notes.append(f"Block {index} has no usable equation text.")
         if kind == "table":
             table = block.get("table")
             if isinstance(table, dict) and isinstance(table.get("rows"), list):
                 rows: list[str] = []
                 for row in table["rows"][:MAX_TABLE_ROWS]:
                     if not isinstance(row, list):
-                        skipped += 1
+                        notes.append(f"Block {index} contains an invalid table row; omitted.")
                         continue
                     cells: list[str] = []
                     for cell in row[:MAX_TABLE_COLUMNS]:
                         if isinstance(cell, dict) and isinstance(cell.get("text"), str):
                             cells.append(cell["text"])
                         else:
-                            skipped += 1
+                            notes.append(f"Block {index} contains a non-text table cell; omitted.")
                     if cells:
                         rows.append("\t".join(cells))
                 if rows:
                     text = (text + "\n" if text else "") + "\n".join(rows)
             else:
-                skipped += 1
+                notes.append(f"Block {index} contains an unsupported table shape; caption only.")
         if kind == "figure":
             figure = block.get("figure")
             if isinstance(figure, dict) and isinstance(figure.get("alt"), str):
-                text = (text + "\n" if text else "") + figure["alt"]
+                # Use the same human-readable, explicitly non-image label
+                # as the canonical block_text() representation for inline images.
+                alt = figure["alt"]
+                if alt:
+                    text = (text + "\n" if text else "") + f"[Image: {alt}]"
         if len(text) > budget:
             text = text[:budget]
             skipped += 1
@@ -2472,7 +2491,7 @@ def preview_package(source: bytes | bytearray | memoryview | str | os.PathLike[s
         "title": title, "version": loaded.manifest["version"],
         "complete": complete, "text": "\n\n".join(item["text"] for item in preview_blocks),
         "blocks": preview_blocks, "skipped": skipped, "skipped_blocks": skipped,
-        "unsupported_requires": unknown_features,
+        "unsupported_requires": unknown_features, "notes": notes,
         "newer_than_known": future_version, "read_only": True,
     }
 

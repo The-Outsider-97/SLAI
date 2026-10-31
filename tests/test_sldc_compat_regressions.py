@@ -193,3 +193,64 @@ def test_merge_preserves_1_1_features_and_version():
     assert merged.version == "1.1.0"
     assert any(b["type"] == "equation" for b in merged.document["blocks"])
     sldc.validate_package(merged)
+
+
+
+def test_future_image_alt_is_labeled_as_non_image_text():
+    def mutate(document):
+        document["blocks"][1] = {
+            "id": "b2", "type": "figure", "text": "",
+            "figure": {"asset": "unavailable", "alt": "red box"},
+        }
+    # Future-version preview does not claim that a missing image asset exists;
+    # it only displays the textual alt field as an explicit image placeholder.
+    data = _reseal(
+        sldc.dumps_package(_modern()), version="1.7.0", mutate=mutate,
+    )
+    preview = sldc.preview_package(data)
+    assert preview["blocks"][-1]["text"] == "[Image: red box]"
+    restored = sldc.preview_to_package(preview)
+    assert sldc.extract_text(restored).split("\n\n")[-1] == "[Image: red box]"
+    assert restored.assets == {}
+
+
+def test_future_unknown_types_with_text_do_not_inflate_skipped_block_count():
+    def mutate(document):
+        document["blocks"][1]["hologram"] = {"depth": 3}
+        document["blocks"].append({
+            "id": "future-1", "type": "hologram",
+            "text": "future text", "future-key": 1,
+        })
+        document["blocks"].append("not a block")
+        document["blocks"].append({
+            "id": "future-2", "type": "paragraph", "text": 7,
+        })
+    preview = sldc.preview_package(
+        _reseal(sldc.dumps_package(_modern()), version="1.7.0", mutate=mutate)
+    )
+    assert preview["skipped"] == 2
+    assert preview["skipped_blocks"] == 2
+    assert preview["blocks"][-1] == {"type": "paragraph", "text": "future text"}
+    assert any("unknown" in note.lower() for note in preview["notes"])
+
+
+def test_unknown_required_feature_reported_in_preview_notes():
+    data = _reseal(
+        sldc.dumps_package(_modern()), version="1.2.0", requires=["holo-layout"],
+    )
+    preview = sldc.preview_package(data)
+    assert "holo-layout" in " ".join(preview["notes"])
+    assert preview["unsupported_requires"] == ["holo-layout"]
+    assert preview["complete"] is False
+
+
+def test_invalid_future_title_falls_back_without_copying_unknown_data():
+    def mutate(document):
+        document["title"] = ["not", "text"]
+        document["blocks"][1]["future_data"] = {"sensitive": "not copied"}
+    preview = sldc.preview_package(
+        _reseal(sldc.dumps_package(_modern()), version="1.7.0", mutate=mutate)
+    )
+    assert preview["title"] == "Untitled document"
+    assert "not copied" not in repr(preview)
+    assert any("title" in note.lower() for note in preview["notes"])
