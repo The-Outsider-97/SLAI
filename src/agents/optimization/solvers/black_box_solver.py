@@ -17,6 +17,7 @@ from __future__ import annotations
 __version__ = "2.3.0"
 
 import math
+import os
 import time
 import numpy as np # type: ignore
 
@@ -154,7 +155,7 @@ class BlackBoxSolver(BaseSolver):
             raise UnsupportedProblemError("checkpoint caching requires deterministic evaluator semantics")
         journal = None
         if checkpoint_path is not None:
-            if not isinstance(checkpoint_path, (str, __import__("os").PathLike)):
+            if not isinstance(checkpoint_path, (str, os.PathLike)):
                 raise OptimizationValidationError("checkpoint_path must be a filesystem path")
             revision = options.get("evaluator_revision")
             if not isinstance(revision, str) or not revision.strip():
@@ -177,6 +178,10 @@ class BlackBoxSolver(BaseSolver):
                 checkpoint_path, identity=identity, resume=resume,
                 maximum_bytes=int(options.get("checkpoint_max_bytes", 32 * 1024 * 1024)),
             )
+            if not resume:
+                # A fresh run must never inherit a checkpoint from a previous
+                # run, including when cancellation happens before evaluation.
+                journal.save()
         state = _EvaluationState()
         cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
         objective = problem.objectives[0]
