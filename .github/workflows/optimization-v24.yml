@@ -8,7 +8,7 @@ on:
       - 'src/agents/optimization/**'
       - 'tests/agents/test_optimization_domain_problems.py'
       - 'tests/agents/test_optimization_numerical_contracts.py'
-      - 'tests/agents/test_optimization_advanced_v24.py tests/agents/test_optimization_de_certification_v24.py'
+      - 'tests/agents/test_optimization_advanced_v24.py'
       - 'tests/agents/test_optimization_de_certification_v24.py'
       - 'benchmarks/optimization_advanced_v24.py'
       - '.github/workflows/optimization-v24.yml'
@@ -21,6 +21,8 @@ on:
       - 'src/agents/optimization/**'
       - 'tests/agents/test_optimization_domain_problems.py'
       - 'tests/agents/test_optimization_numerical_contracts.py'
+      - 'tests/agents/test_optimization_advanced_v24.py'
+      - 'tests/agents/test_optimization_de_certification_v24.py'
       - '.github/workflows/optimization-v24.yml'
   workflow_dispatch:
 
@@ -55,4 +57,4 @@ jobs:
       - name: Compile domain module
         run: uv run python -m py_compile src/agents/optimization/domain_problems.py src/agents/optimization/derivative_checks.py src/agents/optimization/evaluation_runtime.py src/agents/optimization/de_checkpoint.py src/agents/optimization/continuous_feasibility.py benchmarks/optimization_advanced_v24.py
       - name: Run canonical domain and solver integration tests
-        run: uv run python -m pytest -q tests/agents/test_optimization_domain_problems.py tests/agents/test_optimization_numerical_contracts.py tests/agents/test_optimization_advanced_v24.py
+        run: uv run python -m pytest -q tests/agents/test_optimization_domain_problems.py tests/agents/test_optimization_numerical_contracts.py tests/agents/test_optimization_advanced_v24.py tests/agents/test_optimization_de_certification_v24.py
