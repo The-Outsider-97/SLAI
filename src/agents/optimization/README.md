@@ -219,6 +219,20 @@ Relevant regression tests:
 `tests/agents/test_optimization_numerical_contracts.py`.
 Full factory, agent and solver integration validation remains a separate gate.
 
+## Advanced v2.4 Extensions (Experimental)
+
+The general-purpose finite-scenario expectation/CVaR, sampled time-dependent
+constraints, trajectory derivative helpers, Spatial-backed SO(3) metrics,
+STEM-backed gradient diagnostics, and candidate checkpoint/cancel/resume
+options are described in
+[ADVANCED_OPTIMIZATION_V24.md](ADVANCED_OPTIMIZATION_V24.md).
+
+These additions extend the existing canonical mathematical contracts and
+solver adapters. They do not introduce application-specific optimizers.
+Only native pattern search can resume exact persisted algorithm progress;
+discretized constraints are **not** continuous-time guarantees.
+The additions require full integration and benchmark validation.
+
 ## Testing and Verification
 
 Targeted Optimization regression suites now exist under `tests/agents/`, including domain-problem formulation and numerical-contract tests. Passing these targeted suites alone does not establish availability or correctness of every solver. Use `OptimizationRegistries.summary(problem)` and `registry_summary()` to inspect compatibility/coverage without claiming that uncovered problem classes are supported.
