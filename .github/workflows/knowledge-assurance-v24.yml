@@ -1,4 +1,4 @@
-name: SLAI v2.4 Knowledge Assurance A-C
+name: SLAI v2.4 Knowledge Assurance A-E
 
 on:
   pull_request:
@@ -8,6 +8,7 @@ on:
       - 'src/agents/knowledge_agent.py'
       - 'tests/knowledge_assurance/**'
       - 'tests/knowledge_assurance_integration/**'
+      - 'tests/knowledge_assurance_phase_de/**'
       - '.github/workflows/knowledge-assurance-v24.yml'
   push:
     branches: [SLAI-v.2.4]
@@ -16,6 +17,7 @@ on:
       - 'src/agents/knowledge_agent.py'
       - 'tests/knowledge_assurance/**'
       - 'tests/knowledge_assurance_integration/**'
+      - 'tests/knowledge_assurance_phase_de/**'
   workflow_dispatch:
 
 permissions:
@@ -46,3 +48,5 @@ jobs:
         run: python -m unittest discover -s tests/knowledge_assurance -v
       - name: Enforce P0 repository integration gates
         run: python -m unittest discover -s tests/knowledge_assurance_integration -v
+      - name: Run consolidated Phase D-E regression tests
+        run: python -m unittest discover -s tests/knowledge_assurance_phase_de -v
