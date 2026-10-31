@@ -229,8 +229,14 @@ options are described in
 
 These additions extend the existing canonical mathematical contracts and
 solver adapters. They do not introduce application-specific optimizers.
-Only native pattern search can resume exact persisted algorithm progress;
-discretized constraints are **not** continuous-time guarantees.
+Native pattern search supports persisted algorithm progress. The existing
+SciPy differential-evolution backend also supports version-gated,
+full-generation state replay (currently verified against SciPy 1.17.0).
+Exact rational-polynomial motion bounds and moving-sphere separation can
+receive independently checkable continuous-time certificates, but generic
+sampled trajectories, nonpolynomial motion and arbitrary geometry do **not**
+receive continuous-time guarantees. See the advanced documentation for
+backend restrictions, mathematics and tests.
 The additions require full integration and benchmark validation.
 
 ## Testing and Verification
