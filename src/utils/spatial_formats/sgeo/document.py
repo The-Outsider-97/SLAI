@@ -304,6 +304,16 @@ class SceneDocument(SpatialDocument):
         self._live()
         return self._model.evaluate(time)
 
+    def undo_animation(self, *, expected_revision=None) -> int:
+        """Undo one SGEO animation revision without reverting unrelated state."""
+        with self._edit() as model:
+            return model.undo_animation(expected_revision=expected_revision)
+
+    def redo_animation(self, *, expected_revision=None) -> int:
+        """Redo one SGEO animation revision as an atomic new scene revision."""
+        with self._edit() as model:
+            return model.redo_animation(expected_revision=expected_revision)
+
     def generate_joint_motion(self, end_effector, target, duration, *,
                               expected_revision=None, max_iterations=200,
                               tolerance=1e-5):
