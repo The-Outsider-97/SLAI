@@ -296,6 +296,19 @@ def retarget_joint_clip(source_scene, target_scene, source_clip_id, joint_map, *
         sj, tj = source_joints.get(sid), target_joints.get(tid)
         if sj is None or tj is None or sj["kind"] != tj["kind"] or sj["kind"] == "fixed":
             raise ValidationError("retargeting requires matching movable joint kinds")
+        # Simple scalar retargeting is only mathematically safe when the
+        # source/target rest coordinate frames share their world orientation.
+        # Translation may differ (e.g. mechanisms with different link
+        # lengths), but rotated/mirrored frames require full rest-pose
+        # correction, which this restricted converter does not implement.
+        from ..common.transforms import is_rigid
+        source_rest = source_scene.world_transform(sid)
+        target_rest = target_scene.world_transform(tid)
+        if not is_rigid(source_rest) or not is_rigid(target_rest):
+            raise ValidationError("retargeting requires rigid rest frames")
+        linear_indices = (0, 1, 2, 4, 5, 6, 8, 9, 10)
+        if any(abs(source_rest[i] - target_rest[i]) > 1e-6 for i in linear_indices):
+            raise ValidationError("retargeting requires matching rest-frame orientations")
         sa, ta = vector(sj["axis"], 3), vector(tj["axis"], 3)
         sn, tn = hypot(*sa), hypot(*ta)
         dot = sum(a*b for a,b in zip(sa,ta)) / (sn*tn)
