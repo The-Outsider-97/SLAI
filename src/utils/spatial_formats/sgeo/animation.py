@@ -242,7 +242,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                         finite(frame[direction], direction, limit=1e9)
     occupied = _validate_clips(spec, scene, seen)
     _validate_drivers(spec.get("drivers", []), objects, seen, joints, occupied)
-    _validate_constraints(spec.get("constraints", []), objects)
+    _validate_constraints(spec.get("constraints", []), objects, duration=duration)
     return deepcopy(spec)
 
 
@@ -484,7 +484,7 @@ def _evaluate_drivers(drivers: list, grouped: dict):
         pending = remaining
 
 
-def _validate_constraints(constraints, objects) -> None:
+def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
     """Validate supported time-independent world-position constraints."""
     if not isinstance(constraints, list) or len(constraints) > 128:
         raise ValidationError("constraints must be a bounded list (max 128)")
@@ -492,7 +492,7 @@ def _validate_constraints(constraints, objects) -> None:
     for item in constraints:
         if not isinstance(item, dict) or set(item) - {
             "id", "kind", "object_id", "other_id", "target", "distance",
-            "tolerance", "movable"
+            "tolerance", "movable", "start", "end"
         } or not {"id", "kind", "object_id", "movable"} <= set(item):
             raise ValidationError("invalid constraint record")
         ident = require_id(item["id"])
@@ -510,6 +510,10 @@ def _validate_constraints(constraints, objects) -> None:
         tolerance = finite(item.get("tolerance", 1e-6), "constraint tolerance", limit=1e6)
         if tolerance <= 0:
             raise ValidationError("constraint tolerance must be positive")
+        start = finite(item.get("start", 0), "constraint activation start", limit=MAX_TIME)
+        end = finite(item.get("end", duration), "constraint activation end", limit=MAX_TIME)
+        if start < 0 or end < start or end > duration:
+            raise ValidationError("invalid constraint activation interval")
         if item["kind"] == "position":
             if "other_id" in item or "distance" in item:
                 raise ValidationError("position constraint cannot have distance fields")
@@ -885,7 +889,11 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
             parent = index[parent].get("parent")
     diagnostics = None
     if active == ANIMATION_V2_KEY and spec.get("constraints"):
-        diagnostics = solve_animation_constraints(candidate, spec["constraints"])
+        active_constraints = [
+            item for item in spec["constraints"]
+            if item.get("start", 0) <= timestamp <= item.get("end", spec["duration"])
+        ]
+        diagnostics = solve_animation_constraints(candidate, active_constraints)
         if diagnostics["status"] != "satisfied":
             raise ValidationError("animation constraints could not be satisfied",
                                   context={"constraint_report": diagnostics})
