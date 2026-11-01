@@ -144,7 +144,7 @@ class Scene:
         """
         from .animation import (ANIMATION_KEY, ANIMATION_V2_KEY, validate_animation,
                                 validate_animation_v2)
-        if version not in (None, 1, 2) or isinstance(version, bool):
+        if version is not None and (type(version) is not int or version not in (1, 2)):
             raise ValidationError("animation version must be 1 or 2")
         with self._mutation_lock:
             candidate = self._detached_copy()
@@ -213,8 +213,8 @@ class Scene:
             require_id(object_id)
             if any(obj.get("parent")==object_id for obj in self.objects):
                 raise ValidationError("cannot remove scene object with children")
-            if any(track["object_id"] == object_id for track in
-                   self.metadata.get("slai.animation.v1", {}).get("tracks", [])):
+            if any(track["object_id"] == object_id for key in ("slai.animation.v1", "slai.animation.v2")
+                   for track in self.metadata.get(key, {}).get("tracks", [])):
                 raise ValidationError("cannot remove object referenced by animation")
             pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
             if pos is None:
