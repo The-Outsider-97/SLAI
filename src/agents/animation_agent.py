@@ -58,12 +58,12 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "query_events", "retarget_joint_clip", "retarget_rig_motion", "generate_joint_motion",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
 _OPERATIONS = frozenset(SUPPORTED_EDITS | _READ_OPERATIONS | _TRANSPORT_OPERATIONS |
-                        {_BATCH_OPERATION, "apply_ik", "upgrade_animation"})
+                        {_BATCH_OPERATION, "apply_ik", "upgrade_animation", "undo_animation", "redo_animation"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +275,16 @@ class AnimationAgent(BaseAgent):
                     result = self._evaluate_frames(request, scene)
                 elif op == "get_animation":
                     result = self._get_animation(request, scene)
+                elif op == "query_events":
+                    result = self._query_events(request, scene)
+                elif op == "retarget_joint_clip":
+                    result = self._retarget_joint_clip(request, scene)
+                elif op == "retarget_rig_motion":
+                    result = self._retarget_rig_motion(request, scene)
+                elif op == "generate_joint_motion":
+                    result = self._generate_joint_motion(request, scene)
+                elif op in {"undo_animation", "redo_animation"}:
+                    result = self._animation_history_edit(request, scene)
                 elif op in {"forward_kinematics", "solve_ik", "apply_ik"}:
                     result = self._kinematics(request, scene)
                 elif op == "upgrade_animation":
@@ -385,6 +395,159 @@ class AnimationAgent(BaseAgent):
             revision = scene.revision
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
+
+    def _animation_history_edit(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route animation-only undo/redo through SGEO, without parallel state."""
+        if request.dry_run:
+            raise AnimationUnsupportedOperationError(
+                "animation undo/redo does not support speculative dry_run"
+            )
+        if request.expected_revision is None:
+            raise AnimationRevisionConflictError(
+                "animation undo/redo requires expected_revision"
+            )
+        native = getattr(scene, request.operation, None)
+        if not callable(native):
+            raise AnimationUnsupportedOperationError(
+                "provider does not implement authoritative animation history"
+            )
+        revision = native(expected_revision=request.expected_revision)
+        self._run_optional_runtime_operation(
+            "telemetry", "animation_memory.record",
+            lambda: self.animation_memory.record(AnimationEditRecord(
+                request.operation, request.scene_id,
+                request.expected_revision, revision,
+            )),
+        )
+        return {"status": "ok", "request_id": request.request_id,
+                "scene_id": request.scene_id, "revision": revision}
+
+    def _generate_joint_motion(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Return a mathematically checked native motion proposal, not a scene edit."""
+        native = getattr(scene, "generate_joint_motion", None)
+        if not callable(native):
+            raise AnimationUnsupportedOperationError(
+                "scene provider does not expose native joint motion generation"
+            )
+        payload = request.payload
+        if not {"end_effector", "target", "duration"} <= set(payload):
+            raise AnimationValidationError(
+                "generate_joint_motion requires end_effector, target and duration"
+            )
+        result = native(
+            payload["end_effector"], payload["target"], payload["duration"],
+            expected_revision=request.expected_revision,
+            max_iterations=payload.get("max_iterations", 200),
+            tolerance=payload.get("tolerance", 1e-5),
+        )
+        return {"request_id": request.request_id, "scene_id": request.scene_id, **result}
+
+    def _retarget_rig_motion(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Coordinate non-committing multiple-joint retargeting through native SGEO."""
+        provider = getattr(scene, "retarget_rig_motion", None)
+        if not callable(provider):
+            raise AnimationUnsupportedOperationError("target provider cannot retarget articulated rigs")
+        payload = request.payload
+        if not {"source_scene_id", "source_clips", "joint_map"} <= set(payload):
+            raise AnimationValidationError(
+                "retarget_rig_motion requires source_scene_id, source_clips and joint_map"
+            )
+        source = self._scene(payload["source_scene_id"])
+        target_lock = get_animation_edit_lock(scene)
+        source_lock = get_animation_edit_lock(source)
+        if target_lock is None or source_lock is None:
+            raise AnimationUnsupportedOperationError("retargeting requires authoritative scene locks")
+        from contextlib import ExitStack
+        locks = {id(target_lock): target_lock, id(source_lock): source_lock}
+        with ExitStack() as acquired:
+            for lock in (locks[key] for key in sorted(locks)):
+                acquired.enter_context(lock)
+            if request.expected_revision is not None and scene.revision != request.expected_revision:
+                raise AnimationRevisionConflictError("target scene revision mismatch")
+            source_revision = source.revision
+            if "source_expected_revision" in payload:
+                expected = payload["source_expected_revision"]
+                if type(expected) is not int or expected < 1:
+                    raise AnimationValidationError("source_expected_revision must be positive integer")
+                if expected != source_revision:
+                    raise AnimationRevisionConflictError("source scene revision mismatch")
+            result = provider(
+                source, payload["source_clips"], payload["joint_map"],
+                translation_scales=payload.get("translation_scales"),
+            )
+        return {"request_id": request.request_id,
+                "scene_id": request.scene_id, **result}
+
+    def _retarget_joint_clip(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route an explicit, non-committing joint conversion to native SGEO."""
+        provider = getattr(scene, "retarget_joint_clip", None)
+        if not callable(provider):
+            raise AnimationUnsupportedOperationError("target provider cannot retarget native joint clips")
+        payload = request.payload
+        if not {"source_scene_id", "source_clip_id", "joint_map"} <= set(payload):
+            raise AnimationValidationError(
+                "retarget_joint_clip requires source_scene_id, source_clip_id and joint_map"
+            )
+        source = self._scene(payload["source_scene_id"])
+        target_lock = get_animation_edit_lock(scene)
+        source_lock = get_animation_edit_lock(source)
+        if target_lock is None or source_lock is None:
+            raise AnimationUnsupportedOperationError("retargeting requires authoritative scene locks")
+        # Cross-scene reads use one consistent lock ordering to avoid
+        # deadlocks when independent animation requests target opposite scenes.
+        from contextlib import ExitStack
+        locks = {id(target_lock): target_lock, id(source_lock): source_lock}
+        with ExitStack() as acquired:
+            for lock in (locks[key] for key in sorted(locks)):
+                acquired.enter_context(lock)
+            revision = scene.revision
+            source_revision = source.revision
+            if request.expected_revision is not None and revision != request.expected_revision:
+                raise AnimationRevisionConflictError("target scene revision mismatch")
+            if "source_expected_revision" in payload:
+                expected = payload["source_expected_revision"]
+                if type(expected) is not int or expected < 1:
+                    raise AnimationValidationError("source_expected_revision must be a positive integer")
+                if expected != source_revision:
+                    raise AnimationRevisionConflictError("source scene revision mismatch")
+            result = provider(
+                source, payload["source_clip_id"], payload["joint_map"],
+                translation_scales=payload.get("translation_scales"),
+            )
+        return {"status": result["status"], "request_id": request.request_id,
+                "scene_id": request.scene_id, "revision": revision,
+                "source_revision": source_revision, **result}
+
+    def _query_events(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route a bounded, non-executing marker interval query to SGEO."""
+        query = getattr(scene, "animation_events", None)
+        if not callable(query):
+            raise AnimationUnsupportedOperationError(
+                "scene provider does not implement native animation event queries"
+            )
+        payload = request.payload
+        if "start" not in payload or "end" not in payload:
+            raise AnimationValidationError("query_events requires start and end")
+        lock = get_animation_edit_lock(scene)
+        if lock is None:
+            raise AnimationUnsupportedOperationError(
+                "query_events requires the authoritative scene edit lock"
+            )
+        with lock:
+            if request.expected_revision is not None and request.expected_revision != scene.revision:
+                raise AnimationRevisionConflictError("scene revision mismatch")
+            markers = query(
+                payload["start"], payload["end"],
+                include_start=payload.get("include_start", False),
+            )
+            revision = scene.revision
+        limit = self._policy.max_result_objects
+        return {
+            "status": "ok", "request_id": request.request_id,
+            "scene_id": request.scene_id, "revision": revision,
+            "marker_count": len(markers), "markers_truncated": len(markers) > limit,
+            "markers": list(markers[:limit]),
+        }
 
     def _upgrade_animation(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Route one explicit v1-to-v2 migration through native SGEO revision."""

@@ -51,7 +51,9 @@ EXTENDED_EDITS = frozenset({
     "set_interpolation", "set_duration",
     "set_animation_v2", "add_clip", "update_clip", "delete_clip", "add_instance", "update_instance",
     "delete_instance", "add_layer", "update_layer", "delete_layer",
-    "add_event", "delete_event",
+    "add_transition", "update_transition", "delete_transition",
+    "add_choreography", "update_choreography", "delete_choreography",
+    "add_event", "update_event", "delete_event",
 })
 SUPPORTED_EDITS = EDIT_OPERATIONS | EXTENDED_EDITS
 
@@ -133,7 +135,8 @@ def _stage(current: Any, operation: str, payload: Mapping[str, Any]) -> dict | N
     tracks = candidate["tracks"]
     for singular, collection in (
         ("clip", "clips"), ("instance", "instances"),
-        ("layer", "layers"), ("event", "events")
+        ("layer", "layers"), ("transition", "transitions"),
+        ("choreography", "choreographies"), ("event", "events")
     ):
         if operation not in {f"add_{singular}", f"update_{singular}", f"delete_{singular}"}:
             continue

@@ -74,6 +74,43 @@ class SGEOAnimationAdapter:
         """Delegate explicit native v1-to-v2 migration and revision check."""
         return self._scene.upgrade_animation(expected_revision=expected_revision)
 
+    def animation_events(self, start, end, *, include_start: bool = False):
+        """Delegate pure marker queries to authoritative SGEO."""
+        return self._scene.animation_events(start, end, include_start=include_start)
+
+    def undo_animation(self, *, expected_revision=None):
+        """Delegate animation undo to SGEO's transaction-aware scene journal."""
+        return self._scene.undo_animation(expected_revision=expected_revision)
+
+    def redo_animation(self, *, expected_revision=None):
+        """Delegate animation redo to SGEO's transaction-aware scene journal."""
+        return self._scene.redo_animation(expected_revision=expected_revision)
+
+    def generate_joint_motion(self, end_effector, target, duration, *,
+                              expected_revision=None, max_iterations=200,
+                              tolerance=1e-5):
+        """Delegate kinematic motion construction to SGEO's authoritative kernel."""
+        return self._scene.generate_joint_motion(
+            end_effector, target, duration, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+
+    def retarget_rig_motion(self, source_scene, source_clips, joint_map, *,
+                            translation_scales=None):
+        """Delegate synchronized retargeting proposals to the native SGEO scene."""
+        source = source_scene._scene if isinstance(source_scene, SGEOAnimationAdapter) else source_scene
+        return self._scene.retarget_rig_motion(
+            source, source_clips, joint_map, translation_scales=translation_scales,
+        )
+
+    def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
+                            translation_scales=None):
+        """Request a validated, non-committing native joint clip conversion."""
+        source = source_scene._scene if isinstance(source_scene, SGEOAnimationAdapter) else source_scene
+        return self._scene.retarget_joint_clip(
+            source, source_clip_id, joint_map, translation_scales=translation_scales,
+        )
+
     def forward_kinematics(self, values: dict | None = None):
         """Use SGEO's native FK and stable scene revision."""
         return self._scene.forward_kinematics(values)

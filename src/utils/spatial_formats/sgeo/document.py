@@ -304,6 +304,49 @@ class SceneDocument(SpatialDocument):
         self._live()
         return self._model.evaluate(time)
 
+    def undo_animation(self, *, expected_revision=None) -> int:
+        """Undo one SGEO animation revision without reverting unrelated state."""
+        with self._edit() as model:
+            return model.undo_animation(expected_revision=expected_revision)
+
+    def redo_animation(self, *, expected_revision=None) -> int:
+        """Redo one SGEO animation revision as an atomic new scene revision."""
+        with self._edit() as model:
+            return model.redo_animation(expected_revision=expected_revision)
+
+    def generate_joint_motion(self, end_effector, target, duration, *,
+                              expected_revision=None, max_iterations=200,
+                              tolerance=1e-5):
+        """Propose a verified native joint animation without modifying this document."""
+        self._live()
+        return self._model.generate_joint_motion(
+            end_effector, target, duration, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+
+    def retarget_rig_motion(self, source_scene, source_clips, joint_map, *,
+                            translation_scales=None):
+        """Propose multiple synchronized joint clips using native SGEO validation."""
+        self._live()
+        source = source_scene._model if isinstance(source_scene, SceneDocument) else source_scene
+        return self._model.retarget_rig_motion(
+            source, source_clips, joint_map, translation_scales=translation_scales,
+        )
+
+    def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
+                            translation_scales=None):
+        """Propose an explicit joint-channel clip conversion without committing it."""
+        self._live()
+        source = source_scene._model if isinstance(source_scene, SceneDocument) else source_scene
+        return self._model.retarget_joint_clip(
+            source, source_clip_id, joint_map, translation_scales=translation_scales,
+        )
+
+    def animation_events(self, start, end, *, include_start: bool = False):
+        """Query native v2 animation markers without executing callbacks."""
+        self._live()
+        return self._model.animation_events(start, end, include_start=include_start)
+
     def forward_kinematics(self, values: dict | None = None):
         """Return a detached native articulated world-transform mapping."""
         self._live()

@@ -259,5 +259,112 @@ def solve_inverse_kinematics(
     return {**best, "attempts": attempts}
 
 
+def retarget_joint_clip(source_scene, target_scene, source_clip_id, joint_map, *,
+                        translation_scales=None):
+    """Non-destructively retarget compatible scalar joint tracks to a new clip.
+
+    Explicit source/target object correspondence is required. Revolute joint
+    angles are transferred as default-pose deltas, correcting sign for exactly
+    opposite local axes. Prismatic displacement may be scaled per joint.
+    This intentionally rejects incompatible joint frames/topologies rather
+    than claiming general character retargeting or contact preservation.
+    """
+    from ..common.ids import new_id
+    from .animation import ANIMATION_V2_KEY
+    source_scene.validate()
+    target_scene.validate()
+    source = source_scene.metadata.get(ANIMATION_V2_KEY)
+    target = target_scene.metadata.get(ANIMATION_V2_KEY)
+    if source is None or target is None:
+        raise ValidationError("joint clip retargeting requires native v2 scenes")
+    require_canonical_id(source_clip_id)
+    if not isinstance(joint_map, dict) or not joint_map or len(joint_map) > MAX_JOINTS:
+        raise ValidationError("joint_map must map 1..256 source IDs to target IDs")
+    scales = {} if translation_scales is None else translation_scales
+    if not isinstance(scales, dict) or set(scales) - set(joint_map):
+        raise ValidationError("translation_scales must reference mapped source joints")
+    source_joints = validate_joints(source.get("joints", []),
+                                   {o["id"]: o for o in source_scene.objects})
+    target_joints = validate_joints(target.get("joints", []),
+                                   {o["id"]: o for o in target_scene.objects})
+    if len(set(joint_map.values())) != len(joint_map):
+        raise ValidationError("joint correspondence must be one-to-one")
+    corrections = {}
+    for sid, tid in joint_map.items():
+        require_canonical_id(sid)
+        require_canonical_id(tid)
+        sj, tj = source_joints.get(sid), target_joints.get(tid)
+        if sj is None or tj is None or sj["kind"] != tj["kind"] or sj["kind"] == "fixed":
+            raise ValidationError("retargeting requires matching movable joint kinds")
+        # Simple scalar retargeting is only mathematically safe when the
+        # source/target rest coordinate frames share their world orientation.
+        # Translation may differ (e.g. mechanisms with different link
+        # lengths), but rotated/mirrored frames require full rest-pose
+        # correction, which this restricted converter does not implement.
+        from ..common.transforms import is_rigid
+        source_rest = source_scene.world_transform(sid)
+        target_rest = target_scene.world_transform(tid)
+        if not is_rigid(source_rest) or not is_rigid(target_rest):
+            raise ValidationError("retargeting requires rigid rest frames")
+        linear_indices = (0, 1, 2, 4, 5, 6, 8, 9, 10)
+        if any(abs(source_rest[i] - target_rest[i]) > 1e-6 for i in linear_indices):
+            raise ValidationError("retargeting requires matching rest-frame orientations")
+        sa, ta = vector(sj["axis"], 3), vector(tj["axis"], 3)
+        sn, tn = hypot(*sa), hypot(*ta)
+        dot = sum(a*b for a,b in zip(sa,ta)) / (sn*tn)
+        if abs(abs(dot)-1.0) > 1e-6:
+            raise ValidationError("joint axes differ; explicit frame conversion is required")
+        sign = 1 if dot > 0 else -1
+        factor = finite(scales.get(sid, 1), "joint displacement scale", limit=1e6)
+        if factor <= 0 or (sj["kind"] != "prismatic" and factor != 1):
+            raise ValidationError("scaling is supported only for prismatic joint displacement")
+        corrections[sid] = (tid, sj, tj, sign, factor)
+    clips = [c for c in source.get("clips", []) if c["id"] == source_clip_id]
+    if len(clips) != 1:
+        raise ReferenceError("unknown source animation clip")
+    original = clips[0]
+    if not any(i["clip_id"] == source_clip_id and i["object_id"] in joint_map
+               for i in source.get("instances", [])):
+        raise ValidationError("source clip must have an instance bound to a mapped source joint")
+    if not original["tracks"] or any(t["property"] != "joint" for t in original["tracks"]):
+        raise ValidationError("retargeting currently supports joint-only source clips")
+    if len(original["tracks"]) != len(joint_map):
+        raise ValidationError("every source clip joint requires an explicit mapping")
+    # SGEO clip tracks are instance-bound, not object-bound. A joint-only clip
+    # may be transferred only when all its tracks share one target binding.
+    # Therefore the supported subset is a single-joint clip. Multi-joint
+    # motion uses multiple clips and an explicit choreographic relationship.
+    if len(original["tracks"]) != 1 or len(joint_map) != 1:
+        raise ValidationError("joint clips are single-target; retarget multi-joint rigs through individual clips")
+    sid, (tid, sj, tj, sign, factor) = next(iter(corrections.items()))
+    converted = deepcopy(original)
+    converted["id"] = new_id()
+    for track in converted["tracks"]:
+        for keyframe in track["keyframes"]:
+            current = finite(keyframe["value"], "retargeted joint value", limit=1e9)
+            transformed = tj.get("value", 0) + sign * factor * (current - sj.get("value", 0))
+            if not tj["lower"] <= transformed <= tj["upper"]:
+                raise ValidationError("retargeted joint exceeds target joint limits")
+            keyframe["value"] = transformed
+            for name in ("in_tangent", "out_tangent"):
+                if name in keyframe:
+                    keyframe[name] = sign * factor * keyframe[name]
+    # Verify the proposed asset can be interpreted by authoritative SGEO
+    # before exposing it; a proposal is still not an implicit scene commit.
+    from .animation import validate_animation_v2
+    preview = deepcopy(target)
+    preview.setdefault("clips", []).append(converted)
+    preview.setdefault("instances", []).append({
+        "id": new_id(), "clip_id": converted["id"], "object_id": tid, "start": 0,
+    })
+    if converted["duration"] > preview["duration"]:
+        raise ValidationError("retargeted clip exceeds target scene animation duration")
+    validate_animation_v2(preview, target_scene)
+    return {"clip": converted, "target_object_id": tid,
+            "source_clip_id": source_clip_id, "status": "proposed",
+            "mapping": {sid: tid}}
+
+
+
 __all__ = ["MAX_JOINTS", "validate_joints", "joint_transform",
-           "forward_kinematics", "solve_inverse_kinematics"]
+           "forward_kinematics", "solve_inverse_kinematics", "retarget_joint_clip"]
