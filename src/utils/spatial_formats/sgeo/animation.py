@@ -191,7 +191,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
             {"step", "slerp"} if prop == "rotation_quaternion"
             else {"step", "linear", "cubic"}
         )
-        if interpolation not in allowed:
+        if not isinstance(interpolation, str) or interpolation not in allowed:
             raise ValidationError("unsupported interpolation for v2 property type")
         frames = track.get("keyframes")
         if not isinstance(frames, list) or not frames:
@@ -292,7 +292,7 @@ def _validate_clips(spec, scene, direct_targets) -> set:
                 {"step", "slerp"} if prop == "rotation_quaternion"
                 else {"step", "linear", "cubic"}
             )
-            if method not in allowed:
+            if not isinstance(method, str) or method not in allowed:
                 raise ValidationError("unsupported clip track interpolation")
             if prop == "rotation_angle":
                 axis = vector(track.get("axis"), 3, "clip rotation axis")
@@ -390,7 +390,8 @@ def _validate_drivers(drivers, objects, track_targets, joints, occupied_targets=
     destinations = set()
     all_targets = set()
     for driver in drivers:
-        if isinstance(driver, dict) and "target_object_id" in driver and "target_property" in driver:
+        if (isinstance(driver, dict) and isinstance(driver.get("target_object_id"), str)
+                and isinstance(driver.get("target_property"), str)):
             all_targets.add((driver["target_object_id"], driver["target_property"]))
     for driver in drivers:
         if not isinstance(driver, dict) or set(driver) - {
@@ -404,6 +405,8 @@ def _validate_drivers(drivers, objects, track_targets, joints, occupied_targets=
         if src not in objects or dst not in objects:
             raise ReferenceError("driver references a missing object")
         sp, tp = driver["source_property"], driver["target_property"]
+        if not isinstance(sp, str) or not isinstance(tp, str):
+            raise ValidationError("driver properties must be strings")
         if sp not in {"rotation_angle", "joint"} and not (isinstance(sp, str) and sp.startswith("parameter.")):
             raise ValidationError("driver source must be an animated scalar")
         if tp not in {"rotation_angle", "translation", "joint"}:
