@@ -24,7 +24,7 @@ from ..common.transforms import (compose, from_axis_angle, from_translation, fro
                                  from_quaternion, unit_quaternion, slerp_quaternion)
 from ..common.helpers import cubic_hermite_value
 from ..common.helpers import finite, vector
-from ..common.ids import require_id
+from ..common.ids import require_canonical_id, require_id
 from .families import generate_geometry
 
 ANIMATION_KEY = "slai.animation.v1"
@@ -199,7 +199,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
             "object_id", "property", "keyframes", "interpolation", "axis"
         }:
             raise ValidationError("invalid v2 animation track fields")
-        oid = require_id(track.get("object_id"))
+        oid = require_canonical_id(track.get("object_id"))
         obj = objects.get(oid)
         if obj is None:
             raise ReferenceError("animation refers to a missing scene object", context={"object_id": oid})
@@ -328,7 +328,7 @@ def _validate_clips(spec, scene, direct_targets) -> set:
     for clip in clips:
         if not isinstance(clip, dict) or set(clip) != {"id", "duration", "tracks"}:
             raise ValidationError("clip requires id, duration and tracks")
-        cid = require_id(clip["id"])
+        cid = require_canonical_id(clip["id"])
         if cid in definitions:
             raise ValidationError("duplicate clip identifier")
         cd = finite(clip["duration"], "clip duration", limit=MAX_TIME)
@@ -415,12 +415,12 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             "id", "clip_id", "object_id", "start", "speed"
         } or not {"id", "clip_id", "object_id", "start"} <= set(instance):
             raise ValidationError("invalid clip instance fields")
-        iid = require_id(instance["id"])
+        iid = require_canonical_id(instance["id"])
         if iid in instance_ids:
             raise ValidationError("duplicate clip instance identifier")
         instance_ids.add(iid)
-        cid = require_id(instance["clip_id"])
-        oid = require_id(instance["object_id"])
+        cid = require_canonical_id(instance["clip_id"])
+        oid = require_canonical_id(instance["object_id"])
         if cid not in definitions:
             raise ReferenceError("clip instance references a missing definition")
         start = finite(instance["start"], "clip instance start", limit=MAX_TIME)
@@ -467,8 +467,8 @@ def _validate_drivers(drivers, objects, track_targets, joints, occupied_targets=
         } or not {"source_object_id", "source_property", "target_object_id",
                   "target_property", "factor"} <= set(driver):
             raise ValidationError("invalid mechanical driver fields")
-        src = require_id(driver["source_object_id"])
-        dst = require_id(driver["target_object_id"])
+        src = require_canonical_id(driver["source_object_id"])
+        dst = require_canonical_id(driver["target_object_id"])
         if src not in objects or dst not in objects:
             raise ReferenceError("driver references a missing object")
         sp, tp = driver["source_property"], driver["target_property"]
@@ -583,11 +583,11 @@ def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
             raise ValidationError("unexpected fields for animation constraint kind")
         if not fields[kind] <= set(item):
             raise ValidationError("missing required constraint parameters")
-        ident = require_id(item["id"])
+        ident = require_canonical_id(item["id"])
         if ident in identifiers:
             raise ValidationError("duplicate constraint id")
         identifiers.add(ident)
-        oid = require_id(item["object_id"])
+        oid = require_canonical_id(item["object_id"])
         if oid not in objects:
             raise ReferenceError("constraint refers to a missing object")
         if type(item["movable"]) is not bool:
@@ -609,7 +609,7 @@ def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
             if any(lo[i] > hi[i] for i in range(3)):
                 raise ValidationError("animation bounds minimum exceeds maximum")
         else:
-            other = require_id(item.get("other_id"))
+            other = require_canonical_id(item.get("other_id"))
             if other not in objects or other == oid:
                 raise ReferenceError("invalid constraint endpoint")
             if objects[other].get("parent") is not None:
