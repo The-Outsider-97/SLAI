@@ -393,15 +393,22 @@ class AnimationAgent(BaseAgent):
             )
         scene_id = request.scene_id
         if request.operation == "forward_kinematics":
-            if request.expected_revision is not None and scene.revision != request.expected_revision:
-                raise AnimationRevisionConflictError("scene revision mismatch")
-            values = request.payload.get("values")
-            matrices = fk(values)
+            lock = get_animation_edit_lock(scene)
+            if lock is None:
+                raise AnimationUnsupportedOperationError(
+                    "consistent kinematics requires the provider's edit lock"
+                )
+            with lock:
+                if request.expected_revision is not None and scene.revision != request.expected_revision:
+                    raise AnimationRevisionConflictError("scene revision mismatch")
+                values = request.payload.get("values")
+                matrices = fk(values)
+                revision = scene.revision
             keys = sorted(matrices)
             limit = self._policy.max_result_objects
             return {
                 "status": "ok", "request_id": request.request_id,
-                "scene_id": scene_id, "revision": scene.revision,
+                "scene_id": scene_id, "revision": revision,
                 "object_count": len(keys),
                 "transforms_truncated": len(keys) > limit,
                 "transforms": {key: list(matrices[key]) for key in keys[:limit]},
