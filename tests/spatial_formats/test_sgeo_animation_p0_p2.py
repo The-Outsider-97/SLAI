@@ -329,3 +329,109 @@ def test_native_ik_pose_commit_rejects_stale_revision_without_mutation():
         scene.apply_inverse_kinematics(tip, [1, 1, 0],
                                        expected_revision=scene.revision - 1)
     assert scene.as_dict() == prior
+
+
+def test_coupled_attachment_constraints_and_rigid_reference():
+    pytest.importorskip("scipy")
+    scene = Scene()
+    anchor = scene.add_object(name="anchor", transform=from_translation(2, 0, 0))
+    follower = scene.add_object(name="follower")
+    cid = uid()
+    spec = {"duration": 2, "tracks": [], "constraints": [
+        {"id": cid, "kind": "attachment", "object_id": follower,
+         "other_id": anchor, "offset": [0, 1, 0],
+         "movable": True, "tolerance": 1e-3},
+    ]}
+    scene.set_animation(spec, version=2)
+    original = scene.as_dict()
+    sampled = scene.evaluate(0.5)
+    xyz = sampled.world_transform(follower)
+    assert xyz[3] == pytest.approx(2, abs=1e-3)
+    assert xyz[7] == pytest.approx(1, abs=1e-3)
+    assert sampled.constraint_report["constraints"][0]["id"] == cid
+    assert scene.as_dict() == original
+
+
+def test_bounded_world_position_constraints():
+    pytest.importorskip("scipy")
+    scene = Scene()
+    obj = scene.add_object(name="bounded")
+    scene.set_animation({
+        "duration": 2, "tracks": [], "constraints": [
+            {"id": uid(), "kind": "bounds", "object_id": obj, "movable": True,
+             "minimum": [1, -1, -1], "maximum": [2, 1, 1],
+             "tolerance": 1e-3},
+        ],
+    }, version=2)
+    evaluated = scene.evaluate(0)
+    x = evaluated.world_transform(obj)[3]
+    assert 1 - 1e-3 <= x <= 2 + 1e-3
+    assert evaluated.constraint_report["status"] == "satisfied"
+
+
+def test_alignment_between_two_root_objects():
+    pytest.importorskip("scipy")
+    scene = Scene()
+    anchor = scene.add_object(name="anchor", transform=from_translation(0, 0, 0))
+    target = scene.add_object(name="align_target", transform=from_translation(1, 2, 0))
+    scene.set_animation({
+        "duration": 2, "tracks": [], "constraints": [
+            {"id": uid(), "kind": "alignment", "object_id": target,
+             "other_id": anchor, "axis": [1, 0, 0],
+             "movable": True, "tolerance": 1e-3},
+        ],
+    }, version=2)
+    evaluated = scene.evaluate(1)
+    result = evaluated.world_transform(target)
+    assert result[7] == pytest.approx(0, abs=1e-3)
+    assert result[11] == pytest.approx(0, abs=1e-3)
+
+
+def test_conflicting_immovable_distance_constraint_reports_infeasible():
+    scene = Scene()
+    a = scene.add_object(name="a")
+    b = scene.add_object(name="b", transform=from_translation(2, 0, 0))
+    scene.set_animation({"duration": 1, "tracks": [], "constraints": [
+        {"id": uid(), "kind": "distance", "object_id": a,
+         "other_id": b, "distance": 1, "movable": False,
+         "tolerance": 1e-6},
+    ]}, version=2)
+    with pytest.raises(ValidationError) as exc:
+        scene.evaluate(0.5)
+    assert exc.value.context["constraint_report"]["status"] == "infeasible"
+
+
+def test_unsupported_constraint_kind_fails_closed():
+    scene = Scene()
+    obj = scene.add_object()
+    before = scene.as_dict()
+    with pytest.raises(ValidationError, match="unsupported"):
+        scene.set_animation({"duration": 1, "tracks": [], "constraints": [
+            {"id": uid(), "kind": "collision", "object_id": obj,
+             "movable": True},
+        ]}, version=2)
+    assert scene.as_dict() == before
+
+
+def test_native_animation_feature_manifest_round_trip():
+    doc = SceneDocument.new()
+    oid = doc.add_box(size=[1, 1, 1])
+    doc.set_animation({"duration": 2, "tracks": [
+        track(oid, "translation", [0, 0, 0], [2, 0, 0]),
+    ]}, version=2)
+    manifest = doc.manifest()
+    assert "animation-v2" in manifest["requires"]
+    loaded = SceneDocument.from_bytes(doc.dumps())
+    assert "slai.animation.v2" in loaded.snapshot().metadata
+    assert loaded.evaluate(1).world_transform(oid)[3] == pytest.approx(1)
+
+
+def test_ik_unreachable_reports_failure_without_scene_edit():
+    pytest.importorskip("scipy")
+    scene, shoulder, elbow, tip, joints = _arm()
+    original = scene.as_dict()
+    proposal = scene.solve_inverse_kinematics(tip, [100, 100, 0],
+                                               max_iterations=30, tolerance=1e-4)
+    assert proposal["status"] != "solved"
+    assert proposal["position_error"] > 1e-4
+    assert scene.as_dict() == original
