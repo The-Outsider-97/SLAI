@@ -196,22 +196,56 @@ def solve_inverse_kinematics(
         constraints=(), problem_class=ProblemClass.NLP,
         deterministic=True,
     )
-    try:
-        solved = OptimizationSolver().solve_single_detailed(
-            problem, solver="scipy_nonlinear",
-            options={"x0": list(initial.values()),
-                     "scipy_options": {"maxiter": max_iterations}},
-            allow_fallback=False,
-        )
-        solution = solved.solution
-    except (ImportError, RuntimeError, ValueError, ArithmeticError) as exc:
-        return {**first, "status": "numerically_unresolved",
-                "solver_status": type(exc).__name__}
-    if solution is None or solution.primal_solution is None:
-        return {**first, "status": "numerically_unresolved",
-                "solver_status": None if solution is None else solution.status.value}
-    return result(solution.primal_solution, status="numerically_unresolved",
-                  solver_status=solution.status.value, iterations=solution.iteration_count)
+    from src.agents.optimization.utils.optimization_errors import OptimizationError
+
+    # Repeatable, bounded initializations escape stationary stretched-arm poses
+    # where the squared Cartesian residual has vanishing first derivative.
+    names = list(initial)
+    seeds = [list(initial.values())]
+    for direction in (1, -1):
+        seed = []
+        for i, object_id in enumerate(chain):
+            joint = by_object[object_id]
+            lo, hi = joint["lower"], joint["upper"]
+            delta = min(0.25, (hi-lo)/8)
+            seed.append(max(lo, min(hi, initial[names[i]] + direction*delta)))
+        if seed not in seeds:
+            seeds.append(seed)
+    middle = [(by_object[oid]["lower"] + by_object[oid]["upper"])/2
+              for oid in chain]
+    if middle not in seeds:
+        seeds.append(middle)
+
+    best = first
+    attempts = 0
+    solver = OptimizationSolver()
+    for seed in seeds[:4]:
+        attempts += 1
+        try:
+            optimization = solver.solve_single_detailed(
+                problem, solver="scipy_nonlinear",
+                options={"x0": seed, "scipy_options": {"maxiter": max_iterations}},
+                allow_fallback=False,
+            )
+            solution = optimization.solution
+        except (OptimizationError, ArithmeticError, RuntimeError) as exc:
+            best = {**best, "solver_status": type(exc).__name__}
+            continue
+        if solution is None or solution.primal_solution is None:
+            continue
+        try:
+            proposal = result(
+                solution.primal_solution, status="numerically_unresolved",
+                solver_status=solution.status.value,
+                iterations=solution.iteration_count,
+            )
+        except ValidationError:
+            continue
+        if proposal["position_error"] < best["position_error"]:
+            best = proposal
+        if best["status"] == "solved":
+            return {**best, "attempts": attempts}
+    return {**best, "attempts": attempts}
 
 
 __all__ = ["MAX_JOINTS", "validate_joints", "joint_transform",
