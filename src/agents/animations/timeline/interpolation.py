@@ -196,42 +196,15 @@ def lerp_components(
 # Spline interpolation
 # ---------------------------------------------------------------------------
 def cubic_hermite(
-    p0: float,
-    m0: float,
-    p1: float,
-    m1: float,
-    alpha: float,
+    p0: float, m0: float, p1: float, m1: float, alpha: float,
 ) -> float:
-    """Cubic Hermite basis evaluated at ``alpha ∈ [0, 1]``.
-
-    Evaluates ``h00·p0 + h10·m0 + h01·p1 + h11·m1`` using the standard
-    Hermite polynomials:
-    ``h00 = 2t³ - 3t² + 1``, ``h10 = t³ - 2t² + t``,
-    ``h01 = -2t³ + 3t²``, ``h11 = t³ - t²``.
-
-    ``m0``/``m1`` are the *time-derivatives* of the curve at ``p0``/``p1``
-    expressed in the same units as the value; when ``alpha`` is the time
-    fraction of the segment, scaling ``m0``/``m1`` by the segment
-    duration yields unit-consistent tangents.
-
-    Raises
-    ------
-    AnimationValidationError
-        For non-finite inputs or an out-of-range ``alpha``.
-    """
-    p0_f = ensure_finite_scalar(p0, "p0")
-    m0_f = ensure_finite_scalar(m0, "m0")
-    p1_f = ensure_finite_scalar(p1, "p1")
-    m1_f = ensure_finite_scalar(m1, "m1")
-    t = ensure_unit_interval(alpha, "alpha")
-    t2 = t * t
-    t3 = t2 * t
-    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
-    h10 = t3 - 2.0 * t2 + t
-    h01 = -2.0 * t3 + 3.0 * t2
-    h11 = t3 - t2
-    return h00 * p0_f + h10 * m0_f + h01 * p1_f + h11 * m1_f
-
+    """Shared Hermite basis, preserving Animation Agent input diagnostics."""
+    from src.utils.spatial_formats.common.helpers import cubic_hermite_value
+    return cubic_hermite_value(
+        ensure_finite_scalar(p0, "p0"), ensure_finite_scalar(m0, "m0"),
+        ensure_finite_scalar(p1, "p1"), ensure_finite_scalar(m1, "m1"),
+        ensure_unit_interval(alpha, "alpha"),
+    )
 
 def catmull_rom(
     p0: float,
@@ -304,60 +277,14 @@ def nlerp(a, b, alpha: float) -> tuple[float, float, float, float]:
 
 
 def slerp(a, b, alpha: float) -> tuple[float, float, float, float]:
-    """Spherical linear interpolation of two quaternions (Shoemake 1985).
-
-    Short-arc, constant-angular-velocity interpolation between two unit
-    quaternions.  For very close inputs (``dot > 0.9995``) the
-    implementation switches to an inlined nlerp branch — both because the
-    constant-velocity property is imperceptible at that scale and because
-    the classical slerp formula divides by ``sin(θ)``, which underflows
-    as ``θ → 0``.  The hemisphere correction (``dot < 0 ⇒ flip q1``)
-    ensures ``slerp(q, -q, α)`` returns ``q`` for all ``α``.
-
-    Raises
-    ------
-    AnimationValidationError
-        For malformed quaternions, non-unit ``alpha``, or a zero-magnitude
-        input.
-    """
-    alpha_f = ensure_unit_interval(alpha, "alpha")
-    q0 = normalize_quaternion(a, "a")
-    q1 = normalize_quaternion(b, "b")
-    dot = q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3]
-    if dot < 0.0:
-        q1 = (-q1[0], -q1[1], -q1[2], -q1[3])
-        dot = -dot
-    # Numerical clamp: acos is undefined outside [-1, 1], and float
-    # accumulation can push dot a few ULPs past 1.0 even for unit inputs.
-    dot = max(-1.0, min(1.0, dot))
-    if dot > _SLERP_NLERP_THRESHOLD:
-        blended = (
-            q0[0] + alpha_f * (q1[0] - q0[0]),
-            q0[1] + alpha_f * (q1[1] - q0[1]),
-            q0[2] + alpha_f * (q1[2] - q0[2]),
-            q0[3] + alpha_f * (q1[3] - q0[3]),
-        )
-        return normalize_quaternion(blended)
-    theta = acos(dot)
-    sin_theta = sin(theta)
-    if abs(sin_theta) < _QUATERNION_EPSILON:
-        # Unreachable by construction (the nlerp branch catches dot > 0.9995
-        # and the hemisphere correction catches dot < 0), kept as a
-        # defensive guard against future threshold changes.
-        return normalize_quaternion((
-            q0[0] + alpha_f * (q1[0] - q0[0]),
-            q0[1] + alpha_f * (q1[1] - q0[1]),
-            q0[2] + alpha_f * (q1[2] - q0[2]),
-            q0[3] + alpha_f * (q1[3] - q0[3]),
-        ))
-    s0 = sin((1.0 - alpha_f) * theta) / sin_theta
-    s1 = sin(alpha_f * theta) / sin_theta
-    return normalize_quaternion((
-        s0 * q0[0] + s1 * q1[0],
-        s0 * q0[1] + s1 * q1[1],
-        s0 * q0[2] + s1 * q1[2],
-        s0 * q0[3] + s1 * q1[3],
-    ))
+    """Short-arc quaternion interpolation via shared SGEO numeric primitives."""
+    from src.utils.spatial_formats.common.transforms import slerp_quaternion
+    t = ensure_unit_interval(alpha, "alpha")
+    return slerp_quaternion(
+        normalize_quaternion(a, "a"),
+        normalize_quaternion(b, "b"),
+        t,
+    )
 
 
 # ---------------------------------------------------------------------------
