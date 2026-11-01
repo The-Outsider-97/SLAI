@@ -3,7 +3,7 @@ name: Spatial Format Regression
 on:
   pull_request:
     branches: [SLAI-v.2.4]
-    paths: ['src/utils/spatial_formats/**', 'tests/spatial_formats/**', '.github/workflows/spatial-formats.yml']
+    paths: ['src/utils/spatial_formats/**', 'src/agents/animations/**', 'src/agents/animation_agent.py', 'tests/spatial_formats/**', 'tests/agents/animations/**', '.github/workflows/spatial-formats.yml']
   push:
     branches: [SLAI-v.2.4]
     paths: ['src/utils/spatial_formats/**', 'tests/spatial_formats/**', '.github/workflows/spatial-formats.yml']
@@ -33,14 +33,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install test tools
-        run: python -m pip install pytest pytest-cov jsonschema
+        run: python -m pip install pytest pytest-cov jsonschema numpy scipy
       - name: Install optional exchange backends
         if: matrix.backends == 'exchange'
         run: python -m pip install numpy ezdxf trimesh
       - name: Compile spatial core
-        run: python -m compileall -q src/utils/spatial_formats
+        run: python -m compileall -q src/utils/spatial_formats src/agents/animations src/agents/animation_agent.py
       - name: Test spatial formats and coverage
-        run: python -m pytest tests/spatial_formats/ -W error -v --tb=long --cov=src.utils.spatial_formats --cov-report=term-missing --junitxml=spatial-results.xml
+        run: python -m pytest tests/spatial_formats/ tests/agents/animations/ -W error -v --tb=long --cov=src.utils.spatial_formats --cov-report=term-missing --junitxml=spatial-results.xml
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
