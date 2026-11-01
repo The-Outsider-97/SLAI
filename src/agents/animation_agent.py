@@ -58,7 +58,7 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "query_events",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "query_events", "retarget_joint_clip",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
@@ -277,6 +277,8 @@ class AnimationAgent(BaseAgent):
                     result = self._get_animation(request, scene)
                 elif op == "query_events":
                     result = self._query_events(request, scene)
+                elif op == "retarget_joint_clip":
+                    result = self._retarget_joint_clip(request, scene)
                 elif op in {"forward_kinematics", "solve_ik", "apply_ik"}:
                     result = self._kinematics(request, scene)
                 elif op == "upgrade_animation":
@@ -387,6 +389,34 @@ class AnimationAgent(BaseAgent):
             revision = scene.revision
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
+
+    def _retarget_joint_clip(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route an explicit, non-committing joint conversion to native SGEO."""
+        provider = getattr(scene, "retarget_joint_clip", None)
+        if not callable(provider):
+            raise AnimationUnsupportedOperationError("target provider cannot retarget native joint clips")
+        payload = request.payload
+        if not {"source_scene_id", "source_clip_id", "joint_map"} <= set(payload):
+            raise AnimationValidationError(
+                "retarget_joint_clip requires source_scene_id, source_clip_id and joint_map"
+            )
+        source = self._scene(payload["source_scene_id"])
+        target_lock = get_animation_edit_lock(scene)
+        source_lock = get_animation_edit_lock(source)
+        if target_lock is None or source_lock is None:
+            raise AnimationUnsupportedOperationError("retargeting requires authoritative scene locks")
+        # Native SGEO validates detached snapshots and never mutates either
+        # scene; advisory scene revisions are checked against returned state.
+        with target_lock:
+            revision = scene.revision
+            if request.expected_revision is not None and revision != request.expected_revision:
+                raise AnimationRevisionConflictError("target scene revision mismatch")
+        result = provider(
+            source, payload["source_clip_id"], payload["joint_map"],
+            translation_scales=payload.get("translation_scales"),
+        )
+        return {"status": result["status"], "request_id": request.request_id,
+                "scene_id": request.scene_id, "revision": revision, **result}
 
     def _query_events(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Route a bounded, non-executing marker interval query to SGEO."""
