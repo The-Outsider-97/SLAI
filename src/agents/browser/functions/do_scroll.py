@@ -27,8 +27,7 @@ import asyncio
 import time as time_module
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from selenium.common.exceptions import (
     JavascriptException,
     NoSuchElementException,
@@ -41,13 +40,13 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from ..utils.config_loader import get_config_section, load_global_config
+from ..utils.config_loader import *
 from ..utils.browser_errors import *
 from ..utils.Browser_helpers import *
 from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Scroll")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 VALID_DIRECTIONS = {"up", "down", "left", "right"}

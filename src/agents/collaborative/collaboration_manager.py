@@ -221,10 +221,12 @@ class CollaborationManager:
         reliability_manager: Optional[ReliabilityManager] = None,
         policy_engine: Optional[Any] = None,
         contract_registry: Optional[Any] = None,
+        agent_factory: Optional[Any] = None,
         config: Optional[Mapping[str, Any]] = None,
         auto_discover: Optional[bool] = None,
     ):
         self.shared_memory = shared_memory
+        self.agent_factory = agent_factory
         self.config = load_global_config()
         self.manager_config = get_config_section("collaboration") or {}
         self.collaboration_manager_config = get_config_section("collaboration_manager") or {}
@@ -260,6 +262,7 @@ class CollaborationManager:
         self.registry = registry or AgentRegistry(
             shared_memory=self.shared_memory,
             auto_discover=self.runtime_config.auto_discover_agents,
+            agent_factory=self.agent_factory,
         )
         self.contract_registry = contract_registry if contract_registry is not None else self._build_contract_registry()
         self.policy_engine = policy_engine if policy_engine is not None else self._build_policy_engine()

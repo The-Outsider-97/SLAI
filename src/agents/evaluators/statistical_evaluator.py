@@ -7,26 +7,25 @@ from __future__ import annotations
 
 import json
 import math
+import numpy as np
+import yaml
+
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-import numpy as np
-import yaml
-
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.evaluators_calculations import EvaluatorsCalculations
-from .utils.evaluation_errors import (ComparisonError, StatisticalAnalysisError, EvaluationError,
-                                      MemoryAccessError, ValidationFailureError,
-                                      MetricCalculationError, ReportGenerationError)
-from .modules.report import get_visualizer
+from .modules.evaluators_calculations import EvaluatorsCalculations
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
+from .documentation.report import get_visualizer
 from .evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Statistical Evaluator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
-MODULE_VERSION = "2.0.0"
+MODULE_VERSION = "2.3.0"
 
 
 @dataclass(slots=True)
@@ -241,11 +240,13 @@ class StatisticalEvaluator:
         mean_diff = float(np.mean(diffs))
         std_diff = float(np.std(diffs, ddof=1)) if diffs.size > 1 else 0.0
         z_scores = [float(diff / math.sqrt(max(len(diffs), 1))) for diff in diffs]
+        baseline_list = baseline_values.tolist()
+        treatment_list = treatment_values.tolist()
         return {
             "mean_diff": mean_diff,
-            "effect_size": self._hedges_g(baseline_values, treatment_values),
+            "effect_size": self._hedges_g(baseline_list, treatment_list),
             "significance": any(abs(z) > 2.58 for z in z_scores),
-            "paired_test": self.t_test(baseline_values, treatment_values),
+            "paired_test": self.t_test(baseline_list, treatment_list),
             "std_diff": std_diff,
         }
 
@@ -254,7 +255,7 @@ class StatisticalEvaluator:
         sample_b = np.asarray(b, dtype=float)
         if len(sample_a) < 2 or len(sample_b) < 2:
             return 0.0
-        return float(self.calculations.effect_size(sample_a, sample_b))
+        return float(self.calculations.effect_size(sample_a.tolist(), sample_b.tolist()))
 
     def generate_report(self, results: Mapping[str, Any], *, format: str = "markdown") -> Any:
         if not isinstance(results, Mapping):
@@ -450,12 +451,12 @@ class StatisticalEvaluator:
         return better
 
 
+__all__ = [
+    "StatisticalEvaluationResult",
+    "StatisticalEvaluator",
+]
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
-
-# ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Statistical Evaluator ===\n")
     import sys

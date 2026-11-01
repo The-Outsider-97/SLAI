@@ -16,8 +16,9 @@ import math
 import random
 import time
 
+from contextlib import contextmanager
 from collections import defaultdict, deque
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union, Iterator
 
 import torch  # type: ignore
 import torch.nn as nn  # type: ignore
@@ -94,37 +95,61 @@ class AdaptiveCircuit(nn.Module):
                 context={"embedding_aggregation": self.embedding_aggregation},
             )
 
-        self._set_deterministic_seed()
         self._device = self._select_device(self.device_name)
+        self._rng = random.Random(self.seed)
+        
+        self.network_structure = (self._validate_network_structure(network_structure))
+        self.input_vars = list(self.network_structure["nodes"])
+        self.output_vars = list(self.input_vars)
+        self.var_index = {
+            node: idx
+            for idx, node
+            in enumerate(self.input_vars)
+        }
 
-        self.network_structure: Dict[str, Any] = self._validate_network_structure(network_structure)
-        self.input_vars: List[str] = list(self.network_structure["nodes"])
-        self.output_vars: List[str] = list(self.input_vars)
-        self.var_index: Dict[str, int] = {node: idx for idx, node in enumerate(self.input_vars)}
-        self.num_bn_nodes: int = len(self.input_vars)
-        self.parent_map: Dict[str, List[str]] = self._build_parent_map()
-        self.child_map: Dict[str, List[str]] = self._build_child_map()
-        self.topological_order: List[str] = self._topological_sort()
+        self.num_bn_nodes = len(self.input_vars)
+        self.parent_map = (self._build_parent_map())
+        self.child_map = (self._build_child_map())
+        self.topological_order = (self._topological_sort())
+        self.knowledge_base = (self._normalize_knowledge_base(knowledge_base or {}))
+        self._kb_signature = (freeze_kb_signature(self.knowledge_base))
+        self.kb_entity_to_idx = {}
+        self.kb_entity_confidence = {}
+        self.kb_node_entity_indices = {}
+        self.kb_node_entity_weights = {}
 
-        self.knowledge_base: Dict[Fact, float] = self._normalize_knowledge_base(knowledge_base or {})
-        self._kb_signature: Tuple[Tuple[Fact, float], ...] = freeze_kb_signature(self.knowledge_base)
-        self.kb_entity_to_idx: Dict[str, int] = {}
-        self.kb_entity_confidence: Dict[str, float] = {}
-        self.kb_node_entity_indices: Dict[str, List[int]] = {}
-        self.kb_node_entity_weights: Dict[str, List[float]] = {}
-        self.kb_embedding: Optional[nn.Embedding] = None
-        self.kb_attention: Optional[nn.Linear] = None
-        self._initialize_kb_embeddings()
+        self.kb_embedding = None
+        self.kb_attention = None
 
-        fc1_input_dim = self.num_bn_nodes + (self.embedding_dim if self.kb_embedding is not None else 0)
-        self.fc1 = nn.Linear(fc1_input_dim, self.hidden_dim)
-        self.layer_norm = nn.LayerNorm(self.hidden_dim) if self.use_layer_norm else nn.Identity()
-        self.dropout = nn.Dropout(p=self.dropout_rate)
-        self.fc2 = nn.Linear(self.hidden_dim, max(2, self.hidden_dim // 2))
-        self.fc3 = nn.Linear(max(2, self.hidden_dim // 2), self.num_bn_nodes)
+        # All random Torch initialization happens inside a forked RNG
+        # scope. torch restores the process RNG state when this block exits.
+        with self._isolated_torch_rng():
+            self._initialize_kb_embeddings()
 
-        self._initialize_network_parameters()
-        self._initialize_with_priors()
+            fc1_input_dim = (
+                self.num_bn_nodes
+                + (
+                    self.embedding_dim
+                    if self.kb_embedding
+                    is not None
+                    else 0
+                )
+            )
+
+            self.fc1 = nn.Linear(fc1_input_dim, self.hidden_dim)
+
+            self.layer_norm = (nn.LayerNorm(self.hidden_dim)
+                if self.use_layer_norm
+                else nn.Identity()
+            )
+
+            self.dropout = nn.Dropout(p=self.dropout_rate)
+            self.fc2 = nn.Linear(self.hidden_dim, max(2, self.hidden_dim // 2))
+            self.fc3 = nn.Linear(max(2, self.hidden_dim // 2), self.num_bn_nodes)
+
+            self._initialize_network_parameters()
+            self._initialize_with_priors()
+
         self.to(self._device)
 
         logger.info(
@@ -135,7 +160,6 @@ class AdaptiveCircuit(nn.Module):
             fc1_input_dim,
             self._device,
         )
-        printer.status("INIT", f"Adaptive Circuit initialized with {self.num_bn_nodes} nodes", "success")
 
     # ------------------------------------------------------------------
     # Configuration helpers
@@ -182,13 +206,36 @@ class AdaptiveCircuit(nn.Module):
             )
         return parsed
 
-    def _set_deterministic_seed(self) -> None:
+    @contextmanager
+    def _isolated_torch_rng(self) -> Iterator[None]:
+        """
+        Seed Torch deterministically without altering process-global RNG state
+        outside this construction scope.
+        """
         if self.seed is None:
+            yield
             return
-        random.seed(self.seed)
-        torch.manual_seed(self.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(self.seed)
+
+        cuda_devices: List[int] = []
+
+        if (
+            self._device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            cuda_devices.append(
+                self._device.index
+                if self._device.index
+                is not None
+                else torch.cuda.current_device()
+            )
+
+        with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+            torch.manual_seed(self.seed)
+
+            if cuda_devices:
+                torch.cuda.manual_seed(self.seed)
+
+            yield
 
     def _select_device(self, requested: str) -> torch.device:
         if requested == "auto":

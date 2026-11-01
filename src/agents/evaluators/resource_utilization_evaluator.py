@@ -1,27 +1,24 @@
 from __future__ import annotations
 
 import json
-import time
 import psutil
 import yaml
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.evaluators_calculations import EvaluatorsCalculations
-from .utils.evaluation_errors import (ConfigLoadError, EvaluationError, MetricCalculationError,
-                                      MemoryAccessError, VisualizationError, ComparisonError,
-                                      ReportGenerationError, ValidationFailureError)
-from .modules.report import get_visualizer
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
+from .modules.evaluators_calculations import EvaluatorsCalculations
+from .documentation.report import get_visualizer
 from .evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Resource Utilization Evaluator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
-MODULE_VERSION = "2.0.0"
+MODULE_VERSION = "2.3.0"
 _METRIC_ORDER = ("cpu", "memory", "disk", "network")
 
 
@@ -546,12 +543,14 @@ class ResourceUtilizationEvaluator:
         return number
 
 
+__all__ = [
+    "_METRIC_ORDER",
+    "ResourceSnapshot",
+    "ResourceEvaluationResult",
+    "ResourceUtilizationEvaluator",
+]
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
-
-# ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Resource Utilization Evaluator ===\n")
     import sys

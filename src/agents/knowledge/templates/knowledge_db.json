@@ -4,8 +4,8 @@
       "subject": "Apple",
       "predicate": "is",
       "object": "Fruit",
-      "confidence": 0.99999999999,
-      "weight": 0.99999999999
+      "confidence": 0.999999999999,
+      "weight": 0.999999999999
     },
     {
       "subject": "Apple",
@@ -18,8 +18,8 @@
       "subject": "Banana",
       "predicate": "is",
       "object": "Fruit",
-      "confidence": 0.9999996928,
-      "weight": 0.9999996928
+      "confidence": 0.99999993856,
+      "weight": 0.99999993856
     },
     {
       "subject": "Banana",
@@ -46,8 +46,8 @@
       "subject": "Fruit",
       "predicate": "is",
       "object": "Healthy",
-      "confidence": 0.9999999991350244,
-      "weight": 0.9999999991350244
+      "confidence": 0.9999999998702537,
+      "weight": 0.9999999998702537
     },
     {
       "subject": "Vegetable",
@@ -61,14 +61,14 @@
     {
       "name": "identity_rule",
       "callable": "identity_rule",
-      "weight": 1.0
+      "weight": 0.9025
     },
     {
       "name": "transitive_rule",
       "callable": "transitive_rule",
-      "weight": 0.8
+      "weight": 0.722
     }
   ],
-  "reason": "initialized",
-  "updated_at": 1781254583.1324894
+  "reason": "forward_chaining",
+  "updated_at": 1789686971.2461934
 }

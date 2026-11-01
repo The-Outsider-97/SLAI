@@ -20,10 +20,10 @@ from .utils.config_loader import get_config_section
 from .utils.functions_error import (StorageBackendError, StorageDeleteError, StorageDownloadError,
                                     StorageError, StorageNotFoundError, StoragePermissionError, StorageUploadError)
 from .utils.storage_backend import StorageBackend
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Storage")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 _DEFAULT_LOCAL_BASE_PATH = "data/storage"
 _DEFAULT_PRESIGNED_URL_TTL_SECONDS = 3600
@@ -93,6 +93,92 @@ def _sanitize_filename(filename: str) -> str:
     if candidate in {"", ".", ".."}:
         raise ValueError("filename must not be empty")
     return candidate
+
+
+class Storage:
+    """Facade that provides a backend-neutral storage interface."""
+
+    def __init__(self, backend: StorageBackend, generate_unique_filename: bool = True):
+        if not isinstance(backend, StorageBackend):
+            raise TypeError("backend must implement StorageBackend")
+        self.backend = backend
+        self.generate_unique_filename = bool(generate_unique_filename)
+
+    def _unique_filename(self, original_name: str) -> str:
+        """Generate a unique filename while preserving the suffix."""
+        sanitized_name = _sanitize_filename(original_name)
+        suffix = Path(sanitized_name).suffix
+        return f"{uuid.uuid4().hex}{suffix}"
+
+    def _build_object_key(self, filename: str, subpath: str = "") -> str:
+        final_name = self._unique_filename(filename) if self.generate_unique_filename else _sanitize_filename(filename)
+        if subpath and str(subpath).strip():
+            return _join_storage_key(subpath, final_name)
+        return _normalize_storage_key(final_name, field_name="filename")
+
+    def upload(
+        self,
+        file_obj: BinaryIO,
+        filename: str,
+        subpath: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Upload a file and return the backend-neutral object key."""
+        object_key = self._build_object_key(filename=filename, subpath=subpath)
+        return self.backend.upload(file_obj, object_key, metadata)
+
+    def download(self, path: str) -> bytes:
+        object_key = _normalize_storage_key(path)
+        return self.backend.download(object_key)
+
+    def delete(self, path: str) -> None:
+        object_key = _normalize_storage_key(path)
+        self.backend.delete(object_key)
+
+    def get_url(self, path: str) -> str:
+        object_key = _normalize_storage_key(path)
+        return self.backend.get_url(object_key)
+
+    @classmethod
+    def from_config(cls) -> "Storage":
+        """Create a storage facade from the 'storage' configuration section."""
+        config = get_config_section("storage") or {}
+        if not isinstance(config, dict):
+            raise StorageError("storage configuration must be a mapping")
+
+        backend_type = str(config.get("backend", "local")).strip().lower() or "local"
+        generate_unique = bool(config.get("generate_unique_filename", True))
+
+        if backend_type == "local":
+            backend = LocalStorage(
+                base_path=str(config.get("base_path", _DEFAULT_LOCAL_BASE_PATH)),
+                base_url=config.get("base_url"),
+            )
+        elif backend_type == "s3":
+            bucket = config.get("bucket")
+            if not bucket:
+                raise StorageError("storage.s3 configuration requires 'bucket'")
+            backend = S3Storage(
+                bucket=str(bucket),
+                region=_normalize_optional_string(config.get("region"), "region"),
+                access_key=_normalize_optional_string(config.get("access_key"), "access_key"),
+                secret_key=_normalize_optional_string(config.get("secret_key"), "secret_key"),
+                endpoint_url=_normalize_optional_string(config.get("endpoint_url"), "endpoint_url"),
+                public_url_prefix=_normalize_optional_string(
+                    config.get("public_url_prefix"),
+                    "public_url_prefix",
+                ),
+                presigned_url_ttl_seconds=int(
+                    config.get(
+                        "presigned_url_ttl_seconds",
+                        _DEFAULT_PRESIGNED_URL_TTL_SECONDS,
+                    )
+                ),
+            )
+        else:
+            raise StorageError(f"Unsupported storage backend: {backend_type}")
+
+        return cls(backend=backend, generate_unique_filename=generate_unique)
 
 
 class LocalStorage(StorageBackend):
@@ -317,97 +403,19 @@ class S3Storage(StorageBackend):
         return code in {"404", "NoSuchKey", "NotFound"}
 
 
+
 __all__ = [
+    "_require_non_empty_string",
+    "_normalize_optional_string",
+    "_normalize_metadata",
+    "_ensure_binary_fileobj",
+    "_normalize_storage_key",
+    "_join_storage_key",
+    "_sanitize_filename",
+    "Storage",
     "LocalStorage",
     "S3Storage",
-    "Storage",
 ]
-
-
-class Storage:
-    """Facade that provides a backend-neutral storage interface."""
-
-    def __init__(self, backend: StorageBackend, generate_unique_filename: bool = True):
-        if not isinstance(backend, StorageBackend):
-            raise TypeError("backend must implement StorageBackend")
-        self.backend = backend
-        self.generate_unique_filename = bool(generate_unique_filename)
-
-    def _unique_filename(self, original_name: str) -> str:
-        """Generate a unique filename while preserving the suffix."""
-        sanitized_name = _sanitize_filename(original_name)
-        suffix = Path(sanitized_name).suffix
-        return f"{uuid.uuid4().hex}{suffix}"
-
-    def _build_object_key(self, filename: str, subpath: str = "") -> str:
-        final_name = self._unique_filename(filename) if self.generate_unique_filename else _sanitize_filename(filename)
-        if subpath and str(subpath).strip():
-            return _join_storage_key(subpath, final_name)
-        return _normalize_storage_key(final_name, field_name="filename")
-
-    def upload(
-        self,
-        file_obj: BinaryIO,
-        filename: str,
-        subpath: str = "",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Upload a file and return the backend-neutral object key."""
-        object_key = self._build_object_key(filename=filename, subpath=subpath)
-        return self.backend.upload(file_obj, object_key, metadata)
-
-    def download(self, path: str) -> bytes:
-        object_key = _normalize_storage_key(path)
-        return self.backend.download(object_key)
-
-    def delete(self, path: str) -> None:
-        object_key = _normalize_storage_key(path)
-        self.backend.delete(object_key)
-
-    def get_url(self, path: str) -> str:
-        object_key = _normalize_storage_key(path)
-        return self.backend.get_url(object_key)
-
-    @classmethod
-    def from_config(cls) -> "Storage":
-        """Create a storage facade from the 'storage' configuration section."""
-        config = get_config_section("storage") or {}
-        if not isinstance(config, dict):
-            raise StorageError("storage configuration must be a mapping")
-
-        backend_type = str(config.get("backend", "local")).strip().lower() or "local"
-        generate_unique = bool(config.get("generate_unique_filename", True))
-
-        if backend_type == "local":
-            backend = LocalStorage(
-                base_path=str(config.get("base_path", _DEFAULT_LOCAL_BASE_PATH)),
-                base_url=config.get("base_url"),
-            )
-        elif backend_type == "s3":
-            bucket = config.get("bucket")
-            if not bucket:
-                raise StorageError("storage.s3 configuration requires 'bucket'")
-            backend = S3Storage(
-                bucket=str(bucket),
-                region=_normalize_optional_string(config.get("region"), "region"),
-                access_key=_normalize_optional_string(config.get("access_key"), "access_key"),
-                secret_key=_normalize_optional_string(config.get("secret_key"), "secret_key"),
-                endpoint_url=_normalize_optional_string(config.get("endpoint_url"), "endpoint_url"),
-                public_url_prefix=_normalize_optional_string(
-                    config.get("public_url_prefix"),
-                    "public_url_prefix",
-                ),
-                presigned_url_ttl_seconds=int(
-                    config.get(
-                        "presigned_url_ttl_seconds",
-                        _DEFAULT_PRESIGNED_URL_TTL_SECONDS,
-                    )
-                ),
-            )
-        else:
-            raise StorageError(f"Unsupported storage backend: {backend_type}")
-
-        return cls(backend=backend, generate_unique_filename=generate_unique)
 
 if __name__ == "__main__":
     print("\n=== Running Storage ===\n")

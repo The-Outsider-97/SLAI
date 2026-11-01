@@ -16,7 +16,7 @@ Production-oriented knowledge retrieval and management agent with:
 import hashlib
 import json
 import math
-import yaml
+import yaml # type: ignore
 import os
 import re
 import threading
@@ -77,10 +77,7 @@ class KnowledgeAgent(BaseAgent):
         self.is_query = bool(self.knowledge_config.get("is_query", True))
         self.stopwords_path = self.knowledge_config.get("stopwords")
         self.cache_size = self._coerce_positive_int(self.knowledge_config.get("cache_size"), 1000)
-        self.retrieval_cache_ttl = self._coerce_positive_int(
-            self.knowledge_config.get("ttl"),
-            600,
-        )
+        self.retrieval_cache_ttl = self._coerce_positive_int(self.knowledge_config.get("ttl"), 600)
         self.first_pass = bool(self.knowledge_config.get("first_pass", True))
         self.max_workers = self._coerce_positive_int(self.knowledge_config.get("max_workers"), 4)
         self._decay_factor = self._coerce_float(self.knowledge_config.get("decay_factor"), 0.8)
@@ -166,6 +163,8 @@ class KnowledgeAgent(BaseAgent):
         self.sbert_model = None
         self.doc_embeddings: Dict[str, np.ndarray] = {}
         self.doc_tf_idf_vectors: Dict[str, Dict[str, float]] = {}
+        self.doc_tfidf_norms: Dict[str, float] = {}
+        self._tfidf_postings: Dict[str, set[str]] = defaultdict(set)
         self.doc_vectors: Dict[str, np.ndarray] = {}
         self.doc_index: Dict[str, Dict[str, Any]] = {}
         self.embedding_fallback = None
@@ -484,11 +483,11 @@ class KnowledgeAgent(BaseAgent):
                 self.doc_index[assigned_doc_id] = document
                 self.total_documents += 1
                 self._update_vocabulary(tokens)
-                self.doc_tf_idf_vectors[assigned_doc_id] = self._calculate_tfidf(tokens)
-                self.doc_vectors[assigned_doc_id] = self._dict_to_numpy(
-                    self.doc_tf_idf_vectors[assigned_doc_id]
-                )
-                self._vocab_dirty = True
+                tfidf_vector = self._calculate_tfidf(tokens)
+                self.doc_tf_idf_vectors[assigned_doc_id] = tfidf_vector
+                self.doc_tfidf_norms[assigned_doc_id] = math.sqrt(sum(float(value) * float(value) for value in tfidf_vector.values()))
+                for term in tfidf_vector:
+                    self._tfidf_postings[term].add(assigned_doc_id)
 
             self._maybe_compute_dense_embedding(assigned_doc_id, normalized_text)
         except InvalidDocumentError as exc:
@@ -510,8 +509,9 @@ class KnowledgeAgent(BaseAgent):
         unique_tokens = set(tokens)
         for token in unique_tokens:
             self.document_frequency[token] += 1
+
         self.vocabulary.update(unique_tokens)
-        self.sorted_vocab = sorted(self.vocabulary)
+        self._vocab_dirty = True
 
     def _maybe_compute_dense_embedding(self, doc_id: str, text: str) -> None:
         if self.retrieval_mode not in {"dense", "hybrid"}:
@@ -521,13 +521,14 @@ class KnowledgeAgent(BaseAgent):
         if self.sbert_model is None:
             return
         try:
-            embedding = np.asarray(self.sbert_model.encode(text, show_progress_bar=False))
+            embedding = np.asarray(self.sbert_model.encode(text, show_progress_bar=False), dtype=np.float32)
             with self._index_lock:
                 self.doc_embeddings[doc_id] = embedding
         except Exception as exc:
             error = EmbeddingError(doc_id=doc_id, model_name=str(self.embedding_model), error_details=str(exc))
             error.report()
             logger.warning("Dense embedding generation failed for %s: %s", doc_id, exc)
+
 
     def retrieve_documents_by_type(self, doc_type: str) -> List[Dict[str, Any]]:
         documents = []
@@ -783,17 +784,82 @@ class KnowledgeAgent(BaseAgent):
         return serializable_results
 
     def _retrieve_tfidf(self, query_text: str) -> List[Tuple[float, Dict[str, Any]]]:
+        """
+        Retrieve with exact sparse TF-IDF cosine similarity.
+
+        This produces the same mathematical cosine score as dense vocabulary
+        vectors without materializing O(|vocabulary|) arrays for each document.
+        """
+
         query_tokens = self._preprocess(query_text)
         if not query_tokens:
             return []
-        query_vector = self._dict_to_numpy(self._calculate_tfidf(query_tokens))
-        results = []
+
+        query_vector = self._calculate_tfidf(query_tokens)
+        if not query_vector:
+            return []
+
+        query_norm = math.sqrt(
+            sum(
+                float(value) * float(value)
+                for value in query_vector.values()
+            )
+        )
+
+        if query_norm <= 0.0:
+            return []
+
+        # A TF-IDF cosine score can only be non-zero when at least one term
+        # is shared. Use the inverted index to eliminate impossible matches.
+        candidate_ids: set[str] = set()
+        for term in query_vector:
+            candidate_ids.update(self._tfidf_postings.get(term, ()))
+
+        if not candidate_ids:
+            return []
+        results: List[Tuple[float, Dict[str, Any]]] = []
+
+        # Iterate knowledge_agent rather than the set to retain deterministic
+        # document ordering for equal scores.
         for doc in self.knowledge_agent:
-            doc_vector = self._dict_to_numpy(self.doc_tf_idf_vectors.get(doc["doc_id"], {}))
-            similarity = cosine_sim(query_vector.tolist(), doc_vector.tolist())
+            doc_id = str(doc.get("doc_id", ""))
+            if doc_id not in candidate_ids:
+                continue
+
+            doc_vector = self.doc_tf_idf_vectors.get(doc_id)
+            if not doc_vector:
+                continue
+
+            doc_norm = self.doc_tfidf_norms.get(doc_id, 0.0)
+            if doc_norm <= 0.0:
+                continue
+
+            # Iterate the smaller sparse mapping.
+            if len(query_vector) <= len(doc_vector):
+                dot_product = sum(float(query_value) * float(doc_vector.get(term, 0.0))
+                    for term, query_value
+                    in query_vector.items()
+                )
+            else:
+                dot_product = sum(float(doc_value) * float(query_vector.get(term, 0.0))
+                    for term, doc_value
+                    in doc_vector.items()
+                )
+
+            if dot_product <= 0.0:
+                continue
+
+            similarity = (
+                dot_product
+                / (query_norm * doc_norm)
+            )
+
             if similarity >= self.similarity_threshold:
                 results.append((float(similarity), doc))
-        return sorted(results, key=lambda item: item[0], reverse=True)
+
+        results.sort(key=lambda item: item[0], reverse=True)
+
+        return results
 
     def _retrieve_dense(self, query_text: str) -> List[Tuple[float, Dict[str, Any]]]:
         if self.retrieval_mode not in {"dense", "hybrid"}:
@@ -803,22 +869,39 @@ class KnowledgeAgent(BaseAgent):
         if self.sbert_model is None or not self.doc_embeddings:
             return []
         try:
-            query_embedding = np.asarray(self.sbert_model.encode(query_text, show_progress_bar=False))
+
+            query_embedding = np.asarray(self.sbert_model.encode(query_text, show_progress_bar=False), dtype=np.float32).reshape(-1)
+            query_norm = float(np.linalg.norm(query_embedding))
+            if query_norm <= 0.0:
+                return []
+
+            results = []
+
+            for doc_id, doc_embedding in self.doc_embeddings.items():
+                doc = self.doc_index.get(doc_id)
+                if doc is None:
+                    continue
+
+                vector = np.asarray(doc_embedding, dtype=np.float32).reshape(-1)
+                doc_norm = float(np.linalg.norm(vector))
+                if doc_norm <= 0.0:
+                    continue
+
+                similarity = float(
+                    np.dot(query_embedding, vector)
+                    / (query_norm * doc_norm)
+                )
+
+                if similarity >= self.similarity_threshold:
+                    results.append((similarity, doc))
+
+            return sorted(results, key=lambda item: item[0], reverse=True)
+
         except Exception as exc:
             error = EmbeddingError(doc_id="<query>", model_name=str(self.embedding_model), error_details=str(exc))
             error.report()
             logger.warning("Dense query encoding failed: %s", exc)
             return []
-
-        results = []
-        for doc_id, doc_embedding in self.doc_embeddings.items():
-            doc = self.doc_index.get(doc_id)
-            if doc is None:
-                continue
-            similarity = cosine_sim(query_embedding.tolist(), doc_embedding.tolist())
-            if similarity >= self.similarity_threshold:
-                results.append((float(similarity), doc))
-        return sorted(results, key=lambda item: item[0], reverse=True)
 
     def _combine_results(
         self,
@@ -875,9 +958,24 @@ class KnowledgeAgent(BaseAgent):
         return results
 
     def _dict_to_numpy(self, vector: Dict[str, float]) -> np.ndarray:
-        if not self.sorted_vocab:
+        """
+        Legacy dense conversion helper.
+
+        Retrieval itself must remain sparse. This method is retained only for
+        callers that explicitly require a dense vocabulary-aligned vector.
+        """
+        if self._vocab_dirty or not self.sorted_vocab:
             self.sorted_vocab = sorted(self.vocabulary)
-        return np.asarray([vector.get(term, 0.0) for term in self.sorted_vocab], dtype=float)
+            self._vocab_dirty = False
+
+        return np.fromiter(
+            (
+                float(vector.get(term, 0.0))
+                for term in self.sorted_vocab
+            ),
+            dtype=np.float32,
+            count=len(self.sorted_vocab),
+        )
 
     def _preprocess(self, text: str) -> List[str]:
         normalized_text = str(text or "").strip().lower()
@@ -1236,6 +1334,16 @@ class KnowledgeAgent(BaseAgent):
             return 0.0
         return self._cosine_similarity(self._calculate_tfidf(tokens1), self._calculate_tfidf(tokens2))
 
+    def score_text_relevance(self, query_text: str, candidate_text: str) -> float:
+        """Public, threshold-independent TF-IDF cosine score for text pairs.
+
+        Used by offline curriculum enrichment to compare a known positive with
+        scoped candidate negatives on the same numerical scale.  Unlike
+        retrieve(), this method does not apply the global retrieval threshold,
+        truncate top-k results, or perform cross-document search.
+        """
+        return float(self._fallback_relevance_tfidf(query_text, candidate_text))
+
     def _validate_with_safety(self, action_params: Dict, context: Optional[Dict] = None) -> bool:
         if not self.safety_check_callback:
             return True
@@ -1272,6 +1380,45 @@ class KnowledgeAgent(BaseAgent):
         except Exception as exc:
             logger.warning("Tokenizer load failed: %s", exc)
             return None
+
+    def finalize_retrieval_index(self) -> None:
+        """
+        Rebuild sparse TF-IDF state after bulk document ingestion.
+
+        IDF depends on the final document count and document frequencies, so all
+        document vectors must be calculated against the completed corpus.
+        """
+
+        with self._index_lock:
+            self.doc_tf_idf_vectors.clear()
+            self.doc_tfidf_norms.clear()
+            self._tfidf_postings.clear()
+
+            # Legacy dense vectors are deliberately discarded.
+            self.doc_vectors.clear()
+            for doc in self.knowledge_agent:
+                doc_id = str(doc.get("doc_id", ""))
+                if not doc_id:
+                    continue
+
+                tokens = doc.get("tokens", ())
+                if not isinstance(tokens, Sequence):
+                    continue
+
+                vector = self._calculate_tfidf(list(tokens))
+                self.doc_tf_idf_vectors[doc_id] = vector
+                self.doc_tfidf_norms[doc_id] = math.sqrt(
+                    sum(float(value) * float(value)
+                        for value
+                        in vector.values()
+                    )
+                )
+
+                for term in vector:
+                    self._tfidf_postings[term].add(doc_id)
+
+            self.sorted_vocab = []
+            self._vocab_dirty = True
 
     # ------------------------------------------------------------------
     # Shared memory helpers
@@ -1364,4 +1511,7 @@ if __name__ == "__main__":  # pragma: no cover
     query = "AI ethics principles for autonomous systems"
     retriever = agent.retrieve(query=query, k=5)
     printer.status("RETRIEVE", retriever, "success" if retriever else "error")
+
+    final = agent.finalize_retrieval_index()
+    printer.status("FINAL  ", final, "success" if final else "error")
     print("\n=== Successfully ran the Knowledge Agent ===\n")

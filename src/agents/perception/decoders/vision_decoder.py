@@ -7,7 +7,9 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 
 from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.common import TensorOps, Parameter
+from ..utils.common import *
+from ..utils.perception_errors import *
+from ..utils.perception_helpers import *
 from ..modules.transformer import Transformer
 from ..perception_memory import PerceptionMemory
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -36,7 +38,7 @@ class VisionDecoder(nn.Module):
         self.decoder_config = get_config_section('vision_decoder') if 'vision_decoder' in self.config else {}
 
         # Core parameters
-        self.embed_dim = self.config.get('embed_dim')
+        self.embed_dim = self.config.get('embed_dim', 512)
         self.in_channels = self.config.get('in_channels', 3)
         self.decoder_type = self.config.get('decoder_type', self.config.get('encoder_type', 'transformer'))
         self.device = self.config.get('device', 'cpu')
@@ -104,9 +106,11 @@ class VisionDecoder(nn.Module):
             )
 
         # Transformer backbone
-        self.transformer = Transformer()
-        self.transformer.return_hidden = True  # Always return full sequence
-        self.transformer.causal = False        # Vision decoder doesn't need causal masking
+        self.transformer = Transformer(
+            causal=False,
+            enable_cross_attention=False,
+            return_hidden=True,
+        )
 
         # Disable feedforward fusion (no context addition)
         for layer in self.transformer.layers:
@@ -277,12 +281,7 @@ class VisionDecoder(nn.Module):
         else:
             raise ValueError(f"Unsupported decoder type: {self.decoder_type}")
 
-    def _forward_transformer(
-        self,
-        x: torch.Tensor,
-        style_id: torch.Tensor,
-        orig_shape: Tuple[int, int]
-    ) -> torch.Tensor:
+    def _forward_transformer(self, x: torch.Tensor, style_id: Optional[torch.Tensor], orig_shape: Tuple[int, int]) -> torch.Tensor:
         """Transformer decoder forward pass."""
         # Add positional embeddings
         seq_len = x.size(1)
@@ -344,8 +343,8 @@ class VisionDecoder(nn.Module):
             return hook
 
         for idx, layer in enumerate(self.transformer.layers):
-            if 'attention' in layer:
-                attn_module = layer['attention']
+            attn_module = getattr(layer, "attention", None)
+            if attn_module is not None:
                 attn_module.output_attentions = True
                 attn_module.register_forward_hook(hook_fn(idx))
                 logger.info(f"Registered attention hook for layer {idx}")
@@ -382,6 +381,7 @@ class VisionDecoder(nn.Module):
 
         # Positional embeddings
         if 'pos_embed' in weights:
+            assert self.position_embed is not None
             self.position_embed.data.copy_(weights['pos_embed'].to(self.device))
 
         # Projection weights

@@ -16,7 +16,7 @@ import networkx as nx
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union, cast
 from scipy.stats import ttest_ind, wasserstein_distance
 
 from .utils.config_loader import load_global_config, get_config_section
@@ -28,7 +28,7 @@ from .alignment_memory import AlignmentMemory
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Countefactual Auditor")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 @dataclass(frozen=True)
 class CounterfactualScenario:
@@ -559,16 +559,23 @@ class CounterfactualAuditor:
             )
 
             for scenario in scenarios:
+                assert self.causal_model is not None
                 cf_data = self.causal_model.compute_counterfactual(intervention=scenario.intervention)
-                cf_preds = self._get_predictions(cf_data)
+                if not isinstance(cf_data, pd.DataFrame):
+                    raise CounterfactualAuditError(
+                        "Causal model returned counterfactual data that is not a DataFrame.",
+                        context={"actual_type": type(cf_data).__name__},
+                    )
+                cf_frame = cast(pd.DataFrame, cf_data)
+                cf_preds = self._get_predictions(cf_frame)
                 scenario_result: Dict[str, Any] = {
                     "scenario": scenario.to_dict(),
                     "counterfactual_predictions": cf_preds,
-                    "counterfactual_data": cf_data if self.include_counterfactual_samples else None,
+                    "counterfactual_data": cf_frame if self.include_counterfactual_samples else None,
                     "prediction_summary": self._prediction_summary(cf_preds),
                 }
                 if self.include_counterfactual_samples:
-                    scenario_result["counterfactual_sample"] = cf_data.head(self.counterfactual_sample_cap).to_dict(orient="records")
+                    scenario_result["counterfactual_sample"] = cf_frame.head(self.counterfactual_sample_cap).to_dict(orient="records")
                 results[attr][scenario.scenario_id] = scenario_result
         return results, interventions
 
@@ -854,6 +861,7 @@ class CounterfactualAuditor:
         for scenario_id, result in scenario_results.items():
             cf_data = result.get("counterfactual_data")
             if not isinstance(cf_data, pd.DataFrame):
+                assert self.causal_model is not None
                 cf_data = self.causal_model.compute_counterfactual(intervention=result["scenario"]["intervention"])
 
             # Check if counterfactual data has at least two distinct groups
@@ -872,6 +880,7 @@ class CounterfactualAuditor:
                 continue
 
             try:
+                assert cf_data is not None
                 cf_group = self.fairness_assessor.compute_group_disparity(
                     cf_data.assign(_pred=result["counterfactual_predictions"]),
                     sensitive_attr=attr,
@@ -1239,7 +1248,7 @@ class CounterfactualAuditor:
                 threshold=float(threshold),
                 context=dict(normalize_context(context, drop_none=False)),
                 source=source,
-                tags=list(normalize_tags(tags)),
+                tags=list(normalize_tags(list(tags) if tags is not None else None)),
                 metadata=dict(normalize_metadata(metadata)),
             )
         except Exception as exc:
@@ -1268,7 +1277,7 @@ class CounterfactualAuditor:
                 context=dict(normalize_context(context, drop_none=False)),
                 outcome=dict(normalize_metadata(outcome, drop_none=False)),
                 source=source,
-                tags=list(normalize_tags(tags)),
+                tags=list(normalize_tags(list(tags) if tags is not None else None)),
                 metadata=dict(normalize_metadata(metadata)),
             )
         except Exception as exc:
@@ -1281,6 +1290,10 @@ class CounterfactualAuditor:
                 ) from exc
             logger.warning("Counterfactual audit outcome recording failed: %s", exc)
 
+__all__ = [
+    "CounterfactualScenario",
+    "CounterfactualAuditor",
+]
 
 if __name__ == '__main__':
     print("\n=== Running Counterfactual Auditor ===\n")

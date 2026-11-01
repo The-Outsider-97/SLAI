@@ -26,16 +26,17 @@ Academic References:
 import inspect
 import pickle
 import random
-import numpy as np
-import torch
+import numpy as np # type: ignore
+import torch # type: ignore
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Callable
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 
-from .base_agent import BaseAgent, RuntimeLifecycle
+from .base_agent import BaseAgent
+from .runtime_contracts import RuntimeLifecycle
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .adaptive import PolicyManager, LearningParameterTuner, ImitationLearningWorker, MetaLearningWorker, SkillWorker
 from .adaptive.utils.adaptive_errors import *
@@ -96,10 +97,18 @@ class AdaptiveAgent(BaseAgent):
     DEFAULT_RECOVERY_TTL = int(timedelta(days=7).total_seconds())
     DEFAULT_STATE_TTL = int(timedelta(days=30).total_seconds())
     RESERVED_GLOBAL_SKILL_ID = 1_000_000
+    CHECKPOINTING_SUPPORTED = True
+    CHECKPOINT_SCHEMA = "slai.adaptive-agent.state.v1"
 
-    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None,
-                 args: Sequence[Any] = (), kwargs: Optional[Mapping[str, Any]] = None) -> None:
-        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
+    def __init__(self,
+                 shared_memory: Any,
+                 agent_factory: Any,
+                 config: Optional[Mapping[str, Any]] = None,
+                 args: Sequence[Any] = (), kwargs: Optional[Mapping[str, Any]] = None,
+                 *,
+                 checkpoint_manager: Any = None,
+                 ) -> None:
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config, checkpoint_manager=checkpoint_manager)
 
         self.global_config = load_global_config()
         self.agent_config = dict(get_config_section("adaptive_agent") or {})
@@ -200,6 +209,11 @@ class AdaptiveAgent(BaseAgent):
             self.handlers_config = dict(self.agent_config.get("handlers", {}))
             self.env_config = dict(self.agent_config.get("env", {}))
             self.checkpoint_protocol = int(self.agent_config.get("checkpoint_protocol", pickle.HIGHEST_PROTOCOL))
+
+            self.learning_signal_inbox_key = str(self.agent_config.get("learning_signal_inbox_key", "learning:signals:inbox"))
+            self.learning_guidance_prefix = str(self.agent_config.get("learning_guidance_prefix", "learning:guidance"))
+            self.consume_learning_guidance = bool(self.agent_config.get("consume_learning_guidance", True))
+            self.learning_guidance_min_evidence = int(self.agent_config.get("learning_guidance_min_evidence", 3))
         except (TypeError, ValueError) as exc:
             raise InvalidConfigurationValueError(
                 "Failed to parse adaptive_agent configuration values.",
@@ -209,6 +223,7 @@ class AdaptiveAgent(BaseAgent):
                 cause=exc,
             ) from exc
 
+        ensure_positive(self.learning_guidance_min_evidence, "learning_guidance_min_evidence", component="adaptive_agent")
         ensure_positive(self.state_dim, "state_dim", component="adaptive_agent")
         ensure_positive(self.num_actions, "num_actions", component="adaptive_agent")
         ensure_positive(self.num_handlers, "num_handlers", component="adaptive_agent")
@@ -461,6 +476,62 @@ class AdaptiveAgent(BaseAgent):
     def _warm_state_key(self) -> str:
         return f"warm_state:{self.name}"
 
+    def _runtime_state_payload(self) -> Dict[str, Any]:
+        """Build adaptive runtime state without persistence side effects."""
+        return {
+            "version": self.STATE_VERSION,
+            "episode": int(self.episode),
+            "total_steps": int(self.total_steps),
+            "episode_reward": float(self.episode_reward),
+            "episode_length": int(self.episode_length),
+            "last_reward": float(self.last_reward),
+            "current_state": (
+                None
+                if self.current_state is None
+                else np.asarray(
+                    self.current_state,
+                    dtype=np.float32,
+                ).tolist()
+            ),
+            "current_goal": self.current_goal,
+            "current_task_type": self.current_task_type,
+            "last_episode_summary": self.last_episode_summary,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    
+    
+    def _apply_runtime_state_payload(
+        self,
+        state: Mapping[str, Any],
+    ) -> None:
+        version = state.get("version")
+    
+        if version is not None and version != self.STATE_VERSION:
+            raise CheckpointLoadError(
+                "AdaptiveAgent checkpoint state version is incompatible.",
+                component="adaptive_agent",
+                details={
+                    "expected": self.STATE_VERSION,
+                    "actual": version,
+                },
+            )
+    
+        raw_current_state = state.get("current_state")
+    
+        self.current_state = (
+            None
+            if raw_current_state is None
+            else self._validate_state(raw_current_state)
+        )
+        self.episode = int(state.get("episode", 0))
+        self.total_steps = int(state.get("total_steps", 0))
+        self.episode_reward = float(state.get("episode_reward", 0.0))
+        self.episode_length = int(state.get("episode_length", 0))
+        self.last_reward = float(state.get("last_reward", 0.0))
+        self.current_goal = state.get("current_goal")
+        self.current_task_type = state.get("current_task_type")
+        self.last_episode_summary = state.get("last_episode_summary")
+
     def _load_agent_state(self) -> None:
         cached_state = self.shared_memory.get(self._state_key)
         if not isinstance(cached_state, Mapping):
@@ -472,31 +543,11 @@ class AdaptiveAgent(BaseAgent):
             self.last_reward = 0.0
             return
 
-        self.current_state = None if cached_state.get("current_state") is None else self._validate_state(cached_state.get("current_state"))
-        self.episode = int(cached_state.get("episode", 0))
-        self.total_steps = int(cached_state.get("total_steps", 0))
-        self.episode_reward = float(cached_state.get("episode_reward", 0.0))
-        self.episode_length = int(cached_state.get("episode_length", 0))
-        self.last_reward = float(cached_state.get("last_reward", 0.0))
-        self.current_goal = cached_state.get("current_goal")
-        self.current_task_type = cached_state.get("current_task_type")
-        self.last_episode_summary = cached_state.get("last_episode_summary")
+        self._apply_runtime_state_payload(cached_state)
         logger.info("Loaded adaptive agent state from shared memory")
 
     def _save_agent_state(self) -> Dict[str, Any]:
-        state_data = {
-            "version": self.STATE_VERSION,
-            "episode": int(self.episode),
-            "total_steps": int(self.total_steps),
-            "episode_reward": float(self.episode_reward),
-            "episode_length": int(self.episode_length),
-            "last_reward": float(self.last_reward),
-            "current_state": None if self.current_state is None else np.asarray(self.current_state, dtype=np.float32).tolist(),
-            "current_goal": self.current_goal,
-            "current_task_type": self.current_task_type,
-            "last_episode_summary": self.last_episode_summary,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+        state_data = self._runtime_state_payload()
         self.shared_memory.set(self._state_key, state_data, ttl=self.shared_memory_state_ttl)
         self.shared_memory.set(self._warm_state_key, state_data, ttl=self.shared_memory_state_ttl)
         return state_data
@@ -525,6 +576,60 @@ class AdaptiveAgent(BaseAgent):
         self.shared_memory.set(self._report_key, payload, ttl=self.shared_memory_report_ttl)
         if hasattr(self.shared_memory, "publish"):
             self.shared_memory.publish("adaptive_agent/reports", payload)
+
+    def _publish_learning_outcomes(self, summary: Mapping[str, Any]) -> None:
+        """Publish observed per-skill outcomes for LearningAgent.
+    
+        These are observations, not adaptations. LearningAgent decides what can be
+        inferred from them.
+        """
+        rewards = summary.get("per_skill_rewards", {})
+        selected = summary.get("selected_skills", [])
+        if not isinstance(rewards, Mapping):
+            return
+    
+        counts = Counter(int(skill_id) for skill_id in selected)
+        context = {
+            "task_type": summary.get("task_type", self.current_task_type),
+            "goal": summary.get("goal", self.current_goal),
+        }
+    
+        for skill_id_raw, total_reward_raw in rewards.items():
+            skill_id = int(skill_id_raw)
+            total_reward = float(total_reward_raw)
+            rollout_count = max(1, int(counts.get(skill_id, 1)))
+            mean_rollout_reward = (total_reward / rollout_count)
+            signal = {
+                "signal_id": (
+                    f"{self.agent_id}:"
+                    f"episode:{self.episode}:"
+                    f"skill:{skill_id}"
+                ),
+                "source_agent": self.name,
+                "kind": "outcome",
+                "metric": "reward",
+                "value": mean_rollout_reward,
+                "direction": "higher_better",
+                "confidence": 1.0,
+                "validated": True,
+                "provenance": "execution",
+                "strategy": f"skill:{skill_id}",
+                "context": context,
+                "metadata": {
+                    "episode": int(self.episode),
+                    "skill_id": skill_id,
+                    "rollout_count": rollout_count,
+                    "total_reward": total_reward,
+                    "episode_reward": float(summary.get("total_reward", self.episode_reward)), "success": bool(summary.get("success", False))
+                },
+            }
+    
+            if hasattr(self.shared_memory, "append"):
+                self.shared_memory.append(self.learning_signal_inbox_key, signal)
+            else:
+                pending = list(self.shared_memory.get(self.learning_signal_inbox_key) or [])
+                pending.append(signal)
+                self.shared_memory.set(self.learning_signal_inbox_key, pending)
 
     # ------------------------------------------------------------------
     # Core execution
@@ -595,6 +700,7 @@ class AdaptiveAgent(BaseAgent):
         self.last_episode_summary = summary
         self.task_history.append(summary)
         self._publish_report(summary)
+        self._publish_learning_outcomes(summary)
         return summary
 
     def _normalize_task_payload(self, task_data: Any) -> Dict[str, Any]:
@@ -658,11 +764,97 @@ class AdaptiveAgent(BaseAgent):
 
     def _select_skill(self, state: np.ndarray) -> int:
         try:
-            selected = self.policy_manager.select_skill(state, explore=self.explore_skills)
-            return int(selected)
+            selected = int(self.policy_manager.select_skill(state, explore=self.explore_skills))
         except Exception as exc:
             logger.error("Skill selection failed, falling back to first skill: %s", exc)
-            return int(next(iter(self.skills.keys())))
+            selected = int(next(iter(self.skills.keys())))
+    
+        if not self.consume_learning_guidance:
+            return selected
+    
+        guidance = self._get_learning_guidance()
+        if guidance is None:
+            return selected
+    
+        preferred = guidance.get("preferred_strategy")
+        if not isinstance(preferred, str):
+            return selected
+    
+        if not preferred.startswith("skill:"):
+            return selected
+    
+        evidence = guidance.get("strategy_statistics", {})
+        if not isinstance(evidence, Mapping):
+            return selected
+    
+        preferred_stats = evidence.get(preferred, {})
+        if not isinstance(preferred_stats, Mapping):
+            return selected
+    
+        if int(preferred_stats.get("count", 0)) < self.learning_guidance_min_evidence:
+            return selected
+    
+        try:
+            preferred_skill = int(preferred.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return selected
+    
+        if preferred_skill not in self.skills:
+            return selected
+    
+        selected_name = f"skill:{selected}"
+        selected_stats = evidence.get(selected_name)
+    
+        # Do not override the Adaptive policy when historical evidence says its
+        # current choice is at least as good.
+        if isinstance(selected_stats, Mapping):
+            selected_count = int(selected_stats.get("count", 0))
+    
+            if (
+                selected_count
+                >= self.learning_guidance_min_evidence
+            ):
+                selected_mean = float(selected_stats.get("mean", float("-inf")))
+                preferred_mean = float(preferred_stats.get("mean", float("-inf")))
+                if selected_mean >= preferred_mean:
+                    return selected
+    
+        logger.info(
+            "Applying learned skill guidance | task_type=%s policy_skill=%s learned_skill=%s evidence=%s",
+            self.current_task_type,
+            selected,
+            preferred_skill,
+            preferred_stats.get("count"),
+        )
+    
+        return preferred_skill
+    
+    
+    def _get_learning_guidance(self) -> Optional[Dict[str, Any]]:
+        task_type = str(self.current_task_type or self.default_task_type)
+    
+        key = (
+            f"{self.learning_guidance_prefix}:"
+            f"adaptive:{task_type}"
+        )
+    
+        guidance = self.shared_memory.get(key)
+        if not isinstance(guidance, Mapping):
+            return None
+    
+        expected_context = {
+            "task_type": self.current_task_type,
+            "goal": self.current_goal,
+        }
+    
+        stored_context = guidance.get("context")
+    
+        # Prevent learned evidence for a different goal from being applied merely
+        # because both jobs share a task_type.
+        if (isinstance(stored_context, Mapping) and dict(stored_context) != expected_context):
+            return None
+    
+        return dict(guidance)
 
     def _execute_skill_rollout(
         self,
@@ -672,16 +864,31 @@ class AdaptiveAgent(BaseAgent):
         state: np.ndarray,
         task_payload: Mapping[str, Any],
     ) -> Tuple[float, np.ndarray, bool, bool]:
+        # Bind once for the whole rollout so reward shaping, logging,
+        # env hooks, and callbacks can inspect the active task.
+        self.task_payload = dict(task_payload)
+        task_type = task_payload.get("type", self.default_task_type)
+        task_goal = task_payload.get("goal")
+    
         skill_reward = 0.0
         terminated = False
         truncated = False
-
-        for _ in range(self.skill_max_steps):
+    
+        for step_idx in range(self.skill_max_steps):
             action, log_prob, entropy = self._select_primitive_action(skill_worker, state)
             next_state, reward, terminated, truncated, info = self.env.step(action)
             next_state = self._validate_state(next_state)
             normalized_reward = self._coerce_reward(reward)
-
+    
+            # Consume task_payload: add any task-aware shaping bonus on top of
+            # the raw env reward (no-op by default, overridable).
+            normalized_reward += self._task_reward_shaping(
+                info=info,
+                task_payload=task_payload,
+                next_state=next_state,
+                step_idx=step_idx,
+            )
+    
             self._store_skill_experience(
                 skill_worker=skill_worker,
                 state=state,
@@ -700,7 +907,12 @@ class AdaptiveAgent(BaseAgent):
                 done=terminated or truncated,
                 skill_id=skill_id,
             )
-
+    
+            logger.debug(
+                "Rollout step | skill=%s task_type=%s goal=%s step=%d reward=%.4f",
+                skill_id, task_type, task_goal, step_idx, normalized_reward,
+            )
+    
             state = next_state
             skill_reward += float(normalized_reward)
             self.episode_reward += float(normalized_reward)
@@ -708,11 +920,55 @@ class AdaptiveAgent(BaseAgent):
             self.total_steps += 1
             self.last_reward = float(normalized_reward)
             self.current_state = state
-
+    
             if terminated or truncated:
                 break
-
+    
         return float(skill_reward), state, terminated, truncated
+
+    def _task_reward_shaping(
+        self,
+        *,
+        info: Mapping[str, Any],
+        task_payload: Mapping[str, Any],
+        next_state: np.ndarray,
+        step_idx: int,
+    ) -> float:
+        """
+        Additive task-aware reward shaping bonus.
+    
+        Reads signals the environment exposes via ``info`` and combines them
+        with the current task payload (goal / context / type). Default policy
+        is a strict no-op so raw environment rewards are preserved unless the
+        agent is configured to shape.
+        """
+        if not self.agent_config.get("enable_task_reward_shaping", False):
+            return 0.0
+        if not isinstance(info, Mapping):
+            return 0.0
+    
+        bonus = 0.0
+    
+        # Intermediate milestone bonus reported by the env.
+        if info.get("sub_goal_reached") is True:
+            bonus += float(self.agent_config.get("sub_goal_bonus", 0.1))
+    
+        # Goal-distance penalty when the env reports it and a goal exists.
+        goal_distance = info.get("goal_distance")
+        if goal_distance is not None and task_payload.get("goal") is not None:
+            try:
+                dist = float(goal_distance)
+            except (TypeError, ValueError):
+                dist = None
+            if dist is not None and is_finite_number(dist):
+                scale = float(self.agent_config.get("goal_distance_penalty_scale", 0.0))
+                bonus -= scale * dist
+    
+        # Failure / constraint-violation penalty.
+        if info.get("constraint_violated") is True:
+            bonus -= float(self.agent_config.get("constraint_violation_penalty", 0.0))
+    
+        return bonus
 
     def _select_primitive_action(self, skill_worker: SkillWorker, state: np.ndarray) -> Tuple[Any, float, float]:
         try:
@@ -723,15 +979,7 @@ class AdaptiveAgent(BaseAgent):
             fallback = random.randint(0, self.num_actions - 1)
             return fallback, 0.0, 0.0
 
-    def _finalize_skill(
-        self,
-        *,
-        skill_id: int,
-        state: np.ndarray,
-        reward: float,
-        done: bool,
-        success: bool,
-    ) -> None:
+    def _finalize_skill(self, *, skill_id: int, state: np.ndarray, reward: float, done: bool, success: bool) -> None:
         params = self.tuner.get_params(include_metadata=False)
         try:
             if hasattr(self.policy_manager, "store_experience"):
@@ -1494,66 +1742,88 @@ class AdaptiveAgent(BaseAgent):
 
         return int(candidate)
 
-    def save_checkpoint(self, path: str | Path) -> str:
-        checkpoint_path = Path(path)
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": self.STATE_VERSION,
-            "agent_state": self._save_agent_state(),
-            "recovery_history": self._save_recovery_history(),
+    def checkpoint_step(self) -> int:
+        return int(self.total_steps)
+    
+    
+    def _export_checkpoint_state(self) -> Mapping[str, Any]:
+        recovery_history = {
+            str(strategy_name): {
+                "success": int(counts["success"]),
+                "fail": int(counts["fail"]),
+            }
+            for strategy_name, counts in self.recovery_history.items()
+        }
+    
+        return {
+            "schema": self.CHECKPOINT_SCHEMA,
+            "runtime_state": self._runtime_state_payload(),
+            "recovery_history": recovery_history,
             "task_history": list(self.task_history),
             "route_history": list(self.route_history),
             "feedback_history": list(self.feedback_history),
-            "timestamp": datetime.utcnow().isoformat(),
         }
-        try:
-            with checkpoint_path.open("wb") as handle:
-                pickle.dump(payload, handle, protocol=self.checkpoint_protocol)
-        except Exception as exc:
-            raise wrap_exception(
-                exc,
-                CheckpointSaveError,
-                "Failed to save AdaptiveAgent checkpoint.",
+    
+    
+    def _import_checkpoint_state(
+        self,
+        state: Mapping[str, Any],
+    ) -> None:
+        if state.get("schema") != self.CHECKPOINT_SCHEMA:
+            raise CheckpointLoadError(
+                "Unsupported AdaptiveAgent checkpoint schema.",
                 component="adaptive_agent",
-                details={"path": str(checkpoint_path)},
-            ) from exc
-        self.last_checkpoint_path = str(checkpoint_path)
-        return str(checkpoint_path)
-
-    def load_checkpoint(self, path: str | Path) -> "AdaptiveAgent":
-        checkpoint_path = Path(path)
-        if not checkpoint_path.exists():
-            raise CheckpointNotFoundError(
-                f"AdaptiveAgent checkpoint not found: {checkpoint_path}",
-                component="adaptive_agent",
-                details={"path": str(checkpoint_path)},
+                details={
+                    "expected": self.CHECKPOINT_SCHEMA,
+                    "actual": state.get("schema"),
+                },
             )
-        try:
-            with checkpoint_path.open("rb") as handle:
-                payload = pickle.load(handle)
-        except Exception as exc:
-            raise wrap_exception(
-                exc,
-                CheckpointLoadError,
-                "Failed to load AdaptiveAgent checkpoint.",
+    
+        runtime_state = state.get("runtime_state")
+        if not isinstance(runtime_state, Mapping):
+            raise CheckpointLoadError(
+                "AdaptiveAgent checkpoint is missing runtime_state.",
                 component="adaptive_agent",
-                details={"path": str(checkpoint_path)},
-            ) from exc
-
-        ensure_instance(payload, Mapping, "checkpoint_payload", component="adaptive_agent")
-        state = payload.get("agent_state", {})
-        if isinstance(state, Mapping):
-            self.shared_memory.set(self._state_key, dict(state), ttl=self.shared_memory_state_ttl)
-            self._load_agent_state()
-        history = payload.get("recovery_history", {})
-        if isinstance(history, Mapping):
-            self.shared_memory.set(self._recovery_key, dict(history), ttl=self.shared_memory_recovery_ttl)
-            self._load_recovery_history()
-        self.task_history = deque(payload.get("task_history", []), maxlen=self.max_task_history)
-        self.route_history = deque(payload.get("route_history", []), maxlen=self.max_route_history)
-        self.feedback_history = deque(payload.get("feedback_history", []), maxlen=self.max_feedback_history)
-        self.last_checkpoint_path = str(checkpoint_path)
-        return self
+            )
+    
+        self._apply_runtime_state_payload(runtime_state)
+    
+        recovery_state = state.get("recovery_history", {})
+        if not isinstance(recovery_state, Mapping):
+            raise CheckpointLoadError(
+                "AdaptiveAgent checkpoint recovery_history must be a mapping.",
+                component="adaptive_agent",
+            )
+    
+        self.recovery_history = defaultdict(
+            lambda: {"success": 0, "fail": 0}
+        )
+    
+        for strategy_name, counts in recovery_state.items():
+            if not isinstance(counts, Mapping):
+                continue
+    
+            self.recovery_history[str(strategy_name)] = {
+                "success": int(counts.get("success", 0)),
+                "fail": int(counts.get("fail", 0)),
+            }
+    
+        self.task_history = deque(
+            state.get("task_history", []),
+            maxlen=self.max_task_history,
+        )
+        self.route_history = deque(
+            state.get("route_history", []),
+            maxlen=self.max_route_history,
+        )
+        self.feedback_history = deque(
+            state.get("feedback_history", []),
+            maxlen=self.max_feedback_history,
+        )
+    
+        # Keep transient SharedMemory consistent with the restored durable state.
+        self._save_agent_state()
+        self._save_recovery_history()
 
     def get_health_report(self) -> Dict[str, Any]:
         report = self.runtime_status()
@@ -1674,11 +1944,11 @@ if __name__ == "__main__":
     printer.pretty("FALLBACK", fallback, "success")
     printer.pretty("RETRAIN", retrain_result, "success")
 
-    checkpoint_path = Path("/tmp/adaptive_agent_test_checkpoint.pkl")
-    saved_path = agent.save_checkpoint(checkpoint_path)
+    # checkpoint_path = Path("/tmp/adaptive_agent_test_checkpoint.pkl")
+    # saved_path = agent.save_checkpoint(checkpoint_path)
     restored = AdaptiveAgent(shared_memory=shared_memory, agent_factory=agent_factory)
-    restored.load_checkpoint(saved_path)
-    printer.status("TEST", f"Restored checkpoint from {saved_path}", "success")
+    # restored.load_checkpoint(saved_path)
+    # printer.status("TEST", f"Restored checkpoint from {saved_path}", "success")
     printer.pretty("RESTORED_STATE", restored._save_agent_state(), "success")
 
     printer.pretty("FAIL_OPERATIONAL", agent.supports_fail_operational(), "success")

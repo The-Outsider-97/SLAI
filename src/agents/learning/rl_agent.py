@@ -987,6 +987,27 @@ class RLAgent:
         with path_obj.open("rb") as handle:
             payload = pickle.load(handle)
 
+        if not isinstance(payload, dict):
+            raise ValueError("RLAgent checkpoint must be a dictionary")
+
+        if int(payload.get("state_size", -1)) != self.state_size:
+            raise ValueError(
+                "RLAgent checkpoint state_size mismatch: "
+                f"expected {self.state_size}, "
+                f"received {payload.get('state_size')}"
+            )
+
+        saved_actions = payload.get("possible_actions")
+        if not isinstance(saved_actions, list):
+            raise ValueError("RLAgent checkpoint is missing a valid action space")
+
+        if saved_actions != self.possible_actions:
+            raise ValueError(
+                "RLAgent checkpoint action-space mismatch: "
+                f"expected {self.possible_actions}, "
+                f"received {saved_actions}"
+            )
+
         restored_q_table: Dict[QKey, float] = {}
         for key, value in payload.get("q_table", {}).items():
             state_key, action_key = key

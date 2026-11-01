@@ -305,6 +305,7 @@ class NeuralNetwork(nn.Module):
         config: Optional[Dict[str, Any]] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
+        *, target_device: Optional[Any]=None,
     ):
         super().__init__()
         validate_positive(input_dim, "input_dim", strict=True)
@@ -337,6 +338,15 @@ class NeuralNetwork(nn.Module):
         self.weight_init = str(self.nn_config.get("weight_init", "auto")).lower()
         self.use_output_activation_for_loss = coerce_bool(self.nn_config.get("use_output_activation_for_loss", False))
         self.nan_guard = coerce_bool(self.nn_config.get("nan_guard", True), default=True)
+        self.use_dueling = coerce_bool(self.nn_config.get("dueling", False))
+
+        if self.use_dueling:
+            # Last hidden dimension feeds into both V and A streams
+            shared_dim = self.layer_dims[-2]
+            self.W_val = nn.Parameter(torch.empty((shared_dim, 1), device=target_device, dtype=self.dtype), requires_grad=False)
+            self.b_val = nn.Parameter(torch.zeros(1, device=target_device, dtype=self.dtype), requires_grad=False)
+            self.W_adv = nn.Parameter(torch.empty((shared_dim, self.output_dim), device=target_device, dtype=self.dtype), requires_grad=False)
+            self.b_adv = nn.Parameter(torch.zeros(self.output_dim, device=target_device, dtype=self.dtype), requires_grad=False)
 
         if self.weight_init not in self.SUPPORTED_WEIGHT_INITS:
             raise InvalidConfigError("Unsupported neural network weight_init", config_key="neural_network.weight_init", received_value=self.weight_init)
@@ -504,16 +514,34 @@ class NeuralNetwork(nn.Module):
         X, squeezed = self._prepare_input(X)
         self._cache = {"inputs": X, "layer_outputs": []}
         current_a = X
-        for i in range(self.num_layers):
+        
+        # If dueling is enabled, share all layers except the final output projection
+        num_shared_layers = self.num_layers - 1 if self.use_dueling else self.num_layers
+        
+        for i in range(num_shared_layers):
             z = current_a @ self.Ws[i] + self.bs[i]
             if self.nan_guard:
                 _ensure_finite_tensor(z, f"layer_{i}_pre_activation")
+            
+            # Hidden layers use hidden activations; the final shared layer (if not dueling) uses output activation
             activation = self.hidden_activations[i] if i < self.num_layers - 1 else self.output_activation
             current_a = activation.forward(z)
+            
             if self.nan_guard:
                 _ensure_finite_tensor(current_a, f"layer_{i}_activation")
             self._cache["layer_outputs"].append({"z": z, "a": current_a})
-        return current_a.squeeze(0) if squeezed else current_a # type: ignore
+    
+        if self.use_dueling:
+            # current_a contains the shared features from the penultimate layer
+            val = current_a @ self.W_val + self.b_val
+            adv = current_a @ self.W_adv + self.b_adv
+            
+            # Dueling combination formula with mean centering[cite: 1]
+            q_values = val + (adv - adv.mean(dim=-1, keepdim=True))
+            self._cache["dueling"] = {"val": val, "adv": adv, "features": current_a}
+            return q_values.squeeze(0) if squeezed else q_values
+        else:
+            return current_a.squeeze(0) if squeezed else current_a  # type: ignore
 
     def predict_logits(self, X: TensorLike) -> torch.Tensor:
         X, squeezed = self._prepare_input(X)

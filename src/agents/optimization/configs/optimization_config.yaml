@@ -1,0 +1,91 @@
+base_solver:
+  feasibility_tolerance: 1.0e-8
+  optimality_tolerance: 1.0e-8
+  time_limit_seconds: null
+  validate_results: true
+  strict_success_feasibility: true
+
+problem_definition:
+  feasibility_tolerance: 1.0e-8
+  sample_attempt_factor: 50
+  max_expression_length: 1000
+
+optimization_memory:
+  max_records: 5000
+  stats_window: 250
+  autosave: false
+  persistence_path: null
+
+optimization_registries:
+  # Lower numeric priority is preferred before empirical evidence is applied.
+  priority:
+    scipy_highs_linear: 10
+    scipy_quadratic: 20
+    scipy_nonlinear: 30
+    finite_domain_exact: 40
+    black_box_derivative_free: 50
+  priority_weight: 1.0
+  evidence_weight: 25.0
+  determinism_bonus: 2.0
+  warm_start_bonus: 1.0
+
+optimization_solver:
+  allow_fallback: true
+  use_memory_warm_start: true
+  fallback_statuses:
+    - numerical_failure
+    - error
+    - solver_unavailable
+    - unsupported_problem
+
+linear_solver:
+  lp_method: highs
+  presolve: true
+  mip_rel_gap: 1.0e-6
+  node_limit: null
+
+quadratic_solver:
+  method: trust-constr
+  max_iterations: 1000
+  psd_tolerance: 1.0e-10
+
+non_linear_solver:
+  method: SLSQP
+  max_iterations: 1000
+  max_evaluations: null
+
+combinatorial_solver:
+  max_nodes: 1000000
+  max_evaluations: 1000000
+  max_domain_cardinality: 100000
+  propagation: true
+  objective_bounding: true
+  variable_ordering: smallest_domain
+
+black_box_solver:
+  method: differential_evolution
+  max_evaluations: 5000
+  seed: 0
+  popsize: 12
+  tolerance: 1.0e-7
+  constraint_penalty: 1000000.0
+  failure_penalty: 1.0e30
+  polish: false
+  pattern_initial_mesh: 0.25
+  pattern_mesh_reduction: 0.5
+  pattern_min_mesh: 1.0e-6
+
+multiobjective:
+  dominance_tolerance: 1.0e-9
+  feasibility_tolerance: 1.0e-8
+  weight_samples: 11
+  epsilon_samples: 9
+  lexicographic_tolerance: 1.0e-7
+  archive_limit: 512
+  archive_truncation: crowding
+  hypervolume_samples: 20000
+  hypervolume_exact_max_points: 60
+  metrics_max_front: 1000
+  max_candidates: 20000
+  default_strategy: compromise
+  seed: 0

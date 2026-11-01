@@ -1,0 +1,55 @@
+{
+  "patient_case_record": {
+    "metadata": {
+      "patient_id": "UUID-or-String",
+      "clinician_name": "String",
+      "intake_date": "YYYY-MM-DD",
+      "last_session_date": "YYYY-MM-DD",
+      "record_status": "Active | Discharged | Transferred | Waitlisted"
+    },
+    "demographics": {
+      "age": 0,
+      "gender_identity": "String",
+      "pronouns": "String",
+      "relationship_status": "String",
+      "employment_status": "String",
+      "highest_education": "String"
+    },
+    "clinical_presentation": {
+      "chief_complaint": "String",
+      "reported_symptoms": [
+        "String"
+      ],
+      "symptom_onset": "Acute | Insidious | Lifelong",
+      "duration_months": 0,
+      "functional_impairment_level": "None | Mild | Moderate | Severe"
+    },
+    "assessments_and_psychometrics": [
+      {
+        "instrument_name": "String",
+        "date_administered": "YYYY-MM-DD",
+        "score": "String or Number",
+        "clinical_interpretation": "String"
+      }
+    ],
+    "risk_assessment": {
+      "suicidality": {
+        "ideation": "None | Passive | Active",
+        "plan": false,
+        "intent": false,
+        "past_attempts": 0
+      },
+      "overall_risk_level": "Low | Moderate | High | Imminent"
+    },
+    "treatment_plan": {
+      "treatment_goals": [
+        "String"
+      ],
+      "session_frequency": "Weekly | Biweekly | Monthly | Intensive",
+      "referrals_made": [
+        "String"
+      ]
+    }
+  },
+  "_template_scope": "Structured record template only. STEM performs no diagnosis, treatment selection, or clinical inference."
+}

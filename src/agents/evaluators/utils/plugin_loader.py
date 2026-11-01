@@ -1,6 +1,9 @@
 import importlib
 import os
 
+from .evaluation_errors import *
+from .evaluation_helpers import *
+
 def load_evaluator_plugins(plugin_dir="src/agents/evaluators/custom/") -> dict:
     plugins = {}
     if not os.path.exists(plugin_dir):
@@ -13,3 +16,6 @@ def load_evaluator_plugins(plugin_dir="src/agents/evaluators/custom/") -> dict:
             if hasattr(mod, "CustomEvaluator"):
                 plugins[mod_name] = mod.CustomEvaluator
     return plugins
+
+
+__all__ = ["load_evaluator_plugins"]

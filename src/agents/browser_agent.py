@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 """
 Production-grade Browser Agent facade.
@@ -46,6 +46,7 @@ from .base_agent import BaseAgent
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base.utils.config_contract import assert_valid_config_contract
 from .browser.browser_functions import BrowserFunctions
+from .browser.browser_scraper import *
 from .browser.content import ContentHandling
 from .browser.security import SecurityFeatures, exponential_backoff
 from .browser.utilities import Utilities
@@ -56,7 +57,7 @@ from .browser.utils.browser_driver import BrowserDriver
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Browser Agent")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 # ---------------------------------------------------------------------------
@@ -242,10 +243,12 @@ class BrowserAgent(BaseAgent):
     browser operations are routed through ``BrowserFunctions``.
     """
 
-    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None, driver: Any = None, *,
+    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None, driver: Any = None,
+        *,
         browser_driver: Optional[BrowserDriver] = None,
         browser_functions: Optional[BrowserFunctions] = None,
         content_handler: Optional[ContentHandling] = None,
+        scraper: Optional[BrowserScraper] = None,
         security: Optional[SecurityFeatures] = None,
         workflow: Optional[WorkFlow] = None,
         utilities: Optional[Utilities] = None,
@@ -308,10 +311,7 @@ class BrowserAgent(BaseAgent):
         if not self.browser_driver.has_driver and self.options.auto_start_browser:
             start_result = self.browser_driver.start()
             if start_result.get("status") != "success":
-                raise BrowserDriverStartupError(
-                    "Failed to start browser driver",
-                    context={"start_result": start_result},
-                )
+                raise BrowserDriverStartupError("Failed to start browser driver", context={"start_result": start_result})
             time_module.sleep(0.5)  # brief pause to allow driver to initialize before attaching
         
         self.driver = self.browser_driver.driver
@@ -319,8 +319,11 @@ class BrowserAgent(BaseAgent):
         self._closed = not self.browser_driver.has_driver
 
         self.browser_functions = browser_functions or self._build_browser_functions(self.driver)
-        self.content = content_handler or ContentHandling()
+        # Security is created first because network-oriented subsystem
+        # components consume its policy rather than duplicating security logic.
         self.security = security or SecurityFeatures(driver=self.driver)
+        self.content = content_handler or ContentHandling(security=self.security)
+        self.scraper = scraper or BrowserScraper()
         self.workflow = workflow or WorkFlow(config=self.browser_agent_config.get("workflow_config"))
         self.utilities = utilities or Utilities()
 
@@ -397,20 +400,68 @@ class BrowserAgent(BaseAgent):
         return result
 
     def close(self) -> Dict[str, Any]:
+        """
+        Close BrowserAgent-owned runtime resources deterministically.
+
+        One component failing to clean up must not prevent BrowserDriver from
+        being closed. Cleanup failures are attached to result metadata rather
+        than silently discarded.
+        """
+        cleanup_errors: List[Dict[str, str]] = []
+
+        def _safe_close(component_name: str, component: Any) -> None:
+            close_method = getattr(component, "close", None)
+            if not callable(close_method):
+                return
+
+            try:
+                close_method()
+
+            except Exception as exc:
+                cleanup_errors.append({
+                    "component": component_name,
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                })
+
+                logger.warning("Failed to close %s cleanly: %s", component_name, exc)
+
+        # Close auxiliary components first. BrowserFunctions currently does
+        # not own the Selenium driver, so this cannot replace BrowserDriver
+        # lifecycle handling.
+        _safe_close("browser_functions", self.browser_functions)
+        _safe_close("content", self.content)
+
+        # BrowserDriver remains the sole Selenium lifecycle owner.
         try:
-            if hasattr(self.browser_functions, "close"):
-                self.browser_functions.close()
             result = self.browser_driver.close()
-            self.driver = None
-            self._owns_driver = False
-            self._closed = True
-            if hasattr(self.security, "driver"):
-                self.security.driver = None
-            self._publish_health("closed")
-            self._record_agent_result("close_browser", result)
-            return result
+
         except Exception as exc:
-            return self._error(exc, action="close_browser")
+            result = self._error(exc, action="close_browser")
+
+        # Do not assume close succeeded. Reflect BrowserDriver's real state.
+        self.driver = self.browser_driver.driver
+        self._owns_driver = self.browser_driver.owns_driver
+        self._closed = (not self.browser_driver.has_driver)
+
+        if hasattr(self.security, "driver"):
+            self.security.driver = self.driver
+
+        if cleanup_errors:
+            result = dict(result or {})
+            metadata = dict(result.get("metadata")or {})
+            metadata["cleanup_errors"] = (cleanup_errors)
+            result["metadata"] = metadata
+
+        self._publish_health(
+            "closed"
+            if self._closed
+            else "close_failed"
+        )
+
+        self._record_agent_result("close_browser", result)
+
+        return result
 
     def __enter__(self) -> "BrowserAgent":
         if self.driver is None:
@@ -670,6 +721,10 @@ class BrowserAgent(BaseAgent):
 
     async def async_search(self, query: str, **kwargs: Any) -> Dict[str, Any]:
         return await asyncio.to_thread(self.search, query, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Scraper
+    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Workflow and task entrypoints

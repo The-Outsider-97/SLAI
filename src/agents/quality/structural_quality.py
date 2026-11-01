@@ -18,13 +18,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.quality_error import (DataQualityError, QualityErrorType, QualitySeverity,
-                                  QualityMemoryError, SchemaValidationError, normalize_quality_exception)
+from .utils.quality_error import *
+from .utils.quality_helpers import *
 from .quality_memory import QualityMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Structural Quality")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @contextmanager
@@ -110,10 +110,10 @@ class StructuralQuality:
     - schema registration / snapshot persistence into quality memory when available.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, memory: Optional[QualityMemory]=None) -> None:
         self.config = load_global_config()
         self.quality_config = get_config_section("structural_quality")
-        self.memory = QualityMemory()
+        self.memory = memory
 
         self.enabled = bool(self.quality_config.get("enabled", True))
         self.auto_record_to_memory = bool(self.quality_config.get("auto_record_to_memory", True))
@@ -408,6 +408,7 @@ class StructuralQuality:
         dataset_id: str, source_id: str,
     ) -> Dict[str, Any]:
         if schema is None and self.read_expected_schema_from_memory and hasattr(self.memory, "latest_schema_version"):
+            assert self.memory is not None
             latest = self.memory.latest_schema_version(source_id)
             if latest is not None:
                 schema = {
@@ -555,6 +556,7 @@ class StructuralQuality:
                                             ) -> Optional[StructuralFinding]:
         if not self.read_expected_schema_from_memory or not hasattr(self.memory, "latest_schema_version"):
             return None
+        assert self.memory is not None
         latest = self.memory.latest_schema_version(source_id)
         if latest is None or not latest.get("schema_version"):
             return None
@@ -1027,6 +1029,7 @@ class StructuralQuality:
             and schema_hash is not None
         ):
             try:
+                assert self.memory is not None
                 self.memory.register_schema_version(
                     source_id=source_id,
                     schema_version=schema_version,
@@ -1052,6 +1055,7 @@ class StructuralQuality:
 
         if self.memory_record_quality_snapshot and hasattr(self.memory, "record_quality_snapshot"):
             try:
+                assert self.memory is not None
                 memory_snapshot = self.memory.record_quality_snapshot(
                     source_id=source_id,
                     batch_id=batch_id,
@@ -1544,6 +1548,14 @@ class StructuralQuality:
         if len(text) <= limit:
             return text
         return text[: limit - 3] + "..."
+
+
+__all__ = [
+    "StructuralQuality",
+    "StructuralAssessment",
+    "StructuralFinding",
+    "_quality_boundary",
+]
 
 
 if __name__ == "__main__":

@@ -40,7 +40,7 @@ from .alignment_errors import HumanOversightValidationError, HumanOversightAuthE
 from logs.logger import get_logger, PrettyPrinter # type: ignore
 
 logger = get_logger("Human Oversight")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class HumanOversightTimeout(Exception):
     """Raised when a human oversight request times out."""
@@ -292,7 +292,14 @@ class SlackWebhookAdapter(ChannelAdapter):
 
 
 class EmailAdapter(ChannelAdapter):
-    def __init__(self, smtp_server: str, smtp_port: int = 587, username: str = None, password: str = None, from_addr: str = None):
+    def __init__(
+        self,
+        smtp_server: str,
+        smtp_port: int = 587,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        from_addr: Optional[str] = None,
+    ):
         self.smtp_server = smtp_server
         self.smtp_port = smtp_port
         self.username = username
@@ -576,7 +583,7 @@ class HumanOversightInterface:
         decision = self._prompt_with_timeout(
             prompt_lines=prompt_lines,
             parser=self._parse_binary_approval,
-            timeout_seconds=self.timeout_seconds,
+            timeout_seconds=int(self.timeout_seconds or 0),
         )
         # Verify the decision is allowed for this reviewer (if token provided)
         if auth_token:
@@ -585,6 +592,7 @@ class HumanOversightInterface:
         return decision == "approve"
 
     def inject_preference(self, options: List[str], auth_token: Optional[str] = None) -> str:
+        _ = auth_token  # Reserved for future authentication support.
         if not options:
             raise HumanOversightValidationError("Preference injection requires at least one option.")
         option_lines = ["\n[HUMAN PREFERENCE INJECTION]", "Choose the most ethically appropriate response:"]
@@ -593,7 +601,7 @@ class HumanOversightInterface:
         selected_index = self._prompt_with_timeout(
             prompt_lines=option_lines,
             parser=lambda raw: self._parse_preference_index(raw, len(options)),
-            timeout_seconds=self.timeout_seconds,
+            timeout_seconds=int(self.timeout_seconds or 0),
         )
         # No authentication required for preference injection (can be extended)
         return options[selected_index]
@@ -609,7 +617,7 @@ class HumanOversightInterface:
             request_id=request_id,
             created_at=created_at,
             urgency=(urgency or "high").lower(),
-            timeout_seconds=int(self.timeout_seconds),
+            timeout_seconds=int(self.timeout_seconds or 0),
             channels=normalized_channels,
             summary=self._summarize_report(report),
             report=report or {},
@@ -620,15 +628,18 @@ class HumanOversightInterface:
         risk_analysis = report.get("risk_analysis", {}) if isinstance(report, dict) else {}
         recommendations = report.get("recommended_actions", {}) if isinstance(report, dict) else {}
         timeline = report.get("violation_timeline", []) if isinstance(report, dict) else []
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+        risk_dict = risk_analysis if isinstance(risk_analysis, dict) else {}
+        recommendations_dict = recommendations if isinstance(recommendations, dict) else {}
         return {
-            "agent_id": metadata.get("agent_id", "unknown"),
-            "intervention_level": metadata.get("intervention_level", "UNKNOWN"),
-            "protocol_version": metadata.get("protocol_version", "unknown"),
-            "report_timestamp": metadata.get("report_timestamp", datetime.now().isoformat()),
-            "total_risk": risk_analysis.get("total_risk", risk_analysis if isinstance(risk_analysis, (int, float)) else None),
-            "component_risks": risk_analysis.get("component_risks", {}),
-            "ethical_violations": risk_analysis.get("ethical_violations_details", []),
-            "recommended_action_keys": list(recommendations.keys()) if isinstance(recommendations, dict) else [],
+            "agent_id": metadata_dict.get("agent_id", "unknown"),
+            "intervention_level": metadata_dict.get("intervention_level", "UNKNOWN"),
+            "protocol_version": metadata_dict.get("protocol_version", "unknown"),
+            "report_timestamp": metadata_dict.get("report_timestamp", datetime.now().isoformat()),
+            "total_risk": risk_dict.get("total_risk", risk_analysis if isinstance(risk_analysis, (int, float)) else None),
+            "component_risks": risk_dict.get("component_risks", {}),
+            "ethical_violations": risk_dict.get("ethical_violations_details", []),
+            "recommended_action_keys": list(recommendations_dict.keys()),
             "recent_violation_count": len(timeline) if isinstance(timeline, list) else 0,
         }
 
@@ -707,3 +718,19 @@ class HumanOversightInterface:
     # ------------------------------------------------------------------
     def get_audit_log(self) -> List[Dict[str, Any]]:
         return list(self._audit_log)
+
+
+__all__ = [
+    "HumanOversightTimeout",
+    "HumanOversightInterface",
+    "OversightChannelResult",
+    "OversightRequest",
+    "OversightResponse",
+    "OversightRequestStore",
+    "ChannelAdapter",
+    "SlackWebhookAdapter",
+    "EmailAdapter",
+    "ConsoleAdapter",
+    "DashboardAdapter",
+    "AuthProvider",
+]

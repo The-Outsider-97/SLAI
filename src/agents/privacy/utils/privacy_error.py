@@ -595,6 +595,9 @@ class PrivacyError(Exception):
         include_cause: bool = False,
         include_traceback: bool = False,
     ) -> Dict[str, Any]:
+        assert self.domain is not None
+        assert self.severity is not None
+        assert self.decision is not None
         payload: Dict[str, Any] = {
             "incident_id": self.incident_id,
             "error_code": self.error_code,
@@ -619,6 +622,8 @@ class PrivacyError(Exception):
         return payload
 
     def to_public_dict(self) -> Dict[str, Any]:
+        assert self.severity is not None
+        assert self.decision is not None
         return {
             "incident_id": self.incident_id,
             "error_code": self.error_code,
@@ -658,6 +663,7 @@ class PrivacyError(Exception):
 
         if metrics_sink is not None:
             try:
+                assert self.severity is not None
                 metrics_sink(self.error_code, self.severity.value, 1)
                 result["metrics"] = True
             except Exception as sink_exc:
@@ -1239,3 +1245,51 @@ def normalize_privacy_exception(
         context=merged_context,
         cause=exc,
     )
+
+
+__all__ = [
+    # Enums
+    "PrivacySeverity",
+    "PrivacyDecision",
+    "PrivacyDomain",
+    "PrivacyErrorType",
+    # Error specification
+    "PrivacyErrorSpec",
+    "PRIVACY_ERROR_SPECS",
+    "PRIVACY_ERROR_CODES",
+    "SENSITIVE_CONTEXT_KEYWORDS",
+    # Public helpers
+    "get_privacy_error_spec",
+    "sanitize_privacy_context",
+    "normalize_privacy_exception",
+    # Sink management
+    "set_privacy_audit_sink",
+    "set_privacy_metrics_sink",
+    "clear_privacy_sinks",
+    # Base error
+    "PrivacyError",
+    # Specialised errors
+    "DataClassificationPolicyError",
+    "RedactionError",
+    "ToolPayloadSanitizationError",
+    "ConsentValidationError",
+    "ConsentArtifactMissingError",
+    "PurposeLimitationError",
+    "CrossContextSharingError",
+    "PrivacyMemoryError",
+    "PrivacyMemoryWriteError",
+    "RetentionViolationError",
+    "RetentionObligationMissingError",
+    "DeletionSlaViolationError",
+    "DeletionWorkflowError",
+    "DataExportBlockedError",
+    "CrossBorderTransferError",
+    "AuditLogWriteError",
+    "AuditReportGenerationError",
+    "AuditEvidenceGenerationError",
+    "EncryptionPolicyViolationError",
+    "PrivacyConfigurationError",
+    "PolicyEvaluationError",
+    "PrivacyOperationTimeoutError",
+    "InternalPrivacyError",
+]

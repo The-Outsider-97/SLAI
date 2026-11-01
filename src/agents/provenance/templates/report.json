@@ -1,0 +1,79 @@
+{
+  "schema": "slai.provenance.report.v1",
+  "report_id": "",
+  "generated_at": "",
+  "target": {
+    "artifact_id": "",
+    "artifact_type": "",
+    "entity": null
+  },
+  "store_reference": {
+    "schema_version": "slai.provenance.store.v1",
+    "artifact_id": ""
+  },
+  "lineage": {
+    "parents": [],
+    "children": [],
+    "ancestors": [],
+    "descendants": [],
+    "derivation_path": [],
+    "records": [],
+    "subgraph": {
+      "root": "",
+      "nodes": [],
+      "edges": [],
+      "records": []
+    }
+  },
+  "sources": [],
+  "activities": [],
+  "agents": [],
+  "transformations": [],
+  "datasets": [],
+  "models": [],
+  "checkpoints": [],
+  "dependencies": [],
+  "custody": [],
+  "relations": [],
+  "reproducibility": {
+    "artifact_id": "",
+    "source_identity_known": false,
+    "source_available": false,
+    "code_version_known": false,
+    "model_checkpoint_known": false,
+    "dataset_version_known": false,
+    "configuration_known": false,
+    "dependencies_known": false,
+    "transformations_complete": false,
+    "environment_known": false,
+    "reproducible": false,
+    "completeness": 0.0,
+    "required_requirements": [],
+    "missing_requirements": [],
+    "evidence": {}
+  },
+  "local_memory": {
+    "schema_version": "slai.provenance.checkpoint-manifest.v2",
+    "manifest_path": "",
+    "persist": true,
+    "revision": 0,
+    "checkpoint_count": 0,
+    "latest_checkpoint_id": null,
+    "updated_at": null
+  },
+  "agent_state": {
+    "schema": "slai.provenance-agent.runtime-state.v1",
+    "agent_id": "",
+    "operational_state": "",
+    "processed_events": 0,
+    "failed_events": 0,
+    "last_event_id": null,
+    "last_event_timestamp": null,
+    "last_agent_checkpoint_id": null,
+    "local_memory_revision": 0,
+    "known_local_checkpoints": 0,
+    "persistence_enabled": true
+  },
+  "missing_provenance": [],
+  "warnings": []
+}

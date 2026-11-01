@@ -26,7 +26,7 @@ import torch # type: ignore
 
 from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple, cast
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.learning_error import *
@@ -38,6 +38,7 @@ from .maml_rl import MAMLAgent
 from .rsi import RSIAgent
 from .rl_agent import RLAgent
 from .learning_memory import LearningMemory, Transition
+from .learning_signal import LearningSignal
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Learning Factory")
@@ -124,10 +125,26 @@ class LearningFactory:
         self._mutation_q_values = {agent: 1.0 for agent in self.param_bounds}
 
         self.learning_memory = LearningMemory()
+        self.signal_config = get_config_section("learning_signals") or {}
+        
+        self.signal_history_limit = coerce_int(self.signal_config.get("history_limit", 2000),
+            default=2000,
+            minimum=1,
+        )
+        self.context_min_evidence = coerce_int(self.signal_config.get("context_min_evidence", 3),
+            default=3,
+            minimum=1,
+        )
+        self.signal_history: Deque[Dict[str, Any]] = deque(maxlen=self.signal_history_limit)
+        self._seen_signal_ids: set[str] = set()
+        self._seen_signal_order: Deque[str] = deque()
+        self.memory_restore_path: Optional[str] = None
+        self.memory_restore_error: Optional[str] = None
+        self._restore_learning_memory()
+        self._restore_signal_index()
         self.model_id = "Learning_Factory"
         self.memory: Deque[Dict[str, Any]] = deque(maxlen=10000)
         self.training_steps = 0
-
         self.permanent_agents: List[str] = ["dqn", "maml", "rsi", "rl"]
         self.temporary_agents: Dict[str, Dict[str, Any]] = {}
         self.task_registry: Dict[str, int] = defaultdict(int)
@@ -407,6 +424,289 @@ class LearningFactory:
                 agent.epsilon_decay = float(params["epsilon_decay"])
 
     # ------------------------------------------------------------------
+    # System-wide learning signals
+    # ------------------------------------------------------------------
+    
+    def _restore_learning_memory(self) -> None:
+        """Restore the most recent valid LearningMemory checkpoint when present."""
+        restore_on_init = coerce_bool(self.signal_config.get("restore_memory_on_init", True), default=True)
+        if not restore_on_init:
+            return
+    
+        try:
+            self.memory_restore_path = (self.learning_memory.load_latest_checkpoint())
+        except CheckpointError as exc:
+            # Do not silently pretend recovery succeeded.
+            self.memory_restore_error = str(exc)
+            logger.error("LearningMemory recovery failed: %s", exc)
+    
+    def _restore_signal_index(self) -> None:
+        stored = self.learning_memory.get("learning_signal_history", [])
+    
+        if not isinstance(stored, list):
+            return
+    
+        for record in stored[-self.signal_history_limit:]:
+            if not isinstance(record, dict):
+                continue
+    
+            signal_id = str(record.get("signal_id", "")).strip()
+            if not signal_id:
+                continue
+    
+            self.signal_history.append(dict(record))
+            self._remember_signal_id(signal_id)
+    
+    def _remember_signal_id(self, signal_id: str) -> None:
+        if signal_id in self._seen_signal_ids:
+            return
+    
+        while len(self._seen_signal_order) >= self.signal_history_limit:
+            expired = self._seen_signal_order.popleft()
+            self._seen_signal_ids.discard(expired)
+    
+        self._seen_signal_order.append(signal_id)
+        self._seen_signal_ids.add(signal_id)
+    
+    def record_learning_signal(self, signal: LearningSignal) -> Dict[str, Any]:
+        """Persist one validated LearningSignal without redefining its semantics."""
+        if not isinstance(signal, LearningSignal):
+            raise TypeError("record_learning_signal expects LearningSignal.")
+    
+        if signal.signal_id in self._seen_signal_ids:
+            return {
+                "status": "duplicate",
+                "signal_id": signal.signal_id,
+            }
+    
+        record = signal.to_dict()
+    
+        tags = [
+            "learning_signal",
+            f"source:{signal.source_agent}",
+            f"kind:{signal.kind}",
+            f"metric:{signal.metric}",
+            f"context:{signal.context_key}",
+        ]
+    
+        if signal.strategy:
+            tags.append(f"strategy:{signal.strategy}")
+    
+        # Priority controls retrieval frequency only. It is not converted into
+        # behavioral reward.
+        priority = max(float(signal.confidence), 1e-6)
+        memory_index = self.learning_memory.add(record, priority=priority, tag=tags)
+    
+        self.signal_history.append(record)
+        self._remember_signal_id(signal.signal_id)
+        self.learning_memory.set("learning_signal_history", list(self.signal_history))
+    
+        # Only direct reward observations update the existing learner-performance
+        # tracker. Other metrics retain their own semantics.
+        if (
+            signal.metric == "reward"
+            and signal.value is not None
+            and signal.strategy
+        ):
+            self.record_performance(signal.strategy, float(signal.value))
+    
+        return {
+            "status": "recorded",
+            "signal_id": signal.signal_id,
+            "memory_index": memory_index,
+            "context_key": signal.context_key,
+        }
+    
+    def query_learning_signals(
+        self,
+        *,
+        context_key: Optional[str] = None,
+        source_agent: Optional[str] = None,
+        kind: Optional[str] = None,
+        metric: Optional[str] = None,
+        strategy: Optional[str] = None,
+        validated_only: bool = False,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve bounded learning evidence from newest to oldest."""
+    
+        requested = max(1, int(limit))
+        matches: List[Dict[str, Any]] = []
+    
+        for record in reversed(self.signal_history):
+            if context_key is not None:
+                if record.get("context_key") != context_key:
+                    continue
+    
+            if source_agent is not None:
+                if record.get("source_agent") != source_agent:
+                    continue
+    
+            if kind is not None:
+                if record.get("kind") != kind:
+                    continue
+    
+            if metric is not None:
+                if record.get("metric") != metric:
+                    continue
+    
+            if strategy is not None:
+                if record.get("strategy") != strategy:
+                    continue
+    
+            if validated_only and not bool(record.get("validated", False)):
+                continue
+    
+            matches.append(dict(record))
+    
+            if len(matches) >= requested:
+                break
+    
+        return matches
+    
+    def contextual_strategy_summary(
+        self,
+        context_key: str,
+        *,
+        metric: str = "reward",
+        direction: str = "higher_better",
+        allowed_strategies: Optional[Iterable[str]] = None,
+        minimum_evidence: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Summarize observed strategy performance for one equivalent context.
+    
+        No synthetic reward is constructed. Only directly observed values for the
+        requested metric are compared.
+        """
+    
+        allowed = (
+            None
+            if allowed_strategies is None
+            else {str(value) for value in allowed_strategies}
+        )
+    
+        required = (
+            self.context_min_evidence
+            if minimum_evidence is None
+            else max(1, int(minimum_evidence))
+        )
+    
+        observations: Dict[str, List[float]] = defaultdict(list)
+        for record in self.signal_history:
+            if record.get("context_key") != context_key:
+                continue
+    
+            if record.get("metric") != metric:
+                continue
+    
+            if record.get("direction") != direction:
+                continue
+    
+            strategy = record.get("strategy")
+            value = record.get("value")
+            if not isinstance(strategy, str):
+                continue
+    
+            if allowed is not None and strategy not in allowed:
+                continue
+    
+            if not isinstance(value, (int, float)):
+                continue
+    
+            if not np.isfinite(value):
+                continue
+    
+            observations[strategy].append(float(value))
+    
+        summaries: Dict[str, Dict[str, Any]] = {}
+        for strategy, values in observations.items():
+            summaries[strategy] = {
+                "count": len(values),
+                "mean": float(np.mean(values)),
+                "std": float(np.std(values)),
+                "minimum": float(np.min(values)),
+                "maximum": float(np.max(values)),
+            }
+    
+        eligible = {
+            strategy: data
+            for strategy, data in summaries.items()
+            if int(data["count"]) >= required
+        }
+    
+        preferred_strategy: Optional[str] = None
+        if eligible:
+            if direction == "lower_better":
+                preferred_strategy = min(eligible, key=lambda name: eligible[name]["mean"])
+            else:
+                preferred_strategy = max(eligible, key=lambda name: eligible[name]["mean"])
+    
+        return {
+            "context_key": context_key,
+            "metric": metric,
+            "direction": direction,
+            "minimum_evidence": required,
+            "strategies": summaries,
+            "eligible_strategies": sorted(eligible),
+            "preferred_strategy": preferred_strategy,
+        }
+    
+    def snapshot_learning_state(self) -> Dict[str, Any]:
+        """Return orchestration-level learned state for BaseAgent checkpointing."""
+        return {
+            "signal_history": list(self.signal_history),
+            "performance_tracker": {name: list(values) for name, values in self.performance_tracker.items()},
+            "selection_history": list(self.selection_history),
+            "training_steps": int(self.training_steps),
+            "memory_restore_path": self.memory_restore_path,
+            "memory_restore_error": self.memory_restore_error,
+        }
+    
+    def restore_learning_state(self, state: Mapping[str, Any]) -> None:
+        """Restore bounded orchestration learning state."""
+        if not isinstance(state, Mapping):
+            raise TypeError("LearningFactory state must be a mapping.")
+    
+        self.signal_history.clear()
+        self._seen_signal_ids.clear()
+        self._seen_signal_order.clear()
+        for record in state.get("signal_history", []):
+            if not isinstance(record, Mapping):
+                continue
+    
+            record_dict = dict(record)
+            signal_id = str(record_dict.get("signal_id", "")).strip()
+            if not signal_id:
+                continue
+    
+            self.signal_history.append(record_dict)
+            self._remember_signal_id(signal_id)
+        stored_performance = state.get("performance_tracker", {})
+        if isinstance(stored_performance, Mapping):
+            for strategy, values in stored_performance.items():
+                if not isinstance(values, (list, tuple)):
+                    continue
+                self.performance_tracker[str(strategy)] = deque(
+                    (
+                        float(value)
+                        for value in values
+                        if isinstance(value, (int, float))
+                        and np.isfinite(value)
+                    ),
+                    maxlen=100,
+                )
+        self.selection_history = deque(
+            [
+                dict(value)
+                for value in state.get("selection_history", [])
+                if isinstance(value, Mapping)
+            ],
+            maxlen=500,
+        )
+        self.training_steps = int(state.get("training_steps", self.training_steps))
+        self.learning_memory.set("learning_signal_history", list(self.signal_history))
+
+    # ------------------------------------------------------------------
     # Core selection and monitoring
     # ------------------------------------------------------------------
     @property
@@ -482,11 +782,11 @@ class LearningFactory:
 
     def select_agent(self, task_metadata: Optional[Dict[str, Any]]) -> Any:
         task = self._normalise_task_metadata(task_metadata)
-        recent_performance = self._recent_performance_scores()
-        checkpoint_scores = {name: self._get_checkpoint_quality(name) for name in self.permanent_agents}
-        heuristic_scores = self._heuristic_agent_scores(task)
+        recent_performance: Dict[str, float] = self._recent_performance_scores()
+        checkpoint_scores: Dict[str, float] = {name: self._get_checkpoint_quality(name) for name in self.permanent_agents}
+        heuristic_scores: Dict[str, float] = self._heuristic_agent_scores(task)
 
-        combined_scores = {}
+        combined_scores: Dict[str, float] = {}
         for agent_name in self.permanent_agents:
             combined_scores[agent_name] = (
                 0.45 * heuristic_scores.get(agent_name, 0.0)
@@ -494,7 +794,7 @@ class LearningFactory:
                 + 0.20 * checkpoint_scores.get(agent_name, 0.0)
             )
 
-        selected_name = max(combined_scores, key=combined_scores.get)
+        selected_name = max(combined_scores.items(), key=lambda item: float(item[1]))[0]
         selection_record = {
             "timestamp": time.time(),
             "task": task,
@@ -515,6 +815,271 @@ class LearningFactory:
             self._garbage_collect_temporary_agents()
         return selected_agent
 
+    def operational_trl_decision(self, profile: str, features: dict) -> dict:
+        """
+        Get a scheduling or allocation TRL recommendation.
+
+        Specialized models are loaded lazily and cached.
+        No execution or online learning occurs here.
+        """
+        from argparse import Namespace
+        from train_trl import ( # type: ignore
+            ACTIONS,
+            agent_action,
+            encode_operational_state,
+            load_agent,
+        )
+        if profile not in ACTIONS:
+            raise ValueError(f"Unsupported operational TRL profile: {profile}")
+
+        config = get_config_section("operational_trl") or {}
+        profiles = config.get("profiles", {})
+        profile_config = profiles.get(profile, {})
+        default_fallbacks = {
+            "scheduling": "shortest_job",
+            "allocation": "least_loaded",
+        }
+
+        fallback = profile_config.get("fallback", default_fallbacks[profile])
+        if fallback not in ACTIONS[profile]:
+            raise ValueError(f"Invalid fallback for {profile}: {fallback}")
+
+        def reject(reason: str) -> dict:
+            return {
+                "status": "fallback",
+                "profile": profile,
+                "recommended_action": None,
+                "fallback_action": fallback,
+                "apply_policy": False,
+                "reason": reason,
+            }
+
+        if not config.get("enabled", False):
+            return reject("Operational TRL is disabled")
+
+        if not profile_config.get("enabled", False):
+            return reject(f"TRL profile {profile} is disabled")
+
+        mode = profile_config.get("mode", "shadow")
+
+        if mode not in ("disabled", "shadow", "active"):
+            raise ValueError(f"Invalid TRL mode: {mode}")
+
+        if mode == "disabled":
+            return reject("Model profile is disabled")
+
+        if (
+            mode == "active"
+            and not profile_config.get("authorized_active", False)
+        ):
+            return reject("Active deployment is not authorized")
+
+        configured_path = profile_config.get("path")
+        if not configured_path:
+            return reject("No checkpoint configured")
+
+        repository_root = Path(__file__).resolve().parents[3]
+        models_dir = (repository_root
+            / "src/agents/learning/models").resolve()
+
+        checkpoint = (repository_root / configured_path).resolve()
+
+        if not checkpoint.is_relative_to(models_dir):
+            return reject("Checkpoint outside trusted model directory")
+
+        if checkpoint.suffix != ".pt":
+            return reject("Only deployed .pt checkpoints are accepted")
+
+        try:
+            # Validate operational inputs with the SAME encoder
+            # used during training.
+            state = encode_operational_state(profile=profile, **features)
+
+            stat = checkpoint.stat()
+            signature = str(checkpoint), stat.st_mtime_ns, stat.st_size
+            if not hasattr(self, "_operational_trl_cache"):
+                self._operational_trl_cache = {}
+
+            cache = self._operational_trl_cache
+            entry = cache.get(profile)
+            if entry is None or entry["signature"] != signature:
+                agent, metadata = load_agent(checkpoint, Namespace(environment=profile))
+                if metadata.get("status") != "validated":
+                    raise ValueError("Checkpoint is not marked validated")
+
+                if not agent.q_table:
+                    raise ValueError("Empty learned Q-table")
+
+                # Runtime policy selection is deterministic.
+                # Do not explore while servicing real tasks.
+                agent.epsilon = 0.0
+                known_states = {stored_state for stored_state, _ in agent.q_table}
+                entry = {
+                    "agent": agent,
+                    "metadata": metadata,
+                    "signature": signature,
+                    "known_states": known_states,
+                }
+                cache[profile] = entry
+                logger.info("Loaded operational TRL profile=%s path=%s", profile, checkpoint)
+
+            agent = entry["agent"]
+
+            # Do not pretend that an unvisited abstract state
+            # contains an empirically learned policy.
+            if state not in entry["known_states"]:
+                return reject("Unseen operational state")
+
+            action_index = int(agent_action(agent, state))
+            if action_index not in range(len(ACTIONS[profile])):
+                raise ValueError("Invalid model action")
+
+            values = agent.get_action_values(state)
+            q_values = {
+                ACTIONS[profile][int(action)]: float(value)
+                for action, value in values.items()
+            }
+
+            return {
+                "status": "ready",
+                "profile": profile,
+                "mode": mode,
+                "recommended_action": ACTIONS[profile][action_index],
+                "action_index": action_index,
+                "fallback_action": fallback,
+                "apply_policy": mode == "active",
+                "q_values": q_values,
+                "state": state,
+                "model_path": str(checkpoint),
+                "model_version": entry["metadata"].get("version"),
+            }
+
+        except Exception as exc:
+            logger.warning("Operational TRL unavailable | profile=%s | %s", profile, exc)
+            return reject(str(exc))
+
+    def operational_sdqn_decision(self, features: dict, profile: str = "scheduling") -> dict:
+        """Obtain a version-checked scheduling DQN recommendation."""
+        import threading
+        from train_sdqn import ( # type: ignore
+            ACTIONS_S,
+            device_choice,
+            encode,
+            greedy,
+            load,
+            parser,
+            restore_args_from_checkpoint,
+        )
+
+        fallback_default = "shortest_job"
+
+        def rejected(reason: str, fallback: str) -> dict:
+            return {
+                "status": "fallback",
+                "profile": profile,
+                "reason": str(reason),
+                "recommended_action": None,
+                "fallback_action": fallback,
+                "apply_policy": False,
+            }
+
+        config = get_config_section("operational_dqn") or {}
+        profiles = config.get("profiles", {})
+        settings = profiles.get(profile, {})
+        fallback = settings.get("fallback", fallback_default)
+        if fallback not in ACTIONS_S:
+            raise ValueError("Unsupported DQN fallback action")
+
+        if profile != "scheduling":
+            return rejected("Unsupported DQN profile", fallback)
+
+        if not config.get("enabled", False):
+            return rejected("Operational DQN disabled", fallback)
+
+        if not settings.get("enabled", False):
+            return rejected("Scheduling DQN disabled", fallback)
+
+        mode = str(settings.get("mode", "shadow"))
+
+        if mode not in {"shadow", "active", "disabled"}:
+            raise ValueError(f"Invalid operational DQN mode: {mode}")
+
+        if mode == "disabled":
+            return rejected("DQN profile disabled", fallback)
+
+        if (
+            mode == "active"
+            and not settings.get("authorized_active", False)
+        ):
+            return rejected("Active use not authorized", fallback)
+
+        root = Path(__file__).resolve().parents[3]
+        model_directory = (root / "src/agents/learning/models").resolve()
+        from ..model_hub import resolve_model_file
+        checkpoint = resolve_model_file(
+            root / str(settings.get("path", "")), "learning/dqn/StandardDQN.pt"
+        ).resolve()
+
+        if (
+            not checkpoint.is_relative_to(model_directory)
+            or checkpoint.suffix != ".pt"
+        ):
+            return rejected("Untrusted checkpoint path", fallback)
+
+        if not hasattr(self, "_operational_sdqn_lock"):
+            self._operational_sdqn_lock = threading.RLock()
+            self._operational_sdqn_cache = {}
+
+        with self._operational_sdqn_lock:
+            try:
+                observation = encode(features)
+                stat = checkpoint.stat()
+                signature = str(checkpoint), stat.st_mtime_ns, stat.st_size
+                entry = self._operational_sdqn_cache.get(profile)
+                if entry is None or entry["signature"] != signature:
+                    args = parser().parse_args([])
+                    restore_args_from_checkpoint(checkpoint, args)
+                    device = device_choice(str(settings.get("device", "cpu")))
+                    agent, metadata = load(checkpoint, args, device=device)
+                    if metadata.get("status") != "validated":
+                        raise ValueError("Checkpoint not independently validated")
+
+                    if agent.total_gradient_steps <= 0:
+                        raise ValueError("Untrained DQN checkpoint")
+
+                    agent.epsilon = 0.0
+                    entry = {
+                        "agent": agent,
+                        "metadata": metadata,
+                        "signature": signature,
+                    }
+
+                    self._operational_sdqn_cache[profile] = entry
+                    logger.info("Loaded operational SDQN from %s", checkpoint)
+
+                agent = entry["agent"]
+
+                action_index = greedy(agent, observation)
+
+                if action_index not in range(len(ACTIONS_S)):
+                    raise ValueError("Invalid DQN inference action")
+
+                return {
+                    "status": "ready",
+                    "profile": profile,
+                    "mode": mode,
+                    "recommended_action": ACTIONS_S[action_index],
+                    "action_index": action_index,
+                    "fallback_action": fallback,
+                    "apply_policy": mode == "active",
+                    "encoder_version": "sdqn-operational-1",
+                    "model_path": str(checkpoint),
+                }
+
+            except Exception as exc:
+                logger.warning("Operational DQN fallback | profile=%s | %s", profile, exc)
+                return rejected(str(exc), fallback)
+
     def _checkpoint_candidates(self, agent_name: str) -> List[Path]:
         names = [
             self.checkpoint_dir / f"{agent_name}_checkpoint.pt",
@@ -522,6 +1087,13 @@ class LearningFactory:
             self.checkpoint_dir / f"{agent_name}_checkpoint.pkl",
             self.checkpoint_dir / f"{agent_name}.pkl",
         ]
+
+        if agent_name == "rl":
+            from ..model_hub import resolve_model_file
+            names.insert(0, resolve_model_file(
+                "src/agents/learning/models/tabularRL.pt", "learning/rl/tabularRL.pt"
+            ))
+
         return names
 
     def _load_agent_checkpoint(self, agent_name: str, agent: Any) -> bool:
@@ -530,12 +1102,33 @@ class LearningFactory:
             getattr(agent, "load", None),
         ]
         loaders = [loader for loader in loaders if callable(loader)]
+
         if not loaders:
             return False
 
         for path in self._checkpoint_candidates(agent_name):
-            if not path.exists():
+            if not path.is_file():
                 continue
+
+            if agent_name == "rl" and path.name == "tabularRL.pt":
+                if self.state_dim != 5 or self.action_dim != 4:
+                    logger.warning(
+                        "Skipping TRL checkpoint: factory environment has state_dim=%s action_dim=%s; expected 5 and 4",
+                        self.state_dim,
+                        self.action_dim,
+                    )
+                    continue
+
+                try:
+                    from train_trl import checked_load # type: ignore
+                    checked_load(agent, path, inference=True)
+                    logger.info("Loaded validated scheduling TRL checkpoint from %s", path)
+                    return True
+
+                except Exception as exc:
+                    logger.warning("Rejected scheduling TRL checkpoint %s: %s", path, exc)
+                    continue
+
             for loader in loaders:
                 try:
                     loader(str(path))
@@ -543,7 +1136,8 @@ class LearningFactory:
                     return True
                 except Exception as exc:
                     logger.warning("Failed loading checkpoint for %s from %s: %s", agent_name, path, exc)
-        return False
+
+        return False    
 
     def _save_agent_checkpoint(self, agent_name: str, agent: Any) -> Optional[str]:
         save_path = self.checkpoint_dir / f"{agent_name}_checkpoint.pt"
@@ -983,14 +1577,14 @@ class LearningFactory:
     def _agent_replay_size(self, agent: Any) -> int:
         if hasattr(agent, "replay_size") and callable(agent.replay_size):
             try:
-                return int(agent.replay_size())
+                return int(cast(Any, agent.replay_size)())
             except Exception:
                 pass
         memory = getattr(agent, "memory", None)
         if memory is None:
             return 0
         if hasattr(memory, "size") and callable(memory.size):
-            return int(memory.size())
+            return int(cast(Any, memory.size)())
         try:
             return int(len(memory))
         except Exception:

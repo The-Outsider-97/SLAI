@@ -11,6 +11,17 @@ collaboration_error:
   log_errors: true
 
 
+delegation_ranker:
+  enabled: true
+  mode: "shadow"
+  model_dir: "src/agents/collaborative/models/delegation_ranker_v1"
+  event_db: "data/training/collaborative/delegation_ranker/raw/events.sqlite3"
+  success_value: 1.0
+  latency_penalty_per_ms: 0.0
+  min_confidence: 0.0
+  advisory_mix: 0.25
+
+
 collaboration_manager:
   audit_enabled: true
   audit_key: "collaboration:manager_events"
