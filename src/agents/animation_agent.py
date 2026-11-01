@@ -58,11 +58,12 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "apply_ik",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
-_OPERATIONS = frozenset(SUPPORTED_EDITS | _READ_OPERATIONS | _TRANSPORT_OPERATIONS | {_BATCH_OPERATION})
+_OPERATIONS = frozenset(SUPPORTED_EDITS | _READ_OPERATIONS | _TRANSPORT_OPERATIONS |
+                        {_BATCH_OPERATION, "apply_ik", "upgrade_animation"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +277,8 @@ class AnimationAgent(BaseAgent):
                     result = self._get_animation(request, scene)
                 elif op in {"forward_kinematics", "solve_ik", "apply_ik"}:
                     result = self._kinematics(request, scene)
+                elif op == "upgrade_animation":
+                    result = self._upgrade_animation(request, scene)
                 elif op == _BATCH_OPERATION or op in SUPPORTED_EDITS:
                     result = self._edit(request, scene)
                 else:
@@ -382,6 +385,33 @@ class AnimationAgent(BaseAgent):
             revision = scene.revision
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
+
+    def _upgrade_animation(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route one explicit v1-to-v2 migration through native SGEO revision."""
+        if request.dry_run:
+            raise AnimationUnsupportedOperationError(
+                "upgrade_animation does not support dry_run"
+            )
+        if request.expected_revision is None:
+            raise AnimationRevisionConflictError(
+                "upgrade_animation requires expected_revision"
+            )
+        migrate = getattr(scene, "upgrade_animation", None)
+        if not callable(migrate):
+            raise AnimationUnsupportedOperationError(
+                "bound scene provider does not expose native animation migration"
+            )
+        revision = migrate(expected_revision=request.expected_revision)
+        self._run_optional_runtime_operation(
+            "telemetry", "animation_memory.record",
+            lambda: self.animation_memory.record(AnimationEditRecord(
+                request.operation, request.scene_id,
+                request.expected_revision, revision,
+            )),
+        )
+        return {"status": "ok", "request_id": request.request_id,
+                "scene_id": request.scene_id, "revision": revision,
+                "schema": "slai.animation.v2"}
 
     def _kinematics(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Route FK/IK to the authoritative SGEO scene, never solve in agent."""
