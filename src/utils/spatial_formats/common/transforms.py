@@ -373,6 +373,47 @@ def from_axis_angle(axis, angle: float) -> tuple[float, ...]:
             0.0, 0.0, 0.0, 1.0)
 
 
+
+def unit_quaternion(value) -> tuple[float, float, float, float]:
+    """Normalise a scalar-first (w, x, y, z) quaternion with SGEO validation."""
+    w, x, y, z = vector(value, 4, "quaternion")
+    magnitude = math.hypot(w, x, y, z)
+    if magnitude < 1e-15:
+        raise ValidationError("quaternion must have nonzero magnitude")
+    return (w / magnitude, x / magnitude, y / magnitude, z / magnitude)
+
+
+def slerp_quaternion(a, b, alpha: float) -> tuple[float, float, float, float]:
+    """Shortest-arc spherical interpolation; scalar-first quaternion convention."""
+    t = finite(alpha, "alpha", limit=1)
+    if t < 0:
+        raise ValidationError("quaternion interpolation alpha must be in [0, 1]")
+    qa, qb = unit_quaternion(a), unit_quaternion(b)
+    dot = sum(x*y for x, y in zip(qa, qb))
+    if dot < 0:
+        qb = tuple(-x for x in qb)
+        dot = -dot
+    dot = max(-1.0, min(1.0, dot))
+    if dot > 0.9995:
+        return unit_quaternion(tuple(x + t*(y-x) for x,y in zip(qa,qb)))
+    theta = math.acos(dot)
+    denominator = math.sin(theta)
+    a_weight = math.sin((1.0-t)*theta)/denominator
+    b_weight = math.sin(t*theta)/denominator
+    return unit_quaternion(tuple(a_weight*x + b_weight*y for x,y in zip(qa,qb)))
+
+
+def from_quaternion(value) -> tuple[float, ...]:
+    """Convert scalar-first unit rotation to the shared row-major affine matrix."""
+    w, x, y, z = unit_quaternion(value)
+    return require_transform((
+        1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w), 0.0,
+        2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w), 0.0,
+        2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y), 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ))
+
+
 # ---------------------------------------------------------------------------
 # Planar (SDRW) helpers
 # ---------------------------------------------------------------------------
@@ -452,6 +493,9 @@ __all__ = [
     "from_rotation_y",
     "from_rotation_z",
     "from_axis_angle",
+    "unit_quaternion",
+    "slerp_quaternion",
+    "from_quaternion",
     "rigid_inverse",
     "compose2d",
     "invert_transform2d",
