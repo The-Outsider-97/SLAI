@@ -63,7 +63,7 @@ _READ_OPERATIONS = frozenset({
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
 _OPERATIONS = frozenset(SUPPORTED_EDITS | _READ_OPERATIONS | _TRANSPORT_OPERATIONS |
-                        {_BATCH_OPERATION, "apply_ik", "upgrade_animation"})
+                        {_BATCH_OPERATION, "apply_ik", "upgrade_animation", "undo_animation", "redo_animation"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +281,8 @@ class AnimationAgent(BaseAgent):
                     result = self._retarget_joint_clip(request, scene)
                 elif op == "generate_joint_motion":
                     result = self._generate_joint_motion(request, scene)
+                elif op in {"undo_animation", "redo_animation"}:
+                    result = self._animation_history_edit(request, scene)
                 elif op in {"forward_kinematics", "solve_ik", "apply_ik"}:
                     result = self._kinematics(request, scene)
                 elif op == "upgrade_animation":
@@ -391,6 +393,32 @@ class AnimationAgent(BaseAgent):
             revision = scene.revision
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
+
+    def _animation_history_edit(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route animation-only undo/redo through SGEO, without parallel state."""
+        if request.dry_run:
+            raise AnimationUnsupportedOperationError(
+                "animation undo/redo does not support speculative dry_run"
+            )
+        if request.expected_revision is None:
+            raise AnimationRevisionConflictError(
+                "animation undo/redo requires expected_revision"
+            )
+        native = getattr(scene, request.operation, None)
+        if not callable(native):
+            raise AnimationUnsupportedOperationError(
+                "provider does not implement authoritative animation history"
+            )
+        revision = native(expected_revision=request.expected_revision)
+        self._run_optional_runtime_operation(
+            "telemetry", "animation_memory.record",
+            lambda: self.animation_memory.record(AnimationEditRecord(
+                request.operation, request.scene_id,
+                request.expected_revision, revision,
+            )),
+        )
+        return {"status": "ok", "request_id": request.request_id,
+                "scene_id": request.scene_id, "revision": revision}
 
     def _generate_joint_motion(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Return a mathematically checked native motion proposal, not a scene edit."""
