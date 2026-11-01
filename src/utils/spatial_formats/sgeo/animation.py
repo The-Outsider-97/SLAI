@@ -360,6 +360,10 @@ def _validate_layers(spec, scene):
         if mode == "override" and refs:
             raise ValidationError("override layers do not accept additive references")
         keys = {t["object_id"] + ":" + t["property"] for t in tracks}
+        if mode == "additive" and any(t["property"] == "rotation_quaternion" for t in tracks):
+            for t in tracks:
+                if t["property"] == "rotation_quaternion" and t.get("interpolation", "linear") == "linear":
+                    raise ValidationError("quaternion additive tracks require step or slerp")
         if mode == "additive":
             if set(refs) != keys:
                 raise ValidationError("additive references must match every layer track")
@@ -375,6 +379,7 @@ def _validate_layers(spec, scene):
                     if prop == "scale" and any(x <= 0 for x in components):
                         raise ValidationError("additive reference scale must be positive")
                     if prop == "scale":
+                        _validate_continuous_track(track)
                         for frame in track["keyframes"]:
                             if any(x <= 0 for x in frame["value"]):
                                 raise ValidationError("additive scale must be positive")
