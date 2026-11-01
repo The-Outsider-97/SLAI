@@ -213,9 +213,14 @@ class Scene:
             require_id(object_id)
             if any(obj.get("parent")==object_id for obj in self.objects):
                 raise ValidationError("cannot remove scene object with children")
-            if any(track["object_id"] == object_id for track in
-                   self.metadata.get("slai.animation.v1", {}).get("tracks", [])):
-                raise ValidationError("cannot remove object referenced by animation")
+            from .animation import ANIMATION_KEYS
+            for key in ANIMATION_KEYS:
+                spec = self.metadata.get(key, {})
+                if any(track["object_id"] == object_id for track in spec.get("tracks", [])):
+                    raise ValidationError("cannot remove object referenced by animation")
+                if any(object_id in instance.get("bindings", {}).values()
+                       for instance in spec.get("instances", [])):
+                    raise ValidationError("cannot remove object referenced by clip")
             pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
             if pos is None:
                 raise ValidationError("object ID not found")
