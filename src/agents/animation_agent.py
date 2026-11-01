@@ -58,12 +58,12 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status", "animation_events",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
-_PROCEDURAL_OPERATION = "generate_linear_motion"
-_OPERATIONS = frozenset(SUPPORTED_EDITS | _READ_OPERATIONS | _TRANSPORT_OPERATIONS | {_BATCH_OPERATION, _PROCEDURAL_OPERATION})
+_OPERATIONS = frozenset(SUPPORTED_EDITS | _READ_OPERATIONS | _TRANSPORT_OPERATIONS |
+                        {_BATCH_OPERATION, "apply_ik", "upgrade_animation"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,10 +275,10 @@ class AnimationAgent(BaseAgent):
                     result = self._evaluate_frames(request, scene)
                 elif op == "get_animation":
                     result = self._get_animation(request, scene)
-                elif op == "animation_events":
-                    result = self._animation_events(request, scene)
-                elif op == _PROCEDURAL_OPERATION:
-                    result = self._generate_linear_motion(request, scene)
+                elif op in {"forward_kinematics", "solve_ik", "apply_ik"}:
+                    result = self._kinematics(request, scene)
+                elif op == "upgrade_animation":
+                    result = self._upgrade_animation(request, scene)
                 elif op == _BATCH_OPERATION or op in SUPPORTED_EDITS:
                     result = self._edit(request, scene)
                 else:
@@ -386,74 +386,106 @@ class AnimationAgent(BaseAgent):
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
 
-    def _animation_events(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
-        """Return pure event markers in a bounded interval; execute no side effects."""
-        from src.utils.spatial_formats.common.helpers import finite
-        start = finite(request.payload.get("start", 0), "start")
-        end = finite(request.payload.get("end", start), "end")
-        if start < 0 or end < start:
-            raise AnimationValidationError("event interval must be nonnegative and ordered")
-        lock = get_animation_edit_lock(scene)
-        if lock is None:
-            raise AnimationUnsupportedOperationError("event reads require scene lock")
-        with lock:
-            if request.expected_revision is not None and request.expected_revision != scene.revision:
-                raise AnimationRevisionConflictError("scene revision mismatch")
-            spec = scene.metadata.get(ANIMATION_V2_KEY, {})
-            events = [deepcopy(event) for event in spec.get("events", [])
-                      if start <= event["time"] <= end]
-            return {"status": "ok", "request_id": request.request_id,
-                    "revision": scene.revision, "events": events}
-
-    def _generate_linear_motion(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
-        """Generate a deterministic translation track through existing SGEO edits.
-
-        This operation does not claim obstacle avoidance, dynamics or IK.
-        The provider validates all target bindings and keyframe values.
-        """
-        from src.utils.spatial_formats.common.helpers import finite, vector
-        from src.utils.spatial_formats.common.ids import require_id
-        if not is_animation_scene_provider(scene):
-            raise AnimationUnsupportedOperationError("motion generation requires mutable SGEO")
-        payload = request.payload
-        oid = require_id(payload.get("object_id"))
-        start = list(vector(payload.get("start"), 3, "motion start"))
-        end = list(vector(payload.get("end"), 3, "motion end"))
-        duration = finite(payload.get("duration"), "motion duration")
-        if duration <= 0 or duration > 1e9:
-            raise AnimationValidationError("motion duration must be positive and bounded")
-        track = {"object_id": oid, "property": "translation", "interpolation": "linear",
-                 "keyframes": [{"time": 0, "value": start},
-                               {"time": duration, "value": end}]}
-        lock = get_animation_edit_lock(scene)
-        if lock is None:
-            raise AnimationUnsupportedOperationError("motion generation requires scene lock")
-        with lock:
-            if request.expected_revision is not None and scene.revision != request.expected_revision:
-                raise AnimationRevisionConflictError("scene revision mismatch")
-            if ANIMATION_V2_KEY in scene.metadata:
-                candidate = deepcopy(scene.metadata[ANIMATION_V2_KEY])
-                if duration > candidate["duration"]:
-                    raise AnimationValidationError("motion exceeds existing animation duration")
-                if any(t["object_id"] == oid and t["property"] == "translation"
-                       for t in candidate["tracks"]):
-                    raise AnimationValidationError("translation track already exists for target")
-                commands = [{"operation": "add_track", "payload": {"track": track}}]
-            elif ANIMATION_KEY in scene.metadata:
-                raise AnimationUnsupportedOperationError(
-                    "explicitly upgrade legacy v1 animation before generating v2 motion"
-                )
-            else:
-                raise AnimationUnsupportedOperationError(
-                    "create a v2 animation document before generating motion"
-                )
-            result = apply_animation_batch(
-                scene, commands, expected_revision=request.expected_revision,
-                dry_run=request.dry_run,
+    def _upgrade_animation(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route one explicit v1-to-v2 migration through native SGEO revision."""
+        if request.dry_run:
+            raise AnimationUnsupportedOperationError(
+                "upgrade_animation does not support dry_run"
             )
+        if request.expected_revision is None:
+            raise AnimationRevisionConflictError(
+                "upgrade_animation requires expected_revision"
+            )
+        migrate = getattr(scene, "upgrade_animation", None)
+        if not callable(migrate):
+            raise AnimationUnsupportedOperationError(
+                "bound scene provider does not expose native animation migration"
+            )
+        revision = migrate(expected_revision=request.expected_revision)
+        self._run_optional_runtime_operation(
+            "telemetry", "animation_memory.record",
+            lambda: self.animation_memory.record(AnimationEditRecord(
+                request.operation, request.scene_id,
+                request.expected_revision, revision,
+            )),
+        )
         return {"status": "ok", "request_id": request.request_id,
-                "motion_type": "linear_translation", "object_id": oid,
-                "duration": duration, **result}
+                "scene_id": request.scene_id, "revision": revision,
+                "schema": "slai.animation.v2"}
+
+    def _kinematics(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route FK/IK to the authoritative SGEO scene, never solve in agent."""
+        fk = getattr(scene, "forward_kinematics", None)
+        ik = getattr(scene, "solve_inverse_kinematics", None)
+        if not callable(fk) or not callable(ik):
+            raise AnimationUnsupportedOperationError(
+                "bound provider does not expose the native articulated SGEO operations"
+            )
+        scene_id = request.scene_id
+        if request.operation == "forward_kinematics":
+            lock = get_animation_edit_lock(scene)
+            if lock is None:
+                raise AnimationUnsupportedOperationError(
+                    "consistent kinematics requires the provider's edit lock"
+                )
+            with lock:
+                if request.expected_revision is not None and scene.revision != request.expected_revision:
+                    raise AnimationRevisionConflictError("scene revision mismatch")
+                values = request.payload.get("values")
+                matrices = fk(values)
+                revision = scene.revision
+            keys = sorted(matrices)
+            limit = self._policy.max_result_objects
+            return {
+                "status": "ok", "request_id": request.request_id,
+                "scene_id": scene_id, "revision": revision,
+                "object_count": len(keys),
+                "transforms_truncated": len(keys) > limit,
+                "transforms": {key: list(matrices[key]) for key in keys[:limit]},
+            }
+        payload = request.payload
+        if "end_effector" not in payload or "target" not in payload:
+            raise AnimationValidationError("solve_ik requires end_effector and target")
+        if request.operation == "apply_ik":
+            if request.dry_run:
+                raise AnimationUnsupportedOperationError(
+                    "apply_ik does not provide a nonmutating preview; use solve_ik"
+                )
+            if request.expected_revision is None:
+                raise AnimationRevisionConflictError(
+                    "apply_ik requires expected_revision for optimistic concurrency"
+                )
+            apply = getattr(scene, "apply_inverse_kinematics", None)
+            if not callable(apply):
+                raise AnimationUnsupportedOperationError(
+                    "provider does not support atomic native IK pose commits"
+                )
+            result = apply(
+                payload["end_effector"], payload["target"],
+                expected_revision=request.expected_revision,
+                max_iterations=payload.get("max_iterations", 200),
+                tolerance=payload.get("tolerance", 1e-5),
+            )
+            if result["committed"]:
+                self._run_optional_runtime_operation(
+                    "telemetry", "animation_memory.record",
+                    lambda: self.animation_memory.record(AnimationEditRecord(
+                        request.operation, scene_id, request.expected_revision,
+                        result["revision"],
+                    )),
+                )
+                self._run_optional_runtime_operation(
+                    "telemetry", "playback.reconcile",
+                    lambda: self._refresh_playback_duration(scene_id, scene),
+                )
+        else:
+            result = ik(
+                payload["end_effector"], payload["target"],
+                expected_revision=request.expected_revision,
+                max_iterations=payload.get("max_iterations", 200),
+                tolerance=payload.get("tolerance", 1e-5),
+            )
+        return {"request_id": request.request_id, "scene_id": scene_id, **result}
 
     # ------------------------------------------------------------------
     # Transactional writes; SGEO/provider is authoritative
@@ -539,7 +571,7 @@ class AnimationAgent(BaseAgent):
         if not is_animation_scene_provider(scene):
             return
         with self._scene_lock:
-            if scene_id in self._playbacks and ANIMATION_KEY not in scene.metadata and ANIMATION_V2_KEY not in scene.metadata:
+            if scene_id in self._playbacks and not any(key in scene.metadata for key in (ANIMATION_KEY, ANIMATION_V2_KEY)):
                 del self._playbacks[scene_id]
 
     def _playback_operation(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
@@ -614,9 +646,7 @@ class AnimationAgent(BaseAgent):
             "operational_memory": "AnimationMemory",
             "cross_agent_memory": "BaseAgent.shared_memory",
             "checkpointing": False,
-            "procedural_motion": ["linear_translation"],
-            "native_composition": ["clips", "instances", "layers", "override_blending", "loop", "reverse", "events"],
-            "unsupported": ["learned_motion", "rigging", "retargeting", "choreography", "physics_simulation"],
+            "unsupported": ["learned_motion", "skeletal_rigging", "retargeting", "choreography", "physics_simulation"],
         }
 
     def _status(self, request: AnimationRequest) -> dict[str, Any]:

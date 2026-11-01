@@ -144,7 +144,7 @@ class Scene:
         """
         from .animation import (ANIMATION_KEY, ANIMATION_V2_KEY, validate_animation,
                                 validate_animation_v2)
-        if version not in (None, 1, 2) or isinstance(version, bool):
+        if version is not None and (type(version) is not int or version not in (1, 2)):
             raise ValidationError("animation version must be 1 or 2")
         with self._mutation_lock:
             candidate = self._detached_copy()
@@ -163,10 +163,100 @@ class Scene:
             self.revision = candidate.revision
             return self.revision
 
+    def upgrade_animation(self, *, expected_revision: int | None = None) -> int:
+        """Explicitly migrate valid legacy v1 animation to equivalent native v2.
+
+        V1 schema is a strict subset of v2. Migration preserves keyframe data
+        exactly; no implicit upgrade is performed by loading or evaluation.
+        """
+        from .animation import ANIMATION_KEY, ANIMATION_V2_KEY
+        from ..common.errors import ConflictError
+        with self._mutation_lock:
+            if expected_revision is not None and (
+                    type(expected_revision) is not int or expected_revision < 1):
+                raise ValidationError("expected_revision must be positive integer")
+            if expected_revision is not None and self.revision != expected_revision:
+                raise ConflictError("scene revision does not match expected revision")
+            if ANIMATION_V2_KEY in self.metadata:
+                raise ValidationError("scene animation is already v2")
+            spec = self.metadata.get(ANIMATION_KEY)
+            if spec is None:
+                raise ValidationError("scene has no legacy v1 animation to migrate")
+            return self.set_animation(deepcopy(spec), version=2)
+
     def evaluate(self, time: float):
         """Evaluate read-only motion state without changing this scene."""
         from .animation import evaluate_scene
         return evaluate_scene(self, time)
+
+    def forward_kinematics(self, values: dict | None = None):
+        """Compute a detached articulated pose from native v2 joint defaults."""
+        from .kinematics import forward_kinematics
+        from .animation import ANIMATION_V2_KEY
+        with self._mutation_lock:
+            self.validate()
+            spec = self.metadata.get(ANIMATION_V2_KEY)
+            if spec is None:
+                raise ValidationError("forward kinematics requires native v2 animation")
+            candidate = self._detached_copy()
+        return forward_kinematics(candidate, spec.get("joints", []), values)
+
+    def solve_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Return validated joint proposals without editing authoritative state."""
+        from .kinematics import solve_inverse_kinematics
+        from .animation import ANIMATION_V2_KEY
+        if expected_revision is not None and (
+                type(expected_revision) is not int or expected_revision < 1):
+            raise ValidationError("expected_revision must be a positive integer")
+        with self._mutation_lock:
+            if expected_revision is not None and self.revision != expected_revision:
+                from ..common.errors import ConflictError
+                raise ConflictError("scene revision does not match expected revision")
+            self.validate()
+            spec = self.metadata.get(ANIMATION_V2_KEY)
+            if spec is None:
+                raise ValidationError("inverse kinematics requires native v2 animation")
+            candidate = self._detached_copy()
+        result = solve_inverse_kinematics(
+            candidate, spec.get("joints", []), end_effector, target,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+        return {"revision": candidate.revision, **result}
+
+    def apply_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Solve and commit a supported static joint pose atomically.
+
+        This intentionally refuses authored tracks/drivers/constraints so an
+        IK proposal cannot be committed when the evaluated pose differs from
+        its verified unanimated kinematic baseline. Animation-track authoring
+        remains the responsibility of the existing animation editing API.
+        """
+        from .animation import ANIMATION_V2_KEY
+        from ..common.errors import ConflictError
+        solution = self.solve_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+        if solution["status"] != "solved":
+            return {**solution, "committed": False}
+        with self._mutation_lock:
+            if self.revision != solution["revision"]:
+                raise ConflictError("scene changed during IK solve; commit rejected")
+            spec = deepcopy(self.metadata.get(ANIMATION_V2_KEY))
+            if spec is None:
+                raise ValidationError("scene has no v2 animation")
+            if spec.get("tracks") or spec.get("drivers") or spec.get("constraints") or spec.get("instances"):
+                raise ValidationError("IK pose commit requires an unanimated, unconstrained joint assembly")
+            proposals = solution["joint_values"]
+            for joint in spec.get("joints", []):
+                if joint["object_id"] in proposals:
+                    joint["value"] = proposals[joint["object_id"]]
+            committed_revision = self.set_animation(spec, version=2)
+        return {**solution, "revision": committed_revision, "committed": True}
 
     def add_object(self, *, name="", geometry=None, parent=None, transform=None, metadata=None, object_id=None,
                    material=None):
@@ -213,14 +303,21 @@ class Scene:
             require_id(object_id)
             if any(obj.get("parent")==object_id for obj in self.objects):
                 raise ValidationError("cannot remove scene object with children")
-            from .animation import ANIMATION_KEYS
-            for key in ANIMATION_KEYS:
+            for key in ("slai.animation.v1", "slai.animation.v2"):
                 spec = self.metadata.get(key, {})
                 if any(track["object_id"] == object_id for track in spec.get("tracks", [])):
                     raise ValidationError("cannot remove object referenced by animation")
-                if any(object_id in instance.get("bindings", {}).values()
-                       for instance in spec.get("instances", [])):
-                    raise ValidationError("cannot remove object referenced by clip")
+                if key == "slai.animation.v2":
+                    if any(object_id in (d["source_object_id"], d["target_object_id"])
+                           for d in spec.get("drivers", [])):
+                        raise ValidationError("cannot remove object referenced by driver")
+                    if any(object_id in (c["object_id"], c.get("other_id"))
+                           for c in spec.get("constraints", [])):
+                        raise ValidationError("cannot remove object referenced by constraint")
+                    if any(j["object_id"] == object_id for j in spec.get("joints", [])):
+                        raise ValidationError("cannot remove object referenced by joint")
+                    if any(i["object_id"] == object_id for i in spec.get("instances", [])):
+                        raise ValidationError("cannot remove object referenced by animation clip")
             pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
             if pos is None:
                 raise ValidationError("object ID not found")
@@ -301,6 +398,10 @@ class Scene:
             requires.append("materials")
         if self.images:
             requires.append("textures")
+        if "slai.animation.v1" in self.metadata:
+            requires.append("animation-v1")
+        if "slai.animation.v2" in self.metadata:
+            requires.append("animation-v2")
         return requires
 
     def texture_bytes(self, image_id):

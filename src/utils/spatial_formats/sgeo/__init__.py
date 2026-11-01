@@ -11,7 +11,10 @@ from .transactions import apply_scene_operations, objects_within_bounds
 from .solids import extrude, revolve
 from .box_boolean import boolean_boxes
 from .box_offset import offset_box_faces
-from .animation import EvaluatedScene, validate_animation, evaluate_scene
+from .animation import (EvaluatedScene, validate_animation, validate_animation_v2,
+                        evaluate_scene, solve_animation_constraints)
+from .kinematics import (validate_joints, joint_transform, forward_kinematics,
+                         solve_inverse_kinematics)
 
 from .brep import validate_brep, brep_info, scale_brep
 from .brep_mesh import analyze_brep, tessellate_brep

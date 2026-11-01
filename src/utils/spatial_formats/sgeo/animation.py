@@ -24,7 +24,7 @@ from ..common.transforms import (compose, from_axis_angle, from_translation, fro
                                  from_quaternion, unit_quaternion, slerp_quaternion)
 from ..common.helpers import cubic_hermite_value
 from ..common.helpers import finite, vector
-from ..common.ids import require_id
+from ..common.ids import require_canonical_id, require_id
 from .families import generate_geometry
 
 ANIMATION_KEY = "slai.animation.v1"
@@ -122,6 +122,55 @@ def validate_animation(spec: dict, scene) -> dict:
 
 
 
+
+def _validate_continuous_track(track, *, minimum=None, maximum=None):
+    """Prove scalar bounds and nonsingular scale across each track segment.
+
+    Hermite interpolation is cubic on each segment. Its extrema occur at
+    endpoints or roots of the quadratic derivative; evaluating only keys
+    would miss overshoot, illegal joint angles, or scales crossing zero.
+    """
+    from math import sqrt
+    prop = track["property"]
+    method = track.get("interpolation", "linear")
+    if method == "step" or prop not in {"scale", "joint"} and (
+            minimum is None and maximum is None):
+        return
+    frames = track["keyframes"]
+    for a, b in zip(frames, frames[1:]):
+        dt = b["time"] - a["time"]
+        values_a = a["value"] if prop == "scale" else [a["value"]]
+        values_b = b["value"] if prop == "scale" else [b["value"]]
+        for idx, (p0, p1) in enumerate(zip(values_a, values_b)):
+            candidates = [p0, p1]
+            if method == "cubic":
+                m0 = a["out_tangent"][idx] if prop == "scale" else a["out_tangent"]
+                m1 = b["in_tangent"][idx] if prop == "scale" else b["in_tangent"]
+                m0, m1 = m0*dt, m1*dt
+                aa = 2*p0 + m0 - 2*p1 + m1
+                bb = -3*p0 - 2*m0 + 3*p1 - m1
+                cc = m0
+                critical = []
+                if abs(aa) < 1e-14:
+                    if abs(bb) > 1e-14:
+                        critical.append(-cc / (2*bb))
+                else:
+                    discriminant = (2*bb)**2 - 12*aa*cc
+                    if discriminant >= 0:
+                        root = sqrt(discriminant)
+                        critical.extend(((-2*bb + root)/(6*aa), (-2*bb-root)/(6*aa)))
+                for t in critical:
+                    if 0 < t < 1:
+                        candidates.append(cubic_hermite_value(p0, m0, p1, m1, t))
+            lowest, highest = min(candidates), max(candidates)
+            if prop == "scale" and lowest <= 1e-9 and highest >= -1e-9:
+                raise ValidationError("animated scale crosses a singular zero")
+            if minimum is not None and lowest < minimum - 1e-9:
+                raise ValidationError("animation spline exceeds declared lower bound")
+            if maximum is not None and highest > maximum + 1e-9:
+                raise ValidationError("animation spline exceeds declared upper bound")
+
+
 def validate_animation_v2(spec: dict, scene) -> dict:
     """Validate SGEO v2 typed transform tracks without changing v1 semantics.
 
@@ -129,8 +178,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "clips", "instances", "layers", "events"} or not {"duration", "tracks"} <= set(spec):
-        raise ValidationError("invalid v2 animation document fields")
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances"} or not {"duration", "tracks"} <= set(spec):
+        raise ValidationError("v2 animation requires duration/tracks and optional drivers/constraints")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
         raise ValidationError("animation duration must be positive")
@@ -141,6 +190,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
         raise ResourceLimitError("too many animation tracks")
     objects = {obj["id"]: obj for obj in scene.objects}
     families = {fam["id"]: fam for fam in scene.families}
+    from .kinematics import validate_joints
+    joints = validate_joints(spec.get("joints", []), objects)
     seen = set()
     count = 0
     for track in tracks:
@@ -148,14 +199,14 @@ def validate_animation_v2(spec: dict, scene) -> dict:
             "object_id", "property", "keyframes", "interpolation", "axis"
         }:
             raise ValidationError("invalid v2 animation track fields")
-        oid = require_id(track.get("object_id"))
+        oid = require_canonical_id(track.get("object_id"))
         obj = objects.get(oid)
         if obj is None:
             raise ReferenceError("animation refers to a missing scene object", context={"object_id": oid})
         prop = track.get("property")
         if not isinstance(prop, str) or (prop not in {
             "translation", "rotation_angle", "rotation_quaternion",
-            "scale", "visibility"
+            "scale", "visibility", "joint"
         } and not prop.startswith("parameter.")):
             raise ValidationError("unsupported v2 animation property")
         if (oid, prop) in seen:
@@ -172,6 +223,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
         elif "axis" in track:
             raise ValidationError("axis only supported for axis-angle tracks")
         definition = None
+        if prop == "joint" and (oid not in joints or joints[oid]["kind"] == "fixed"):
+            raise ValidationError("joint animation requires a movable declared joint")
         if prop.startswith("parameter."):
             fam = families.get(obj.get("family_id"))
             name = prop.removeprefix("parameter.")
@@ -187,7 +240,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
             {"step", "slerp"} if prop == "rotation_quaternion"
             else {"step", "linear", "cubic"}
         )
-        if interpolation not in allowed:
+        if not isinstance(interpolation, str) or interpolation not in allowed:
             raise ValidationError("unsupported interpolation for v2 property type")
         frames = track.get("keyframes")
         if not isinstance(frames, list) or not frames:
@@ -217,6 +270,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                     raise ValidationError("visibility keyframes must be booleans")
             else:
                 num = finite(value, "animation scalar", limit=1e9)
+                if prop == "joint" and not joints[oid]["lower"] <= num <= joints[oid]["upper"]:
+                    raise ValidationError("animated joint violates its declared limits")
                 if definition is not None:
                     if (num < definition.get("min", 0 if definition["type"] == "length" else -1e12)
                             or num > definition.get("max", 1e12)):
@@ -234,112 +289,604 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                         vector(frame[direction], 3, direction)
                     else:
                         finite(frame[direction], direction, limit=1e9)
-
-    _validate_composition(spec, scene)
+    occupied = _validate_clips(spec, scene, seen)
+    for track in tracks:
+        prop = track["property"]
+        if prop == "scale":
+            _validate_continuous_track(track)
+        elif prop == "joint":
+            joint = joints[track["object_id"]]
+            _validate_continuous_track(track, minimum=joint["lower"], maximum=joint["upper"])
+        elif prop.startswith("parameter."):
+            family = families[objects[track["object_id"]]["family_id"]]
+            definition = family["parameters"][prop.removeprefix("parameter.")]
+            _validate_continuous_track(
+                track,
+                minimum=definition.get("min", 0 if definition["type"] == "length" else -1e12),
+                maximum=definition.get("max", 1e12),
+            )
+    _validate_drivers(spec.get("drivers", []), objects, seen, joints, occupied)
+    _validate_constraints(spec.get("constraints", []), objects, duration=duration)
     return deepcopy(spec)
 
 
-def _validate_composition(spec, scene):
-    """Validate reusable clips, bindings, layers and pure event markers."""
+
+
+def _validate_clips(spec, scene, direct_targets) -> set:
+    """Validate bounded reusable property clips and non-overlapping bindings.
+
+    P1 composition is intentionally deterministic: one writer per target
+    property at a time; disjoint clips may reuse the same binding. Layer blending
+    and simultaneous overrides require a separately versioned policy.
+    """
     clips, instances = spec.get("clips", []), spec.get("instances", [])
-    layers, events = spec.get("layers", []), spec.get("events", [])
-    if not all(isinstance(items, list) for items in (clips, instances, layers, events)):
-        raise ValidationError("composition members must be lists")
-    if len(clips) > 256 or len(instances) > 1024 or len(layers) > 128 or len(events) > 4096:
-        raise ResourceLimitError("animation composition budget exceeded")
-    clip_index, layer_index = {}, {}
+    if not isinstance(clips, list) or len(clips) > 256:
+        raise ValidationError("clips must be a bounded list (max 256)")
+    if not isinstance(instances, list) or len(instances) > 1024:
+        raise ValidationError("clip instances must be a bounded list (max 1024)")
+    definitions = {}
     for clip in clips:
         if not isinstance(clip, dict) or set(clip) != {"id", "duration", "tracks"}:
-            raise ValidationError("invalid clip definition")
-        cid = require_id(clip["id"])
-        if cid in clip_index:
-            raise ValidationError("duplicate clip ID")
-        duration = finite(clip["duration"], "clip duration", limit=MAX_TIME)
-        if duration <= 0 or not isinstance(clip["tracks"], list):
-            raise ValidationError("invalid clip duration or tracks")
-        clip_index[cid] = clip
-    for layer in layers:
-        if not isinstance(layer, dict) or set(layer) - {"id", "weight", "enabled"} or "id" not in layer:
-            raise ValidationError("invalid layer fields")
-        lid = require_id(layer["id"])
-        if lid in layer_index:
-            raise ValidationError("duplicate layer ID")
-        weight = finite(layer.get("weight", 1), "layer weight", limit=1)
-        if weight < 0 or type(layer.get("enabled", True)) is not bool:
-            raise ValidationError("invalid layer settings")
-        layer_index[lid] = layer
-    objects = {obj["id"] for obj in scene.objects}
-    total = sum(len(track["keyframes"]) for track in spec["tracks"])
+            raise ValidationError("clip requires id, duration and tracks")
+        cid = require_canonical_id(clip["id"])
+        if cid in definitions:
+            raise ValidationError("duplicate clip identifier")
+        cd = finite(clip["duration"], "clip duration", limit=MAX_TIME)
+        if cd <= 0:
+            raise ValidationError("clip duration must be positive")
+        if not isinstance(clip["tracks"], list) or not clip["tracks"] or len(clip["tracks"]) > 128:
+            raise ValidationError("clip must have between 1 and 128 tracks")
+        properties = []
+        for track in clip["tracks"]:
+            if not isinstance(track, dict) or "object_id" in track:
+                raise ValidationError("clip tracks bind by instance, not fixed object ID")
+            if set(track) - {"property", "keyframes", "interpolation", "axis"}:
+                raise ValidationError("unknown clip track fields")
+            prop = track.get("property")
+            if not isinstance(prop, str) or (prop not in {
+                "translation", "rotation_angle", "rotation_quaternion", "scale",
+                "visibility", "joint"
+            } and not prop.startswith("parameter.")):
+                raise ValidationError("unsupported clip track property")
+            if prop in properties:
+                raise ValidationError("duplicate clip track property")
+            properties.append(prop)
+            method = track.get("interpolation", "linear")
+            allowed = {"step"} if prop == "visibility" else (
+                {"step", "slerp"} if prop == "rotation_quaternion"
+                else {"step", "linear", "cubic"}
+            )
+            if not isinstance(method, str) or method not in allowed:
+                raise ValidationError("unsupported clip track interpolation")
+            if prop == "rotation_angle":
+                axis = vector(track.get("axis"), 3, "clip rotation axis")
+                if sum(x*x for x in axis) < 1e-24:
+                    raise ValidationError("clip rotation axis must be nonzero")
+            elif "axis" in track:
+                raise ValidationError("axis only supported for clip axis-angle rotation")
+            frames = track.get("keyframes")
+            if not isinstance(frames, list) or not frames:
+                raise ValidationError("clip track must contain keyframes")
+            previous = -1
+            for frame in frames:
+                if not isinstance(frame, dict) or set(frame) - {
+                    "time", "value", "in_tangent", "out_tangent"
+                } or not {"time", "value"} <= set(frame):
+                    raise ValidationError("invalid clip keyframe fields")
+                timestamp = finite(frame["time"], "clip keyframe time", limit=MAX_TIME)
+                if timestamp <= previous or timestamp < 0 or timestamp > cd:
+                    raise ValidationError("clip keyframe time must increase within clip duration")
+                previous = timestamp
+                value = frame["value"]
+                if prop in {"translation", "scale"}:
+                    components = vector(value, 3, "clip vector")
+                    if prop == "scale" and any(abs(x) < 1e-9 for x in components):
+                        raise ValidationError("clip scale must be nonsingular")
+                elif prop == "rotation_quaternion":
+                    unit_quaternion(value)
+                elif prop == "visibility":
+                    if type(value) is not bool:
+                        raise ValidationError("clip visibility must be boolean")
+                else:
+                    finite(value, "clip scalar", limit=1e9)
+                tangents = {"in_tangent", "out_tangent"} & set(frame)
+                if method != "cubic" and tangents:
+                    raise ValidationError("clip tangents require cubic interpolation")
+                if method == "cubic":
+                    if tangents != {"in_tangent", "out_tangent"}:
+                        raise ValidationError("cubic clip keys require both tangents")
+                    for key in tangents:
+                        if prop in {"translation", "scale"}:
+                            vector(frame[key], 3, "clip tangent")
+                        else:
+                            finite(frame[key], "clip tangent", limit=1e9)
+        for track in clip["tracks"]:
+            if track["property"] == "scale":
+                _validate_continuous_track(track)
+        definitions[cid] = clip
+    # Axis-angle and quaternion rotations both write one authoritative local
+    # rotation channel. Treat them as the same destination even though their
+    # serialized property names differ.
+    def channel(property_name):
+        return "rotation" if property_name in {"rotation_angle", "rotation_quaternion"} else property_name
+
+    if any("rotation_angle" in properties and "rotation_quaternion" in properties
+           for properties in (
+               [track["property"] for track in clip["tracks"]]
+               for clip in definitions.values()
+           )):
+        raise ValidationError("clip cannot contain two rotation representations")
+    authored_channels = {(oid, channel(prop)) for oid, prop in direct_targets}
+    occupied = set(direct_targets)
+    instance_intervals: dict[tuple, list[tuple[float, float]]] = {}
+    instance_ids = set()
+    total_sampled_frames = sum(len(t["keyframes"]) for t in spec["tracks"])
+    total_sampled_frames += sum(len(t["keyframes"]) for c in definitions.values() for t in c["tracks"])
+    if total_sampled_frames > MAX_KEYFRAMES:
+        raise ResourceLimitError("clip definition keyframe budget exceeded")
     for instance in instances:
         if not isinstance(instance, dict) or set(instance) - {
-            "clip_id", "bindings", "layer_id", "start", "speed", "loop", "enabled"
-        } or not {"clip_id", "bindings"} <= set(instance):
+            "id", "clip_id", "object_id", "start", "speed"
+        } or not {"id", "clip_id", "object_id", "start"} <= set(instance):
             raise ValidationError("invalid clip instance fields")
-        cid = require_id(instance["clip_id"])
-        if cid not in clip_index:
-            raise ReferenceError("unknown clip")
-        lid = instance.get("layer_id")
-        if lid is not None and require_id(lid) not in layer_index:
-            raise ReferenceError("unknown animation layer")
-        bindings = instance["bindings"]
-        if not isinstance(bindings, dict) or len(bindings) > MAX_TRACKS:
-            raise ValidationError("invalid clip bindings")
-        clip = clip_index[cid]
-        sources = {track.get("object_id") for track in clip["tracks"]}
-        if set(bindings) != sources or any(require_id(v) not in objects for v in bindings.values()):
-            raise ReferenceError("clip bindings must resolve every source to a scene object")
-        start = finite(instance.get("start", 0), "clip start", limit=MAX_TIME)
-        speed = finite(instance.get("speed", 1), "clip speed", limit=1e6)
-        if start < 0 or speed == 0 or type(instance.get("loop", False)) is not bool or type(instance.get("enabled", True)) is not bool:
-            raise ValidationError("invalid clip playback")
-        bound = [{**deepcopy(track), "object_id": bindings[track["object_id"]]}
-                 for track in clip["tracks"]]
-        total += sum(len(track["keyframes"]) for track in bound)
-        validate_animation_v2({"duration": clip["duration"], "tracks": bound}, scene)
-    if total > MAX_KEYFRAMES:
-        raise ResourceLimitError("animation keyframe budget exceeded")
-    for event in events:
-        if not isinstance(event, dict) or set(event) != {"name", "time"}:
-            raise ValidationError("invalid animation event")
-        if not isinstance(event["name"], str) or not 0 < len(event["name"]) <= 128:
-            raise ValidationError("invalid event name")
-        when = finite(event["time"], "event time", limit=MAX_TIME)
-        if when < 0 or when > spec["duration"]:
-            raise ValidationError("event outside animation duration")
+        iid = require_canonical_id(instance["id"])
+        if iid in instance_ids:
+            raise ValidationError("duplicate clip instance identifier")
+        instance_ids.add(iid)
+        cid = require_canonical_id(instance["clip_id"])
+        oid = require_canonical_id(instance["object_id"])
+        if cid not in definitions:
+            raise ReferenceError("clip instance references a missing definition")
+        start = finite(instance["start"], "clip instance start", limit=MAX_TIME)
+        speed = finite(instance.get("speed", 1), "clip instance speed", limit=1e4)
+        if start < 0 or speed <= 0 or start + definitions[cid]["duration"]/speed > spec["duration"] + 1e-9:
+            raise ValidationError("clip instance exceeds animation duration")
+        # Reuse the exact same native typed-track validator and binding rules.
+        mapped = [
+            {"object_id": oid, **track} for track in definitions[cid]["tracks"]
+        ]
+        validate_animation_v2({
+            "duration": definitions[cid]["duration"], "tracks": mapped,
+            "joints": spec.get("joints", []),
+        }, scene)
+        total_sampled_frames += sum(len(t["keyframes"]) for t in mapped)
+        if total_sampled_frames > MAX_KEYFRAMES:
+            raise ResourceLimitError("instanced clip sampling budget exceeded")
+        for track in mapped:
+            target = (oid, track["property"])
+            channel_target = (oid, channel(track["property"]))
+            if channel_target in authored_channels:
+                raise ValidationError("clip binding conflicts with an authored property channel")
+            interval = (start, start + definitions[cid]["duration"]/speed)
+            instance_intervals.setdefault(channel_target, []).append(interval)
+            occupied.add(target)
+    for windows in instance_intervals.values():
+        windows.sort()
+        if any(current[0] <= previous[1]
+               for previous, current in zip(windows, windows[1:])):
+            raise ValidationError("overlapping clips cannot write the same property")
+    # Validate even dormant reusable assets with a supported scene binding.
+    # Without a compatible target, their property semantics remain checked
+    # only when an instance is added; no claim of evaluated functionality.
+    return occupied
 
 
-def _sample_composition(spec, time):
-    clips = {clip["id"]: clip for clip in spec.get("clips", [])}
-    layers = {layer["id"]: layer for layer in spec.get("layers", [])}
-    order = {layer["id"]: i for i, layer in enumerate(spec.get("layers", []))}
-    for _, instance in sorted(enumerate(spec.get("instances", [])),
-                              key=lambda pair: (order.get(pair[1].get("layer_id"), -1), pair[0])):
-        layer = layers.get(instance.get("layer_id"), {})
-        if not instance.get("enabled", True) or not layer.get("enabled", True):
-            continue
-        weight = layer.get("weight", 1)
-        if weight == 0:
-            continue
-        clip = clips[instance["clip_id"]]
-        local = (time - instance.get("start", 0)) * instance.get("speed", 1)
-        if instance.get("loop", False):
-            local %= clip["duration"]
-        elif local < 0 or local > clip["duration"]:
-            continue
-        for track in clip["tracks"]:
-            yield instance["bindings"][track["object_id"]], track["property"], track, _sample_v2(track, local), weight
+def _validate_drivers(drivers, objects, track_targets, joints, occupied_targets=None) -> tuple:
+    """Validate bounded directed scalar mechanical couplings and detect cycles."""
+    if not isinstance(drivers, list) or len(drivers) > MAX_TRACKS:
+        raise ValidationError("drivers must be a bounded list")
+    graph = {}
+    destinations = set()
+    all_targets = set()
+    for driver in drivers:
+        if (isinstance(driver, dict) and isinstance(driver.get("target_object_id"), str)
+                and isinstance(driver.get("target_property"), str)):
+            all_targets.add((driver["target_object_id"], driver["target_property"]))
+    for driver in drivers:
+        if not isinstance(driver, dict) or set(driver) - {
+            "source_object_id", "source_property", "target_object_id",
+            "target_property", "factor", "offset", "axis"
+        } or not {"source_object_id", "source_property", "target_object_id",
+                  "target_property", "factor"} <= set(driver):
+            raise ValidationError("invalid mechanical driver fields")
+        src = require_canonical_id(driver["source_object_id"])
+        dst = require_canonical_id(driver["target_object_id"])
+        if src not in objects or dst not in objects:
+            raise ReferenceError("driver references a missing object")
+        sp, tp = driver["source_property"], driver["target_property"]
+        if not isinstance(sp, str) or not isinstance(tp, str):
+            raise ValidationError("driver properties must be strings")
+        if sp not in {"rotation_angle", "joint"} and not (isinstance(sp, str) and sp.startswith("parameter.")):
+            raise ValidationError("driver source must be an animated scalar")
+        if tp not in {"rotation_angle", "translation", "joint"}:
+            raise ValidationError("driver target must be rotation_angle or translation")
+        source = (src, sp)
+        target = (dst, tp)
+        # The two rotational representations share one transform channel.
+        alternate = (dst, "rotation_quaternion") if tp == "rotation_angle" else None
+        occupied = occupied_targets if occupied_targets is not None else track_targets
+        if (target in occupied or target in destinations
+                or (alternate is not None and alternate in occupied)):
+            raise ValidationError("driver target conflicts with a track or another driver")
+        if source not in track_targets and source not in all_targets:
+            raise ValidationError("driver source must be an existing animated property")
+        destinations.add(target)
+        if tp == "joint" and (dst not in joints or joints[dst]["kind"] == "fixed"):
+            raise ValidationError("joint driver target requires a movable declared joint")
+        finite(driver["factor"], "driver factor")
+        finite(driver.get("offset", 0), "driver offset")
+        if tp in {"rotation_angle", "translation"}:
+            axis = vector(driver.get("axis"), 3, "driver axis")
+            if sum(component*component for component in axis) < 1e-24:
+                raise ValidationError("driver axis must be nonzero")
+        elif "axis" in driver:
+            raise ValidationError("joint drivers derive axis from their joint declaration")
+        graph.setdefault(source, set()).add(target)
+    # Kahn's algorithm: a coupled relationship requires a solver, not silent
+    # evaluation-order-dependent feedback.
+    nodes = set(graph) | {x for targets in graph.values() for x in targets}
+    indegree = {node: 0 for node in nodes}
+    for targets in graph.values():
+        for target in targets:
+            indegree[target] += 1
+    ready = sorted(node for node, degree in indegree.items() if degree == 0)
+    visited = 0
+    while ready:
+        node = ready.pop(0)
+        visited += 1
+        for target in sorted(graph.get(node, ())):
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+        ready.sort()
+    if visited != len(nodes):
+        raise ValidationError("mechanical driver dependency cycle requires simultaneous solving")
+    return tuple(sorted(nodes))
 
 
-def _blend_value(prop, previous, value, weight):
-    if weight >= 1:
-        return deepcopy(value)
-    if prop == "visibility":
-        return value if weight >= 0.5 else previous
-    if prop == "rotation_quaternion":
-        return list(slerp_quaternion(previous, value, weight))
-    if isinstance(value, (list, tuple)):
-        return [a + (b-a)*weight for a, b in zip(previous, value)]
-    return previous + (value-previous)*weight
+def _evaluate_drivers(drivers: list, grouped: dict):
+    """Resolve validated scalar mechanical drivers once, in stable DAG order.
+
+    The source-to-consumer index avoids rescanning all drivers for every
+    depth of a long motion chain; no independent graph/store is introduced.
+    """
+    from heapq import heappop, heappush
+    consumers: dict[tuple, list] = {}
+    for index, driver in enumerate(drivers):
+        source = (driver["source_object_id"], driver["source_property"])
+        consumers.setdefault(source, []).append((index, driver))
+    ready = []
+    for oid, properties in grouped.items():
+        for prop in properties:
+            heappush(ready, (oid, prop))
+    resolved = 0
+    while ready:
+        source_oid, source_prop = heappop(ready)
+        sampled = grouped[source_oid][source_prop][1]
+        for _, driver in consumers.pop((source_oid, source_prop), ()):
+            if isinstance(sampled, bool) or not isinstance(sampled, (int, float)):
+                raise ValidationError("mechanical driver source is not scalar")
+            scalar = finite(sampled * driver["factor"] + driver.get("offset", 0),
+                            "driven motion")
+            target_prop = driver["target_property"]
+            target_oid = driver["target_object_id"]
+            axis = (vector(driver["axis"], 3, "driver axis")
+                    if target_prop != "joint" else None)
+            driven = ([component * scalar for component in axis]
+                      if target_prop == "translation" else scalar)
+            generated = {"property": target_prop}
+            if axis is not None:
+                generated["axis"] = list(axis)
+            grouped.setdefault(target_oid, {})[target_prop] = (generated, driven)
+            heappush(ready, (target_oid, target_prop))
+            resolved += 1
+    if consumers or resolved != len(drivers):
+        raise ValidationError("unresolved mechanical driver dependency")
+
+
+
+def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
+    """Validate bounded, typed, world-position constraints for root objects."""
+    if not isinstance(constraints, list) or len(constraints) > 128:
+        raise ValidationError("constraints must be a bounded list (max 128)")
+    identifiers = set()
+    object_mobility = {}
+    common_fields = {"id", "kind", "object_id", "movable",
+                     "tolerance", "start", "end"}
+    fields = {
+        "position": {"target"},
+        "distance": {"other_id", "distance"},
+        "bounds": {"minimum", "maximum"},
+        "attachment": {"other_id", "offset"},
+        "alignment": {"other_id", "axis"},
+    }
+    for item in constraints:
+        if not isinstance(item, dict) or not {"id", "kind", "object_id", "movable"} <= set(item):
+            raise ValidationError("constraint requires id, kind, object_id and movable")
+        kind = item["kind"]
+        if not isinstance(kind, str) or kind not in fields:
+            raise ValidationError("unsupported native animation constraint kind")
+        if set(item) - (common_fields | fields[kind]):
+            raise ValidationError("unexpected fields for animation constraint kind")
+        if not fields[kind] <= set(item):
+            raise ValidationError("missing required constraint parameters")
+        ident = require_canonical_id(item["id"])
+        if ident in identifiers:
+            raise ValidationError("duplicate constraint id")
+        identifiers.add(ident)
+        oid = require_canonical_id(item["object_id"])
+        if oid not in objects:
+            raise ReferenceError("constraint refers to a missing object")
+        if type(item["movable"]) is not bool:
+            raise ValidationError("constraint movable must be boolean")
+        if oid in object_mobility and object_mobility[oid] is not item["movable"]:
+            raise ValidationError("conflicting mobility declarations for constrained object")
+        object_mobility[oid] = item["movable"]
+        if objects[oid].get("parent") is not None:
+            raise ValidationError("native position constraints require root objects")
+        tolerance = finite(item.get("tolerance", 1e-6), "constraint tolerance", limit=1e6)
+        if tolerance <= 0:
+            raise ValidationError("constraint tolerance must be positive")
+        start = finite(item.get("start", 0), "constraint activation start", limit=MAX_TIME)
+        end = finite(item.get("end", duration), "constraint activation end", limit=MAX_TIME)
+        if start < 0 or end < start or end > duration:
+            raise ValidationError("invalid constraint activation interval")
+        if kind == "position":
+            vector(item["target"], 3, "position target")
+        elif kind == "bounds":
+            lo = vector(item["minimum"], 3, "bounds minimum")
+            hi = vector(item["maximum"], 3, "bounds maximum")
+            if any(lo[i] > hi[i] for i in range(3)):
+                raise ValidationError("animation bounds minimum exceeds maximum")
+        else:
+            other = require_canonical_id(item.get("other_id"))
+            if other not in objects or other == oid:
+                raise ReferenceError("invalid constraint endpoint")
+            if objects[other].get("parent") is not None:
+                raise ValidationError("native coupled constraints require root objects")
+            if kind == "distance":
+                if finite(item.get("distance"), "constraint distance", limit=1e9) < 0:
+                    raise ValidationError("distance must be nonnegative")
+            elif kind == "attachment":
+                vector(item["offset"], 3, "attachment offset")
+            else:
+                axis = vector(item["axis"], 3, "alignment axis")
+                if sum(x*x for x in axis) < 1e-24:
+                    raise ValidationError("alignment axis must be nonzero")
+
+
+
+def solve_animation_constraints(scene, constraints: list, *, max_iterations: int = 200) -> dict:
+    """Solve supported coupled root-position constraints on a detached scene.
+
+    Uses SLAI's canonical OptimizationProblem and OptimizationSolver rather
+    than maintaining a parallel nonlinear numerical solver. No mutation is
+    performed when numerical convergence cannot be independently verified.
+    A failed optimizer is *unresolved*, never a proof of infeasibility.
+    """
+    if type(max_iterations) is not int or not 1 <= max_iterations <= 2000:
+        raise ValidationError("max_iterations must be an integer in [1, 2000]")
+    objects = {obj["id"]: obj for obj in scene.objects}
+    _validate_constraints(constraints, objects)
+    initial_world = scene.world_transforms()
+    original = {oid: tuple(initial_world[oid][k] for k in (3, 7, 11)) for oid in objects}
+    movable_ids = sorted({c["object_id"] for c in constraints if c["movable"]})
+    names = {(oid, k): "v%d_%d" % (i, k) for i, oid in enumerate(movable_ids) for k in range(3)}
+
+    def location(oid, point):
+        return tuple(point[names[(oid, k)]] if oid in movable_ids else original[oid][k]
+                     for k in range(3))
+
+    def residual(c, point):
+        a = location(c["object_id"], point)
+        kind = c["kind"]
+        if kind == "position":
+            return [a[k] - c["target"][k] for k in range(3)]
+        if kind == "bounds":
+            lo, hi = c["minimum"], c["maximum"]
+            return [
+                min(0.0, a[k] - lo[k]) + max(0.0, a[k] - hi[k])
+                for k in range(3)
+            ]
+        b = location(c["other_id"], point)
+        if kind == "distance":
+            from math import hypot
+            return [hypot(*(a[k]-b[k] for k in range(3))) - c["distance"]]
+        if kind == "attachment":
+            return [a[k] - b[k] - c["offset"][k] for k in range(3)]
+        # Alignment is satisfied when (a-b) is parallel to the axis.
+        ax, ay, az = vector(c["axis"], 3, "alignment axis")
+        norm = (ax*ax + ay*ay + az*az)**0.5
+        ax, ay, az = ax/norm, ay/norm, az/norm
+        dx, dy, dz = (a[k]-b[k] for k in range(3))
+        return [dy*az-dz*ay, dz*ax-dx*az, dx*ay-dy*ax]
+
+    def report(point, status, *, solver_status=None, iterations=None):
+        details = []
+        for c in constraints:
+            deviations = residual(c, point)
+            maximum = max((abs(v) for v in deviations), default=0.0)
+            details.append({
+                "id": c["id"], "kind": c["kind"], "residual": maximum,
+                "tolerance": c.get("tolerance", 1e-6),
+                "satisfied": maximum <= c.get("tolerance", 1e-6),
+            })
+        valid = all(d["satisfied"] for d in details)
+        return {"status": "satisfied" if valid else status,
+                "solver_status": solver_status, "iterations": iterations,
+                "constraints": details, "max_residual": max(
+                    (d["residual"] for d in details), default=0.0),
+                "positions": {oid: list(location(oid, point)) for oid in movable_ids}}
+
+    start = {name: original[oid][k] for (oid, k), name in names.items()}
+    original_report = report(start, "unsatisfied")
+    if original_report["status"] == "satisfied":
+        return original_report
+    # Any violated constraint with no movable endpoint is independently
+    # infeasible, regardless of other unconstrained movable entities.
+    for constraint, detail in zip(constraints, original_report["constraints"]):
+        endpoints = {constraint["object_id"]}
+        if "other_id" in constraint:
+            endpoints.add(constraint["other_id"])
+        if not detail["satisfied"] and not (endpoints & set(movable_ids)):
+            return {**original_report, "status": "infeasible",
+                    "solver_status": "analytic_fixed_endpoints"}
+    if not movable_ids:
+        original_report["status"] = "infeasible"
+        return original_report
+
+    def apply_solution(solution):
+        for oid, xyz in solution["positions"].items():
+            obj = objects[oid]
+            transform = list(obj["transform"])
+            for component, value in zip((3, 7, 11), xyz):
+                transform[component] = value
+            obj["transform"] = transform
+        return solution
+
+    if len(constraints) == 1:
+        # Common one-constraint mechanisms have exact geometric projections.
+        # In particular a coincident distance pair has undefined numerical
+        # gradient; choose the deterministic +X direction rather than asking
+        # a local optimizer to escape that degenerate starting state.
+        constraint = constraints[0]
+        if constraint["movable"] and constraint["kind"] in {
+                "distance", "attachment", "alignment", "bounds"}:
+            from math import hypot
+            oid = constraint["object_id"]
+            current = original[oid]
+            kind = constraint["kind"]
+            if kind == "bounds":
+                xyz = [
+                    max(constraint["minimum"][i],
+                        min(constraint["maximum"][i], current[i]))
+                    for i in range(3)
+                ]
+            else:
+                other = original[constraint["other_id"]]
+                if kind == "attachment":
+                    xyz = [other[i] + constraint["offset"][i]
+                           for i in range(3)]
+                elif kind == "distance":
+                    delta = [current[i]-other[i] for i in range(3)]
+                    norm = hypot(*delta)
+                    direction = [1.0, 0.0, 0.0] if norm < 1e-12 else [
+                        value/norm for value in delta
+                    ]
+                    xyz = [
+                        other[i] + constraint["distance"]*direction[i]
+                        for i in range(3)
+                    ]
+                else:
+                    axis = constraint["axis"]
+                    norm = hypot(*axis)
+                    unit = [value/norm for value in axis]
+                    distance_along = sum(
+                        (current[i]-other[i])*unit[i] for i in range(3)
+                    )
+                    xyz = [other[i] + distance_along*unit[i]
+                           for i in range(3)]
+            candidate = dict(start)
+            for component in range(3):
+                candidate[names[(oid, component)]] = xyz[component]
+            analytic = report(candidate, "unsatisfied",
+                              solver_status="analytic")
+            if analytic["status"] == "satisfied":
+                return apply_solution(analytic)
+
+    if all(c["kind"] == "position" for c in constraints):
+        # Position-only constraints are separable linear systems; satisfy
+        # their tolerance intervals analytically instead of invoking NLP.
+        candidate_point = dict(start)
+        impossible = False
+        for oid in movable_ids:
+            related = [c for c in constraints if c["object_id"] == oid]
+            for coordinate in range(3):
+                lower = max(
+                    c["target"][coordinate] - c.get("tolerance", 1e-6)
+                    for c in related
+                )
+                upper = min(
+                    c["target"][coordinate] + c.get("tolerance", 1e-6)
+                    for c in related
+                )
+                if lower > upper:
+                    impossible = True
+                    break
+                candidate_point[names[(oid, coordinate)]] = (
+                    lower + (upper - lower)/2
+                )
+            if impossible:
+                break
+        solved = report(candidate_point, "infeasible" if impossible else "unsatisfied",
+                        solver_status="analytic")
+        if solved["status"] == "satisfied":
+            return apply_solution(solved)
+        if impossible:
+            return solved
+
+    # No global optimality guarantee. This is a constrained local nonlinear
+    # solve with residual checks against each physical-space tolerance.
+    from src.agents.optimization.optimization_types import (
+        Variable, VariableDomain, Objective, Constraint, ConstraintSense,
+        OptimizationProblem, ProblemClass,
+    )
+    from src.agents.optimization.optimization_solver import OptimizationSolver
+    variables = tuple(
+        Variable(name=name, domain=VariableDomain.real(-1e9, 1e9), initial=start[name])
+        for name in start
+    )
+    # Multi-residual least squares avoids SLSQP's requirement that the
+    # number of strict equality equations not exceed the degrees of freedom.
+    # Hard feasibility is determined AFTER solving by each original tolerance.
+    def weighted_error(point):
+        violation = sum(
+            sum(component * component for component in residual(c, point))
+            for c in constraints
+        )
+        regularizer = 1e-8 * sum(
+            (point[name] - original_value) ** 2
+            for name, original_value in start.items()
+        )
+        return violation + regularizer
+
+    objective = Objective(name="constraint_residuals", function=weighted_error)
+    problem = OptimizationProblem(
+        name="sgeo_animation_constraints", variables=variables,
+        objectives=(objective,), constraints=(),
+        problem_class=ProblemClass.NLP, deterministic=True,
+    )
+    from src.agents.optimization.utils.optimization_errors import (
+        OptimizationError, SolverUnavailableError, OptimizationConfigurationError,
+    )
+    try:
+        result = OptimizationSolver().solve_single_detailed(
+            problem, solver="scipy_nonlinear",
+            options={"x0": [start[name] for name in start],
+                     "scipy_options": {"maxiter": max_iterations},
+                     "time_limit_seconds": 5.0},
+            allow_fallback=False,
+        )
+        solution = result.solution
+    except (SolverUnavailableError, ImportError) as exc:
+        return {**original_report, "status": "unsupported",
+                "solver_status": type(exc).__name__}
+    except OptimizationConfigurationError as exc:
+        return {**original_report, "status": "invalid",
+                "solver_status": type(exc).__name__}
+    except (OptimizationError, RuntimeError, ArithmeticError) as exc:
+        return {**original_report, "status": "numerically_unresolved",
+                "solver_status": type(exc).__name__}
+    if solution is None or solution.primal_solution is None:
+        return {**original_report, "status": "numerically_unresolved",
+                "solver_status": None if solution is None else solution.status.value}
+    solved = report(solution.primal_solution, "numerically_unresolved",
+                    solver_status=solution.status.value,
+                    iterations=solution.iteration_count)
+    if solved["status"] != "satisfied":
+        return solved
+    # Commit only after independently verifying every physical residual.
+    return apply_solution(solved)
 
 
 def _sample_v2(track: dict, time: float):
@@ -414,6 +961,7 @@ class EvaluatedScene:
     revision: int
     _scene: object
     _hidden: frozenset[str]
+    constraint_report: object = None
     _index: object = field(init=False, repr=False)
     _transforms: object = field(init=False, repr=False)
     _bounds: object = field(init=False, repr=False)
@@ -487,24 +1035,23 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
     grouped: dict[str, dict[str, tuple[dict, object]]] = {}
     for track in spec["tracks"]:
         grouped.setdefault(track["object_id"], {})[track["property"]] = (track, _sample_v2(track, timestamp) if active == ANIMATION_V2_KEY else _sample(track, timestamp))
-    if active == ANIMATION_V2_KEY:
-        for oid, prop, track, value, weight in _sample_composition(spec, timestamp):
-            properties = grouped.setdefault(oid, {})
-            previous = properties.get(prop)
-            if previous is None:
-                if prop == "visibility":
-                    baseline = True
-                elif prop == "translation":
-                    baseline = [0.0, 0.0, 0.0]
-                elif prop == "scale":
-                    baseline = [1.0, 1.0, 1.0]
-                elif prop == "rotation_quaternion":
-                    baseline = [1.0, 0.0, 0.0, 0.0]
-                else:
-                    baseline = 0.0
-            else:
-                baseline = previous[1]
-            properties[prop] = (track, _blend_value(prop, baseline, value, weight))
+    if active == ANIMATION_V2_KEY and spec.get("instances"):
+        definitions = {clip["id"]: clip for clip in spec.get("clips", [])}
+        for instance in spec["instances"]:
+            clip = definitions[instance["clip_id"]]
+            local_time = (timestamp - instance["start"]) * instance.get("speed", 1)
+            if local_time < 0 or local_time > clip["duration"]:
+                continue
+            for track in clip["tracks"]:
+                grouped.setdefault(instance["object_id"], {})[track["property"]] = (
+                    track, _sample_v2(track, local_time)
+                )
+    if active == ANIMATION_V2_KEY and spec.get("drivers"):
+        _evaluate_drivers(spec["drivers"], grouped)
+    joint_index = {}
+    if active == ANIMATION_V2_KEY and spec.get("joints"):
+        from .kinematics import validate_joints
+        joint_index = validate_joints(spec["joints"], index)
     invisible: set[str] = set()
     for oid, tracks in grouped.items():
         obj = index[oid]
@@ -520,6 +1067,10 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
             transform = compose(transform, from_quaternion(tracks["rotation_quaternion"][1]))
         if "scale" in tracks:
             transform = compose(transform, from_scale(*tracks["scale"][1]))
+        if oid in joint_index:
+            from .kinematics import joint_transform
+            transform = compose(transform, joint_transform(
+                joint_index[oid], tracks["joint"][1] if "joint" in tracks else None))
         obj["transform"] = list(transform)
         parameters = {name.removeprefix("parameter."): value for name, (_, value) in tracks.items()
                       if name.startswith("parameter.")}
@@ -527,6 +1078,13 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
             overrides = {**obj.get("parameters", {}), **parameters}
             obj["geometry"] = generate_geometry(families[obj["family_id"]], overrides)
             obj["parameters"] = overrides
+    # Joint defaults apply to untracked joints as well.
+    if joint_index:
+        from .kinematics import joint_transform
+        for oid, joint in joint_index.items():
+            if oid not in grouped:
+                obj = index[oid]
+                obj["transform"] = list(compose(obj["transform"], joint_transform(joint)))
     # Visibility inherits through the hierarchy without mutating object data.
     for oid, obj in index.items():
         parent = obj.get("parent")
@@ -535,9 +1093,20 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
                 invisible.add(oid)
                 break
             parent = index[parent].get("parent")
+    diagnostics = None
+    if active == ANIMATION_V2_KEY and spec.get("constraints"):
+        active_constraints = [
+            item for item in spec["constraints"]
+            if item.get("start", 0) <= timestamp <= item.get("end", spec["duration"])
+        ]
+        diagnostics = solve_animation_constraints(candidate, active_constraints)
+        if diagnostics["status"] != "satisfied":
+            raise ValidationError("animation constraints could not be satisfied",
+                                  context={"constraint_report": diagnostics})
     candidate.validate()
-    return EvaluatedScene(timestamp, candidate.revision, candidate, frozenset(invisible))
+    return EvaluatedScene(timestamp, candidate.revision, candidate, frozenset(invisible), diagnostics)
 
 
 __all__ = ["ANIMATION_KEY", "ANIMATION_V2_KEY", "ANIMATION_KEYS", "EvaluatedScene",
-           "validate_animation", "validate_animation_v2", "evaluate_scene"]
+           "validate_animation", "validate_animation_v2", "evaluate_scene",
+           "solve_animation_constraints"]
