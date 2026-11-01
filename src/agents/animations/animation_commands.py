@@ -49,6 +49,9 @@ logger = get_logger("Animation Commands")
 EXTENDED_EDITS = frozenset({
     "add_track", "update_track", "delete_track",
     "set_interpolation", "set_duration",
+    "add_clip", "update_clip", "delete_clip", "add_instance", "update_instance",
+    "delete_instance", "add_layer", "update_layer", "delete_layer",
+    "add_event", "delete_event",
 })
 SUPPORTED_EDITS = EDIT_OPERATIONS | EXTENDED_EDITS
 
@@ -128,6 +131,28 @@ def _stage(current: Any, operation: str, payload: Mapping[str, Any]) -> dict | N
 
     candidate = _mutable_animation(current)
     tracks = candidate["tracks"]
+    for singular, collection in (
+        ("clip", "clips"), ("instance", "instances"),
+        ("layer", "layers"), ("event", "events")
+    ):
+        if operation not in {f"add_{singular}", f"update_{singular}", f"delete_{singular}"}:
+            continue
+        entries = candidate.setdefault(collection, [])
+        if operation.startswith("add_"):
+            value = _required(payload, singular)
+            if not isinstance(value, Mapping):
+                raise AnimationValidationError(f"{singular} must be a mapping")
+            entries.append(deepcopy(dict(value)))
+        else:
+            idx = ensure_track_index(_required(payload, f"{singular}_index"), len(entries))
+            if operation.startswith("delete_"):
+                del entries[idx]
+            else:
+                value = _required(payload, singular)
+                if not isinstance(value, Mapping):
+                    raise AnimationValidationError(f"{singular} must be a mapping")
+                entries[idx] = deepcopy(dict(value))
+        return candidate
     if operation == "set_duration":
         # SGEO owns duration value/bound checks; do not clip keyframes.
         candidate["duration"] = _required(payload, "duration")
