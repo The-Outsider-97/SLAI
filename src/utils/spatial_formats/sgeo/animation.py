@@ -499,14 +499,14 @@ def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
         "alignment": {"other_id", "axis"},
     }
     for item in constraints:
-        if not isinstance(item, dict) or not common_fields <= set(item):
+        if not isinstance(item, dict) or not {"id", "kind", "object_id", "movable"} <= set(item):
             raise ValidationError("constraint requires id, kind, object_id and movable")
         kind = item["kind"]
         if not isinstance(kind, str) or kind not in fields:
             raise ValidationError("unsupported native animation constraint kind")
         if set(item) - (common_fields | fields[kind]):
             raise ValidationError("unexpected fields for animation constraint kind")
-        if not (fields[kind] - {"distance"} <= set(item)):
+        if not fields[kind] <= set(item):
             raise ValidationError("missing required constraint parameters")
         ident = require_id(item["id"])
         if ident in identifiers:
