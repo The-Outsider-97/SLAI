@@ -224,7 +224,8 @@ def solve_inverse_kinematics(
         try:
             optimization = solver.solve_single_detailed(
                 problem, solver="scipy_nonlinear",
-                options={"x0": seed, "scipy_options": {"maxiter": max_iterations}},
+                options={"x0": seed, "scipy_options": {"maxiter": max_iterations},
+                         "time_limit_seconds": 5.0},
                 allow_fallback=False,
             )
             solution = optimization.solution
