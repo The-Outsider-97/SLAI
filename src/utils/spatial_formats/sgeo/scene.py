@@ -168,6 +168,39 @@ class Scene:
         from .animation import evaluate_scene
         return evaluate_scene(self, time)
 
+    def forward_kinematics(self, values: dict | None = None):
+        """Compute a detached articulated pose from native v2 joint defaults."""
+        from .kinematics import forward_kinematics
+        from .animation import ANIMATION_V2_KEY
+        with self._mutation_lock:
+            self.validate()
+            spec = self.metadata.get(ANIMATION_V2_KEY)
+            if spec is None:
+                raise ValidationError("forward kinematics requires native v2 animation")
+            candidate = self._detached_copy()
+        return forward_kinematics(candidate, spec.get("joints", []), values)
+
+    def solve_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Return validated joint proposals without editing authoritative state."""
+        from .kinematics import solve_inverse_kinematics
+        from .animation import ANIMATION_V2_KEY
+        with self._mutation_lock:
+            if expected_revision is not None and self.revision != expected_revision:
+                from ..common.errors import ConflictError
+                raise ConflictError("scene revision does not match expected revision")
+            self.validate()
+            spec = self.metadata.get(ANIMATION_V2_KEY)
+            if spec is None:
+                raise ValidationError("inverse kinematics requires native v2 animation")
+            candidate = self._detached_copy()
+        result = solve_inverse_kinematics(
+            candidate, spec.get("joints", []), end_effector, target,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+        return {"revision": candidate.revision, **result}
+
     def add_object(self, *, name="", geometry=None, parent=None, transform=None, metadata=None, object_id=None,
                    material=None):
         """Commit one individually validated leaf object under the scene lock.
@@ -226,6 +259,8 @@ class Scene:
                         raise ValidationError("cannot remove object referenced by constraint")
                     if any(j["object_id"] == object_id for j in spec.get("joints", [])):
                         raise ValidationError("cannot remove object referenced by joint")
+                    if any(i["object_id"] == object_id for i in spec.get("instances", [])):
+                        raise ValidationError("cannot remove object referenced by animation clip")
             pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
             if pos is None:
                 raise ValidationError("object ID not found")
