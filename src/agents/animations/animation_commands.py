@@ -30,7 +30,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from src.utils.spatial_formats.sgeo.animation import ANIMATION_KEY, validate_animation # type: ignore
+from src.utils.spatial_formats.sgeo.animation import (ANIMATION_KEY, ANIMATION_V2_KEY,
+                                                       validate_animation, validate_animation_v2) # type: ignore
 from src.utils.spatial_formats.sgeo.scene import Scene as SGEOScene # type: ignore
 from .animation_protocols import get_animation_edit_lock, is_animation_scene_provider
 from .animation_types import EDIT_OPERATIONS
@@ -187,7 +188,7 @@ def _validate_candidate(scene: Any, candidate: dict | None, *, required: bool) -
     if callable(validate):
         validate(candidate)
     elif isinstance(scene, SGEOScene):
-        validate_animation(candidate, scene)
+        (validate_animation_v2 if ANIMATION_V2_KEY in scene.metadata else validate_animation)(candidate, scene)
     elif required:
         raise AnimationUnsupportedOperationError(
             "provider does not expose read-only animation validation for dry run"
@@ -270,7 +271,8 @@ def apply_animation_batch(
                 "scene revision does not match expected_revision",
                 context={"expected_revision": expected_revision, "actual_revision": revision},
             )
-        current = deepcopy(scene.metadata.get(ANIMATION_KEY))
+        key = ANIMATION_V2_KEY if ANIMATION_V2_KEY in scene.metadata else ANIMATION_KEY
+        current = deepcopy(scene.metadata.get(key))
         candidate = current
         for operation, payload in normalized:
             candidate = _stage(candidate, operation, payload)
