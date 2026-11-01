@@ -349,6 +349,17 @@ def retarget_joint_clip(source_scene, target_scene, source_clip_id, joint_map, *
             for name in ("in_tangent", "out_tangent"):
                 if name in keyframe:
                     keyframe[name] = sign * factor * keyframe[name]
+    # Verify the proposed asset can be interpreted by authoritative SGEO
+    # before exposing it; a proposal is still not an implicit scene commit.
+    from .animation import validate_animation_v2
+    preview = deepcopy(target)
+    preview.setdefault("clips", []).append(converted)
+    preview.setdefault("instances", []).append({
+        "id": new_id(), "clip_id": converted["id"], "object_id": tid, "start": 0,
+    })
+    if converted["duration"] > preview["duration"]:
+        raise ValidationError("retargeted clip exceeds target scene animation duration")
+    validate_animation_v2(preview, target_scene)
     return {"clip": converted, "target_object_id": tid,
             "source_clip_id": source_clip_id, "status": "proposed",
             "mapping": {sid: tid}}
