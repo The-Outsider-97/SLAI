@@ -404,6 +404,19 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             if track["property"] == "scale":
                 _validate_continuous_track(track)
         definitions[cid] = clip
+    # Axis-angle and quaternion rotations both write one authoritative local
+    # rotation channel. Treat them as the same destination even though their
+    # serialized property names differ.
+    def channel(property_name):
+        return "rotation" if property_name in {"rotation_angle", "rotation_quaternion"} else property_name
+
+    if any("rotation_angle" in properties and "rotation_quaternion" in properties
+           for properties in (
+               [track["property"] for track in clip["tracks"]]
+               for clip in definitions.values()
+           )):
+        raise ValidationError("clip cannot contain two rotation representations")
+    authored_channels = {(oid, channel(prop)) for oid, prop in direct_targets}
     occupied = set(direct_targets)
     instance_intervals: dict[tuple, list[tuple[float, float]]] = {}
     instance_ids = set()
@@ -441,10 +454,11 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             raise ResourceLimitError("instanced clip sampling budget exceeded")
         for track in mapped:
             target = (oid, track["property"])
-            if target in direct_targets:
-                raise ValidationError("clip binding conflicts with an authored property track")
+            channel_target = (oid, channel(track["property"]))
+            if channel_target in authored_channels:
+                raise ValidationError("clip binding conflicts with an authored property channel")
             interval = (start, start + definitions[cid]["duration"]/speed)
-            instance_intervals.setdefault(target, []).append(interval)
+            instance_intervals.setdefault(channel_target, []).append(interval)
             occupied.add(target)
     for windows in instance_intervals.values():
         windows.sort()
@@ -488,7 +502,11 @@ def _validate_drivers(drivers, objects, track_targets, joints, occupied_targets=
             raise ValidationError("driver target must be rotation_angle or translation")
         source = (src, sp)
         target = (dst, tp)
-        if target in (occupied_targets or track_targets) or target in destinations:
+        # The two rotational representations share one transform channel.
+        alternate = (dst, "rotation_quaternion") if tp == "rotation_angle" else None
+        occupied = occupied_targets if occupied_targets is not None else track_targets
+        if (target in occupied or target in destinations
+                or (alternate is not None and alternate in occupied)):
             raise ValidationError("driver target conflicts with a track or another driver")
         if source not in track_targets and source not in all_targets:
             raise ValidationError("driver source must be an existing animated property")
@@ -572,6 +590,7 @@ def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
     if not isinstance(constraints, list) or len(constraints) > 128:
         raise ValidationError("constraints must be a bounded list (max 128)")
     identifiers = set()
+    object_mobility = {}
     common_fields = {"id", "kind", "object_id", "movable",
                      "tolerance", "start", "end"}
     fields = {
@@ -600,6 +619,9 @@ def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
             raise ReferenceError("constraint refers to a missing object")
         if type(item["movable"]) is not bool:
             raise ValidationError("constraint movable must be boolean")
+        if oid in object_mobility and object_mobility[oid] is not item["movable"]:
+            raise ValidationError("conflicting mobility declarations for constrained object")
+        object_mobility[oid] = item["movable"]
         if objects[oid].get("parent") is not None:
             raise ValidationError("native position constraints require root objects")
         tolerance = finite(item.get("tolerance", 1e-6), "constraint tolerance", limit=1e6)
@@ -700,6 +722,15 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
     original_report = report(start, "unsatisfied")
     if original_report["status"] == "satisfied":
         return original_report
+    # Any violated constraint with no movable endpoint is independently
+    # infeasible, regardless of other unconstrained movable entities.
+    for constraint, detail in zip(constraints, original_report["constraints"]):
+        endpoints = {constraint["object_id"]}
+        if "other_id" in constraint:
+            endpoints.add(constraint["other_id"])
+        if not detail["satisfied"] and not (endpoints & set(movable_ids)):
+            return {**original_report, "status": "infeasible",
+                    "solver_status": "analytic_fixed_endpoints"}
     if not movable_ids:
         original_report["status"] = "infeasible"
         return original_report
