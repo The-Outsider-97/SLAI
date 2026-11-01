@@ -13,7 +13,7 @@ from math import hypot
 from ..common.errors import ReferenceError, ValidationError, ResourceLimitError
 from ..common.helpers import finite, vector
 from ..common.ids import require_id
-from ..common.transforms import compose, from_axis_angle, from_translation
+from ..common.transforms import IDENTITY, compose, from_axis_angle, from_translation
 
 MAX_JOINTS = 256
 
@@ -125,14 +125,29 @@ def solve_inverse_kinematics(
     if len(chain) > 32:
         raise ResourceLimitError("IK chain exceeds supported 32 degrees of freedom")
     originals = {item: by_object[item].get("value", 0) for item in chain}
+    ancestry = []
+    cursor = oid
+    while cursor is not None:
+        ancestry.append(cursor)
+        cursor = objects[cursor].get("parent")
+    ancestry.reverse()
+    # IK evaluates a single kinematic chain; re-validating/deep-copying an
+    # entire SGEO scene at every optimization iterate is unnecessary.
+    # Callers supply a revision-checked detached scene snapshot.
+    baseline = tuple((obj_id, tuple(objects[obj_id]["transform"]), by_object.get(obj_id))
+                     for obj_id in ancestry)
 
     def pose(point):
         return {item: point["j%d" % i] for i, item in enumerate(chain)}
 
     def location(point):
-        transforms = forward_kinematics(scene, joints, pose(point))
-        matrix = transforms[oid]
-        return (matrix[3], matrix[7], matrix[11])
+        q = pose(point)
+        transform = IDENTITY
+        for obj_id, local, joint in baseline:
+            transform = compose(transform, local)
+            if joint is not None:
+                transform = compose(transform, joint_transform(joint, q.get(obj_id)))
+        return (transform[3], transform[7], transform[11])
 
     def residual(point):
         xyz = location(point)
