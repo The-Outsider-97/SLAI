@@ -316,7 +316,7 @@ def _validate_clips(spec, scene, direct_targets) -> set:
     """Validate bounded reusable property clips and non-overlapping bindings.
 
     P1 composition is intentionally deterministic: one writer per target
-    property, including authored tracks and clip instances. Layer blending
+    property at a time; disjoint clips may reuse the same binding. Layer blending
     and simultaneous overrides require a separately versioned policy.
     """
     clips, instances = spec.get("clips", []), spec.get("instances", [])
@@ -405,6 +405,7 @@ def _validate_clips(spec, scene, direct_targets) -> set:
                 _validate_continuous_track(track)
         definitions[cid] = clip
     occupied = set(direct_targets)
+    instance_intervals: dict[tuple, list[tuple[float, float]]] = {}
     instance_ids = set()
     total_sampled_frames = sum(len(t["keyframes"]) for t in spec["tracks"])
     total_sampled_frames += sum(len(t["keyframes"]) for c in definitions.values() for t in c["tracks"])
@@ -440,8 +441,14 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             raise ResourceLimitError("instanced clip sampling budget exceeded")
         for track in mapped:
             target = (oid, track["property"])
-            if target in occupied:
-                raise ValidationError("clip binding conflicts with another animated property")
+            if target in direct_targets:
+                raise ValidationError("clip binding conflicts with an authored property track")
+            interval = (start, start + definitions[cid]["duration"]/speed)
+            windows = instance_intervals.setdefault(target, [])
+            if any(max(interval[0], previous[0]) <= min(interval[1], previous[1])
+                   for previous in windows):
+                raise ValidationError("overlapping clips cannot write the same property")
+            windows.append(interval)
             occupied.add(target)
     # Validate even dormant reusable assets with a supported scene binding.
     # Without a compatible target, their property semantics remain checked
