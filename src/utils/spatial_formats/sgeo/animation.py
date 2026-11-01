@@ -180,7 +180,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances", "layers", "skins", "transitions"} or not {"duration", "tracks"} <= set(spec):
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances", "layers", "skins", "transitions", "events", "choreographies"} or not {"duration", "tracks"} <= set(spec):
         raise ValidationError("v2 animation requires duration/tracks and optional drivers/constraints")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
@@ -312,12 +312,120 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     _validate_layers(spec, scene)
     _validate_skins(spec, scene)
     _validate_transitions(spec)
+    _validate_events(spec, objects)
+    _validate_choreographies(spec)
     return deepcopy(spec)
 
 
 
 
 
+
+
+def _validate_events(spec, objects):
+    """Bounded declarative markers; evaluation never executes side effects."""
+    events = spec.get("events", [])
+    if not isinstance(events, list) or len(events) > 4096:
+        raise ValidationError("events must be a list of at most 4096 markers")
+    seen = set()
+    for event in events:
+        if (not isinstance(event, dict) or set(event) - {
+                "id", "name", "time", "object_id"
+            } or not {"id", "name", "time"} <= set(event)):
+            raise ValidationError("invalid animation event marker")
+        eid = require_canonical_id(event["id"])
+        if eid in seen:
+            raise ValidationError("duplicate animation event identifier")
+        seen.add(eid)
+        name = event["name"]
+        if not isinstance(name, str) or not 1 <= len(name) <= 128:
+            raise ValidationError("event name must be a nonempty bounded string")
+        moment = finite(event["time"], "animation event time", limit=MAX_TIME)
+        if not 0 <= moment <= spec["duration"]:
+            raise ValidationError("event time exceeds animation duration")
+        if "object_id" in event and require_canonical_id(event["object_id"]) not in objects:
+            raise ReferenceError("event references missing object")
+
+
+def query_animation_events(scene, start, end, *, include_start=False) -> tuple:
+    """Query markers in a directed half-open time interval, without effects.
+
+    Forward traversal returns (start, end], reverse returns [end, start);
+    include_start makes the initial boundary inclusive. This lets a playback
+    consumer avoid duplicate events across adjacent ticks while seeking at
+    arbitrary times. The caller is responsible for dispatching side effects.
+    """
+    a = finite(start, "event start time", limit=MAX_TIME)
+    b = finite(end, "event end time", limit=MAX_TIME)
+    if a < 0 or b < 0 or type(include_start) is not bool:
+        raise ValidationError("event interval must be nonnegative and include_start boolean")
+    with scene._mutation_lock:
+        scene.validate()
+        data = scene.metadata.get(ANIMATION_V2_KEY)
+        if data is None:
+            return ()
+        markers = data.get("events", [])
+        if b >= a:
+            chosen = [e for e in markers if (a <= e["time"] if include_start else a < e["time"]) and e["time"] <= b]
+            chosen.sort(key=lambda e: (e["time"], e["id"]))
+        else:
+            chosen = [e for e in markers if b <= e["time"] and (e["time"] <= a if include_start else e["time"] < a)]
+            chosen.sort(key=lambda e: (-e["time"], e["id"]))
+        return tuple(deepcopy(chosen))
+
+
+def _validate_choreographies(spec):
+    """Synchronize clip instances by one authoritative leader local phase."""
+    entries = spec.get("choreographies", [])
+    if not isinstance(entries, list) or len(entries) > 128:
+        raise ValidationError("choreographies must be a list of at most 128")
+    instances = {i["id"]: i for i in spec.get("instances", [])}
+    seen, followers = set(), set()
+    for entry in entries:
+        if (not isinstance(entry, dict) or set(entry) != {
+                "id", "leader", "followers"
+            }):
+            raise ValidationError("choreography requires id, leader, and followers")
+        cid = require_canonical_id(entry["id"])
+        if cid in seen:
+            raise ValidationError("duplicate choreography identifier")
+        seen.add(cid)
+        leader = require_canonical_id(entry["leader"])
+        if leader not in instances or instances[leader].get("playback", "once") != "once":
+            raise ValidationError("choreography leader must be a once-playing clip instance")
+        mapped = entry["followers"]
+        if not isinstance(mapped, list) or not 1 <= len(mapped) <= 128:
+            raise ValidationError("choreography followers must contain 1..128 bindings")
+        for participant in mapped:
+            if not isinstance(participant, dict) or set(participant) - {"instance_id", "phase_offset"} or "instance_id" not in participant:
+                raise ValidationError("invalid choreography follower")
+            fid = require_canonical_id(participant["instance_id"])
+            if fid not in instances or fid == leader or fid in followers:
+                raise ValidationError("unknown, repeated, or self-referential choreography follower")
+            if instances[fid].get("playback", "once") != "once":
+                raise ValidationError("choreography followers currently require once playback")
+            offset = finite(participant.get("phase_offset", 0), "choreography phase offset", limit=1)
+            if not -1 <= offset <= 1:
+                raise ValidationError("choreography phase offset must be in [-1,1]")
+            followers.add(fid)
+        if leader in followers:
+            raise ValidationError("choreography dependency cycle")
+    if any(e["leader"] in followers for e in entries):
+        raise ValidationError("choreography leaders cannot also follow another group")
+
+
+def _choreography_times(spec, timestamp, definitions, instances):
+    """Map follower clip-time to leader normalized phase, keeping data immutable."""
+    overrides = {}
+    for entry in spec.get("choreographies", []):
+        leader = instances[entry["leader"]]
+        length = definitions[leader["clip_id"]]["duration"]
+        phase = (timestamp - leader["start"]) * leader.get("speed", 1) / length
+        for follower in entry["followers"]:
+            instance = instances[follower["instance_id"]]
+            own_length = definitions[instance["clip_id"]]["duration"]
+            overrides[follower["instance_id"]] = (phase + follower.get("phase_offset", 0)) * own_length
+    return overrides
 
 
 def _transition_weight(transition, timestamp):
@@ -490,7 +598,7 @@ def _validate_layers(spec, scene):
     count = 0
     for layer in layers:
         if not isinstance(layer, dict) or set(layer) - {
-            "id", "mode", "weight", "enabled", "tracks", "reference"
+            "id", "mode", "weight", "enabled", "tracks", "reference", "mask", "time_offset", "time_scale"
         } or not {"id", "mode", "weight", "tracks"} <= set(layer):
             raise ValidationError("invalid animation layer fields")
         lid = require_canonical_id(layer["id"])
@@ -521,6 +629,15 @@ def _validate_layers(spec, scene):
         if mode == "override" and refs:
             raise ValidationError("override layers do not accept additive references")
         keys = {t["object_id"] + ":" + t["property"] for t in tracks}
+        mask = layer.get("mask", sorted(keys))
+        if (not isinstance(mask, list) or not mask or len(mask) > MAX_TRACKS
+                or any(not isinstance(key, str) for key in mask)
+                or len(set(mask)) != len(mask) or not set(mask) <= keys):
+            raise ValidationError("layer mask must select unique existing track bindings")
+        offset = finite(layer.get("time_offset", 0), "layer time offset", limit=MAX_TIME)
+        speed = finite(layer.get("time_scale", 1), "layer time scale", limit=1e4)
+        if speed <= 0:
+            raise ValidationError("layer time scale must be positive")
         if mode == "additive" and any(t["property"] == "rotation_quaternion" for t in tracks):
             for t in tracks:
                 if t["property"] == "rotation_quaternion" and t.get("interpolation", "linear") == "linear":
@@ -561,9 +678,15 @@ def _compose_layer(grouped, layer, timestamp):
         return
     weight = layer["weight"]
     mode = layer["mode"]
+    selected = set(layer.get("mask", (
+        track["object_id"] + ":" + track["property"] for track in layer["tracks"]
+    )))
+    local_time = (timestamp - layer.get("time_offset", 0)) * layer.get("time_scale", 1)
     for track in layer["tracks"]:
         oid, prop = track["object_id"], track["property"]
-        value = _sample_v2(track, timestamp)
+        if oid + ":" + prop not in selected:
+            continue
+        value = _sample_v2(track, local_time)
         target = grouped.setdefault(oid, {})
         previous = target.get(prop)
         if prop == "rotation_quaternion" and "rotation_angle" in target:
@@ -1343,9 +1466,13 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
     if active == ANIMATION_V2_KEY and spec.get("instances"):
         definitions = {clip["id"]: clip for clip in spec.get("clips", [])}
         sampled_instances = {}
+        by_instance_id = {instance["id"]: instance for instance in spec["instances"]}
+        choreography_times = _choreography_times(spec, timestamp, definitions, by_instance_id)
         for instance in spec["instances"]:
             clip = definitions[instance["clip_id"]]
-            local_time = (timestamp - instance["start"]) * instance.get("speed", 1)
+            local_time = choreography_times.get(
+                instance["id"], (timestamp - instance["start"]) * instance.get("speed", 1)
+            )
             cycles = instance.get("repeat", 1)
             span = clip["duration"]
             if local_time < 0 or local_time > span * cycles:
@@ -1440,4 +1567,4 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
 
 __all__ = ["ANIMATION_KEY", "ANIMATION_V2_KEY", "ANIMATION_KEYS", "EvaluatedScene",
            "validate_animation", "validate_animation_v2", "evaluate_scene",
-           "solve_animation_constraints"]
+           "solve_animation_constraints", "query_animation_events"]
