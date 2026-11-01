@@ -201,6 +201,39 @@ class Scene:
         )
         return {"revision": candidate.revision, **result}
 
+    def apply_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Solve and commit a supported static joint pose atomically.
+
+        This intentionally refuses authored tracks/drivers/constraints so an
+        IK proposal cannot be committed when the evaluated pose differs from
+        its verified unanimated kinematic baseline. Animation-track authoring
+        remains the responsibility of the existing animation editing API.
+        """
+        from .animation import ANIMATION_V2_KEY
+        from ..common.errors import ConflictError
+        solution = self.solve_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+        if solution["status"] != "solved":
+            return {**solution, "committed": False}
+        with self._mutation_lock:
+            if self.revision != solution["revision"]:
+                raise ConflictError("scene changed during IK solve; commit rejected")
+            spec = deepcopy(self.metadata.get(ANIMATION_V2_KEY))
+            if spec is None:
+                raise ValidationError("scene has no v2 animation")
+            if spec.get("tracks") or spec.get("drivers") or spec.get("constraints") or spec.get("instances"):
+                raise ValidationError("IK pose commit requires an unanimated, unconstrained joint assembly")
+            proposals = solution["joint_values"]
+            for joint in spec.get("joints", []):
+                if joint["object_id"] in proposals:
+                    joint["value"] = proposals[joint["object_id"]]
+            committed_revision = self.set_animation(spec, version=2)
+        return {**solution, "revision": committed_revision, "committed": True}
+
     def add_object(self, *, name="", geometry=None, parent=None, transform=None, metadata=None, object_id=None,
                    material=None):
         """Commit one individually validated leaf object under the scene lock.
