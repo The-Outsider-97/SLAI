@@ -126,20 +126,37 @@ class Scene:
                     raise ValidationError("family instance geometry does not match its parameters")
             elif "parameters" in obj:
                 raise ValidationError("parameters require a family reference")
-        if "slai.animation.v1" in self.metadata:
-            from .animation import validate_animation
-            validate_animation(self.metadata["slai.animation.v1"], self)
+        from .animation import ANIMATION_KEY, ANIMATION_V2_KEY, validate_animation, validate_animation_v2
+        if ANIMATION_KEY in self.metadata and ANIMATION_V2_KEY in self.metadata:
+            raise ValidationError("scene cannot contain both v1 and v2 animation")
+        if ANIMATION_KEY in self.metadata:
+            validate_animation(self.metadata[ANIMATION_KEY], self)
+        if ANIMATION_V2_KEY in self.metadata:
+            validate_animation_v2(self.metadata[ANIMATION_V2_KEY], self)
         return self
 
-    def set_animation(self, animation: dict | None) -> int:
-        """Atomically replace/remove an animation and increment one revision."""
-        from .animation import ANIMATION_KEY, validate_animation
+    def set_animation(self, animation: dict | None, *, version: int | None = None) -> int:
+        """Atomically replace animation, preserving the active version by default.
+
+        Explicit version=2 upgrades v1 data only when the caller chooses it.
+        Removing animation clears both supported versions. Validation precedes
+        committing the detached candidate.
+        """
+        from .animation import (ANIMATION_KEY, ANIMATION_V2_KEY, validate_animation,
+                                validate_animation_v2)
+        if version not in (None, 1, 2) or isinstance(version, bool):
+            raise ValidationError("animation version must be 1 or 2")
         with self._mutation_lock:
             candidate = self._detached_copy()
-            if animation is None:
-                candidate.metadata.pop(ANIMATION_KEY, None)
-            else:
-                candidate.metadata[ANIMATION_KEY] = validate_animation(animation, candidate)
+            active_v2 = ANIMATION_V2_KEY in candidate.metadata
+            chosen = (2 if active_v2 else 1) if version is None else version
+            candidate.metadata.pop(ANIMATION_KEY, None)
+            candidate.metadata.pop(ANIMATION_V2_KEY, None)
+            if animation is not None:
+                if chosen == 2:
+                    candidate.metadata[ANIMATION_V2_KEY] = validate_animation_v2(animation, candidate)
+                else:
+                    candidate.metadata[ANIMATION_KEY] = validate_animation(animation, candidate)
             candidate.revision += 1
             candidate.validate()
             self.metadata = candidate.metadata

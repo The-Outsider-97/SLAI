@@ -123,6 +123,24 @@ def vector(value, dimension: int, label: str = "vector") -> tuple[float, ...]:
     return tuple(finite(v, label) for v in value)
 
 
+
+def cubic_hermite_value(p0, m0, p1, m1, alpha):
+    """Scalar Hermite interpolation with tangents expressed per unit interval.
+
+    For time-derivative tangents, callers must multiply by the duration of
+    their keyframe segment before invoking this pure shared primitive.
+    """
+    p0, m0 = finite(p0, "p0"), finite(m0, "m0")
+    p1, m1 = finite(p1, "p1"), finite(m1, "m1")
+    t = finite(alpha, "alpha", limit=1)
+    if t < 0:
+        raise ValidationError("interpolation alpha must be in [0, 1]")
+    t2, t3 = t*t, t*t*t
+    return finite((2*t3 - 3*t2 + 1)*p0 + (t3 - 2*t2 + t)*m0
+                  + (-2*t3 + 3*t2)*p1 + (t3 - t2)*m1,
+                  "interpolated value")
+
+
 # ---------------------------------------------------------------------------
 # Structural validation and serialization
 # ---------------------------------------------------------------------------

@@ -265,10 +265,10 @@ class SceneDocument(SpatialDocument):
                                                                        "operands": [first_id, second_id],
                                                                        "representation": "rectilinear-mesh"}})
 
-    def set_animation(self, animation: dict | None) -> int:
-        """Persist a bounded declarative animation (``None`` removes it)."""
+    def set_animation(self, animation: dict | None, *, version: int | None = None) -> int:
+        """Persist native animation; explicit version=2 opts into the extended schema."""
         with self._edit() as model:
-            return model.set_animation(animation)
+            return model.set_animation(animation, version=version)
 
     def offset_box_faces(self, object_id: str, distance: float, *, name: str = "") -> str:
         """Create a mitered six-face box offset as a separate SGEO object.
@@ -290,7 +290,9 @@ class SceneDocument(SpatialDocument):
 
     def animation(self) -> dict | None:
         """Get a detached animation definition, not a live reference."""
-        return deepcopy(self._model.metadata.get("slai.animation.v1"))
+        from .animation import ANIMATION_KEY, ANIMATION_V2_KEY
+        metadata = self._model.metadata
+        return deepcopy(metadata.get(ANIMATION_V2_KEY, metadata.get(ANIMATION_KEY)))
 
     def evaluate(self, time: float):
         """Return the detached evaluated SGEO scene at time in seconds."""
