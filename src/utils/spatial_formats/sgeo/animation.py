@@ -485,16 +485,29 @@ def _evaluate_drivers(drivers: list, grouped: dict):
 
 
 def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
-    """Validate supported time-independent world-position constraints."""
+    """Validate bounded, typed, world-position constraints for root objects."""
     if not isinstance(constraints, list) or len(constraints) > 128:
         raise ValidationError("constraints must be a bounded list (max 128)")
     identifiers = set()
+    common_fields = {"id", "kind", "object_id", "movable",
+                     "tolerance", "start", "end"}
+    fields = {
+        "position": {"target"},
+        "distance": {"other_id", "distance"},
+        "bounds": {"minimum", "maximum"},
+        "attachment": {"other_id", "offset"},
+        "alignment": {"other_id", "axis"},
+    }
     for item in constraints:
-        if not isinstance(item, dict) or set(item) - {
-            "id", "kind", "object_id", "other_id", "target", "distance",
-            "tolerance", "movable", "start", "end"
-        } or not {"id", "kind", "object_id", "movable"} <= set(item):
-            raise ValidationError("invalid constraint record")
+        if not isinstance(item, dict) or not common_fields <= set(item):
+            raise ValidationError("constraint requires id, kind, object_id and movable")
+        kind = item["kind"]
+        if not isinstance(kind, str) or kind not in fields:
+            raise ValidationError("unsupported native animation constraint kind")
+        if set(item) - (common_fields | fields[kind]):
+            raise ValidationError("unexpected fields for animation constraint kind")
+        if not (fields[kind] - {"distance"} <= set(item)):
+            raise ValidationError("missing required constraint parameters")
         ident = require_id(item["id"])
         if ident in identifiers:
             raise ValidationError("duplicate constraint id")
@@ -502,11 +515,10 @@ def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
         oid = require_id(item["object_id"])
         if oid not in objects:
             raise ReferenceError("constraint refers to a missing object")
-        movable = item["movable"]
-        if type(movable) is not bool:
+        if type(item["movable"]) is not bool:
             raise ValidationError("constraint movable must be boolean")
         if objects[oid].get("parent") is not None:
-            raise ValidationError("native position constraints currently require root objects")
+            raise ValidationError("native position constraints require root objects")
         tolerance = finite(item.get("tolerance", 1e-6), "constraint tolerance", limit=1e6)
         if tolerance <= 0:
             raise ValidationError("constraint tolerance must be positive")
@@ -514,22 +526,28 @@ def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
         end = finite(item.get("end", duration), "constraint activation end", limit=MAX_TIME)
         if start < 0 or end < start or end > duration:
             raise ValidationError("invalid constraint activation interval")
-        if item["kind"] == "position":
-            if "other_id" in item or "distance" in item:
-                raise ValidationError("position constraint cannot have distance fields")
-            vector(item.get("target"), 3, "position target")
-        elif item["kind"] == "distance":
-            if "target" in item:
-                raise ValidationError("distance constraint cannot have a position target")
+        if kind == "position":
+            vector(item["target"], 3, "position target")
+        elif kind == "bounds":
+            lo = vector(item["minimum"], 3, "bounds minimum")
+            hi = vector(item["maximum"], 3, "bounds maximum")
+            if any(lo[i] > hi[i] for i in range(3)):
+                raise ValidationError("animation bounds minimum exceeds maximum")
+        else:
             other = require_id(item.get("other_id"))
             if other not in objects or other == oid:
-                raise ReferenceError("invalid distance constraint endpoint")
+                raise ReferenceError("invalid constraint endpoint")
             if objects[other].get("parent") is not None:
-                raise ValidationError("native distance constraints currently require root objects")
-            if finite(item.get("distance"), "constraint distance", limit=1e9) < 0:
-                raise ValidationError("distance must be nonnegative")
-        else:
-            raise ValidationError("unsupported animation constraint kind")
+                raise ValidationError("native coupled constraints require root objects")
+            if kind == "distance":
+                if finite(item.get("distance"), "constraint distance", limit=1e9) < 0:
+                    raise ValidationError("distance must be nonnegative")
+            elif kind == "attachment":
+                vector(item["offset"], 3, "attachment offset")
+            else:
+                axis = vector(item["axis"], 3, "alignment axis")
+                if sum(x*x for x in axis) < 1e-24:
+                    raise ValidationError("alignment axis must be nonzero")
 
 
 
@@ -556,11 +574,27 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
 
     def residual(c, point):
         a = location(c["object_id"], point)
-        if c["kind"] == "position":
+        kind = c["kind"]
+        if kind == "position":
             return [a[k] - c["target"][k] for k in range(3)]
+        if kind == "bounds":
+            lo, hi = c["minimum"], c["maximum"]
+            return [
+                min(0.0, a[k] - lo[k]) + max(0.0, a[k] - hi[k])
+                for k in range(3)
+            ]
         b = location(c["other_id"], point)
-        from math import hypot
-        return [hypot(*(a[k]-b[k] for k in range(3))) - c["distance"]]
+        if kind == "distance":
+            from math import hypot
+            return [hypot(*(a[k]-b[k] for k in range(3))) - c["distance"]]
+        if kind == "attachment":
+            return [a[k] - b[k] - c["offset"][k] for k in range(3)]
+        # Alignment is satisfied when (a-b) is parallel to the axis.
+        ax, ay, az = vector(c["axis"], 3, "alignment axis")
+        norm = (ax*ax + ay*ay + az*az)**0.5
+        ax, ay, az = ax/norm, ay/norm, az/norm
+        dx, dy, dz = (a[k]-b[k] for k in range(3))
+        return [dy*az-dz*ay, dz*ax-dx*az, dx*ay-dy*ax]
 
     def report(point, status, *, solver_status=None, iterations=None):
         details = []
