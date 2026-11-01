@@ -606,7 +606,7 @@ def test_sequential_mixed_rotation_representations_can_share_channel():
     scene = Scene()
     obj = scene.add_object(name="rotation")
     a, b = uid(), uid()
-    spec = {"duration": 2, "tracks": [],
+    spec = {"duration": 2.1, "tracks": [],
             "clips": [
                 {"id": a, "duration": 1, "tracks": [
                     {"property": "rotation_angle", "axis": [0, 0, 1],
