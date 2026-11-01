@@ -645,7 +645,7 @@ def _validate_clips(spec, scene, direct_targets) -> set:
         raise ResourceLimitError("clip definition keyframe budget exceeded")
     for instance in instances:
         if not isinstance(instance, dict) or set(instance) - {
-            "id", "clip_id", "object_id", "start", "speed"
+            "id", "clip_id", "object_id", "start", "speed", "playback", "repeat"
         } or not {"id", "clip_id", "object_id", "start"} <= set(instance):
             raise ValidationError("invalid clip instance fields")
         iid = require_canonical_id(instance["id"])
@@ -658,7 +658,15 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             raise ReferenceError("clip instance references a missing definition")
         start = finite(instance["start"], "clip instance start", limit=MAX_TIME)
         speed = finite(instance.get("speed", 1), "clip instance speed", limit=1e4)
-        if start < 0 or speed <= 0 or start + definitions[cid]["duration"]/speed > spec["duration"] + 1e-9:
+        playback = instance.get("playback", "once")
+        repeat = instance.get("repeat", 1)
+        if playback not in {"once", "reverse", "loop", "pingpong"}:
+            raise ValidationError("unsupported clip playback mode")
+        if type(repeat) is not int or not 1 <= repeat <= 1024:
+            raise ValidationError("clip repeat must be an integer in [1,1024]")
+        if playback in {"once", "reverse"} and repeat != 1:
+            raise ValidationError("once/reverse playback cannot repeat")
+        if start < 0 or speed <= 0 or start + repeat*definitions[cid]["duration"]/speed > spec["duration"] + 1e-9:
             raise ValidationError("clip instance exceeds animation duration")
         # Reuse the exact same native typed-track validator and binding rules.
         mapped = [
@@ -676,7 +684,7 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             channel_target = (oid, channel(track["property"]))
             if channel_target in authored_channels:
                 raise ValidationError("clip binding conflicts with an authored property channel")
-            interval = (start, start + definitions[cid]["duration"]/speed)
+            interval = (start, start + repeat*definitions[cid]["duration"]/speed)
             instance_intervals.setdefault(channel_target, []).append(interval)
             occupied.add(target)
     for windows in instance_intervals.values():
@@ -1259,8 +1267,20 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
         for instance in spec["instances"]:
             clip = definitions[instance["clip_id"]]
             local_time = (timestamp - instance["start"]) * instance.get("speed", 1)
-            if local_time < 0 or local_time > clip["duration"]:
+            cycles = instance.get("repeat", 1)
+            span = clip["duration"]
+            if local_time < 0 or local_time > span * cycles:
                 continue
+            mode = instance.get("playback", "once")
+            if mode == "reverse":
+                local_time = span - local_time
+            elif mode in {"loop", "pingpong"}:
+                # Exact endpoint is the final frame, not an accidental restart.
+                cycle = min(int(local_time / span), cycles - 1)
+                phase = local_time - cycle * span
+                if mode == "pingpong" and cycle % 2:
+                    phase = span - phase
+                local_time = phase
             for track in clip["tracks"]:
                 grouped.setdefault(instance["object_id"], {})[track["property"]] = (
                     track, _sample_v2(track, local_time)
