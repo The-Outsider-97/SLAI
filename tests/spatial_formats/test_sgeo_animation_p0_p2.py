@@ -579,3 +579,78 @@ def test_sequential_reusable_clips_share_target_without_overlapping():
     with pytest.raises(ValidationError, match="overlapping"):
         scene.set_animation(bad)
     assert scene.as_dict() == baseline
+
+
+def test_clip_rotation_channel_conflict_with_direct_track():
+    scene = Scene()
+    obj = scene.add_object(name="rotation")
+    clip_id = uid()
+    instance_id = uid()
+    authored = track(obj, "rotation_angle", 0, 1, axis=[0, 0, 1])
+    clip_track = {"property": "rotation_quaternion", "interpolation": "slerp",
+                  "keyframes": [
+                      {"time": 0, "value": [1, 0, 0, 0]},
+                      {"time": 1, "value": [0, 0, 0, 1]},
+                  ]}
+    spec = {"duration": 2, "tracks": [authored],
+            "clips": [{"id": clip_id, "duration": 1, "tracks": [clip_track]}],
+            "instances": [{"id": instance_id, "clip_id": clip_id,
+                           "object_id": obj, "start": 0}]}
+    before = scene.as_dict()
+    with pytest.raises(ValidationError, match="property channel"):
+        scene.set_animation(spec, version=2)
+    assert scene.as_dict() == before
+
+
+def test_sequential_mixed_rotation_representations_can_share_channel():
+    scene = Scene()
+    obj = scene.add_object(name="rotation")
+    a, b = uid(), uid()
+    spec = {"duration": 2, "tracks": [],
+            "clips": [
+                {"id": a, "duration": 1, "tracks": [
+                    {"property": "rotation_angle", "axis": [0, 0, 1],
+                     "keyframes": [{"time": 0, "value": 0}, {"time": 1, "value": 1}]}]},
+                {"id": b, "duration": 1, "tracks": [
+                    {"property": "rotation_quaternion", "interpolation": "slerp",
+                     "keyframes": [{"time": 0, "value": [1, 0, 0, 0]},
+                                   {"time": 1, "value": [0, 0, 0, 1]}]}]},
+            ],
+            "instances": [
+                {"id": uid(), "clip_id": a, "object_id": obj, "start": 0},
+                {"id": uid(), "clip_id": b, "object_id": obj, "start": 1.001},
+            ]}
+    scene.set_animation(spec, version=2)
+    assert scene.evaluate(0.5).world_transform(obj)
+    assert scene.evaluate(1.5).world_transform(obj)
+
+
+def test_fixed_constraint_cannot_be_moved_by_unrelated_movable_object():
+    scene = Scene()
+    fixed = scene.add_object(name="fixed")
+    free = scene.add_object(name="free")
+    spec = {"duration": 1, "tracks": [], "constraints": [
+        {"id": uid(), "kind": "position", "object_id": fixed,
+         "movable": False, "target": [5, 0, 0]},
+        {"id": uid(), "kind": "position", "object_id": free,
+         "movable": True, "target": [1, 0, 0]},
+    ]}
+    scene.set_animation(spec, version=2)
+    from src.utils.spatial_formats.sgeo.animation import solve_animation_constraints
+    snapshot = scene._detached_copy()
+    result = solve_animation_constraints(snapshot, spec["constraints"])
+    assert result["status"] == "infeasible"
+    assert result["solver_status"] == "analytic_fixed_endpoints"
+
+
+def test_conflicting_constraint_mobility_rejected():
+    scene = Scene()
+    oid = scene.add_object(name="mobility")
+    spec = {"duration": 1, "tracks": [], "constraints": [
+        {"id": uid(), "kind": "position", "object_id": oid,
+         "movable": False, "target": [0, 0, 0]},
+        {"id": uid(), "kind": "position", "object_id": oid,
+         "movable": True, "target": [1, 0, 0]},
+    ]}
+    with pytest.raises(ValidationError, match="mobility"):
+        scene.set_animation(spec, version=2)
