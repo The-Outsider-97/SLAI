@@ -57,7 +57,8 @@ An instance is active within its own bounded time window; inactive tracks do
 not override authored base properties. The same clip may bind to several
 objects without duplicating its authored keyframes. Multiple simultaneous
 writers to the same target/property are rejected in this foundation, rather
-than silently layered. Multi-layer blend policies and clip transitions are
+than silently layered. Sequential, non-overlapping instances can address the
+same target/property deterministically. Multi-layer blend policies and clip transitions are
 planned as a separate, explicitly specified capability.
 
 V2 `drivers` are acyclic, declarative scalar mechanical couplings:
@@ -91,6 +92,8 @@ supports **root-object world positions** for these kinds:
 
 All are hard constraints. Compatible position-only systems can be solved
 analytically, with contradictory tolerance intervals classified infeasible.
+Isolated distance, bounds, attachment and alignment constraints also use
+analytical projections, avoiding unnecessary nonlinear solver overhead.
 Coupled problems use SLAI's existing `OptimizationSolver` nonlinear adapter
 (SciPy). A result is accepted **only after its physical-space residuals meet
 all individual tolerances**. Solver failure does not prove mathematical
@@ -112,7 +115,8 @@ the same scene hierarchy, never a separate skeleton database.
 position-target IK for one end effector, using a bounded local nonlinear
 optimization against supported joint limits. Deterministic restarts reduce
 stagnation at singular poses. The returned structured proposal identifies
-`solved` versus `numerically_unresolved`, the measured target error,
+`solved`, `numerically_unresolved`, `unsupported`, or `invalid` as appropriate,
+with the measured target error,
 iterations and proposed joint values. It never silently commits motion or
 claims global optimality.
 
