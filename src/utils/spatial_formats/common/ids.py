@@ -67,6 +67,19 @@ def require_id(value: str) -> str:
     return str(parsed)
 
 
+def require_canonical_id(value: str) -> str:
+    """Require a lowercase canonical UUID, not merely a parseable UUID.
+
+    Unlike historical `require_id`, this stricter opt-in validator rejects
+    uppercase aliases so identity-sensitive v2 animation DAGs and bindings
+    cannot pass validation then fail to resolve different dictionary keys.
+    """
+    canonical = require_id(value)
+    if value != canonical:
+        raise ValidationError("identifier must use canonical lowercase UUID form")
+    return canonical
+
+
 def require_id_or_none(value):
     """Validate ``value`` as a UUID or ``None``; used for optional parents."""
     if value is None:
@@ -155,6 +168,7 @@ __all__ = [
     "new_id",
     "is_valid_id",
     "require_id",
+    "require_canonical_id",
     "require_id_or_none",
     "require_id_list",
     "coerce_id",
