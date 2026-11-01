@@ -14,7 +14,8 @@ control who can bind a scene and issue mutations.
 """
 from __future__ import annotations
 
-from ..sgeo.animation import evaluate_scene, validate_animation
+from ..sgeo.animation import (ANIMATION_V2_KEY, evaluate_scene,
+                              validate_animation, validate_animation_v2)
 from ..sgeo.scene import Scene
 from logs.logger import get_logger # type: ignore
 
@@ -59,12 +60,28 @@ class SGEOAnimationAdapter:
         return evaluate_scene(self._scene, time, expected_revision=expected_revision)
 
     def validate_animation(self, spec: dict) -> dict:
-        """Delegate the complete v1 schema and family validation to SGEO."""
-        return validate_animation(spec, self._scene)
+        """Delegate active version's complete schema validation to native SGEO."""
+        with self._scene._mutation_lock:
+            if ANIMATION_V2_KEY in self._scene.metadata:
+                return validate_animation_v2(spec, self._scene)
+            return validate_animation(spec, self._scene)
 
-    def set_animation(self, animation: dict | None) -> int:
+    def set_animation(self, animation: dict | None, *, version: int | None = None) -> int:
         """Delegate the only authoritative mutation and revision increment."""
-        return self._scene.set_animation(animation)
+        return self._scene.set_animation(animation, version=version)
+
+    def forward_kinematics(self, values: dict | None = None):
+        """Use SGEO's native FK and stable scene revision."""
+        return self._scene.forward_kinematics(values)
+
+    def solve_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Return an SGEO-produced IK proposal without mutating the scene."""
+        return self._scene.solve_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
 
 
 __all__ = ["SGEOAnimationAdapter"]
