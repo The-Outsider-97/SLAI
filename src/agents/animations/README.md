@@ -36,7 +36,7 @@ The native `slai.animation.v2` metadata document retains `duration` and
   existing v2 animation via the existing atomic animation-command path.
   It does not perform obstacle avoidance, inverse kinematics or dynamics.
 
-The Animation Agent supports the existing `edit_batch` operation for
+The Animation Agent exposes `set_animation_v2` for explicit native v2 creation or upgrade, and supports the existing `edit_batch` operation for
 `add_clip`, `update_clip`, `delete_clip`, `add_instance`,
 `update_instance`, `delete_instance`, `add_layer`, `update_layer`,
 `delete_layer`, `add_event` and `delete_event`. Each operation uses
