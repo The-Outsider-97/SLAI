@@ -129,7 +129,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints"} or not {"duration", "tracks"} <= set(spec):
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints"} or not {"duration", "tracks"} <= set(spec):
         raise ValidationError("v2 animation requires duration/tracks and optional drivers/constraints")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
@@ -141,6 +141,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
         raise ResourceLimitError("too many animation tracks")
     objects = {obj["id"]: obj for obj in scene.objects}
     families = {fam["id"]: fam for fam in scene.families}
+    from .kinematics import validate_joints
+    joints = validate_joints(spec.get("joints", []), objects)
     seen = set()
     count = 0
     for track in tracks:
@@ -155,7 +157,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
         prop = track.get("property")
         if not isinstance(prop, str) or (prop not in {
             "translation", "rotation_angle", "rotation_quaternion",
-            "scale", "visibility"
+            "scale", "visibility", "joint"
         } and not prop.startswith("parameter.")):
             raise ValidationError("unsupported v2 animation property")
         if (oid, prop) in seen:
@@ -172,6 +174,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
         elif "axis" in track:
             raise ValidationError("axis only supported for axis-angle tracks")
         definition = None
+        if prop == "joint" and (oid not in joints or joints[oid]["kind"] == "fixed"):
+            raise ValidationError("joint animation requires a movable declared joint")
         if prop.startswith("parameter."):
             fam = families.get(obj.get("family_id"))
             name = prop.removeprefix("parameter.")
@@ -217,6 +221,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                     raise ValidationError("visibility keyframes must be booleans")
             else:
                 num = finite(value, "animation scalar", limit=1e9)
+                if prop == "joint" and not joints[oid]["lower"] <= num <= joints[oid]["upper"]:
+                    raise ValidationError("animated joint violates its declared limits")
                 if definition is not None:
                     if (num < definition.get("min", 0 if definition["type"] == "length" else -1e12)
                             or num > definition.get("max", 1e12)):
@@ -636,6 +642,10 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
         grouped.setdefault(track["object_id"], {})[track["property"]] = (track, _sample_v2(track, timestamp) if active == ANIMATION_V2_KEY else _sample(track, timestamp))
     if active == ANIMATION_V2_KEY and spec.get("drivers"):
         _evaluate_drivers(spec["drivers"], grouped)
+    joint_index = {}
+    if active == ANIMATION_V2_KEY and spec.get("joints"):
+        from .kinematics import validate_joints
+        joint_index = validate_joints(spec["joints"], index)
     invisible: set[str] = set()
     for oid, tracks in grouped.items():
         obj = index[oid]
@@ -651,6 +661,10 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
             transform = compose(transform, from_quaternion(tracks["rotation_quaternion"][1]))
         if "scale" in tracks:
             transform = compose(transform, from_scale(*tracks["scale"][1]))
+        if oid in joint_index:
+            from .kinematics import joint_transform
+            transform = compose(transform, joint_transform(
+                joint_index[oid], tracks["joint"][1] if "joint" in tracks else None))
         obj["transform"] = list(transform)
         parameters = {name.removeprefix("parameter."): value for name, (_, value) in tracks.items()
                       if name.startswith("parameter.")}
@@ -658,6 +672,13 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
             overrides = {**obj.get("parameters", {}), **parameters}
             obj["geometry"] = generate_geometry(families[obj["family_id"]], overrides)
             obj["parameters"] = overrides
+    # Joint defaults apply to untracked joints as well.
+    if joint_index:
+        from .kinematics import joint_transform
+        for oid, joint in joint_index.items():
+            if oid not in grouped:
+                obj = index[oid]
+                obj["transform"] = list(compose(obj["transform"], joint_transform(joint)))
     # Visibility inherits through the hierarchy without mutating object data.
     for oid, obj in index.items():
         parent = obj.get("parent")
