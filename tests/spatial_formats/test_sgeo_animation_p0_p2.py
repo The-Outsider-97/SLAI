@@ -271,3 +271,61 @@ def test_ik_stretched_arm_recovery_requires_bounded_multistart():
                                              max_iterations=250, tolerance=2e-3)
     assert outcome["status"] == "solved", outcome
     assert outcome["position_error"] <= 2e-3
+
+
+def test_scale_crossing_zero_is_rejected_before_animation_commit():
+    scene = Scene()
+    oid = scene.add_object(name="scale")
+    initial = scene.as_dict()
+    spec = {"duration": 2, "tracks": [
+        track(oid, "scale", [-1, 1, 1], [1, 1, 1]),
+    ]}
+    with pytest.raises(ValidationError, match="singular"):
+        scene.set_animation(spec, version=2)
+    assert scene.as_dict() == initial
+
+
+def test_cubic_joint_overshoot_rejected_analytically():
+    scene, shoulder, elbow, tip, joints = _arm()
+    candidate = deepcopy(scene.metadata["slai.animation.v2"])
+    candidate["tracks"] = [
+        {"object_id": shoulder, "property": "joint", "interpolation": "cubic",
+         "keyframes": [
+             {"time": 0, "value": 0, "in_tangent": 100, "out_tangent": 100},
+             {"time": 2, "value": 0, "in_tangent": -100, "out_tangent": -100},
+         ]}
+    ]
+    baseline = scene.as_dict()
+    with pytest.raises(ValidationError, match="bound"):
+        scene.set_animation(candidate)
+    assert scene.as_dict() == baseline
+
+
+def test_native_ik_pose_commit_changes_exactly_one_revision():
+    pytest.importorskip("scipy")
+    pytest.importorskip("numpy")
+    scene, shoulder, elbow, tip, joints = _arm()
+    before = scene.revision
+    committed = scene.apply_inverse_kinematics(
+        tip, [1, 1, 0], expected_revision=before, tolerance=1e-3,
+    )
+    assert committed["status"] == "solved", committed
+    assert committed["committed"] is True
+    assert committed["revision"] == before + 1
+    assert scene.revision == before + 1
+    evaluated = scene.evaluate(0).world_transform(tip)
+    assert evaluated[3] == pytest.approx(1, abs=1e-3)
+    assert evaluated[7] == pytest.approx(1, abs=1e-3)
+
+
+def test_native_ik_pose_commit_rejects_stale_revision_without_mutation():
+    scene, shoulder, elbow, tip, joints = _arm()
+    spec = deepcopy(scene.metadata["slai.animation.v2"])
+    spec["tracks"] = [track(shoulder, "joint", 0, 1)]
+    scene.set_animation(spec)
+    prior = scene.as_dict()
+    from src.utils.spatial_formats.common.errors import ConflictError
+    with pytest.raises(ConflictError):
+        scene.apply_inverse_kinematics(tip, [1, 1, 0],
+                                       expected_revision=scene.revision - 1)
+    assert scene.as_dict() == prior
