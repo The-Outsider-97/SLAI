@@ -31,7 +31,7 @@ from threading import RLock
 from time import perf_counter
 from typing import Any, cast
 
-from src.utils.spatial_formats.sgeo.animation import ANIMATION_KEY # type: ignore
+from src.utils.spatial_formats.sgeo.animation import ANIMATION_KEY, ANIMATION_V2_KEY # type: ignore
 from .base_agent import BaseAgent
 from .base.utils.main_config_loader import get_config_section
 from .animations.animation_commands import SUPPORTED_EDITS, apply_animation_batch, update_animation
@@ -378,7 +378,7 @@ class AnimationAgent(BaseAgent):
             if request.expected_revision is not None and scene.revision != request.expected_revision:
                 raise AnimationRevisionConflictError("scene revision mismatch")
             revision = scene.revision
-            document = deepcopy(scene.metadata.get(ANIMATION_KEY))
+            document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
 
     # ------------------------------------------------------------------
@@ -444,7 +444,7 @@ class AnimationAgent(BaseAgent):
         with lock:
             if expected_revision is not None and scene.revision != expected_revision:
                 raise AnimationRevisionConflictError("scene revision mismatch")
-            spec = scene.metadata.get(ANIMATION_KEY)
+            spec = scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY))
             if not isinstance(spec, Mapping):
                 raise AnimationStateError("scene has no animation document for playback")
             duration = ensure_finite_non_negative(spec.get("duration"), "duration")
@@ -465,7 +465,7 @@ class AnimationAgent(BaseAgent):
         if not is_animation_scene_provider(scene):
             return
         with self._scene_lock:
-            if scene_id in self._playbacks and ANIMATION_KEY not in scene.metadata:
+            if scene_id in self._playbacks and ANIMATION_KEY not in scene.metadata and ANIMATION_V2_KEY not in scene.metadata:
                 del self._playbacks[scene_id]
 
     def _playback_operation(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
@@ -540,6 +540,7 @@ class AnimationAgent(BaseAgent):
             "operational_memory": "AnimationMemory",
             "cross_agent_memory": "BaseAgent.shared_memory",
             "checkpointing": False,
+            "native_composition": ["clips", "instances", "layers", "override_blending", "loop", "reverse", "events"],
             "unsupported": ["learned_motion", "rigging", "retargeting", "choreography", "physics_simulation"],
         }
 
