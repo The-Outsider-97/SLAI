@@ -4,6 +4,7 @@ animation:
     default_fps_den: 1
   evaluation:
     deterministic: true
+    max_batch_samples: 256
   limits:
     max_tracks: 4096
     max_keyframes: 100000
@@ -16,6 +17,7 @@ animation:
   # false preserves the current facade API; true requires caller-supplied CAS.
   commands:
     require_expected_revision: false
+    max_batch_operations: 128
   # Used when AnimationMemory(capacity=None) is constructed.
   memory:
     max_recent_edits: 256

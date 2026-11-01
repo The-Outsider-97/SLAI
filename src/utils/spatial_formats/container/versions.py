@@ -17,7 +17,8 @@ _V1_FEATURES = frozenset({"scene-graph", "triangle-mesh", "analytic-primitives",
 #: a feature it does not know must refuse the file instead of guessing.
 FEATURES = {
     "0.1.0": _V1_FEATURES,
-    "0.2.0": _V1_FEATURES | {"annotations", "blocks", "linetypes", "nurbs", "brep", "materials", "textures"},
+    "0.2.0": _V1_FEATURES | {"annotations", "blocks", "linetypes", "nurbs", "brep", "materials", "textures",
+                               "animation-v1", "animation-v2"},
 }
 
 #: Content introduced after 0.1.0 (used by the strict legacy check before upgrading).

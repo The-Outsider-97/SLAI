@@ -288,6 +288,11 @@ class SceneDocument(SpatialDocument):
                                                                             "distance": float(distance),
                                                                             "join": "miter"}})
 
+    def upgrade_animation(self, *, expected_revision=None) -> int:
+        """Explicitly migrate an existing v1 animation to native v2."""
+        with self._edit() as model:
+            return model.upgrade_animation(expected_revision=expected_revision)
+
     def animation(self) -> dict | None:
         """Get a detached animation definition, not a live reference."""
         from .animation import ANIMATION_KEY, ANIMATION_V2_KEY
@@ -298,6 +303,33 @@ class SceneDocument(SpatialDocument):
         """Return the detached evaluated SGEO scene at time in seconds."""
         self._live()
         return self._model.evaluate(time)
+
+    def forward_kinematics(self, values: dict | None = None):
+        """Return a detached native articulated world-transform mapping."""
+        self._live()
+        return self._model.forward_kinematics(values)
+
+    def solve_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Return a non-mutating native SGEO IK solution and diagnostics."""
+        self._live()
+        return self._model.solve_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+
+    def apply_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Commit a validated static IK pose through existing writable SGEO facade."""
+        self._writable()
+        # Do not hold the document edit lock across a bounded nonlinear solve.
+        # Scene snapshots the source and rechecks its revision before commit.
+        return self._model.apply_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
 
     # -- NURBS and B-rep -----------------------------------------------------------------------------
     def add_nurbs_curve(self, control_points, *, degree: int = 3, knots=None, weights=None, **options) -> str:
