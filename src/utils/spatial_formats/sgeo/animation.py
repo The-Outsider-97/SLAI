@@ -240,18 +240,22 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                         vector(frame[direction], 3, direction)
                     else:
                         finite(frame[direction], direction, limit=1e9)
-    _validate_drivers(spec.get("drivers", []), objects, seen)
+    _validate_drivers(spec.get("drivers", []), objects, seen, joints)
     _validate_constraints(spec.get("constraints", []), objects)
     return deepcopy(spec)
 
 
 
-def _validate_drivers(drivers, objects, track_targets) -> tuple:
+def _validate_drivers(drivers, objects, track_targets, joints) -> tuple:
     """Validate bounded directed scalar mechanical couplings and detect cycles."""
     if not isinstance(drivers, list) or len(drivers) > MAX_TRACKS:
         raise ValidationError("drivers must be a bounded list")
     graph = {}
     destinations = set()
+    all_targets = set()
+    for driver in drivers:
+        if isinstance(driver, dict) and "target_object_id" in driver and "target_property" in driver:
+            all_targets.add((driver["target_object_id"], driver["target_property"]))
     for driver in drivers:
         if not isinstance(driver, dict) or set(driver) - {
             "source_object_id", "source_property", "target_object_id",
@@ -264,27 +268,27 @@ def _validate_drivers(drivers, objects, track_targets) -> tuple:
         if src not in objects or dst not in objects:
             raise ReferenceError("driver references a missing object")
         sp, tp = driver["source_property"], driver["target_property"]
-        if sp != "rotation_angle" and not (isinstance(sp, str) and sp.startswith("parameter.")):
+        if sp not in {"rotation_angle", "joint"} and not (isinstance(sp, str) and sp.startswith("parameter.")):
             raise ValidationError("driver source must be an animated scalar")
-        if tp not in {"rotation_angle", "translation"}:
+        if tp not in {"rotation_angle", "translation", "joint"}:
             raise ValidationError("driver target must be rotation_angle or translation")
         source = (src, sp)
         target = (dst, tp)
         if target in track_targets or target in destinations:
             raise ValidationError("driver target conflicts with a track or another driver")
-        if sp.startswith("parameter."):
-            # Native family parameter dependency must have an evaluated source track.
-            if source not in track_targets and source not in destinations:
-                raise ValidationError("driver source must be an existing animated property")
-        if source not in track_targets and source not in destinations:
+        if source not in track_targets and source not in all_targets:
             raise ValidationError("driver source must be an existing animated property")
         destinations.add(target)
+        if tp == "joint" and (dst not in joints or joints[dst]["kind"] == "fixed"):
+            raise ValidationError("joint driver target requires a movable declared joint")
         finite(driver["factor"], "driver factor")
         finite(driver.get("offset", 0), "driver offset")
         if tp in {"rotation_angle", "translation"}:
             axis = vector(driver.get("axis"), 3, "driver axis")
             if sum(component*component for component in axis) < 1e-24:
                 raise ValidationError("driver axis must be nonzero")
+        elif "axis" in driver:
+            raise ValidationError("joint drivers derive axis from their joint declaration")
         graph.setdefault(source, set()).add(target)
     # Kahn's algorithm: a coupled relationship requires a solver, not silent
     # evaluation-order-dependent feedback.
@@ -323,13 +327,17 @@ def _evaluate_drivers(drivers: list, grouped: dict):
                 raise ValidationError("mechanical driver source is not scalar")
             scalar = finite(value * driver["factor"] + driver.get("offset", 0), "driven motion")
             target_prop = driver["target_property"]
-            axis = vector(driver["axis"], 3, "driver axis")
+            axis = (vector(driver["axis"], 3, "driver axis")
+                    if target_prop != "joint" else None)
             if target_prop == "translation":
                 driven = [component * scalar for component in axis]
             else:
                 driven = scalar
+            generated = {"property": target_prop}
+            if axis is not None:
+                generated["axis"] = list(axis)
             grouped.setdefault(driver["target_object_id"], {})[target_prop] = (
-                {"axis": list(axis), "property": target_prop}, driven
+                generated, driven
             )
             progress = True
         if not progress:
