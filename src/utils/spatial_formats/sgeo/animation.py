@@ -122,6 +122,55 @@ def validate_animation(spec: dict, scene) -> dict:
 
 
 
+
+def _validate_continuous_track(track, *, minimum=None, maximum=None):
+    """Prove scalar bounds and nonsingular scale across each track segment.
+
+    Hermite interpolation is cubic on each segment. Its extrema occur at
+    endpoints or roots of the quadratic derivative; evaluating only keys
+    would miss overshoot, illegal joint angles, or scales crossing zero.
+    """
+    from math import sqrt
+    prop = track["property"]
+    method = track.get("interpolation", "linear")
+    if method == "step" or prop not in {"scale", "joint"} and (
+            minimum is None and maximum is None):
+        return
+    frames = track["keyframes"]
+    for a, b in zip(frames, frames[1:]):
+        dt = b["time"] - a["time"]
+        values_a = a["value"] if prop == "scale" else [a["value"]]
+        values_b = b["value"] if prop == "scale" else [b["value"]]
+        for idx, (p0, p1) in enumerate(zip(values_a, values_b)):
+            candidates = [p0, p1]
+            if method == "cubic":
+                m0 = a["out_tangent"][idx] if prop == "scale" else a["out_tangent"]
+                m1 = b["in_tangent"][idx] if prop == "scale" else b["in_tangent"]
+                m0, m1 = m0*dt, m1*dt
+                aa = 2*p0 + m0 - 2*p1 + m1
+                bb = -3*p0 - 2*m0 + 3*p1 - m1
+                cc = m0
+                critical = []
+                if abs(aa) < 1e-14:
+                    if abs(bb) > 1e-14:
+                        critical.append(-cc / (2*bb))
+                else:
+                    discriminant = (2*bb)**2 - 12*aa*cc
+                    if discriminant >= 0:
+                        root = sqrt(discriminant)
+                        critical.extend(((-2*bb + root)/(6*aa), (-2*bb-root)/(6*aa)))
+                for t in critical:
+                    if 0 < t < 1:
+                        candidates.append(cubic_hermite_value(p0, m0, p1, m1, t))
+            lowest, highest = min(candidates), max(candidates)
+            if prop == "scale" and lowest <= 1e-9 and highest >= -1e-9:
+                raise ValidationError("animated scale crosses a singular zero")
+            if minimum is not None and lowest < minimum - 1e-9:
+                raise ValidationError("animation spline exceeds declared lower bound")
+            if maximum is not None and highest > maximum + 1e-9:
+                raise ValidationError("animation spline exceeds declared upper bound")
+
+
 def validate_animation_v2(spec: dict, scene) -> dict:
     """Validate SGEO v2 typed transform tracks without changing v1 semantics.
 
@@ -241,6 +290,21 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                     else:
                         finite(frame[direction], direction, limit=1e9)
     occupied = _validate_clips(spec, scene, seen)
+    for track in tracks:
+        prop = track["property"]
+        if prop == "scale":
+            _validate_continuous_track(track)
+        elif prop == "joint":
+            joint = joints[track["object_id"]]
+            _validate_continuous_track(track, minimum=joint["lower"], maximum=joint["upper"])
+        elif prop.startswith("parameter."):
+            family = families[objects[track["object_id"]]["family_id"]]
+            definition = family["parameters"][prop.removeprefix("parameter.")]
+            _validate_continuous_track(
+                track,
+                minimum=definition.get("min", 0 if definition["type"] == "length" else -1e12),
+                maximum=definition.get("max", 1e12),
+            )
     _validate_drivers(spec.get("drivers", []), objects, seen, joints, occupied)
     _validate_constraints(spec.get("constraints", []), objects, duration=duration)
     return deepcopy(spec)
@@ -336,6 +400,9 @@ def _validate_clips(spec, scene, direct_targets) -> set:
                             vector(frame[key], 3, "clip tangent")
                         else:
                             finite(frame[key], "clip tangent", limit=1e9)
+        for track in clip["tracks"]:
+            if track["property"] == "scale":
+                _validate_continuous_track(track)
         definitions[cid] = clip
     occupied = set(direct_targets)
     instance_ids = set()
