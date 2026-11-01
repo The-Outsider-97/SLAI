@@ -163,6 +163,27 @@ class Scene:
             self.revision = candidate.revision
             return self.revision
 
+    def upgrade_animation(self, *, expected_revision: int | None = None) -> int:
+        """Explicitly migrate valid legacy v1 animation to equivalent native v2.
+
+        V1 schema is a strict subset of v2. Migration preserves keyframe data
+        exactly; no implicit upgrade is performed by loading or evaluation.
+        """
+        from .animation import ANIMATION_KEY, ANIMATION_V2_KEY
+        from ..common.errors import ConflictError
+        with self._mutation_lock:
+            if expected_revision is not None and (
+                    type(expected_revision) is not int or expected_revision < 1):
+                raise ValidationError("expected_revision must be positive integer")
+            if expected_revision is not None and self.revision != expected_revision:
+                raise ConflictError("scene revision does not match expected revision")
+            if ANIMATION_V2_KEY in self.metadata:
+                raise ValidationError("scene animation is already v2")
+            spec = self.metadata.get(ANIMATION_KEY)
+            if spec is None:
+                raise ValidationError("scene has no legacy v1 animation to migrate")
+            return self.set_animation(deepcopy(spec), version=2)
+
     def evaluate(self, time: float):
         """Evaluate read-only motion state without changing this scene."""
         from .animation import evaluate_scene
