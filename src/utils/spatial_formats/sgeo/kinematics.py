@@ -12,7 +12,7 @@ from math import hypot
 
 from ..common.errors import ReferenceError, ValidationError, ResourceLimitError
 from ..common.helpers import finite, vector
-from ..common.ids import require_id
+from ..common.ids import require_canonical_id, require_id
 from ..common.transforms import IDENTITY, compose, from_axis_angle, from_translation
 
 MAX_JOINTS = 256
@@ -31,7 +31,7 @@ def validate_joints(joints, objects) -> dict:
             "id", "object_id", "kind", "axis", "lower", "upper", "value"
         } or not {"id", "object_id", "kind"} <= set(joint):
             raise ValidationError("invalid joint fields")
-        jid, oid = require_id(joint["id"]), require_id(joint["object_id"])
+        jid, oid = require_canonical_id(joint["id"]), require_canonical_id(joint["object_id"])
         if jid in identifiers or oid in by_object:
             raise ValidationError("duplicate joint id or object")
         identifiers.add(jid)
