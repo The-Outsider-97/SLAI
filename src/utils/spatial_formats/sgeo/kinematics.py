@@ -164,22 +164,21 @@ def solve_inverse_kinematics(
                  initial=originals[item])
         for i,item in enumerate(chain)
     )
-    objective = Objective(
-        name="minimal_joint_change",
-        function=lambda point: sum((point[name]-value)**2 for name,value in initial.items()),
-    )
-    equations = tuple(
-        Constraint(
-            name="end_effector_%d" % component, sense=ConstraintSense.EQ,
-            rhs=0.0, tolerance=tol,
-            function=lambda point, k=component: residual(point)[k],
+    # A 2-DOF planar arm cannot satisfy 3 independent positional equalities
+    # in SLSQP; minimize Cartesian residuals subject to joint limits instead.
+    # Always check measured end-effector accuracy before reporting success.
+    def objective_value(point):
+        distance_squared = sum(component**2 for component in residual(point))
+        regularization = 1e-10 * sum(
+            (point[name]-value)**2 for name, value in initial.items()
         )
-        for component in range(3)
-    )
+        return distance_squared + regularization
+
+    objective = Objective(name="end_effector_error", function=objective_value)
     problem = OptimizationProblem(
         name="sgeo_inverse_kinematics",
         variables=variables, objectives=(objective,),
-        constraints=equations, problem_class=ProblemClass.NLP,
+        constraints=(), problem_class=ProblemClass.NLP,
         deterministic=True,
     )
     try:
