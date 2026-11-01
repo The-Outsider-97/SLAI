@@ -279,15 +279,70 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             if set(track) - {"property", "keyframes", "interpolation", "axis"}:
                 raise ValidationError("unknown clip track fields")
             prop = track.get("property")
-            if not isinstance(prop, str) or not prop:
-                raise ValidationError("clip track requires property")
+            if not isinstance(prop, str) or (prop not in {
+                "translation", "rotation_angle", "rotation_quaternion", "scale",
+                "visibility", "joint"
+            } and not prop.startswith("parameter.")):
+                raise ValidationError("unsupported clip track property")
             if prop in properties:
                 raise ValidationError("duplicate clip track property")
             properties.append(prop)
+            method = track.get("interpolation", "linear")
+            allowed = {"step"} if prop == "visibility" else (
+                {"step", "slerp"} if prop == "rotation_quaternion"
+                else {"step", "linear", "cubic"}
+            )
+            if method not in allowed:
+                raise ValidationError("unsupported clip track interpolation")
+            if prop == "rotation_angle":
+                axis = vector(track.get("axis"), 3, "clip rotation axis")
+                if sum(x*x for x in axis) < 1e-24:
+                    raise ValidationError("clip rotation axis must be nonzero")
+            elif "axis" in track:
+                raise ValidationError("axis only supported for clip axis-angle rotation")
+            frames = track.get("keyframes")
+            if not isinstance(frames, list) or not frames:
+                raise ValidationError("clip track must contain keyframes")
+            previous = -1
+            for frame in frames:
+                if not isinstance(frame, dict) or set(frame) - {
+                    "time", "value", "in_tangent", "out_tangent"
+                } or not {"time", "value"} <= set(frame):
+                    raise ValidationError("invalid clip keyframe fields")
+                timestamp = finite(frame["time"], "clip keyframe time", limit=MAX_TIME)
+                if timestamp <= previous or timestamp < 0 or timestamp > cd:
+                    raise ValidationError("clip keyframe time must increase within clip duration")
+                previous = timestamp
+                value = frame["value"]
+                if prop in {"translation", "scale"}:
+                    components = vector(value, 3, "clip vector")
+                    if prop == "scale" and any(abs(x) < 1e-9 for x in components):
+                        raise ValidationError("clip scale must be nonsingular")
+                elif prop == "rotation_quaternion":
+                    unit_quaternion(value)
+                elif prop == "visibility":
+                    if type(value) is not bool:
+                        raise ValidationError("clip visibility must be boolean")
+                else:
+                    finite(value, "clip scalar", limit=1e9)
+                tangents = {"in_tangent", "out_tangent"} & set(frame)
+                if method != "cubic" and tangents:
+                    raise ValidationError("clip tangents require cubic interpolation")
+                if method == "cubic":
+                    if tangents != {"in_tangent", "out_tangent"}:
+                        raise ValidationError("cubic clip keys require both tangents")
+                    for key in tangents:
+                        if prop in {"translation", "scale"}:
+                            vector(frame[key], 3, "clip tangent")
+                        else:
+                            finite(frame[key], "clip tangent", limit=1e9)
         definitions[cid] = clip
     occupied = set(direct_targets)
     instance_ids = set()
-    total_sampled_frames = len(spec["tracks"])
+    total_sampled_frames = sum(len(t["keyframes"]) for t in spec["tracks"])
+    total_sampled_frames += sum(len(t["keyframes"]) for c in definitions.values() for t in c["tracks"])
+    if total_sampled_frames > MAX_KEYFRAMES:
+        raise ResourceLimitError("clip definition keyframe budget exceeded")
     for instance in instances:
         if not isinstance(instance, dict) or set(instance) - {
             "id", "clip_id", "object_id", "start", "speed"
