@@ -129,7 +129,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints"} or not {"duration", "tracks"} <= set(spec):
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances"} or not {"duration", "tracks"} <= set(spec):
         raise ValidationError("v2 animation requires duration/tracks and optional drivers/constraints")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
@@ -240,13 +240,94 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                         vector(frame[direction], 3, direction)
                     else:
                         finite(frame[direction], direction, limit=1e9)
-    _validate_drivers(spec.get("drivers", []), objects, seen, joints)
+    occupied = _validate_clips(spec, scene, seen)
+    _validate_drivers(spec.get("drivers", []), objects, seen, joints, occupied)
     _validate_constraints(spec.get("constraints", []), objects)
     return deepcopy(spec)
 
 
 
-def _validate_drivers(drivers, objects, track_targets, joints) -> tuple:
+
+def _validate_clips(spec, scene, direct_targets) -> set:
+    """Validate bounded reusable property clips and non-overlapping bindings.
+
+    P1 composition is intentionally deterministic: one writer per target
+    property, including authored tracks and clip instances. Layer blending
+    and simultaneous overrides require a separately versioned policy.
+    """
+    clips, instances = spec.get("clips", []), spec.get("instances", [])
+    if not isinstance(clips, list) or len(clips) > 256:
+        raise ValidationError("clips must be a bounded list (max 256)")
+    if not isinstance(instances, list) or len(instances) > 1024:
+        raise ValidationError("clip instances must be a bounded list (max 1024)")
+    definitions = {}
+    for clip in clips:
+        if not isinstance(clip, dict) or set(clip) != {"id", "duration", "tracks"}:
+            raise ValidationError("clip requires id, duration and tracks")
+        cid = require_id(clip["id"])
+        if cid in definitions:
+            raise ValidationError("duplicate clip identifier")
+        cd = finite(clip["duration"], "clip duration", limit=MAX_TIME)
+        if cd <= 0:
+            raise ValidationError("clip duration must be positive")
+        if not isinstance(clip["tracks"], list) or not clip["tracks"] or len(clip["tracks"]) > 128:
+            raise ValidationError("clip must have between 1 and 128 tracks")
+        properties = []
+        for track in clip["tracks"]:
+            if not isinstance(track, dict) or "object_id" in track:
+                raise ValidationError("clip tracks bind by instance, not fixed object ID")
+            if set(track) - {"property", "keyframes", "interpolation", "axis"}:
+                raise ValidationError("unknown clip track fields")
+            prop = track.get("property")
+            if not isinstance(prop, str) or not prop:
+                raise ValidationError("clip track requires property")
+            if prop in properties:
+                raise ValidationError("duplicate clip track property")
+            properties.append(prop)
+        definitions[cid] = clip
+    occupied = set(direct_targets)
+    instance_ids = set()
+    total_sampled_frames = len(spec["tracks"])
+    for instance in instances:
+        if not isinstance(instance, dict) or set(instance) - {
+            "id", "clip_id", "object_id", "start", "speed"
+        } or not {"id", "clip_id", "object_id", "start"} <= set(instance):
+            raise ValidationError("invalid clip instance fields")
+        iid = require_id(instance["id"])
+        if iid in instance_ids:
+            raise ValidationError("duplicate clip instance identifier")
+        instance_ids.add(iid)
+        cid = require_id(instance["clip_id"])
+        oid = require_id(instance["object_id"])
+        if cid not in definitions:
+            raise ReferenceError("clip instance references a missing definition")
+        start = finite(instance["start"], "clip instance start", limit=MAX_TIME)
+        speed = finite(instance.get("speed", 1), "clip instance speed", limit=1e4)
+        if start < 0 or speed <= 0 or start + definitions[cid]["duration"]/speed > spec["duration"] + 1e-9:
+            raise ValidationError("clip instance exceeds animation duration")
+        # Reuse the exact same native typed-track validator and binding rules.
+        mapped = [
+            {"object_id": oid, **track} for track in definitions[cid]["tracks"]
+        ]
+        validate_animation_v2({
+            "duration": definitions[cid]["duration"], "tracks": mapped,
+            "joints": spec.get("joints", []),
+        }, scene)
+        total_sampled_frames += sum(len(t["keyframes"]) for t in mapped)
+        if total_sampled_frames > MAX_KEYFRAMES:
+            raise ResourceLimitError("instanced clip sampling budget exceeded")
+        for track in mapped:
+            target = (oid, track["property"])
+            if target in occupied:
+                raise ValidationError("clip binding conflicts with another animated property")
+            occupied.add(target)
+    # Validate even dormant reusable assets with a supported scene binding.
+    # Without a compatible target, their property semantics remain checked
+    # only when an instance is added; no claim of evaluated functionality.
+    return occupied
+
+
+def _validate_drivers(drivers, objects, track_targets, joints, occupied_targets=None) -> tuple:
     """Validate bounded directed scalar mechanical couplings and detect cycles."""
     if not isinstance(drivers, list) or len(drivers) > MAX_TRACKS:
         raise ValidationError("drivers must be a bounded list")
@@ -274,7 +355,7 @@ def _validate_drivers(drivers, objects, track_targets, joints) -> tuple:
             raise ValidationError("driver target must be rotation_angle or translation")
         source = (src, sp)
         target = (dst, tp)
-        if target in track_targets or target in destinations:
+        if target in (occupied_targets or track_targets) or target in destinations:
             raise ValidationError("driver target conflicts with a track or another driver")
         if source not in track_targets and source not in all_targets:
             raise ValidationError("driver source must be an existing animated property")
@@ -649,6 +730,17 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
     grouped: dict[str, dict[str, tuple[dict, object]]] = {}
     for track in spec["tracks"]:
         grouped.setdefault(track["object_id"], {})[track["property"]] = (track, _sample_v2(track, timestamp) if active == ANIMATION_V2_KEY else _sample(track, timestamp))
+    if active == ANIMATION_V2_KEY and spec.get("instances"):
+        definitions = {clip["id"]: clip for clip in spec.get("clips", [])}
+        for instance in spec["instances"]:
+            clip = definitions[instance["clip_id"]]
+            local_time = (timestamp - instance["start"]) * instance.get("speed", 1)
+            if local_time < 0 or local_time > clip["duration"]:
+                continue
+            for track in clip["tracks"]:
+                grouped.setdefault(instance["object_id"], {})[track["property"]] = (
+                    track, _sample_v2(track, local_time)
+                )
     if active == ANIMATION_V2_KEY and spec.get("drivers"):
         _evaluate_drivers(spec["drivers"], grouped)
     joint_index = {}
