@@ -374,6 +374,10 @@ class Scene:
             requires.append("materials")
         if self.images:
             requires.append("textures")
+        if "slai.animation.v1" in self.metadata:
+            requires.append("animation-v1")
+        if "slai.animation.v2" in self.metadata:
+            requires.append("animation-v2")
         return requires
 
     def texture_bytes(self, image_id):
