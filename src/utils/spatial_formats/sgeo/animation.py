@@ -180,7 +180,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances", "layers", "skins"} or not {"duration", "tracks"} <= set(spec):
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances", "layers", "skins", "transitions"} or not {"duration", "tracks"} <= set(spec):
         raise ValidationError("v2 animation requires duration/tracks and optional drivers/constraints")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
@@ -311,11 +311,85 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     _validate_constraints(spec.get("constraints", []), objects, duration=duration)
     _validate_layers(spec, scene)
     _validate_skins(spec, scene)
+    _validate_transitions(spec)
     return deepcopy(spec)
 
 
 
 
+
+
+
+def _transition_weight(transition, timestamp):
+    progress = min(1.0, max(0.0, (timestamp - transition["start"]) / transition["duration"]))
+    easing = transition.get("easing", "linear")
+    if easing == "smoothstep":
+        return progress * progress * (3 - 2 * progress)
+    if easing == "ease_in":
+        return progress * progress * progress
+    if easing == "ease_out":
+        return 1 - (1 - progress) ** 3
+    return progress
+
+
+def _validate_transitions(spec):
+    """Validate deterministic clip crossfades between overlapping instances."""
+    transitions = spec.get("transitions", [])
+    if not isinstance(transitions, list) or len(transitions) > 256:
+        raise ValidationError("transitions must be a list of at most 256")
+    instances = {entry["id"]: entry for entry in spec.get("instances", [])}
+    clips = {entry["id"]: entry for entry in spec.get("clips", [])}
+    ids, pairs = set(), set()
+    for transition in transitions:
+        if not isinstance(transition, dict) or set(transition) - {
+            "id", "source", "destination", "start", "duration", "easing"
+        } or not {"id", "source", "destination", "start", "duration"} <= set(transition):
+            raise ValidationError("invalid transition fields")
+        tid = require_canonical_id(transition["id"])
+        if tid in ids:
+            raise ValidationError("duplicate transition identifier")
+        ids.add(tid)
+        source = require_canonical_id(transition["source"])
+        destination = require_canonical_id(transition["destination"])
+        if source not in instances or destination not in instances or source == destination:
+            raise ValidationError("transition requires distinct existing clip instances")
+        a, b = instances[source], instances[destination]
+        if a["object_id"] != b["object_id"]:
+            raise ValidationError("transition clips must target the same object")
+        channels_a = {track["property"] for track in clips[a["clip_id"]]["tracks"]}
+        channels_b = {track["property"] for track in clips[b["clip_id"]]["tracks"]}
+        if channels_a != channels_b or "visibility" in channels_a or "joint" in channels_a:
+            raise ValidationError("transition requires matching supported continuous channels")
+        if transition.get("easing", "linear") not in {"linear", "smoothstep", "ease_in", "ease_out"}:
+            raise ValidationError("unsupported transition easing")
+        start = finite(transition["start"], "transition start", limit=MAX_TIME)
+        duration = finite(transition["duration"], "transition duration", limit=MAX_TIME)
+        if duration <= 0 or start < 0 or start + duration > spec["duration"]:
+            raise ValidationError("transition interval exceeds animation duration")
+        for instance in (a, b):
+            clip_duration = clips[instance["clip_id"]]["duration"]
+            end = instance["start"] + instance.get("repeat", 1)*clip_duration/instance.get("speed", 1)
+            if start < instance["start"] or start + duration > end:
+                raise ValidationError("transition must lie within both clip instance intervals")
+        pair = (source, destination)
+        if pair in pairs:
+            raise ValidationError("duplicate transition pair")
+        pairs.add(pair)
+    for i, a in enumerate(transitions):
+        for b in transitions[i+1:]:
+            if (instances[a["source"]]["object_id"] == instances[b["source"]]["object_id"]
+                    and a["start"] < b["start"] + b["duration"]
+                    and b["start"] < a["start"] + a["duration"]):
+                raise ValidationError("overlapping transitions on the same object are unsupported")
+
+
+def _blend_transition(a, b, weight):
+    prop, value_a, value_b = a[0]["property"], a[1], b[1]
+    if prop == "rotation_quaternion":
+        return (b[0], list(slerp_quaternion(value_a, value_b, weight)))
+    if isinstance(value_a, (list, tuple)):
+        return (b[0], [x + weight*(y-x) for x,y in zip(value_a,value_b)])
+    return (b[0], value_a + weight*(value_b-value_a))
 
 
 def _validate_skins(spec, scene):
@@ -637,7 +711,8 @@ def _validate_clips(spec, scene, direct_targets) -> set:
         raise ValidationError("clip cannot contain two rotation representations")
     authored_channels = {(oid, channel(prop)) for oid, prop in direct_targets}
     occupied = set(direct_targets)
-    instance_intervals: dict[tuple, list[tuple[float, float]]] = {}
+    transition_pairs = {frozenset((t["source"], t["destination"])) for t in spec.get("transitions", [])}
+    instance_intervals: dict[tuple, list[tuple[float, float, str]]] = {}
     instance_ids = set()
     total_sampled_frames = sum(len(t["keyframes"]) for t in spec["tracks"])
     total_sampled_frames += sum(len(t["keyframes"]) for c in definitions.values() for t in c["tracks"])
@@ -685,11 +760,11 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             if channel_target in authored_channels:
                 raise ValidationError("clip binding conflicts with an authored property channel")
             interval = (start, start + repeat*definitions[cid]["duration"]/speed)
-            instance_intervals.setdefault(channel_target, []).append(interval)
+            instance_intervals.setdefault(channel_target, []).append((*interval, iid))
             occupied.add(target)
     for windows in instance_intervals.values():
         windows.sort()
-        if any(current[0] <= previous[1]
+        if any(current[0] <= previous[1] and frozenset((current[2], previous[2])) not in transition_pairs
                for previous, current in zip(windows, windows[1:])):
             raise ValidationError("overlapping clips cannot write the same property")
     # Validate even dormant reusable assets with a supported scene binding.
@@ -1264,6 +1339,7 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
         grouped.setdefault(track["object_id"], {})[track["property"]] = (track, _sample_v2(track, timestamp) if active == ANIMATION_V2_KEY else _sample(track, timestamp))
     if active == ANIMATION_V2_KEY and spec.get("instances"):
         definitions = {clip["id"]: clip for clip in spec.get("clips", [])}
+        sampled_instances = {}
         for instance in spec["instances"]:
             clip = definitions[instance["clip_id"]]
             local_time = (timestamp - instance["start"]) * instance.get("speed", 1)
@@ -1281,10 +1357,17 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
                 if mode == "pingpong" and cycle % 2:
                     phase = span - phase
                 local_time = phase
-            for track in clip["tracks"]:
-                grouped.setdefault(instance["object_id"], {})[track["property"]] = (
-                    track, _sample_v2(track, local_time)
-                )
+            sampled_instances[instance["id"]] = {track["property"]: (track, _sample_v2(track, local_time)) for track in clip["tracks"]}
+            if not any(instance["id"] in (t["source"], t["destination"]) for t in spec.get("transitions", [])):
+                grouped.setdefault(instance["object_id"], {}).update(sampled_instances[instance["id"]])
+        for transition in spec.get("transitions", []):
+            source, destination = transition["source"], transition["destination"]
+            if source not in sampled_instances or destination not in sampled_instances:
+                continue
+            weight = _transition_weight(transition, timestamp)
+            oid = next(i["object_id"] for i in spec["instances"] if i["id"] == source)
+            for prop, source_value in sampled_instances[source].items():
+                grouped.setdefault(oid, {})[prop] = _blend_transition(source_value, sampled_instances[destination][prop], weight)
     if active == ANIMATION_V2_KEY and spec.get("layers"):
         for layer in spec["layers"]:
             _compose_layer(grouped, layer, timestamp)
