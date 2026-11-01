@@ -14,7 +14,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 from scipy import stats
 from scipy.stats import linregress
 from sklearn.metrics import pairwise_distances
@@ -25,7 +25,7 @@ from .alignment_memory import AlignmentMemory
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Fairness Evaluator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class FairnessEvaluator:
     """
@@ -85,11 +85,7 @@ class FairnessEvaluator:
         "fingerprint",
     )
 
-    def __init__(
-        self,
-        config_section_name: str = "fairness_evaluator",
-        config_file_path: Optional[str] = None,
-    ):
+    def __init__(self, config_section_name: str = "fairness_evaluator", config_file_path: Optional[str] = None):
         self.config = load_global_config()
         self.config_section_name = ensure_non_empty_string(
             config_section_name,
@@ -138,25 +134,16 @@ class FairnessEvaluator:
             "similarity_metric",
             error_cls=ConfigurationError,
         ).strip().lower()
-        self.prediction_threshold = coerce_probability(
-            self.fe_config["prediction_threshold"],
-            field_name="prediction_threshold",
-        )
+        self.prediction_threshold = coerce_probability(self.fe_config["prediction_threshold"], field_name="prediction_threshold")
         self.min_group_size = coerce_positive_int(self.fe_config["min_group_size"], field_name="min_group_size")
         self.k_neighbors = coerce_positive_int(self.fe_config["k_neighbors"], field_name="k_neighbors")
-        self.max_pair_samples = coerce_positive_int(
-            self.fe_config["max_pair_samples"],
-            field_name="max_pair_samples",
-        )
+        self.max_pair_samples = coerce_positive_int(self.fe_config["max_pair_samples"], field_name="max_pair_samples")
         self.individual_violation_threshold = coerce_float(
             self.fe_config["individual_violation_threshold"],
             field_name="individual_violation_threshold",
             minimum=0.0,
         )
-        self.history_max_rows = coerce_positive_int(
-            self.fe_config["history_max_rows"],
-            field_name="history_max_rows",
-        )
+        self.history_max_rows = coerce_positive_int(self.fe_config["history_max_rows"], field_name="history_max_rows")
         self.rolling_window = coerce_window_size(
             self.fe_config["rolling_window"],
             field_name="rolling_window",
@@ -1282,7 +1269,9 @@ class FairnessEvaluator:
                 continue
             x = metric_data["timestamp"].astype("int64") // 10**9
             y = metric_data["value"].astype(float)
-            slope, intercept, r_value, p_value, std_err = linregress(x, y)
+            slope, intercept, r_value, p_value, std_err = cast(
+                Tuple[float, float, float, float, float], linregress(x, y)
+            )
             recent = metric_data.tail(min(self.rolling_window, len(metric_data)))
             recent_change = float(recent["value"].iloc[-1] - recent["value"].iloc[0]) if len(recent) >= 2 else 0.0
             trends[str(metric_name)] = {
@@ -1364,6 +1353,9 @@ class FairnessEvaluator:
         sampled_idx = np.linspace(0, len(values) - 1, num=self.distribution_sample_cap, dtype=int)
         return [float(values[idx]) for idx in sampled_idx.tolist()]
 
+__all__ = [
+    "FairnessEvaluator",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Fairness Evaluator ===\n")

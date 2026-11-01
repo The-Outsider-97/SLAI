@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import fnmatch
 import heapq
+import math
 import os
 import pickle
 import random
@@ -79,7 +80,7 @@ class SharedMemoryProxy(NamespaceProxy):
                  "load_from_file", "increment", "get_latest_snapshot", "log_intervention",
                  "configure", "compare_and_swap", "get_all_keys", "get_by_tag",
                  "cleanup_expired", "validate_integrity", "compact", "health_check",
-                 "snapshot_state", "restore_snapshot", "close")
+                 "snapshot_state", "restore_snapshot", "close", "acquire_lease", "release_lease")
 
     def __contains__(self, key: Hashable) -> bool:
         return self._callmethod("__contains__", (key,))
@@ -105,22 +106,55 @@ class SharedMemory:
     For IPC, consider using `multiprocessing.Manager` or external solutions
     like Redis or Memcached.
     """
+
     _instance = None
+    _instance_lock = threading.RLock()
 
     def __new__(cls):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
-            cls._instance.__initialized = False
-        return cls._instance
-    
+        with cls._instance_lock:
+            instance = cls._instance
+
+            if (instance is None or getattr(instance, "_closed", False)):
+                instance = super().__new__(cls)
+                instance._SharedMemory__initialized = False
+                cls._instance = instance
+
+            return instance
+
     def __init__(self):
+        cls = type(self)
+        with cls._instance_lock:
+            if getattr(self, "_SharedMemory__initialized", False):
+                return
+
+            try:
+                self._initialize()
+
+            except BaseException:
+                stop_event = getattr(self, "_stop_cleaner_event", None)
+                if stop_event is not None:
+                    stop_event.set()
+
+                thread = getattr(self, "_cleaner_thread", None)
+                if (
+                    thread is not None
+                    and thread.is_alive()
+                    and thread is not threading.current_thread()
+                ):
+                    thread.join()
+
+                self._SharedMemory__initialized = False
+                self._closed = True
+                if cls._instance is self:
+                    cls._instance = None
+
+                raise
+
+            self._SharedMemory__initialized = True
+
+    def _initialize(self):
         # Using deque allows efficient append and limiting version count if max_versions is set
         # Force conversion to integer or None
-        if getattr(self, "_SharedMemory__initialized", False):
-            return
-        if self.__initialized:
-            return
-        self.__initialized = True
         self.config = load_global_config()
         self.memory_config = get_config_section("shared_memory")
 
@@ -355,7 +389,7 @@ class SharedMemory:
     def _calculate_size(self, obj: Any) -> int:
         """Estimate object size in bytes."""
         try:
-            from pympler import asizeof
+            from pympler import asizeof # type: ignore
             return int(asizeof.asizeof(obj))
         except ImportError:
             # fallback to shallow size
@@ -804,12 +838,10 @@ class SharedMemory:
     # ==============================
     def _validate_ttl(self, value):
         """Validate TTL input (supports int/float/timedelta)."""
-
         return self._normalize_ttl(value, allow_immediate=False)
 
     def _validate_max_versions(self, value):
         """Ensure max_versions is a positive integer or None."""
-
         if value is None:
             return None
         parsed = coerce_int(value, default=0)
@@ -820,12 +852,85 @@ class SharedMemory:
 
     def _validate_network_latency(self, value):
         """Ensure network latency is a non-negative float."""
-
         return coerce_float(value, default=0.0, minimum=0.0, maximum=5.0)
+
+
+    def acquire_lease(
+        self,
+        key,
+        owner_token: str,
+        ttl: float,
+        *,
+        value: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
+        """Atomically acquire a TTL-bounded, owner-identified lease.
+        Existing non-expired keys, including legacy task locks, are treated as occupied.
+        """
+        self._record_operation("acquire_lease")
+        self._ensure_open("acquire_lease")
+        key = self._validate_key(key, operation="acquire_lease")
+        if not isinstance(owner_token, str) or not owner_token:
+            raise ValueError("owner_token must be a non-empty string")
+
+        lease_ttl = self._normalize_ttl(ttl, allow_immediate=False)
+        if lease_ttl is None:
+            raise ValueError("A finite positive TTL is required for leases")
+
+        if not math.isfinite(lease_ttl):
+            raise ValueError("Lease TTL must be finite")
+
+        with self._lock:
+            now = time.time()
+            if key in self._data:
+                if not self._is_expired(key, now):
+                    return False
+
+                self._remove_key(key)
+
+            lease_value = dict(value or {})
+            lease_value["owner_token"] = owner_token
+
+            self._store_version_locked(key, lease_value, current_time=now)
+            self._set_expiration_locked(key, lease_ttl, current_time=now,)
+            self._evict_until_within_limit_locked(protected_key=key)
+            self._notify_change_locked(key, lease_value, event_type="acquire_lease")
+
+            return True
+
+    def release_lease(self, key, owner_token: str) -> bool:
+        """Remove a lease only when the caller still owns it."""
+        self._record_operation("release_lease")
+        self._ensure_open("release_lease")
+        key = self._validate_key(key, operation="release_lease")
+        if not isinstance(owner_token, str) or not owner_token:
+            raise ValueError("owner_token must be a non-empty string")
+
+        with self._lock:
+            now = time.time()
+            if key not in self._data:
+                return False
+
+            if self._is_expired(key, now):
+                self._remove_key(key)
+                return False
+
+            versions = self._data.get(key)
+            if not versions:
+                return False
+
+            current = versions[-1].value
+            if not isinstance(current, Mapping):
+                return False
+
+            if current.get("owner_token") != owner_token:
+                return False
+
+            self._remove_key(key)
+            self._notify_change_locked(key, None, event_type="release_lease")
+            return True
 
     def compare_and_swap(self, key, expected_value, new_value):
         """Atomically replace a value when the current latest value matches expected_value."""
-
         self._record_operation("compare_and_swap")
         self._ensure_open("compare_and_swap")
         key = self._validate_key(key, operation="compare_and_swap")
@@ -852,7 +957,6 @@ class SharedMemory:
     # ==============================
     def _simulate_network(self):
         """Simulates network latency for distributed coordination scenarios."""
-
         if self.network_latency > 0:
             jitter = random.uniform(-0.1, 0.1) * self.network_latency
             effective_delay = max(0.0, self.network_latency + jitter)
@@ -861,13 +965,11 @@ class SharedMemory:
     @property
     def network_latency(self):
         """Get current network latency with validation."""
-
         return self._network_latency
 
     @network_latency.setter
     def network_latency(self, value):
         """Set network latency with validation and logging."""
-
         self._network_latency = self._validate_network_latency(value)
         logger.info("Updated network latency to %.3fs", self._network_latency)
 
@@ -876,7 +978,6 @@ class SharedMemory:
     # ===================================
     def _evict_lru(self):
         """Evict the least-recently-used key and return it."""
-
         with self._lock:
             return self._evict_lru_locked()
 
@@ -885,7 +986,6 @@ class SharedMemory:
     # ==============================
     def _remove_key(self, key):
         """Removes a key and associated metadata without locking."""
-
         if key in self._data:
             self.current_memory -= self._size_by_key.get(key, 0)
             self.current_memory = max(0, self.current_memory)
@@ -900,14 +1000,12 @@ class SharedMemory:
     # ===================================
     def __len__(self):
         """Returns the exact count of non-expired keys, with live expiration checks."""
-
         with self._lock:
             self._cleanup_expired_locked(time.time())
             return len(self._data)
 
     def __contains__(self, key):
         """Checks if a non-expired key exists in memory using ``key in shared_memory``."""
-
         if key is None:
             return False
         try:
@@ -924,7 +1022,6 @@ class SharedMemory:
 
     def get_all_keys(self):
         """Return all non-expired keys."""
-
         self._record_operation("get_all_keys")
         with self._lock:
             self._cleanup_expired_locked(time.time())
@@ -933,7 +1030,6 @@ class SharedMemory:
     # ========== Others ============
     def configure(self, default_ttl=None, max_versions=10):
         """Update runtime TTL/version configuration."""
-
         self._record_operation("configure")
         with self._lock:
             if default_ttl is not None:
@@ -947,7 +1043,6 @@ class SharedMemory:
 
     def increment(self, key, delta=1):
         """Atomically increment a numeric value."""
-
         self._record_operation("increment")
         self._ensure_open("increment")
         key = self._validate_key(key, operation="increment")
@@ -976,7 +1071,6 @@ class SharedMemory:
 
     def get_latest_snapshot(self):
         """Retrieve the most recent system snapshot with metadata."""
-
         self._record_operation("get_latest_snapshot")
         with self._lock:
             snapshot_keys = sorted(
@@ -1154,16 +1248,37 @@ class SharedMemory:
                 self.put(key_text, item.get("latest_value"), tags=item.get("tags"), notify=False)
         return True
 
-    def close(self):
-        """Stop background worker resources for this process-local instance."""
 
-        self._record_operation("close")
-        self._closed = True
-        self._stop_cleaner_event.set()
-        thread = self._cleaner_thread
-        if thread and thread.is_alive():
-            thread.join(timeout=1.0)
-        return True
+    def close(self):
+        """Close this instance exactly once.
+
+        The next SharedMemory() construction will create a new
+        singleton. Existing references remain closed.
+        """
+        cls = type(self)
+
+        with cls._instance_lock:
+            if getattr(self, "_closed", False):
+                return True
+
+            self._record_operation("close")
+            self._closed = True
+            stop_event = getattr(self, "_stop_cleaner_event", None)
+            if stop_event is not None:
+                stop_event.set()
+
+            thread = getattr(self, "_cleaner_thread", None)
+
+            if (
+                thread is not None
+                and thread.is_alive()
+                and thread is not threading.current_thread()
+            ):
+                thread.join()
+
+            self._cleaner_thread = None
+
+            return True
 
     # ------------------------------------------------------------------
     # Internal mutation helpers. Caller must hold self._lock unless noted.
@@ -1367,16 +1482,11 @@ class _SharedMemoryManager(BaseManager):
     pass
 
 
-_SharedMemoryManager.register(
-    "SharedMemory",
-    callable=SharedMemory,
-    proxytype=SharedMemoryProxy,
-)
+_SharedMemoryManager.register("SharedMemory", callable=SharedMemory, proxytype=SharedMemoryProxy)
 
 
 class SharedMemoryManager:
     """Manager for shared memory instances."""
-
     _instance = None
 
     def __new__(cls):

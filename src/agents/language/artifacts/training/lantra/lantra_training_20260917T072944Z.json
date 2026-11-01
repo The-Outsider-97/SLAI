@@ -1,0 +1,235 @@
+{
+  "completed_at": "2026-09-17T07:29:51.300465Z",
+  "config": {
+    "balance_tasks": true,
+    "clip_grad": 1.0,
+    "data_paths": [],
+    "device": "auto",
+    "embedding_margin": 0.2,
+    "embedding_max_length": 192,
+    "epochs": 12,
+    "generation_eval_records": 8,
+    "glove_batch_size": 128,
+    "glove_bootstrap": true,
+    "glove_epochs": 1,
+    "glove_learning_rate": 0.0001,
+    "glove_max_tokens": 0,
+    "glove_path": null,
+    "gradient_accumulation": 8,
+    "init_from": null,
+    "label_smoothing": 0.05,
+    "learning_rate": 0.0003,
+    "log_every": 100,
+    "max_eval_records": 2000,
+    "min_delta": 0.0001,
+    "min_learning_rate": 3e-06,
+    "min_task_samples": 8,
+    "output_dir": "src/agents/language/checkpoints/lantra",
+    "patience": 3,
+    "raw_chunk_chars": 2000,
+    "raw_corruption_probability": 0.15,
+    "raw_max_length": 256,
+    "raw_max_segments": 100000,
+    "raw_min_chars": 40,
+    "raw_pretrain_epochs": 2,
+    "raw_segments_per_epoch": 20000,
+    "raw_text_paths": [],
+    "raw_validation_fraction": 0.02,
+    "report_dir": "src/agents/language/artifacts/training/lantra",
+    "require_all_supervised_tasks": false,
+    "reranking_margin": 0.15,
+    "retrain_tokenizer": false,
+    "seed": 42,
+    "source_max_length": 384,
+    "target_max_length": 160,
+    "test_fraction": 0.05,
+    "tokenizer_min_frequency": 2,
+    "tokenizer_vocab_size": 50000,
+    "validation_fraction": 0.05,
+    "warmup_steps": 1000,
+    "weight_decay": 0.0001
+  },
+  "elapsed_seconds": 6.338516199961305,
+  "environment": {
+    "device": "cpu",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.10.11 (tags/v3.10.11:7d4cc5a, Apr  5 2023, 00:38:17) [MSC v.1929 64 bit (AMD64)]"
+  },
+  "glove": {
+    "dimension": 200,
+    "file_sha256": "fec592118ffc8f39de813df3bca5b2cefe748a0ad903efbfda5f5a0934f775cd",
+    "matched_tokens": 4029,
+    "path": "data\\embeddings\\glove.6B.200d.json"
+  },
+  "objective_contract": {
+    "classification": {
+      "mode": "seq2seq",
+      "source_prefix": "task: classification\ntext:",
+      "target": "label text"
+    },
+    "dialogue": {
+      "mode": "seq2seq",
+      "source_prefix": "task: dialogue\nconversation:",
+      "target": "assistant response"
+    },
+    "embedding": {
+      "inference": "mean-pool encoder memory over non-padding tokens, then L2-normalize",
+      "mode": "triplet_cosine_margin",
+      "text_prefix": "task: embedding\ntext:"
+    },
+    "generation": {
+      "mode": "seq2seq",
+      "source_prefix": "task: generation\nprompt:",
+      "target": "completion"
+    },
+    "reranking": {
+      "document_prefix": "task: reranking\ndocument:",
+      "inference": "rank candidate documents by cosine(query_embedding, document_embedding)",
+      "mode": "pairwise_cosine_margin",
+      "query_prefix": "task: reranking\nquery:"
+    },
+    "summarization": {
+      "mode": "seq2seq",
+      "source_prefix": "task: summarization\ndocument:",
+      "target": "summary"
+    },
+    "translation": {
+      "mode": "seq2seq",
+      "source_prefix": "task: translation",
+      "target": "translated text"
+    }
+  },
+  "raw_corpus": {
+    "files": [],
+    "fingerprint_sha256": "11c81abae35b54e5c015b78916c2d2d1866717a9a479cedaacfd4a1522a2aa2f",
+    "segments": 0
+  },
+  "run_id": "20260917T072944Z",
+  "schema": "slai.lantra.training-report.v2",
+  "started_at": "2026-09-17T07:29:44.962015Z",
+  "status": "completed",
+  "supervised_dataset": null,
+  "tokenizer": {
+    "algorithm": "bpe",
+    "decode_calls": 0,
+    "diagnostics_count": 0,
+    "encode_calls": 0,
+    "history_length": 0,
+    "merge_count": 50000,
+    "model_path": "data\\bpe_200d_50k_model.json",
+    "request_id": "tokenizer_20260917T072946Z_214953d603ad",
+    "special_token_count": 9,
+    "token_counts_size": 0,
+    "tokenize_calls": 0,
+    "trained": true,
+    "training_runs": 0,
+    "unknown_token_count": 0,
+    "version": "2.1",
+    "vocab_path": "data\\bpe_200d_50k_vocab.json",
+    "vocab_size": 49913
+  },
+  "trainer": {
+    "direct_third_party_imports": [],
+    "module": "train_lantra",
+    "slai_components": [
+      "src.agents.language.modules.language_tokenizer.LanguageTokenizer",
+      "src.agents.language.modules.language_transformer.LanguageTransformer",
+      "logs.logger"
+    ],
+    "training_pipeline": [
+      "bpe_tokenizer_bootstrap",
+      "glove_semantic_bootstrap",
+      "raw_text_denoising_pretraining",
+      "supervised_multitask_specialization"
+    ],
+    "transitive_runtime_note": "LanguageTransformer/LanguageTokenizer retain SLAI's own PyTorch/regex dependencies; this trainer does not import those packages directly."
+  },
+  "training": {
+    "final_checkpoint": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260917T072944Z.pt",
+    "mode": "bootstrap_pretraining_only",
+    "model_stats": {
+      "base_stats": {
+        "created_at": "2026-09-17T07:29:46+00:00",
+        "d_model": 256,
+        "decoder_layers": 4,
+        "device": "cpu",
+        "encoder_layers": 4,
+        "history_length": 5,
+        "memory_enabled": false,
+        "nhead": 8,
+        "request_id": "transformer_20260917T072946Z_9d00ac19f5de",
+        "total_parameters": 45707008,
+        "trainable_parameters": 45707008
+      },
+      "beam_width": 5,
+      "current_device": "cpu",
+      "diagnostics_count": 0,
+      "history_length": 4,
+      "length_penalty": 0.6,
+      "max_generation_length": 100,
+      "request_id": "transformer_20260917T072946Z_9d00ac19f5de",
+      "task_type": "generation",
+      "temperature": 1.0,
+      "version": "2.0"
+    },
+    "phases": {
+      "bpe": {
+        "status": "completed",
+        "tokenizer_stats": {
+          "algorithm": "bpe",
+          "decode_calls": 0,
+          "diagnostics_count": 0,
+          "encode_calls": 0,
+          "history_length": 0,
+          "merge_count": 50000,
+          "model_path": "data\\bpe_200d_50k_model.json",
+          "request_id": "tokenizer_20260917T072946Z_214953d603ad",
+          "special_token_count": 9,
+          "token_counts_size": 0,
+          "tokenize_calls": 0,
+          "trained": true,
+          "training_runs": 0,
+          "unknown_token_count": 0,
+          "version": "2.1",
+          "vocab_path": "data\\bpe_200d_50k_vocab.json",
+          "vocab_size": 49913
+        },
+        "vocab_size": 49913
+      },
+      "glove": {
+        "asset": {
+          "dimension": 200,
+          "file_sha256": "fec592118ffc8f39de813df3bca5b2cefe748a0ad903efbfda5f5a0934f775cd",
+          "matched_tokens": 4029,
+          "path": "data\\embeddings\\glove.6B.200d.json"
+        },
+        "checkpoint": "src\\agents\\language\\checkpoints\\lantra\\lantra_glove_bootstrap.pt",
+        "history": [
+          {
+            "batches": 32,
+            "epoch": 1,
+            "examples": 4029,
+            "mean_cosine_loss": 0.6099009346216917,
+            "mean_loss": 0.4888737238943577,
+            "mean_normalized_mse": 0.004764851022628136
+          }
+        ],
+        "initialization": {
+          "glove_dimension": 200,
+          "model_dimension": 256,
+          "rows_initialized": 4029,
+          "strategy": "zero_pad_geometry_preserving"
+        },
+        "status": "completed"
+      },
+      "raw_text": {
+        "reason": "no raw segments or raw_pretrain_epochs=0",
+        "status": "skipped"
+      },
+      "supervised": {
+        "reason": "no supervised task corpus",
+        "status": "skipped"
+      }
+    }
+  }
+}

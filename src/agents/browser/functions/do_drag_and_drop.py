@@ -52,13 +52,13 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.config_loader import *
 from ..utils.browser_errors import *
 from ..utils.Browser_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Drag & Drop")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 DEFAULT_DRAG_STRATEGIES: Tuple[str, ...] = (
@@ -1056,6 +1056,23 @@ class DoDragAndDrop:
 
         result = self._perform_drag_and_drop(source_selector, None, wait_time, target_offset=(x_offset, y_offset))
         return str(result.get("message", ""))
+
+
+__all__ = [
+    # Constants
+    "DEFAULT_DRAG_STRATEGIES",
+    "SUPPORTED_DRAG_STRATEGIES",
+    "OFFSET_ONLY_STRATEGIES",
+    "ELEMENT_TARGET_STRATEGIES",
+    # Dataclasses
+    "DragAndDropOptions",
+    "DragAndDropRequest",
+    "DragAndDropExecutionContext",
+    # Standalone helper
+    "normalize_drag_strategies",
+    # Executor class
+    "DoDragAndDrop",
+]
 
 
 if __name__ == "__main__":

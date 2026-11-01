@@ -5,22 +5,26 @@ Implements version control, rollback, and hyperparameter tuning foundations
 
 import subprocess
 import hashlib
-import json, yaml
-import numpy as np
+import numpy as np # type: ignore
 
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from src.agents.evaluators.utils.config_loader import load_global_config, get_config_section
-from deployment.rollback.code_rollback import AtomicRollback, reset_to_commit, rollforward_to_next_tag, get_sorted_tags
-from deployment.rollback.model_rollback import rollback_model, validate_backup_integrity, rollforward_model
-from src.tuning.tuner import HyperparamTuner as BaseTuner
-from src.agents.evaluators.evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger, PrettyPrinter
+from deployment.rollback.code_rollback import reset_to_commit, rollforward_to_next_tag, get_sorted_tags # type: ignore
+from deployment.rollback.model_rollback import rollback_model, validate_backup_integrity, rollforward_model # type: ignore
+from src.tuning.tuner import HyperparamTuner as BaseTuner # type: ignore
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.evaluation_helpers import *
+from .utils.evaluation_errors import *
+from .evaluators_memory import EvaluatorsMemory
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Infrastructure Manager")
-printer = PrettyPrinter
+printer = PrettyPrinter()
+
+MODULE_VERSION = "2.3.0"
+
 
 class InfrastructureManager:
     """Orchestrates core infrastructure operations"""
@@ -340,7 +344,14 @@ class EvalTuner(BaseTuner):
         else:
             logger.critical("Failed to restore system state after tuning failure!")
 
-# ====================== Usage Example ======================
+
+__all__ = [
+    "InfrastructureManager",
+    "RollbackSystem",
+    "EvalTuner",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Infrastructure Manager ===\n")
     printer.status("Init", "Infrastructure Manager initialized", "info")

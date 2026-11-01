@@ -11,17 +11,14 @@ import time
 
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from .utils import (load_global_config, get_config_section,
-                    # privacy error
-                    ConsentArtifactMissingError, ConsentValidationError, CrossContextSharingError,
-                    PolicyEvaluationError, PrivacyConfigurationError, PrivacyMemoryWriteError,
-                    PrivacyDecision, PrivacyError, PurposeLimitationError, normalize_privacy_exception,
-                    sanitize_privacy_context)
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.privacy_error import *
+from .utils.privacy_helpers import *
 from .privacy_memory import PrivacyMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Data Consent and Purpose Binding")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class DataConsent:
@@ -42,65 +39,25 @@ class DataConsent:
 
         self.enabled = bool(self.consent_config.get("enabled", True))
         self.strict_mode = bool(self.consent_config.get("strict_mode", True))
-        self.sanitize_freeform_context = bool(
-            self.consent_config.get("sanitize_freeform_context", True)
-        )
-        self.record_decisions_in_memory = bool(
-            self.consent_config.get("record_decisions_in_memory", True)
-        )
-        self.record_stage_decisions = bool(
-            self.consent_config.get("record_stage_decisions", False)
-        )
-        self.write_shared_contract = bool(
-            self.consent_config.get("write_shared_contract", True)
-        )
-
-        self.require_artifact_for_processing = bool(
-            self.consent_config.get("require_artifact_for_processing", True)
-        )
-        self.require_active_consent = bool(
-            self.consent_config.get("require_active_consent", True)
-        )
-        self.require_purpose_binding = bool(
-            self.consent_config.get("require_purpose_binding", True)
-        )
-        self.require_legal_basis_for_granted_consent = bool(
-            self.consent_config.get("require_legal_basis_for_granted_consent", True)
-        )
-        self.enforce_source_context_match = bool(
-            self.consent_config.get("enforce_source_context_match", True)
-        )
-        self.enforce_destination_context_allowlist = bool(
-            self.consent_config.get("enforce_destination_context_allowlist", True)
-        )
-        self.enforce_action_allowlist = bool(
-            self.consent_config.get("enforce_action_allowlist", True)
-        )
+        self.sanitize_freeform_context = bool(self.consent_config.get("sanitize_freeform_context", True))
+        self.record_decisions_in_memory = bool(self.consent_config.get("record_decisions_in_memory", True))
+        self.record_stage_decisions = bool(self.consent_config.get("record_stage_decisions", False))
+        self.write_shared_contract = bool(self.consent_config.get("write_shared_contract", True))
+        self.require_artifact_for_processing = bool(self.consent_config.get("require_artifact_for_processing", True))
+        self.require_active_consent = bool(self.consent_config.get("require_active_consent", True))
+        self.require_purpose_binding = bool( self.consent_config.get("require_purpose_binding", True))
+        self.require_legal_basis_for_granted_consent = bool(self.consent_config.get("require_legal_basis_for_granted_consent", True))
+        self.enforce_source_context_match = bool(self.consent_config.get("enforce_source_context_match", True))
+        self.enforce_destination_context_allowlist = bool(self.consent_config.get("enforce_destination_context_allowlist", True))
+        self.enforce_action_allowlist = bool(self.consent_config.get("enforce_action_allowlist", True))
         self.allow_same_context_without_explicit_destination_binding = bool(
-            self.consent_config.get(
-                "allow_same_context_without_explicit_destination_binding",
-                True,
-            )
-        )
-
-        self.default_policy_version = str(
-            self.consent_config.get("default_policy_version", "v1")
-        )
-        self.default_decision_stage = str(
-            self.consent_config.get("default_decision_stage", "consent.runtime_gate")
-        )
-        self.max_allowed_contexts = int(
-            self.consent_config.get("max_allowed_contexts", 50)
-        )
-        self.max_allowed_processors = int(
-            self.consent_config.get("max_allowed_processors", 50)
-        )
-        self.max_allowed_actions = int(
-            self.consent_config.get("max_allowed_actions", 50)
-        )
-        self.max_allowed_purposes = int(
-            self.consent_config.get("max_allowed_purposes", 100)
-        )
+            self.consent_config.get("allow_same_context_without_explicit_destination_binding", True,))
+        self.default_policy_version = str(self.consent_config.get("default_policy_version", "v1"))
+        self.default_decision_stage = str(self.consent_config.get("default_decision_stage", "consent.runtime_gate"))
+        self.max_allowed_contexts = int(self.consent_config.get("max_allowed_contexts", 50))
+        self.max_allowed_processors = int(self.consent_config.get("max_allowed_processors", 50))
+        self.max_allowed_actions = int(self.consent_config.get("max_allowed_actions", 50))
+        self.max_allowed_purposes = int(self.consent_config.get("max_allowed_purposes", 100))
 
         self._validate_config()
         logger.info("DataConsent initialized with production-ready consent controls.")
@@ -279,6 +236,7 @@ class DataConsent:
     ) -> None:
         if not self.record_stage_decisions:
             return
+        assert exc.severity is not None
         self._record_decision(
             request_id=request_id,
             stage=stage,
@@ -1097,6 +1055,7 @@ class DataConsent:
                     "required_processor": required_processor,
                 },
             )
+            assert normalized_exc.severity is not None
             self._record_decision(
                 request_id=normalized_request_id,
                 stage=self.default_decision_stage,
@@ -1124,6 +1083,7 @@ class DataConsent:
             )
             raise normalized_exc from exc
 
+__all__ =["DataConsent"]
 
 if __name__ == "__main__":
     print("\n=== Running data consent===\n")

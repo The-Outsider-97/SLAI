@@ -18,31 +18,30 @@ import json
 import math
 import os
 import uuid
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
-import yaml
+import matplotlib.pyplot as plt # type: ignore
+import networkx as nx # type: ignore
+import numpy as np # type: ignore
+import yaml # type: ignore
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from statistics import mean
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.evaluators_calculations import EvaluatorsCalculations
-from .utils.evaluation_errors import (ConfigLoadError, OperationalError, VisualizationError,
-                                      MetricCalculationError, ReportGenerationError,
-                                      ThresholdViolationError, ValidationFailureError)
-from .modules.report import get_visualizer
+from .modules.evaluators_calculations import EvaluatorsCalculations
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
+from .documentation.report import get_visualizer
 from .evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Autonomous Evaluator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
-MODULE_VERSION = "2.0.0"
+MODULE_VERSION = "2.3.0"
 
 
 @dataclass(slots=True)
@@ -959,23 +958,26 @@ class AutonomousEvaluator:
 
     def _store_error_if_possible(self, error: Exception, **context: Any) -> None:
         try:
-            if hasattr(self.memory, "add_error") and hasattr(error, "to_audit_dict"):
-                self.memory.add_error(
-                    error,
-                    tags=["autonomous", "error"],
-                    metadata=context,
-                )
-            else:
-                self.memory.add(
-                    entry={
-                        "error_type": error.__class__.__name__,
-                        "message": str(error),
-                        "context": context,
-                        "timestamp": _utcnow().isoformat(),
-                    },
-                    tags=["autonomous", "error"],
-                    priority="high",
-                )
+            if hasattr(self.memory, "add_error"):
+                audit_error: Any = error
+                if hasattr(audit_error, "to_audit_dict"):
+                    self.memory.add_error(
+                        audit_error,
+                        tags=["autonomous", "error"],
+                        metadata=context,
+                    )
+                    return
+
+            self.memory.add(
+                entry={
+                    "error_type": error.__class__.__name__,
+                    "message": str(error),
+                    "context": context,
+                    "timestamp": _utcnow().isoformat(),
+                },
+                tags=["autonomous", "error"],
+                priority="high",
+            )
         except Exception as exc:
             logger.error("Failed to persist autonomous evaluator error: %s", exc)
 
@@ -1306,15 +1308,6 @@ class AutonomousEvaluator:
         payload["task_id"] = task_id
         payload["recorded_at"] = _utcnow().isoformat()
         return payload
-
-
-# ----------------------------------------------------------------------
-# Utility functions
-# ----------------------------------------------------------------------
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 __all__ = [

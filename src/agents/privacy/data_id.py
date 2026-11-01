@@ -9,20 +9,20 @@ from __future__ import annotations
 import json
 import re
 import time
-from pathlib import Path
 
+from pathlib import Path
 from dataclasses import dataclass
 from threading import RLock
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from .utils import (load_global_config, get_config_section,
-                    PrivacyError, PrivacyErrorType, PrivacySeverity,
-                    normalize_privacy_exception)
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.privacy_error import *
+from .utils.privacy_helpers import *
 from .privacy_memory import PrivacyMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Data Identification")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass(frozen=True)
@@ -1045,6 +1045,11 @@ class DataID:
             return exc
         return normalize_privacy_exception(exc, stage=stage, context=context)
 
+__all__ = [
+    "EntityDetection",
+    "SensitiveAttributeTag",
+    "DataID",
+]
 
 if __name__ == "__main__":
     print("\n=== Running data ID===\n")

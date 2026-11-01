@@ -490,41 +490,41 @@ class ReasoningAbduction(BaseReasoning):
     # Phase 4 — Selection
     # ------------------------------------------------------------------
     def _select_best_hypothesis(self, evaluated: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Pick the highest-composite-score hypothesis that passes all gates.
- 
-        Gate 1: ``is_supported`` must be True.
-        Gate 2: ``confidence`` ≥ ``min_confidence``.
-        Gate 3: ``explanatory_power`` ≥ ``explanatory_threshold``.
- 
-        If no hypothesis passes all three gates, relaxes gate 3 (explanatory
-        threshold) and returns the best remaining candidate.  If still none,
-        returns ``None``.
+        """Pick the highest-composite-score hypothesis that passes the gates.
+
+        ``selection_mode`` is intentionally explicit so callers can distinguish a
+        strict accepted hypothesis from the existing relaxed explanatory-threshold
+        fallback.  No scoring formula or threshold policy is changed here.
         """
         valid = [
-            h for h in evaluated
-            if h["is_supported"]
-            and h["confidence"] >= self.min_confidence
-            and h["explanatory_power"] >= self.explanatory_threshold
+            hypothesis
+            for hypothesis in evaluated
+            if hypothesis["is_supported"]
+            and hypothesis["confidence"] >= self.min_confidence
+            and hypothesis["explanatory_power"] >= self.explanatory_threshold
         ]
- 
+
         if valid:
-            best = valid[0]   # already sorted by composite_score desc
+            best = valid[0]
+            best["selection_mode"] = "strict"
             log_step(f"Best hypothesis selected: {best['hypothesis'][:80]}")
             return best
- 
-        # Relaxed fallback: drop explanatory threshold gate
+
         relaxed = [
-            h for h in evaluated
-            if h["is_supported"] and h["confidence"] >= self.min_confidence
+            hypothesis
+            for hypothesis in evaluated
+            if hypothesis["is_supported"]
+            and hypothesis["confidence"] >= self.min_confidence
         ]
         if relaxed:
             best = relaxed[0]
+            best["selection_mode"] = "relaxed_explanatory_threshold"
             log_step(
                 f"Fallback hypothesis (relaxed threshold): {best['hypothesis'][:80]}",
                 "warning",
             )
             return best
- 
+
         log_step("No hypothesis met the acceptance criteria", "warning")
         return None
  

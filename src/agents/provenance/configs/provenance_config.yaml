@@ -1,0 +1,35 @@
+# SLAI v2.3 Provenance subsystem configuration.
+# Provenance records derivation evidence; it does not score source quality,
+# trustworthiness, runtime health, correctness, or policy compliance.
+
+provenance_store:
+  path: data/provenance/provenance_store.json
+  persist: true
+  schema_version: slai.provenance.store.v1
+
+provenance_memory:
+  path: data/provenance/checkpoints_manifest.json
+  persist: true
+
+provenance_lineage: {}
+provenance_custody: {}
+lineage: {}
+artifact_lineage: {}
+dataset_lineage: {}
+dependency_lineage: {}
+model_lineage: {}
+transformation_lineage: {}
+source_registry: {}
+
+lineage_graph:
+  query:
+    max_depth: 256
+
+reproducibility:
+  # These are provenance completeness requirements, not quality criteria.
+  required_requirements:
+    - source_identity_known
+    - configuration_known
+    - dependencies_known
+    - transformations_complete
+    - environment_known

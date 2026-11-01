@@ -10,6 +10,7 @@ flask
 flask-socketio  # provides flask_socketio
 GPUtil
 gymnasium
+huggingface_hub>=0.25
 joblib
 jsonschema
 kafka-python  # provides kafka

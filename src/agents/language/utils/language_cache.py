@@ -1174,6 +1174,29 @@ def _optional_seconds(value: Any, *, default: Optional[float]) -> Optional[float
     return number
 
 
+__all__ = [
+    # Type aliases
+    "CacheKey",
+    "CacheKind",
+    "CacheNamespace",
+    "MetadataFilter",
+    "ValueFactory",
+    # Dataclasses
+    "CacheLookup",
+    "SimilarityMatch",
+    "CacheEntry",
+    "LanguageCacheStats",
+    "LanguageCacheConfig",
+    # Eviction strategy classes
+    "BaseCacheStrategy",
+    "LRUCacheStrategy",
+    "LFUCacheStrategy",
+    "FIFOCacheStrategy",
+    # Main cache class
+    "LanguageCache",
+]
+
+
 if __name__ == "__main__":
     print("\n=== Running Language Cache ===\n")
     printer.status("TEST", "Language Cache initialized", "info")

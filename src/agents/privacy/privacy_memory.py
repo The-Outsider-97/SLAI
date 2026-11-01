@@ -19,15 +19,13 @@ import uuid
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from threading import RLock
 
-from .utils import (get_config_section, load_global_config,
-                    # Error
-                    PolicyEvaluationError, PrivacyConfigurationError, PrivacyDecision, PrivacyError,
-                    PrivacyMemoryError, PrivacyMemoryWriteError, RetentionObligationMissingError,
-                    normalize_privacy_exception, sanitize_privacy_context)
-from logs.logger import PrettyPrinter, get_logger
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.privacy_error import *
+from .utils.privacy_helpers import *
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Privacy Memory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class PrivacyMemory:
@@ -1470,6 +1468,7 @@ class PrivacyMemory:
                 raise self._handle_exception(exc, stage="privacy_memory.export_state") from exc
             raise
 
+__all__ = ["PrivacyMemory"]
 
 if __name__ == "__main__":
     print("\n=== Running Privacy Memory ===\n")

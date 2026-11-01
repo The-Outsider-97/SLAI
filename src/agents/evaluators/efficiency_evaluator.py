@@ -2,19 +2,17 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
-import hashlib
-import numpy as np
-import torch
-import yaml
+import numpy as np # type: ignore
+import torch # type: ignore
+import yaml # type: ignore
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-from PyQt5.QtCore import QSize, QBuffer
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+from PyQt5.QtCore import QSize # type: ignore
 
 if sys.platform != "win32":
     import resource
@@ -22,17 +20,15 @@ else:
     resource = None
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.evaluators_calculations import EvaluatorsCalculations
-from .utils.evaluation_errors import (ComparisonError, ConfigLoadError, EvaluationError,
-                                      MemoryAccessError, MetricCalculationError, OperationalError,
-                                      ReportGenerationError, TemplateError, ValidationFailureError,
-                                      VisualizationError)
-from .modules.report import get_visualizer
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
+from .modules.evaluators_calculations import EvaluatorsCalculations
+from .documentation.report import get_visualizer
 from .evaluators_memory import EvaluatorsMemory
-from logs.logger import get_logger, PrettyPrinter
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Efficiency Evaluator")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 @dataclass(slots=True)
@@ -116,7 +112,7 @@ class EfficiencyEvaluator:
     avoids brittle runtime import behavior.
     """
 
-    MODULE_VERSION = "2.0.0"
+    MODULE_VERSION = "2.3.0"
 
     def __init__(
         self,
@@ -607,7 +603,7 @@ class EfficiencyEvaluator:
         operator = str(condition.get("operator", "")).strip()
         threshold = condition.get("threshold")
 
-        if not metric_key or metric_key not in metrics:
+        if not metric_key or metric_key not in metrics or threshold is None:
             return False
         try:
             threshold_value = float(threshold)
@@ -692,11 +688,7 @@ class EfficiencyEvaluator:
 
         return comparisons
 
-    def _calculate_reference_diagnostics(
-        self,
-        outputs: Sequence[Any],
-        ground_truths: Sequence[Any],
-    ) -> Dict[str, float]:
+    def _calculate_reference_diagnostics(self, outputs: Sequence[Any], ground_truths: Sequence[Any]) -> Dict[str, float]:
         if len(ground_truths) == 0:
             return {}
         output_token_total = sum(self._estimate_token_count(item) for item in outputs)
@@ -1292,14 +1284,17 @@ class EfficiencyEvaluator:
         logger.warning("Efficiency Evaluator temporarily disabled.")
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+__all__ = [
+    "EfficiencyHistoryRecord",
+    "BaselineComparison",
+    "EfficiencyEvaluationResult",
+    "EfficiencyEvaluator",
+]
 
 
-# ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Efficiency Evaluator ===\n")
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication # type: ignore
 
     app = QApplication(sys.argv)
     eval = EfficiencyEvaluator()

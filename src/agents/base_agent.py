@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-__version__ = "2.2.0"
-
 """
 SLAI Base Agent
 
@@ -19,6 +15,9 @@ This module intentionally keeps local project imports direct. Optional heavyweig
 third-party imports such as torch are lazy-loaded only when their optional helper
 methods are used.
 """
+from __future__ import annotations
+
+__version__ = "2.3.0"
 
 import abc
 import contextlib
@@ -36,21 +35,18 @@ from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequenc
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
-from typing import Any, Deque, Dict, Iterator, List, Optional, Tuple
+from typing import Any, ClassVar, Deque, Dict, Iterator, List, Optional, Tuple
 
 from .base.utils.main_config_loader import load_global_config, get_config_section
 from .base.utils.base_errors import *
 from .base.issue_handler import *
 from .base.lazy_agent import LazyAgent
 from .base.light_metric_store import LightMetricStore
+from .base.failure_taxonomy import DEFAULT_FAILURE_TAXONOMY, FailureTaxonomy
+from .base.success_taxonomy import DEFAULT_SUCCESS_TAXONOMY, SuccessTaxonomy
 from .collaborative.shared_memory import SharedMemory
-from .runtime_contracts import (
-    AgentRuntimeIdentity,
-    RuntimeContractViolation,
-    RuntimeLifecycle,
-    RuntimeStatus,
-    build_runtime_scope_id,
-)
+from .runtime_contracts import *
+from checkpointing.checkpoint_manager import CheckpointManager # pyright: ignore[reportMissingImports]
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("SLAI Base Agent")
@@ -83,8 +79,8 @@ def _ensure_torch_imported() -> bool:
     if TORCH_AVAILABLE is False:
         return False
     try:
-        import torch as torch_module
-        import torch.nn as torch_nn
+        import torch as torch_module # type: ignore
+        import torch.nn as torch_nn # type: ignore
     except Exception as exc:  # third-party optional dependency, not a local import
         TORCH_AVAILABLE = False
         TORCH_IMPORT_ERROR = exc
@@ -141,8 +137,19 @@ class BaseAgent(abc.ABC):
 
     DEFAULT_CAPABILITY_ORDER: Tuple[str, ...] = ("predict", "get_action", "act")
     DEFAULT_CONTENT_KEYS: Tuple[str, ...] = ("text", "query", "input", "message", "data", "payload")
+    CHECKPOINTING_SUPPORTED: bool = False
+    FAILURE_TAXONOMY: ClassVar[FailureTaxonomy] = DEFAULT_FAILURE_TAXONOMY
+    SUCCESS_TAXONOMY: ClassVar[SuccessTaxonomy] = DEFAULT_SUCCESS_TAXONOMY
+    STRICT_SUCCESS_REQUIRED: ClassVar[bool] = False
 
-    def __init__(self, shared_memory: Any, agent_factory: Any, config: Optional[Mapping[str, Any]] = None) -> None:
+    def __init__(
+            self,
+            shared_memory: Any,
+            agent_factory: Any,
+            config: Optional[Mapping[str, Any]] = None,
+            *,
+            checkpoint_manager: Any = None,
+            ) -> None:
         self.logger = get_logger(self.__class__.__name__)
         self.name = self.__class__.__name__
         self.agent_id = f"{self.name}:{uuid.uuid4().hex[:12]}"
@@ -155,8 +162,11 @@ class BaseAgent(abc.ABC):
         )
         self._runtime_status = RuntimeStatus()
 
-        self.shared_memory = shared_memory if shared_memory is not None else SharedMemory()
         self.agent_factory = agent_factory
+        self.shared_memory = shared_memory if shared_memory is not None else SharedMemory()
+        self._checkpoint_manager = checkpoint_manager
+        self._validate_checkpoint_manager_contract()
+        self._checkpoint_enabled = False
 
         self.config = load_global_config()
         self.global_config = self.config
@@ -201,6 +211,508 @@ class BaseAgent(abc.ABC):
         self._init_core_components()
         self._publish_lifecycle_event("initialized", {"agent_id": self.agent_id})
         self._transition_runtime_lifecycle(RuntimeLifecycle.ACTIVE)
+
+    # ==========================================================
+    # Durable checkpoint integration
+    #
+    # BaseAgent owns:
+    #   - the common agent-facing checkpoint API
+    #   - manager contract validation
+    #   - common metadata / health reporting
+    #   - generic agent-state save/load/restore orchestration
+    #
+    # Concrete agents own:
+    #   - which state is checkpointable
+    #   - component extraction
+    #   - codec declarations
+    #   - state application
+    #   - specialized restore ordering when required
+    #
+    # CheckpointManager owns:
+    #   - serialization
+    #   - integrity verification
+    #   - manifests
+    #   - storage / atomic commit
+    #   - selection / compatibility
+    #   - policy / retention
+    # ==========================================================
+
+    @property
+    def supports_checkpointing(self) -> bool:
+        """Whether this agent declares durable checkpoint participation."""
+        return bool(self.CHECKPOINTING_SUPPORTED)
+
+    @property
+    def checkpointing_enabled(self) -> bool:
+        """Whether checkpointing is both supported and currently available."""
+        return (self.supports_checkpointing and self._checkpoint_manager is not None)
+
+    @property
+    def checkpoint_manager(self) -> Any:
+        """Return the injected checkpoint service without transferring ownership."""
+        return self._checkpoint_manager
+
+    def _validate_checkpoint_manager_contract(self) -> None:
+        """Validate an injected checkpoint manager structurally.
+
+        BaseAgent intentionally depends only on the canonical component-oriented
+        checkpoint boundary rather than the concrete CheckpointManager class.
+        """
+        manager = self._checkpoint_manager
+        if manager is None:
+            return
+
+        missing = tuple(
+            method_name
+            for method_name in ("save_components", "load_components")
+            if not callable(getattr(manager, method_name, None))
+        )
+
+        if missing:
+            raise BaseConfigurationError(
+                "checkpoint_manager does not satisfy the required checkpoint contract.",
+                component=self.name,
+                details={
+                    "manager_type": type(manager).__name__,
+                    "missing_methods": list(missing),
+                    "required_methods": [
+                        "save_components",
+                        "load_components",
+                    ],
+                },
+            )
+
+    def _require_checkpoint_manager(self) -> Any:
+        """Return the injected checkpoint manager or fail explicitly."""
+        if not self.supports_checkpointing:
+            raise BaseStateError(
+                f"{self.name} does not declare durable checkpoint support.",
+                component=self.name,
+                details={"checkpointing_supported": False,},
+            )
+
+        manager = self._checkpoint_manager
+        if manager is None:
+            raise BaseStateError(
+                f"Checkpointing is unavailable for {self.name}: "
+                "no checkpoint manager was injected.",
+                component=self.name,
+                details={
+                    "checkpointing_supported": True,
+                    "checkpoint_manager_available": False,
+                },
+            )
+
+        return manager
+
+    # ----------------------------------------------------------
+    # Checkpoint declaration hooks
+    # ----------------------------------------------------------
+
+    def checkpoint_components(self) -> Mapping[str, Any]:
+        """Return named components owned by this agent for durable persistence.
+
+        The default BaseAgent implementation persists only the agent-specific
+        state exported by ``_export_checkpoint_state``.
+
+        Agents with models, optimizers, schedulers, RNG state, tokenizers, or
+        other independently serialized components should override this method.
+        """
+        state = self._export_checkpoint_state()
+
+        if not isinstance(state, Mapping):
+            raise BaseStateError(
+                "_export_checkpoint_state() must return a mapping.",
+                component=self.name,
+                details={
+                    "actual_type": type(state).__name__,
+                },
+            )
+
+        return {
+            "agent_state": dict(state),
+        }
+
+    def checkpoint_codec_ids(self) -> Mapping[str, str]:
+        """Declare the codec expected for each checkpoint component.
+
+        Override together with ``checkpoint_components`` when an agent saves
+        components other than generic agent state.
+        """
+        return {
+            "agent_state": "agent-state",
+        }
+
+    def checkpoint_restore_components(self) -> Tuple[str, ...]:
+        """Return the components required for a normal agent restore."""
+        return tuple(self.checkpoint_codec_ids().keys())
+
+    def checkpoint_step(self) -> Optional[int]:
+        """Return an agent-defined monotonically meaningful step, if any."""
+        return None
+
+    def checkpoint_metrics(self) -> Mapping[str, Any]:
+        """Return checkpoint-associated metrics, if meaningful for the agent."""
+        return {}
+
+    def _checkpoint_metadata(
+        self,
+        *,
+        reason: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build common checkpoint metadata without overriding caller metadata."""
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise BaseValidationError(
+                "checkpoint metadata must be a mapping.",
+                component=self.name,
+                details={
+                    "actual_type": type(metadata).__name__,
+                },
+            )
+
+        payload = dict(metadata or {})
+
+        if reason is not None:
+            if not isinstance(reason, str) or not reason.strip():
+                raise BaseValidationError(
+                    "checkpoint reason must be a non-empty string when provided.",
+                    component=self.name,
+                )
+            payload["reason"] = reason.strip()
+
+        # Reserved identity fields are written last so caller metadata cannot
+        # silently impersonate another agent/runtime.
+        payload.update(
+            {
+                "agent": self.name,
+                "agent_id": self.agent_id,
+                "agent_version": __version__,
+                "runtime_scope_id": self.runtime_identity.scope_id,
+            }
+        )
+
+        return payload
+
+    # ----------------------------------------------------------
+    # Public checkpoint API
+    # ----------------------------------------------------------
+
+    def save_checkpoint(
+        self,
+        version: Optional[str] = None,
+        *,
+        reason: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        overwrite: Optional[bool] = None,
+    ) -> Any:
+        """Persist this agent through the injected checkpoint manager."""
+        manager = self._require_checkpoint_manager()
+
+        components = self.checkpoint_components()
+        codec_ids = self.checkpoint_codec_ids()
+
+        if not isinstance(components, Mapping) or not components:
+            raise BaseStateError(
+                "checkpoint_components() must return a non-empty mapping.",
+                component=self.name,
+            )
+
+        if not isinstance(codec_ids, Mapping):
+            raise BaseStateError(
+                "checkpoint_codec_ids() must return a mapping.",
+                component=self.name,
+            )
+
+        component_names = set(components)
+        codec_names = set(codec_ids)
+
+        if component_names != codec_names:
+            raise BaseStateError(
+                "Checkpoint components and codec declarations must match exactly.",
+                component=self.name,
+                details={
+                    "components": sorted(component_names),
+                    "codec_components": sorted(codec_names),
+                    "missing_codec_ids": sorted(component_names - codec_names),
+                    "orphan_codec_ids": sorted(codec_names - component_names),
+                },
+            )
+
+        step = self.checkpoint_step()
+        if step is not None and (
+            isinstance(step, bool)
+            or not isinstance(step, int)
+            or step < 0
+        ):
+            raise BaseStateError(
+                "checkpoint_step() must return None or a non-negative integer.",
+                component=self.name,
+                details={"checkpoint_step": step},
+            )
+
+        metrics = self.checkpoint_metrics()
+        if not isinstance(metrics, Mapping):
+            raise BaseStateError(
+                "checkpoint_metrics() must return a mapping.",
+                component=self.name,
+                details={
+                    "actual_type": type(metrics).__name__,
+                },
+            )
+
+        try:
+            result = manager.save_components(
+                components,
+                version=version,
+                codec_ids=codec_ids,
+                step=step,
+                metrics=dict(metrics),
+                metadata=self._checkpoint_metadata(
+                    reason=reason,
+                    metadata=metadata,
+                ),
+                overwrite=overwrite,
+            )
+        except Exception as exc:
+            self._mark_runtime_degraded(
+                "persistence",
+                "checkpoint.save",
+                exc,
+            )
+            raise
+
+        self._mark_runtime_recovered(
+            "persistence",
+            "checkpoint.save",
+        )
+
+        return result
+
+    def load_checkpoint(
+        self,
+        version: Optional[str] = None,
+        *,
+        verify_integrity: bool = True,
+    ) -> Any:
+        """Decode a checkpoint without mutating the live agent.
+
+        ``version=None`` deliberately delegates checkpoint selection to
+        CheckpointManager.  This method is therefore distinct from
+        ``restore_checkpoint``: load performs durable selection/verification/
+        decoding; restore additionally applies the decoded state.
+        """
+        manager = self._require_checkpoint_manager()
+
+        codec_ids = self.checkpoint_codec_ids()
+        components = self.checkpoint_restore_components()
+
+        if not isinstance(components, tuple):
+            components = tuple(components)
+
+        if not components:
+            raise BaseStateError(
+                "checkpoint_restore_components() must not be empty.",
+                component=self.name,
+            )
+
+        unknown = set(components) - set(codec_ids)
+        if unknown:
+            raise BaseStateError(
+                "Restore components have no declared checkpoint codec.",
+                component=self.name,
+                details={
+                    "unknown_components": sorted(unknown),
+                },
+            )
+
+        try:
+            result = manager.load_components(
+                version,
+                components=components,
+                expected_codecs={
+                    name: codec_ids[name]
+                    for name in components
+                },
+                strict=True,
+                verify_integrity=verify_integrity,
+            )
+        except Exception as exc:
+            self._mark_runtime_degraded(
+                "persistence",
+                "checkpoint.load",
+                exc,
+            )
+            raise
+
+        self._mark_runtime_recovered(
+            "persistence",
+            "checkpoint.load",
+        )
+
+        return result
+
+    def restore_checkpoint(
+        self,
+        version: Optional[str] = None,
+        *,
+        verify_integrity: bool = True,
+    ) -> Any:
+        """Load and apply a checkpoint to the live agent.
+
+        The BaseAgent implementation provides rollback for the generic
+        agent-state boundary. Agents with multi-component or topology-sensitive
+        restoration should override the relevant restore hooks rather than
+        reimplementing checkpoint storage or selection.
+        """
+        baseline = self._capture_checkpoint_restore_state()
+
+        try:
+            result = self.load_checkpoint(
+                version,
+                verify_integrity=verify_integrity,
+            )
+
+            components = getattr(result, "components", None)
+            if not isinstance(components, Mapping):
+                raise BaseStateError(
+                    "Checkpoint load result does not expose a component mapping.",
+                    component=self.name,
+                    details={
+                        "result_type": type(result).__name__,
+                    },
+                )
+
+            self._apply_checkpoint_components(components)
+
+        except Exception as exc:
+            try:
+                self._rollback_checkpoint_restore_state(baseline)
+            except Exception as rollback_exc:
+                self._mark_runtime_degraded(
+                    "persistence",
+                    "checkpoint.restore.rollback",
+                    rollback_exc,
+                    retryable=False,
+                )
+                raise BaseStateError(
+                    "Checkpoint restore failed and the live-state rollback also failed.",
+                    component=self.name,
+                    details={
+                        "restore_error_type": type(exc).__name__,
+                        "restore_error": str(exc),
+                        "rollback_error_type": type(rollback_exc).__name__,
+                        "rollback_error": str(rollback_exc),
+                    },
+                    cause=exc,
+                ) from exc
+
+            self._mark_runtime_degraded(
+                "persistence",
+                "checkpoint.restore",
+                exc,
+            )
+            raise
+
+        self._mark_runtime_recovered(
+            "persistence",
+            "checkpoint.restore",
+        )
+
+        return result
+
+    # ----------------------------------------------------------
+    # Agent-specific state hooks
+    # ----------------------------------------------------------
+
+    def _export_checkpoint_state(self) -> Mapping[str, Any]:
+        """Return a self-contained snapshot of BaseAgent-owned durable state.
+
+        Concrete checkpoint-capable agents must override this method unless
+        they override ``checkpoint_components`` completely.
+        """
+        raise NotImplementedError(
+            f"{self.name} declares checkpoint support but does not implement "
+            "_export_checkpoint_state()."
+        )
+
+    def _import_checkpoint_state(
+        self,
+        state: Mapping[str, Any],
+    ) -> None:
+        """Apply a previously exported agent-state payload."""
+        raise NotImplementedError(
+            f"{self.name} declares checkpoint support but does not implement "
+            "_import_checkpoint_state()."
+        )
+
+    def _apply_checkpoint_components(
+        self,
+        components: Mapping[str, Any],
+    ) -> None:
+        """Apply decoded components for the default agent-state-only contract."""
+        required = set(self.checkpoint_restore_components())
+        missing = required - set(components)
+
+        if missing:
+            raise BaseStateError(
+                "Checkpoint is missing required agent components.",
+                component=self.name,
+                details={
+                    "missing_components": sorted(missing),
+                    "available_components": sorted(components),
+                },
+            )
+
+        # BaseAgent can safely define only the generic agent_state application.
+        # Model/optimizer/topology-specific semantics belong to the concrete
+        # agent.
+        if required != {"agent_state"}:
+            raise BaseStateError(
+                "This agent declares specialized checkpoint components but "
+                "does not implement specialized checkpoint application.",
+                component=self.name,
+                details={
+                    "restore_components": sorted(required),
+                    "required_override": "_apply_checkpoint_components",
+                },
+            )
+
+        state = components["agent_state"]
+        if not isinstance(state, Mapping):
+            raise BaseStateError(
+                "Decoded agent_state checkpoint component must be a mapping.",
+                component=self.name,
+                details={
+                    "actual_type": type(state).__name__,
+                },
+            )
+
+        self._import_checkpoint_state(state)
+
+    def _capture_checkpoint_restore_state(self) -> Mapping[str, Any]:
+        """Capture the live state required to roll back a failed restore.
+
+        The exported state must be self-contained rather than a collection of
+        references into mutable live state.
+        """
+        state = self._export_checkpoint_state()
+
+        if not isinstance(state, Mapping):
+            raise BaseStateError(
+                "_export_checkpoint_state() must return a mapping.",
+                component=self.name,
+            )
+
+        return dict(state)
+
+    def _rollback_checkpoint_restore_state(
+        self,
+        baseline: Mapping[str, Any],
+    ) -> None:
+        """Restore the pre-load state after failed checkpoint application."""
+        self._import_checkpoint_state(baseline)
+    # ===============================================
 
     def bind_runtime_identity(self, identity: AgentRuntimeIdentity) -> None:
         """Bind the exact factory definition/scope identity after construction."""
@@ -381,18 +893,35 @@ class BaseAgent(abc.ABC):
                 raise BaseStateError(f"Known issue handler already registered: {issue_pattern_or_id}", component=self.name)
             self._known_issue_handlers[issue_pattern_or_id] = handler_func
 
+
     def execute(self, input_data: Any) -> Any:
-        """Execute task data through the common production envelope."""
-        if self._runtime_status.lifecycle not in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
+        """Execute with accurate outcomes and side-effect-safe retries."""
+        if self._runtime_status.lifecycle not in {
+            RuntimeLifecycle.ACTIVE,
+            RuntimeLifecycle.DEGRADED,
+        }:
             raise BaseStateError(
                 "Agent cannot execute outside an active runtime lifecycle.",
                 component=self.name,
                 details={"lifecycle": self._runtime_status.lifecycle.value},
             )
+
         execution_id = uuid.uuid4().hex
         started_at = time.time()
         attempts = 0
         last_exception: Optional[BaseException] = None
+
+        # Retry is only safe when the capability itself guarantees
+        # idempotency, or guarantees deduplication by idempotency key.
+        retry_safe = bool(getattr(self, "execution_is_idempotent", False))
+
+        if (
+            isinstance(input_data, Mapping)
+            and input_data.get("idempotency_key")
+            and getattr(self, "supports_idempotency_keys", False)
+        ):
+            retry_safe = True
+
         self.operational_state = "running"
         self._run_optional_runtime_operation(
             "telemetry",
@@ -400,55 +929,164 @@ class BaseAgent(abc.ABC):
             lambda: self.metric_store.start_tracking(
                 "execute",
                 "performance",
-                metadata={"agent": self.name, "execution_id": execution_id},
+                metadata={
+                    "agent": self.name,
+                    "execution_id": execution_id,
+                },
             ),
         )
+
+        def complete_success(result: Any, *, recovered_by: Optional[str] = None) -> Any:
+            # Accounting is outside the capability retry boundary.
+            # A telemetry failure must never repeat the operation.
+            try:
+                self._after_successful_execution(
+                    result,
+                    attempts,
+                    execution_id,
+                    recovered_by=recovered_by,
+                )
+            except Exception as exc:
+                self._mark_runtime_degraded(
+                    "telemetry",
+                    "execute.success_accounting",
+                    exc,
+                    retryable=False,
+                )
+                self.logger.warning("[%s] Execution succeeded but accounting failed: %s", self.name, exc)
+
+            self._record_execution(
+                started_at,
+                "recovered" if recovered_by else "success",
+                attempts,
+                result=result,
+                recovered_by=recovered_by,
+                execution_id=execution_id,
+            )
+            return result
 
         try:
             for attempt_index in range(self.max_task_retries + 1):
                 attempts = attempt_index + 1
+
                 try:
                     result = self._execute_once(input_data)
-                    self._after_successful_execution(result, attempts, execution_id)
-                    self._record_execution(started_at, "success", attempts, result=result, execution_id=execution_id)
-                    return result
+
                 except Exception as exc:
                     last_exception = exc
-                    if attempt_index < self.max_task_retries:
+
+                    if (retry_safe and attempt_index < self.max_task_retries):
                         self._publish_lifecycle_event("retry", {"attempt": attempts, "error": str(exc)})
+
                         time.sleep(min(self.retry_backoff_seconds * (attempt_index + 1), self.retry_backoff_cap_seconds))
                         continue
+
                     break
 
-            error_info = self._build_error_info(last_exception, input_data, execution_id, attempts)
+                # A returned failure is not successful execution.
+                # When STRICT_SUCCESS_REQUIRED is set, unmarked results
+                # ("unknown") are also treated as failures so they trigger
+                # the same recovery path.
+                classification = self._classify_result(result)
+                if classification == "failure" or (classification == "unknown" and self.STRICT_SUCCESS_REQUIRED):
+                    if isinstance(result, Mapping):
+                        error_message = str(result.get("error", result.get("reason", "Task returned a failure result.")))
+                    else:
+                        error_message = "Task returned an unsuccessful result."
+
+                    error_info = {
+                        "error_type": "ReturnedTaskFailure",
+                        "error_message": error_message,
+                        "execution_id": execution_id,
+                        "attempts": attempts,
+                    }
+
+                    self._record_execution(
+                        started_at,
+                        "failed",
+                        attempts,
+                        result=result,
+                        error_info=error_info,
+                        execution_id=execution_id,
+                    )
+                    self._publish_stats(success=False, attempts=attempts, error=error_info)
+
+                    if isinstance(result, Mapping):
+                        return result
+
+                    return {
+                        "status": "failed",
+                        "reason": error_message,
+                        "execution_id": execution_id,
+                        "attempts": attempts,
+                    }
+
+                return complete_success(result)
+
+            error_info = self._build_error_info(
+                last_exception,
+                input_data,
+                execution_id,
+                attempts,
+            )
+
             self._log_error_to_shared_memory(error_info)
             self._check_and_log_similar_errors(error_info)
 
-            if self.enable_known_issue_recovery:
-                recovered = self.handle_known_issue(input_data, error_info, error=last_exception)
-                if not self._is_failure_result(recovered):
-                    self._after_successful_execution(recovered, attempts, execution_id, recovered_by="handle_known_issue")
-                    self._record_execution(started_at, "recovered", attempts, result=recovered, recovered_by="handle_known_issue", execution_id=execution_id)
-                    return recovered
+            # General recovery handlers may retry the original action.
+            # Only invoke them if repeated execution is safe.
+            if self.enable_known_issue_recovery and retry_safe:
+                try:
+                    recovered = self.handle_known_issue(input_data, error_info, error=last_exception)
+                    if not self._is_failure_result(recovered):
+                        return complete_success(recovered, recovered_by="handle_known_issue")
+                except Exception as exc:
+                    self._mark_runtime_degraded(
+                        "recovery",
+                        "execute.handle_known_issue",
+                        exc,
+                        retryable=False,
+                    )
 
-            if self.enable_alternative_execute:
-                alternative_result = self.alternative_execute(input_data, original_error=last_exception)
-                if not self._is_failure_result(alternative_result):
-                    self._after_successful_execution(alternative_result, attempts, execution_id, recovered_by="alternative_execute")
-                    self._record_execution(started_at, "recovered", attempts, result=alternative_result, recovered_by="alternative_execute", execution_id=execution_id)
-                    return alternative_result
+            alternative_safe = (retry_safe or bool(getattr(self, "alternative_execute_is_safe_after_failure", False))
+                or (type(self).alternative_execute is BaseAgent.alternative_execute))
+            # Explicitly overridden domain alternatives remain valid.
+            # The default BaseAgent alternative is diagnostic only.
+            if self.enable_alternative_execute and alternative_safe:
+                try:
+                    alternative_result = self.alternative_execute(input_data, original_error=last_exception)
+                    if not self._is_failure_result(alternative_result):
+                        return complete_success(alternative_result, recovered_by="alternative_execute")
+
+                except Exception as exc:
+                    self._mark_runtime_degraded(
+                        "recovery",
+                        "execute.alternative_execute",
+                        exc,
+                        retryable=False,
+                    )
 
             failure = {
                 "status": "failed",
                 "error": error_info["error_message"],
                 "error_type": error_info["error_type"],
-                "reason": "All execution and recovery attempts failed.",
+                "reason": "Execution failed and no valid recovery completed the task.",
                 "execution_id": execution_id,
                 "attempts": attempts,
             }
-            self._record_execution(started_at, "failed", attempts, error_info=error_info, execution_id=execution_id)
+
+            self._record_execution(
+                started_at,
+                "failed",
+                attempts,
+                result=failure,
+                error_info=error_info,
+                execution_id=execution_id,
+            )
             self._publish_stats(success=False, attempts=attempts, error=error_info)
+
             return failure
+
         finally:
             self._run_optional_runtime_operation(
                 "telemetry",
@@ -570,27 +1208,242 @@ class BaseAgent(abc.ABC):
                     return {"status": "failed", "reason": f"Handler for {pattern} failed: {exc}", "error": str(exc)}
         return {"status": "failed", "reason": "No applicable known issue handler recovered the task."}
 
-    @staticmethod
-    def _is_failure_result(value: Any) -> bool:
+
+    @classmethod
+    def _is_truthy_error_value(cls, value: Any) -> bool:
+        if value is None or value is False:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set, frozenset, dict)):
+            return len(value) > 0
+        if isinstance(value, (int, float)):
+            return value != 0
+        return bool(value)
+
+    @classmethod
+    def _is_failure_result(cls, value: Any) -> bool:
+        """Taxonomy-driven failure detection.
+
+        The vocabulary lives on ``cls.FAILURE_TAXONOMY`` (see
+        ``base/failure_taxonomy.py``). Subclasses extend it by deriving
+        a new taxonomy from ``DEFAULT_FAILURE_TAXONOMY`` — no override
+        of this method is required.
+        """
+        taxonomy = cls.FAILURE_TAXONOMY
+
+        # 1. None is always failure.
         if value is None:
             return True
-        if isinstance(value, Mapping):
-            return str(value.get("status", "")).lower() in {"failed", "failure", "error"} and not value.get("recovered")
+
+        # 2. Explicit boolean.
+        if isinstance(value, bool):
+            return value is False
+
+        # 3. String result.
         if isinstance(value, str):
-            return "[fallback failure]" in value.lower()
+            text = value.strip().lower()
+            if not text:
+                return False
+            return any(text.startswith(p) for p in taxonomy.failure_string_prefixes)
+
+        # 4. Mapping result.
+        if isinstance(value, Mapping):
+            # 4a. Primary status.
+            if taxonomy.is_failure_status(value.get("status")):
+                return True
+
+            # 4b. Alternate status-bearing keys.
+            for alt_key in ("state", "result_status", "outcome", "phase"):
+                if taxonomy.is_failure_status(value.get(alt_key)):
+                    return True
+
+            # 4c. HTTP / numeric status codes.
+            for code_key in taxonomy.http_status_keys:
+                if code_key not in value:
+                    continue
+                code = value.get(code_key)
+                if isinstance(code, bool):
+                    continue
+                if isinstance(code, (int, float)) and code >= 400:
+                    return True
+
+            # 4d. Explicit error carriers.
+            for key in taxonomy.error_carrier_keys:
+                if key in value and cls._is_truthy_error_value(value.get(key)):
+                    return True
+
+            # 4e. Success flags set to False.
+            for key in taxonomy.success_flag_keys:
+                if key in value and value.get(key) is False:
+                    return True
+
+            # 4f. Failure flags set to True.
+            for key in taxonomy.failure_flag_keys:
+                if key in value and value.get(key) is True:
+                    return True
+
+            # 4g. Recursive nested result (guarded by success signals).
+            nested = value.get("result")
+            if (
+                isinstance(nested, (Mapping, str))
+                and nested is not value
+                and cls._is_failure_result(nested)
+                and not any(value.get(k) is True for k in taxonomy.success_flag_keys)
+            ):
+                return True
+
+            return False
+
+        # 5. Sequence result (opt-in per taxonomy).
+        if (isinstance(value, (list, tuple)) and taxonomy.treat_sequence_failures_as_failure):
+            return any(cls._is_failure_result(item) for item in value)
+
         return False
 
+    @classmethod
+    def _is_success_result(cls, value: Any) -> bool:
+        """Positive success detection driven by ``cls.SUCCESS_TAXONOMY``.
+
+        Success requires an affirmative signal that is not suppressed by any
+        failure signal. Failure precedence is enforced here, not inside the
+        taxonomy, so the taxonomy stays a pure vocabulary.
+
+        Relationship to ``_is_failure_result``:
+        - Returns ``False`` for anything ``_is_failure_result`` returns ``True`` for.
+        - Returns ``False`` for anything that carries no affirmative marker
+          (raw strings without a success prefix, empty mappings, ``None``).
+        - Returns ``True`` only when at least one affirmative signal fires and
+          no blocking signal fires.
+        """
+        taxonomy = cls.SUCCESS_TAXONOMY
+        failure_taxonomy = cls.FAILURE_TAXONOMY
+
+        # 1. None is never success.
+        if value is None:
+            return False
+
+        # 2. Explicit boolean.
+        if isinstance(value, bool):
+            return value is True
+
+        # 3. String result.
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if not text:
+                return False
+            if any(text.startswith(p) for p in failure_taxonomy.failure_string_prefixes):
+                return False
+            return any(text.startswith(p) for p in taxonomy.success_string_prefixes)
+
+        # 4. Mapping result.
+        if isinstance(value, Mapping):
+            # ---- Blockers: any failure signal defeats success.
+            if failure_taxonomy.is_failure_status(value.get("status")):
+                return False
+            for alt_key in ("state", "result_status", "outcome", "phase"):
+                if failure_taxonomy.is_failure_status(value.get(alt_key)):
+                    return False
+            for key in failure_taxonomy.failure_flag_keys:
+                if value.get(key) is True:
+                    return False
+            for key in failure_taxonomy.error_carrier_keys:
+                if key in value and cls._is_truthy_error_value(value.get(key)):
+                    return False
+            for key in failure_taxonomy.success_flag_keys:
+                if key in value and value.get(key) is False:
+                    return False
+            for code_key in failure_taxonomy.http_status_keys:
+                code = value.get(code_key)
+                if isinstance(code, (int, float)) and not isinstance(code, bool) and code >= 400:
+                    return False
+
+            # ---- Positive signals.
+            if taxonomy.is_success_status(value.get("status")):
+                return True
+            for alt_key in ("state", "result_status", "outcome", "phase"):
+                if taxonomy.is_success_status(value.get(alt_key)):
+                    return True
+            for key in taxonomy.success_flag_keys:
+                if value.get(key) is True:
+                    return True
+            for key in taxonomy.failure_flag_keys:
+                if key in value and value.get(key) is False:
+                    return True
+            for code_key in taxonomy.http_status_keys:
+                code = value.get(code_key)
+                if isinstance(code, (int, float)) and not isinstance(code, bool) and 200 <= code < 400:
+                    return True
+
+            # ---- Recursive nested result.
+            nested = value.get("result")
+            if (isinstance(nested, (Mapping, str)) and nested is not value and cls._is_success_result(nested)):
+                return True
+
+            return False
+
+        # 5. Sequence result (opt-in per taxonomy).
+        if (isinstance(value, (list, tuple)) and taxonomy.treat_sequence_successes_as_success):
+            return bool(value) and all(cls._is_success_result(item) for item in value)
+
+        return False
+
+    @classmethod
+    def _classify_result(cls, value: Any) -> str:
+        """Return ``"failure"``, ``"success"``, or ``"unknown"``.
+
+        Failure takes precedence over success when both taxonomies match,
+        so mixed signals are treated conservatively. ``"unknown"`` covers
+        payloads that carry no affirmative marker at all — e.g. raw strings
+        without a prefix, empty mappings, or arbitrary non-string objects.
+        """
+        if cls._is_failure_result(value):
+            return "failure"
+        if cls._is_success_result(value):
+            return "success"
+        return "unknown"
+
     def alternative_execute(self, task_data: Any, original_error: Optional[BaseException] = None) -> Any:
-        if hasattr(self, "replan") and callable(getattr(self, "replan")) and self.current_goal:
-            with contextlib.suppress(Exception):
-                new_plan = self.replan(self.current_goal)  # pyright: ignore[reportAttributeAccessIssue]
-                if new_plan:
-                    return self.execute_plan(new_plan, goal=self.current_goal)
+        """Attempt a legitimate plan recovery, otherwise fail explicitly."""
+        retry_safe = bool(getattr(self, "execution_is_idempotent", False))
+        if (
+            isinstance(task_data, Mapping)
+            and task_data.get("idempotency_key")
+            and getattr(self, "supports_idempotency_keys", False)
+        ):
+            retry_safe = True
+        replan = getattr(self, "replan", None)
+        if (
+            retry_safe
+            and callable(replan)
+            and self.current_goal
+        ):
+            try:
+                new_plan = replan(self.current_goal)
+                if isinstance(new_plan, Iterable) and new_plan:
+                    result = self.execute_plan(new_plan, goal=self.current_goal)
+                    if not self._is_failure_result(result):
+                        return result
+
+            except Exception as exc:
+                self.logger.warning("[%s] Plan-based recovery failed: %s", self.name, exc)
+
         sanitized_input = self.sanitize_input(task_data)
-        rule_based = self.apply_rule_based_processing(sanitized_input)
-        if rule_based is not None:
-            return rule_based
-        return self.echo_strategy(sanitized_input, original_error=original_error)
+        guidance = self.apply_rule_based_processing(sanitized_input)
+
+        return {
+            "status": "failed",
+            "reason": (
+                "No verified alternative execution "
+                "completed the requested operation."
+            ),
+            "guidance": guidance,
+            "original_error": (
+                str(original_error)
+                if original_error is not None
+                else None
+            ),
+        }
 
     def sanitize_input(self, task_data: Any) -> str:
         if isinstance(task_data, str):
@@ -617,6 +1470,7 @@ class BaseAgent(abc.ABC):
         grammar = getattr(self, "grammar", None)
         if callable(getattr(grammar, "compose_sentence", None)):
             with contextlib.suppress(Exception):
+                assert grammar is not None
                 return f"[Grammar Response] {grammar.compose_sentence({'input': sanitized_input[:100], 'error': 'unknown'})}"
         return None
 
@@ -626,24 +1480,37 @@ class BaseAgent(abc.ABC):
         reason = str(original_error) if original_error else "no processable input"
         return f"[Fallback failure] Unable to process request through alternative methods: {reason}"
 
-    def _invoke_capability(self, fn: Callable[..., Any], task_data: Any, context: Any = None) -> Any:
+
+    @staticmethod
+    def _capability_call_arguments(fn: Callable[..., Any], task_data: Any, context: Any = None) -> tuple[tuple[Any, ...], Dict[str, Any]]:
+        """Resolve and validate arguments without invoking the capability."""
         signature = inspect.signature(fn)
         params = list(signature.parameters.values())
+
         if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
-            return fn(task_data, context)
+            args = (task_data, context)
+            signature.bind(*args)
+            return args, {}
 
         positional: List[Any] = []
         kwargs: Dict[str, Any] = {}
         accepts_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
-        payload_names = {"task_data", "data", "input_data", "state", "task", "query", "payload"}
+        payload_names = {
+            "task_data", "data", "input_data",
+            "state", "task", "query", "payload",
+        }
         context_names = {"context", "ctx"}
 
         for param in params:
-            if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            if param.kind in {
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }:
                 if param.name in payload_names:
                     positional.append(task_data)
                 elif param.name in context_names:
                     positional.append(context)
+
             elif param.kind == inspect.Parameter.KEYWORD_ONLY:
                 if param.name in payload_names:
                     kwargs[param.name] = task_data
@@ -652,20 +1519,43 @@ class BaseAgent(abc.ABC):
 
         if not positional and not kwargs:
             if accepts_varkw:
-                return fn(task_data=task_data, context=context)
-            return fn(task_data)
-        return fn(*positional, **kwargs)
+                kwargs = {
+                    "task_data": task_data,
+                    "context": context,
+                }
+            else:
+                positional = [task_data]
+
+        signature.bind(*positional, **kwargs)
+
+        return tuple(positional), kwargs
+
+    def _invoke_capability(self, fn: Callable[..., Any], task_data: Any, context: Any = None) -> Any:
+        args, kwargs = self._capability_call_arguments(fn, task_data, context)
+        return fn(*args, **kwargs)
+
 
     def perform_task(self, task_data: Any) -> Any:
         context = None
         operation = None
         payload = task_data
+
         if isinstance(task_data, Mapping):
             context = task_data.get("context")
             operation = task_data.get("operation")
-            payload = task_data.get("task_data", task_data.get("input_data", task_data.get("payload", task_data)))
+            payload = task_data.get(
+                "task_data",
+                task_data.get(
+                    "input_data",
+                    task_data.get(
+                        "payload",
+                        task_data,
+                    ),
+                ),
+            )
 
         dispatch_order = list(self.DEFAULT_CAPABILITY_ORDER)
+
         if operation:
             preferred = {
                 "predict": "predict",
@@ -675,20 +1565,43 @@ class BaseAgent(abc.ABC):
                 "action": "get_action",
                 "act": "act",
             }.get(str(operation).strip().lower())
+
             if preferred:
-                dispatch_order = [preferred] + [name for name in dispatch_order if name != preferred]
+                dispatch_order = [
+                    preferred,
+                    *[
+                        name
+                        for name in dispatch_order
+                        if name != preferred
+                    ],
+                ]
 
         errors: List[str] = []
+
         for method_name in dispatch_order:
-            capability = getattr(self, method_name, None)
+            capability = getattr(
+                self,
+                method_name,
+                None,
+            )
+
             if not callable(capability):
                 continue
+
             try:
-                return self._invoke_capability(capability, payload, context)
-            except TypeError as exc:
+                args, kwargs = self._capability_call_arguments(capability, payload, context)
+            except (TypeError, ValueError) as exc:
                 errors.append(f"{method_name}: {exc}")
                 continue
-        details = "; ".join(errors) if errors else "No compatible capability methods found."
+
+            # Invocation is intentionally outside the argument
+            # compatibility exception handler.
+            # A TypeError raised inside the capability is not
+            # interpreted as a signature mismatch.
+            return capability(*args, **kwargs)
+
+        details = ("; ".join(errors) if errors else "No compatible capability methods found.")
+
         raise NotImplementedError(f"{self.name} cannot execute task. {details}")
 
     def execute_plan(self, plan: Iterable[Any], goal: Any = None) -> Dict[str, Any]:

@@ -1,0 +1,54 @@
+format_version: "1.0"
+
+schemas:
+  linear_resource_allocation:
+    schema_version: "1.0"
+    description: >-
+      Reusable contract for a bounded continuous linear resource-allocation
+      problem with one linear cost objective and one or more linear constraints.
+      Runtime data supplies finite capacities, costs, and demand; solver choice
+      remains outside the template layer.
+
+    parameters:
+      capacities:
+        type: mapping
+        required: true
+        required_keys: [north, south]
+        values_type: number
+        description: Finite non-negative upper capacities for each source.
+
+      costs:
+        type: mapping
+        required: true
+        required_keys: [north, south]
+        values_type: number
+        description: Finite linear unit costs for each source.
+
+      demand:
+        type: number
+        required: true
+        minimum: 0
+        description: Minimum aggregate allocation that must be satisfied.
+
+      model_name:
+        type: string
+        required: false
+        default: warehouse_distribution
+        description: Optional canonical problem name for the instantiated model.
+
+    problem:
+      class: lp
+      variables:
+        min_items: 2
+        max_items: 2
+        allowed_domains: [real]
+      objectives:
+        min_items: 1
+        max_items: 1
+        allowed_structures: [linear]
+      constraints:
+        min_items: 1
+        allowed_structures: [linear]
+
+    validation:
+      unknown_parameters: reject

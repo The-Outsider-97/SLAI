@@ -8,22 +8,20 @@ import yaml # type: ignore
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
-from .utils.evaluators_calculations import EvaluatorsCalculations
-from .utils.evaluation_errors import (ComparisonError, ConfigLoadError, EvaluationError,
-                                      MemoryAccessError, ValidationFailureError,
-                                      MetricCalculationError, ReportGenerationError,
-                                      VisualizationError)
-from .modules.report import get_visualizer
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
+from .modules.evaluators_calculations import EvaluatorsCalculations
+from .documentation.report import get_visualizer
 from .evaluators_memory import EvaluatorsMemory
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Performance Evaluator")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.0.0"
+MODULE_VERSION = "2.3.0"
 _HIGHER_IS_BETTER = frozenset({
     "accuracy",
     "precision",
@@ -303,15 +301,17 @@ class PerformanceEvaluator:
         comparisons: Dict[str, BaselineComparison] = {}
         for metric, current_value in current_metrics.items():
             baseline_value = baseline_metrics.get(metric)
-            if not self._is_numeric(current_value) or not self._is_numeric(baseline_value):
+            current_float = self._coerce_float_value(current_value)
+            baseline_float = self._coerce_float_value(baseline_value)
+            if current_float is None or baseline_float is None:
                 continue
 
-            current = float(current_value)
-            baseline = float(baseline_value)
+            current = float(current_float)
+            baseline = float(baseline_float)
             absolute_difference = current - baseline
             relative_change = None if baseline == 0 else absolute_difference / abs(baseline)
             direction = self._metric_direction(metric)
-            improvement = absolute_difference > 0 if direction == "higher" else absolute_difference < 0
+            improvement = (current > baseline) if direction == "higher" else (current < baseline)
 
             comparisons[metric] = BaselineComparison(
                 metric=metric,
@@ -375,7 +375,12 @@ class PerformanceEvaluator:
                 data=destination_path,
                 expected="Non-empty destination path",
             )
-        suffix_format = format or path.rsplit(".", 1)[-1].lower() if "." in path else format or "markdown"
+        if format is not None:
+            suffix_format = str(format).strip().lower()
+        elif "." in path:
+            suffix_format = path.rsplit(".", 1)[-1].lower()
+        else:
+            suffix_format = "markdown"
         rendered = self.generate_report(result, format=suffix_format, include_visualizations=include_visualizations)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(rendered if isinstance(rendered, str) else json.dumps(rendered, indent=2, default=str))
@@ -788,25 +793,25 @@ class PerformanceEvaluator:
 
         summary = payload["summary"]
         report.append("## Executive Summary\n")
-        report.append(f"- **Samples Evaluated**: {summary.get('sample_count', 0)}")
-        report.append(f"- **Accuracy**: {self._format_metric(summary.get('accuracy'))}")
-        report.append(f"- **Precision**: {self._format_metric(summary.get('precision'))}")
-        report.append(f"- **Recall**: {self._format_metric(summary.get('recall'))}")
-        report.append(f"- **F1 Score**: {self._format_metric(summary.get('f1'))}")
+        report.append(f"- **Samples Evaluated**: {summary.get('sample_count', 0)}\n")
+        report.append(f"- **Accuracy**: {self._format_metric(summary.get('accuracy'))}\n")
+        report.append(f"- **Precision**: {self._format_metric(summary.get('precision'))}\n")
+        report.append(f"- **Recall**: {self._format_metric(summary.get('recall'))}\n")
+        report.append(f"- **F1 Score**: {self._format_metric(summary.get('f1'))}\n")
         if summary.get("composite_score") is not None:
-            report.append(f"- **Composite Score**: {self._format_metric(summary.get('composite_score'))}")
+            report.append(f"- **Composite Score**: {self._format_metric(summary.get('composite_score'))}\n")
 
         visualizations = payload.get("visualizations", {})
         if visualizations.get("pass_rate_trend"):
             report.append("\n## Performance Trend\n")
             report.append(
-                f"![Pass Rate Trend](data:image/png;base64,{visualizations['pass_rate_trend']['image']})"
+                f"![Pass Rate Trend](data:image/png;base64,{visualizations['pass_rate_trend']['image']})\n"
             )
 
         report.append("\n## Core Metrics\n")
         for key in ["accuracy", "precision", "recall", "f1", "roc_auc", "log_loss", "composite_score"]:
             if key in payload["metrics"]:
-                report.append(f"- **{key.replace('_', ' ').title()}**: {self._format_metric(payload['metrics'][key])}")
+                report.append(f"- **{key.replace('_', ' ').title()}**: {self._format_metric(payload['metrics'][key])}\n")
 
         if payload["baseline_comparison"]:
             report.append("\n## Baseline Comparison\n")
@@ -814,32 +819,33 @@ class PerformanceEvaluator:
                 sign = "improved" if comparison.get("improvement") else "regressed"
                 report.append(
                     f"- **{metric}**: current={self._format_metric(comparison.get('current'))}, "
-                    f"baseline={self._format_metric(comparison.get('baseline'))}, {sign} by {self._format_metric(comparison.get('absolute_difference'))}"
+                    f"baseline={self._format_metric(comparison.get('baseline'))}, {sign} by "
+                    f"{self._format_metric(comparison.get('absolute_difference'))}\n"
                 )
 
         threshold = payload["threshold_assessment"]
         if threshold.get("warnings"):
             report.append("\n## Threshold Warnings\n")
             for warning in threshold["warnings"]:
-                report.append(f"- {warning}")
+                report.append(f"- {warning}\n")
 
         diagnostics = payload["diagnostics"]
         report.append("\n## Diagnostics\n")
         if diagnostics.get("confusion_analysis"):
             for key, value in diagnostics["confusion_analysis"].items():
-                report.append(f"- **{key.replace('_', ' ').title()}**: {value}")
+                report.append(f"- **{key.replace('_', ' ').title()}**: {value}\n")
         if diagnostics.get("warnings"):
             for warning in diagnostics["warnings"]:
-                report.append(f"- Warning: {warning}")
+                report.append(f"- Warning: {warning}\n")
 
         recommendations = payload.get("recommendations", [])
         if recommendations:
             report.append("\n## Recommendations\n")
             for item in recommendations:
-                report.append(f"- {item}")
+                report.append(f"- {item}\n")
 
-        report.append(f"\n---\n*Report generated by {self.__class__.__name__}*")
-        return "\n".join(report)
+        report.append(f"\n---\n*Report generated by {self.__class__.__name__}*\n")
+        return "".join(report)
 
     # ------------------------------------------------------------------
     # Utility helpers
@@ -1004,23 +1010,48 @@ class PerformanceEvaluator:
         return numeric
 
     @staticmethod
+    def _coerce_float_value(value: Any) -> Optional[float]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float, np.floating, np.integer)):
+            return float(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                return float(stripped)
+            except ValueError:
+                return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _is_numeric(value: Any) -> bool:
-        return isinstance(value, (int, float, np.floating, np.integer)) and not isinstance(value, bool)
+        return PerformanceEvaluator._coerce_float_value(value) is not None
 
     @staticmethod
     def _format_metric(value: Any) -> str:
         if value is None:
             return "N/A"
-        if isinstance(value, (int, float, np.floating, np.integer)):
-            return f"{float(value):.4f}"
+        coerced = PerformanceEvaluator._coerce_float_value(value)
+        if coerced is not None:
+            return f"{coerced:.4f}"
         return str(value)
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+__all__ = [
+    "_HIGHER_IS_BETTER",
+    "_LOWER_IS_BETTER",
+    "BaselineComparison",
+    "ThresholdAssessment",
+    "PerformanceEvaluationResult",
+    "PerformanceEvaluator",
+]
 
 
-# ====================== Usage Example ======================
 if __name__ == "__main__":
     print("\n=== Running Performance Evaluator ===\n")
     import sys

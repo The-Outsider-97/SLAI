@@ -1,0 +1,115 @@
+[project]
+name = "slai"
+version = "2.3.0"
+
+description = "Self-Learning Artificial Intelligence — Modular Agent Framework"
+
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    "numpy",
+    "pyyaml>=6.0",
+    "requests",
+    "psutil",
+    "pydantic",
+    "packaging",
+    "jsonschema",
+    "cryptography",
+    "tenacity",
+    "regex",
+    "portalocker",
+]
+
+[project.optional-dependencies]
+
+documents = [
+    "pypdf",
+    "reportlab",
+    "pandas",
+    "pyarrow",
+    "Pillow",
+]
+
+web = [
+    "beautifulsoup4",
+    "fastapi",
+    "flask",
+    "flask-socketio",
+    "selenium",
+    "websocket-client",
+    "websockets",
+]
+
+neural = [
+    "torch",
+    "torchvision",
+    "transformers",
+    "sentence-transformers",
+    "einops",
+    "rotary-embedding-torch",
+]
+
+scientific = [
+    "scipy",
+    "scikit-learn",
+    "scikit-optimize",
+    "statsmodels",
+    "networkx",
+    "matplotlib",
+    "seaborn",
+    "pgmpy",
+    "ruptures",
+    "gymnasium",
+    "joblib",
+]
+
+media = [
+    "opencv-python",
+    "librosa",
+    "pydub",
+    "PyQt5",
+]
+
+integrations = [
+    "boto3",
+    "botocore",
+    "elasticsearch",
+    "kafka-python",
+    "prometheus-client",
+    "psycopg2-binary",
+    "phonenumbers",
+    "Metaphone",
+    "pyperclip",
+    "GPUtil",
+    "watchdog",
+    "lz4",
+    "pympler",
+    "pynvml",
+]
+
+lstp = [
+    "lstp==0.1.0a1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov>=5",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+lstp = { path = "model/LSTP", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+    "deployment/test",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100

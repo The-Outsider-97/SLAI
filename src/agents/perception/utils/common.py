@@ -11,7 +11,7 @@ from ...base.modules.activation_engine import gelu_tensor, swish_tensor, mish_te
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Common")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class Parameter(torch.nn.Parameter):
@@ -304,6 +304,12 @@ class TensorOps:
             'numel': x.numel(),
             'dim': x.dim(),
         }
+
+
+__all__ = [
+    "Parameter",
+    "TensorOps",
+]
 
 
 # ----------------------------------------------------------------------

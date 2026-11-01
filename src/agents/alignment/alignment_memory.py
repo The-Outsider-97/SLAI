@@ -26,10 +26,11 @@ from sklearn.linear_model import SGDRegressor, BayesianRidge  # type: ignore
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.alignment_errors import *
+from .utils.alignment_helpers  import *
 from logs.logger import get_logger, PrettyPrinter # type: ignore
 
 logger = get_logger("Alignment Memory")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 class AlignmentMemory:
     """
@@ -1293,6 +1294,9 @@ class AlignmentMemory:
         except (TypeError, ValueError):
             return str(value)
 
+__all__ = [
+    "AlignmentMemory",
+]
 
 if __name__ == "__main__":
     print("\n=== Running Alignment Memory ===\n")

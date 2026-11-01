@@ -185,10 +185,10 @@ ethical_constraints:
   weight_floor: 0.10
   weight_ceiling: 5.00
   audit_history_limit: 10000
-  rule_load_fail_open: true
   unknown_rule_policy: review
   memory_logging_enabled: true
-  auto_adapt_on_violation: true
+  rule_load_fail_open: false
+  auto_adapt_on_violation: false
   default_scope: global
   default_severity: medium
 

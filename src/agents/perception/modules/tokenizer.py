@@ -3,16 +3,19 @@ import json
 import re
 import torch
 import unicodedata
+
 from pathlib import Path
 from typing import List, Dict, Mapping, Union, Optional, Tuple
 
 from ..utils.config_loader import load_global_config, get_config_section
-from ..utils.common import TensorOps, Parameter
+from ..utils.common import *
+from ..utils.perception_errors import *
+from ..utils.perception_helpers import *
 from ...base.modules.base_tokenizer import BaseTokenizer
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Tokenizer")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class BytePairEncoder:
@@ -287,10 +290,8 @@ class Tokenizer(BaseTokenizer):
         position_ids.masked_fill_(attention_mask == 0, 0)
         return position_ids
 
+__all__ = ["BytePairEncoder", "Tokenizer"]
 
-# ----------------------------------------------------------------------
-# Test block
-# ----------------------------------------------------------------------
 if __name__ == "__main__":
     print("\n=== Running Tokenizer ===\n")
     try:

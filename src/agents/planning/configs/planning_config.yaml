@@ -152,6 +152,7 @@ heuristic_selector:
     - GB
     - DT
     - UA
+    - FC
     - CBR
 
   fallback_heuristic: "DT"
@@ -200,6 +201,7 @@ heuristic_selector:
     RL: "reinforcement_learning"
     UA: "uncertainty_aware"
     CBR: "case_based_reasoning"
+    FC: "feasibility_constraint"
 
 
 base_heuristics:
@@ -251,6 +253,7 @@ global_heuristic:
   planning_db_path: "templates/planning_db.json"
   heuristic_model_path: "src/agents/planning/models/"
 
+
 decision_tree_heuristic:
   min_impurity_decrease: 0.01
   ccp_alpha: 0.02
@@ -262,6 +265,7 @@ decision_tree_heuristic:
     test_size: 0.25
     max_training_samples: 10000
 
+
 gradient_boosting_heuristic:
   n_estimators: 200
   learning_rate: 0.05
@@ -272,6 +276,7 @@ gradient_boosting_heuristic:
     use_priority: true
     use_resource_check: true
     recent_success_window: 10
+
 
 reinforcement_learning_heuristic:
   hidden_size: 64
@@ -285,11 +290,13 @@ reinforcement_learning_heuristic:
     use_resource_check: true
     use_temporal_features: true
 
+
 uncertainty_aware_heuristic:
   uncertainty_threshold: 0.15
   model_type: "BNN" # GP or BNN
   feature_config: {}
   bnn_config: {}
+
 
 case_based_reasoning_heuristic:
   similarity_threshold: 0.7
@@ -298,6 +305,18 @@ case_based_reasoning_heuristic:
   feature_weights: {}
   adaptation_rules: {}
   feature_config: {}
+
+
+feasibility_constraint_heuristic:
+  # Leave empty to use built-in DEFAULT_WEIGHTS / DEFAULT_BIAS.
+  # Override only when you have a reason to deviate:
+  # weights: {precondition_satisfaction: 2.4, ...}
+  # bias: -2.2
+  hard_constraints: ["precondition_satisfaction", "resource_feasibility"]
+  hard_constraint_floor: 0.05
+  veto_probability: 0.02
+  resource_safety_buffer: 0.0
+  temporal_time_buffer: 0.0
 
 
 planning_memory:
@@ -383,6 +402,7 @@ planning_monitor:
     plan_execution: 5          # Check metrics every N plans
     resource_scan: 300         # Full system scan every N seconds
 
+
 planning_types:
   validation_level: strict
   type_checks: enabled
@@ -418,12 +438,12 @@ planning_types:
     max_concurrent: 5
     time_buffer: 120
 
+
 planning_executor:
   check_interval: 0.5
   divergence_threshold: 2
   state_checks_enabled: true
   precondition_checks_enabled: true
-  precondition_lookahead: 3
   snapshot_interval: 3.0              # Seconds between state checks
   max_deviation_threshold: 0.25        # 25% state deviation tolerance
   max_tolerable_deviations: 3          # Max deviations before replan

@@ -11,17 +11,14 @@ import time
 
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from .utils import (get_config_section, load_global_config,
-                    # Error
-                    DeletionSlaViolationError, RetentionObligationMissingError, PrivacyError,
-                    DeletionWorkflowError, PolicyEvaluationError, PrivacyDecision,
-                    PrivacyConfigurationError, PrivacyMemoryWriteError, RetentionViolationError,
-                    normalize_privacy_exception, sanitize_privacy_context)
+from .utils.config_loader import load_global_config, get_config_section
+from .utils.privacy_error import *
+from .utils.privacy_helpers import *
 from .privacy_memory import PrivacyMemory
-from logs.logger import PrettyPrinter, get_logger
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Data Retention and Deletion Governance")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 class DataRetention:
@@ -56,33 +53,16 @@ class DataRetention:
         self.auto_schedule_due_deletion = bool(self.retention_config.get("auto_schedule_due_deletion", True))
         self.auto_update_deleted_status = bool(self.retention_config.get("auto_update_deleted_status", True))
         self.allow_legal_hold_override = bool(self.retention_config.get("allow_legal_hold_override", False))
-        self.right_to_be_forgotten_requires_reason = bool(
-            self.retention_config.get("right_to_be_forgotten_requires_reason", True)
-        )
-        self.immediate_forget_request_deletion = bool(
-            self.retention_config.get("immediate_forget_request_deletion", True)
-        )
-        self.require_subject_id_for_obligation = bool(
-            self.retention_config.get("require_subject_id_for_obligation", False)
-        )
+        self.right_to_be_forgotten_requires_reason = bool(self.retention_config.get("right_to_be_forgotten_requires_reason", True))
+        self.immediate_forget_request_deletion = bool(self.retention_config.get("immediate_forget_request_deletion", True))
+        self.require_subject_id_for_obligation = bool(self.retention_config.get("require_subject_id_for_obligation", False))
         self.require_policy_id = bool(self.retention_config.get("require_policy_id", True))
 
         self.default_policy_version = str(self.retention_config.get("default_policy_version", "v1"))
-        self.default_decision_stage = str(
-            self.retention_config.get("default_decision_stage", "retention.runtime_gate")
-        )
-        self.default_deletion_reason = str(
-            self.retention_config.get("default_deletion_reason", "retention_expired")
-        )
-        self.default_requested_by = str(
-            self.retention_config.get("default_requested_by", "privacy_agent")
-        )
-        self.default_deletion_workflow = str(
-            self.retention_config.get(
-                "default_deletion_workflow",
-                self.memory.default_deletion_workflow,
-            )
-        )
+        self.default_decision_stage = str(self.retention_config.get("default_decision_stage", "retention.runtime_gate"))
+        self.default_deletion_reason = str(self.retention_config.get("default_deletion_reason", "retention_expired"))
+        self.default_requested_by = str(self.retention_config.get("default_requested_by", "privacy_agent"))
+        self.default_deletion_workflow = str(self.retention_config.get("default_deletion_workflow", self.memory.default_deletion_workflow))
 
         self.max_metadata_fields = int(self.retention_config.get("max_metadata_fields", 100))
         self.max_record_tags = int(self.retention_config.get("max_record_tags", 100))
@@ -859,6 +839,7 @@ class DataRetention:
                 context={"record_id": record_id, "request_id": request_id},
             ) from exc
 
+__all__ = ["DataRetention"]
 
 if __name__ == "__main__":
     print("\n=== Running data retantion===\n")

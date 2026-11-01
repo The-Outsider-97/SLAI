@@ -1,0 +1,157 @@
+{
+    "animal_profile": {
+        "metadata": {
+            "record_id": "UUID-or-String",
+            "recorded_by": "String",
+            "date_recorded": "YYYY-MM-DD",
+            "last_updated": "YYYY-MM-DD"
+        },
+        "taxonomy": {
+            "kingdom": "Animalia",
+            "phylum": "String",
+            "subphylum": "String",
+            "class": "String",
+            "order": "String",
+            "family": "String",
+            "genus": "String",
+            "species": "String",
+            "subspecies": "String",
+            "scientific_name": "String",
+            "author_citation": "String",
+            "common_names": [
+                "String"
+            ]
+        },
+        "morphology": {
+            "body_symmetry": "Bilateral | Radial | Asymmetrical",
+            "length_cm": {
+                "min": 0.0,
+                "max": 0.0
+            },
+            "weight_kg": {
+                "min": 0.0,
+                "max": 0.0
+            },
+            "integument": {
+                "primary_covering": "Fur | Feathers | Scales | Bare Skin | Exoskeleton | Shell | Cuticle",
+                "coloration": "String",
+                "camouflage_or_mimicry": "String"
+            },
+            "appendages": {
+                "limbs_count": 0,
+                "type": "Legs | Wings | Fins | Flippers | Tentacles | None",
+                "description": "String"
+            },
+            "dentition_or_mouthparts": {
+                "type": "Teeth | Beak | Mandibles | Radula | Proboscis | Filter",
+                "description": "String"
+            },
+            "sexual_dimorphism": {
+                "present": true,
+                "description": "String"
+            }
+        },
+        "ecology_and_behavior": {
+            "geographic_range": [
+                "String"
+            ],
+            "habitat_types": [
+                "Marine",
+                "Freshwater",
+                "Terrestrial",
+                "Arboreal",
+                "Benthic",
+                "Pelagic",
+                "Fossorial",
+                "Urban"
+            ],
+            "diet": {
+                "trophic_level": "Herbivore | Carnivore | Omnivore | Detritivore | Parasite",
+                "primary_food_sources": [
+                    "String"
+                ],
+                "foraging_strategy": "Ambush | Pursuit | Grazing | Filter Feeding | Scavenging"
+            },
+            "locomotion": [
+                "Walking",
+                "Running",
+                "Flying",
+                "Swimming",
+                "Climbing",
+                "Gliding",
+                "Slithering",
+                "Burrowing"
+            ],
+            "social_structure": "Solitary | Pair | Herd/Flock | Pack | Eusocial",
+            "activity_pattern": "Diurnal | Nocturnal | Crepuscular | Cathemeral",
+            "communication": [
+                "Vocal",
+                "Chemical (Pheromones)",
+                "Visual",
+                "Tactile",
+                "Electrical"
+            ]
+        },
+        "physiology": {
+            "thermoregulation": "Endotherm | Ectotherm | Poikilotherm | Homeotherm | Heterotherm",
+            "respiration_type": "Lungs | Gills | Tracheal System | Cutaneous | Book Lungs",
+            "sensory_capabilities": [
+                "Vision (Color)",
+                "Vision (Low-light)",
+                "Echolocation",
+                "Electroreception",
+                "Magnetoreception",
+                "Olfaction"
+            ],
+            "lifespan_years": {
+                "wild": 0.0,
+                "captivity": 0.0
+            }
+        },
+        "reproduction_and_development": {
+            "mating_system": "Monogamy | Polygyny | Polyandry | Promiscuity",
+            "fertilization": "Internal | External",
+            "parity": "Oviparous | Viviparous | Ovoviviparous",
+            "clutch_or_litter_size": {
+                "min": 0,
+                "max": 0
+            },
+            "gestation_or_incubation_days": 0,
+            "development_type": "Direct | Indirect (Metamorphosis)",
+            "parental_care": "None | Maternal | Paternal | Biparental | Cooperative"
+        },
+        "genetics": {
+            "chromosome_number_2n": 0,
+            "genome_size_mb": 0.0,
+            "sex_determination": "XX/XY | ZZ/ZW | Temperature-dependent | Haplodiploidy"
+        },
+        "human_interactions": {
+            "domestication_status": "Wild | Domesticated | Feral | Semi-domesticated",
+            "uses": [
+                "Food",
+                "Fiber/Leather",
+                "Working Animal",
+                "Research",
+                "Pet/Ornamental"
+            ],
+            "threat_to_humans": {
+                "venomous": false,
+                "poisonous": false,
+                "disease_vector": false,
+                "description": "String"
+            }
+        },
+        "conservation": {
+            "iucn_red_list_status": "NE | DD | LC | NT | VU | EN | CR | EW | EX",
+            "cites_appendix": "I | II | III | None",
+            "population_trend": "Increasing | Stable | Decreasing | Unknown",
+            "major_threats": [
+                "Habitat Loss",
+                "Climate Change",
+                "Overharvesting",
+                "Pollution",
+                "Invasive Species"
+            ]
+        }
+    }
+}

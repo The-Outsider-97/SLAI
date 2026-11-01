@@ -45,13 +45,13 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
 
-from ..utils.config_loader import load_global_config, get_config_section
+from ..utils.config_loader import *
 from ..utils.browser_errors import *
 from ..utils.Browser_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Click")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 DEFAULT_CLICK_STRATEGIES: Tuple[str, ...] = (
@@ -704,6 +704,24 @@ class DoClick:
 
         result = self._perform_click(selector, wait_time)
         return str(result.get("message", ""))
+
+
+__all__ = [
+    # Constants
+    "DEFAULT_CLICK_STRATEGIES",
+    "SUPPORTED_CLICK_STRATEGIES",
+    "SPECIAL_TAGS",
+    "CHECKABLE_INPUT_TYPES",
+    "KEYBOARD_ACTIVATION_TAGS",
+    # Dataclasses
+    "ClickOptions",
+    "ClickRequest",
+    "ClickExecutionContext",
+    # Standalone helper
+    "normalize_click_strategies",
+    # Executor class
+    "DoClick",
+]
 
 
 if __name__ == "__main__":

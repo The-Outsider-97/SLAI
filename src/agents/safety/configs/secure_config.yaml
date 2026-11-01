@@ -439,7 +439,18 @@ cyber_safety:
     max_matches_per_rule: 25
     max_recommendations: 12
   model:
-    enabled: true
+    enabled: false
+    # Trained HTTP-specific anomaly MLP; never used for generic prompt safety.
+    # Experimental checkpoint permits REVIEW suggestions only, not autonomous BLOCK.
+    http_mlp:
+      enabled: true
+      model_path: "src/agents/safety/model/mlp_http_risk_v2.pt"
+      mode: assist
+      max_checkpoint_bytes: 16777216
+      allow_experimental_review_only: true
+      fail_closed_on_load_error: false
+      fail_closed_on_prediction_error: false
+      sha256: ""
     model_path: "src/agents/safety/models/cyber_safety_model.json"
     allow_untrained_fallback: true
     fail_closed_on_prediction_error: false
@@ -1138,15 +1149,14 @@ safety_helpers:
   max_recursion_depth: 8
   max_file_bytes: 1048576
   redaction_marker: "[REDACTED]"
-  redaction_patterns:
-    - name: "ssn"
-      pattern: '\b\d{3}-\d{2}-\d{4}\b'
   sensitive_key_patterns:
     - '(?i)(?:^|[_\-.])(api[_\-.]?key|token|secret|password|passwd|pwd|credential|authorization|auth|cookie|session|private[_\-.]?key|access[_\-.]?key|refresh[_\-.]?token|client[_\-.]?secret)(?:$|[_\-.])'
     - '(?i)(?:bearer|oauth|jwt|csrf|xsrf)'
   identifier_key_patterns:
     - '(?i)(?:^|[_\-.])(user[_\-.]?id|subject[_\-.]?id|account[_\-.]?id|actor[_\-.]?id|tenant[_\-.]?id|session[_\-.]?id|request[_\-.]?id|trace[_\-.]?id|correlation[_\-.]?id|email|phone|ip|source[_\-.]?ip)(?:$|[_\-.])'
   redaction_patterns:
+    - name: "ssn"
+      pattern: '\b\d{3}-\d{2}-\d{4}\b'
     - name: "authorization_header"
       pattern: '(?i)authorization\s*:\s*(?:basic|bearer)\s+[A-Za-z0-9._~+/=-]+'
     - name: "bearer_token"

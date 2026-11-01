@@ -1,0 +1,3326 @@
+{
+  "completed_at": "2026-09-19T10:36:36.049009Z",
+  "config": {
+    "balance_tasks": true,
+    "checkpoint_every_steps": 500,
+    "clip_grad": 1.0,
+    "data_paths": [
+      "data\\processed\\lantra\\supervised"
+    ],
+    "device": "auto",
+    "embedding_margin": 0.2,
+    "embedding_max_length": 192,
+    "epochs": 12,
+    "generation_eval_records": 8,
+    "glove_batch_size": 128,
+    "glove_bootstrap": false,
+    "glove_epochs": 1,
+    "glove_learning_rate": 0.0001,
+    "glove_max_tokens": 0,
+    "glove_path": null,
+    "gradient_accumulation": 8,
+    "init_from": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260917T212400Z.pt",
+    "label_smoothing": 0.05,
+    "learning_rate": 0.0003,
+    "log_every": 100,
+    "max_eval_records": 2000,
+    "min_delta": 0.0001,
+    "min_learning_rate": 3e-06,
+    "min_task_samples": 8,
+    "output_dir": "src/agents/language/checkpoints/lantra",
+    "patience": 3,
+    "raw_chunk_chars": 2000,
+    "raw_corruption_probability": 0.15,
+    "raw_max_length": 256,
+    "raw_max_segments": 100000,
+    "raw_min_chars": 40,
+    "raw_pretrain_epochs": 2,
+    "raw_segments_per_epoch": 20000,
+    "raw_test_fraction": 0.02,
+    "raw_text_paths": [],
+    "raw_validation_fraction": 0.02,
+    "report_dir": "src/agents/language/artifacts/training/lantra",
+    "require_all_supervised_tasks": true,
+    "reranking_margin": 0.15,
+    "retrain_tokenizer": false,
+    "seed": 42,
+    "source_max_length": 384,
+    "target_max_length": 160,
+    "test_fraction": 0.05,
+    "tokenizer_min_frequency": 2,
+    "tokenizer_vocab_size": 50000,
+    "validation_fraction": 0.05,
+    "warmup_steps": 1000,
+    "weight_decay": 0.0001
+  },
+  "elapsed_seconds": 61465.536005800124,
+  "environment": {
+    "device": "cpu",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.10.11 (tags/v3.10.11:7d4cc5a, Apr  5 2023, 00:38:17) [MSC v.1929 64 bit (AMD64)]"
+  },
+  "glove": null,
+  "objective_contract": {
+    "classification": {
+      "mode": "seq2seq",
+      "source_prefix": "task: classification\ntext:",
+      "target": "label text"
+    },
+    "dialogue": {
+      "mode": "seq2seq",
+      "source_prefix": "task: dialogue\nconversation:",
+      "target": "assistant response"
+    },
+    "embedding": {
+      "inference": "mean-pool encoder memory over non-padding tokens, then L2-normalize",
+      "mode": "triplet_cosine_margin",
+      "text_prefix": "task: embedding\ntext:"
+    },
+    "generation": {
+      "mode": "seq2seq",
+      "source_prefix": "task: generation\nprompt:",
+      "target": "completion"
+    },
+    "reranking": {
+      "document_prefix": "task: reranking\ndocument:",
+      "inference": "rank candidate documents by cosine(query_embedding, document_embedding)",
+      "mode": "pairwise_cosine_margin",
+      "query_prefix": "task: reranking\nquery:"
+    },
+    "summarization": {
+      "mode": "seq2seq",
+      "source_prefix": "task: summarization\ndocument:",
+      "target": "summary"
+    },
+    "translation": {
+      "mode": "seq2seq",
+      "source_prefix": "task: translation",
+      "target": "translated text"
+    }
+  },
+  "raw_corpus": {
+    "deduplication": {
+      "duplicate_documents_exact": 0,
+      "duplicate_documents_normalized": 0,
+      "duplicate_files_exact": 1,
+      "duplicate_segments": 3216
+    },
+    "documents": 671,
+    "documents_by_split": {
+      "test": 13,
+      "train": 645,
+      "validation": 13
+    },
+    "documents_by_type": {
+      "docx": 1,
+      "epub": 2,
+      "html": 2,
+      "md": 19,
+      "pdf": 135,
+      "txt": 512
+    },
+    "extraction_failures": [
+      {
+        "error_type": "NoTextExtracted",
+        "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+        "source_path": "data\\library\\View of Sustainable Architecture in Context.pdf",
+        "source_type": "pdf"
+      },
+      {
+        "error_type": "NoTextExtracted",
+        "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+        "source_path": "data\\library\\pdfcoffee.com_fundamentals-of-piano-theory-level-pdf-free.pdf",
+        "source_type": "pdf"
+      },
+      {
+        "error_type": "NoTextExtracted",
+        "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+        "source_path": "data\\library\\the-four-loves.pdf",
+        "source_type": "pdf"
+      }
+    ],
+    "files": [
+      "data\\library\\00016357.2011.568959.pdf",
+      "data\\library\\1366_keynestheoryofemployment.pdf",
+      "data\\library\\20230223_20minSuburbs-1677186785.pdf",
+      "data\\library\\21162-readme.txt",
+      "data\\library\\3.5_ The Trans-Saharan Slave Trade - Humanities LibreTexts.html",
+      "data\\library\\79426554.pdf",
+      "data\\library\\900-13-082-US-liquid-hydrogen-safetygram-9.pdf",
+      "data\\library\\9789264301085-en.pdf",
+      "data\\library\\A Child of the Orient.txt",
+      "data\\library\\A Collection of College Words and Customs.txt",
+      "data\\library\\A Description of the Coasts of East Africa and Malabar in the Beginning of the Sixteenth Century.txt",
+      "data\\library\\A Discourse Presented to the Most Serene Don Cosimo II..txt",
+      "data\\library\\A Group of Eastern Romances and Stories from the Persian, Tamil, and Urdu.txt",
+      "data\\library\\A Guide to Health.txt",
+      "data\\library\\A History of Matrimonial Institutions, Vol 3 of 3.txt",
+      "data\\library\\A History of Matrimonial Institutions, Vol. 1 of 3.txt",
+      "data\\library\\A History of Matrimonial Institutions, Vol. 2 of 3.txt",
+      "data\\library\\A House to Let.txt",
+      "data\\library\\A Middle English Vocabulary.txt",
+      "data\\library\\A Model of Growth Through Creative Destruction.pdf",
+      "data\\library\\A Narrative of Captivity in Abyssinia.txt",
+      "data\\library\\A New System; or, an Analysis of Antient Mythology. Volume 1 (of 6).txt",
+      "data\\library\\A New System; or, an Analysis of Antient Mythology. Volume 2 (of 6).txt",
+      "data\\library\\A Pilgrimage to Nejd, the Cradle of the Arab Race. Vol. 1.txt",
+      "data\\library\\A Pilgrimage to Nejd, the Cradle of the Arab Race. Vol. 2.txt",
+      "data\\library\\A Sea Queen's Sailing.txt",
+      "data\\library\\A Selection of Cases on the Law of Torts by Ames, Pound, and Smith.txt",
+      "data\\library\\A Struggle for Rome, v. 2.txt",
+      "data\\library\\A Struggle for Rome, v. 3.txt",
+      "data\\library\\A Tale of Two Cities.txt",
+      "data\\library\\A beginner's history.txt",
+      "data\\library\\AN10441.pdf",
+      "data\\library\\ARIANE 6 – TANKS & STRUCTURES FOR THE NEW EUROPEAN.pdf",
+      "data\\library\\ATALA.md",
+      "data\\library\\Across Coveted Lands; or, a Journey from Flushing (Holland) to Calcutta….txt",
+      "data\\library\\Across Mongolian Plains.txt",
+      "data\\library\\Across the Mesa.txt",
+      "data\\library\\Adventures of a Young Naturalist.txt",
+      "data\\library\\Alfred the Great.txt",
+      "data\\library\\All The Light We Cannot See - Anthony Doerr.epub",
+      "data\\library\\All_the_Light_We_Cannot_See_1x01.pdf",
+      "data\\library\\An Old Babylonian Version of the Gilgamesh Epic.txt",
+      "data\\library\\Ancient rhetoric and poetic.txt",
+      "data\\library\\Anna Karenina.txt",
+      "data\\library\\Anomalies of the English law.txt",
+      "data\\library\\Apology, Crito, and Phaedo of Socrates.txt",
+      "data\\library\\Arab-Israeli wars.txt",
+      "data\\library\\Arabian Society in the Middle Ages.txt",
+      "data\\library\\Ardath.txt",
+      "data\\library\\Arethusa.txt",
+      "data\\library\\Around the End.txt",
+      "data\\library\\As a Matter of Course.txt",
+      "data\\library\\Atlas Shrugged.pdf",
+      "data\\library\\Atomic Physics.pdf",
+      "data\\library\\Atomic Theory.pdf",
+      "data\\library\\Avalanche.pdf",
+      "data\\library\\Aztec Land.txt",
+      "data\\library\\BEYOND THE STARS.md",
+      "data\\library\\Bad Memory.txt",
+      "data\\library\\Barbara Blomberg.txt",
+      "data\\library\\Barry Locke, half-back.txt",
+      "data\\library\\Basic Attention Token.pdf",
+      "data\\library\\Behind the Line.txt",
+      "data\\library\\Behind the Veil in Persia and Turkish Arabia.txt",
+      "data\\library\\Belgian Fairy Tales.txt",
+      "data\\library\\Ben, the Trapper.txt",
+      "data\\library\\Betty the retched.pdf",
+      "data\\library\\Big Bang Theory; Origin of Our Universe.pdf",
+      "data\\library\\Billy To-morrow.txt",
+      "data\\library\\Birth control laws.txt",
+      "data\\library\\Bitcoin.pdf",
+      "data\\library\\Black Holes.pdf",
+      "data\\library\\Bleak House.txt",
+      "data\\library\\Brazilian Literature.txt",
+      "data\\library\\Brazilian Tales.txt",
+      "data\\library\\Burnham Breaker.txt",
+      "data\\library\\CRESTLANDS.txt",
+      "data\\library\\Calavar; or, The Knight of The Conquest, A Romance of Mexico.txt",
+      "data\\library\\Camilla; or, A Picture of Youth.txt",
+      "data\\library\\Camps and Trails in China.txt",
+      "data\\library\\Caps and Capers.txt",
+      "data\\library\\Captain Chub.txt",
+      "data\\library\\Captain of the Crew.txt",
+      "data\\library\\Caribbean Football Pyramid Feasibility Study — Group Four.pdf",
+      "data\\library\\Caribbean League Country and Territory Profiles — Group Three.pdf",
+      "data\\library\\Caribbean League Country and Territory Profiles — Group Two.pdf",
+      "data\\library\\Caribbean League Feasibility Study.pdf",
+      "data\\library\\Caribbean League Regional Baseline 01.pdf",
+      "data\\library\\Cassell's Natural History, Vol. 1 (of 6).txt",
+      "data\\library\\Cassell's Natural History, Vol. 2 (of 6).txt",
+      "data\\library\\Cassell's Natural History, Vol. 3 (of 6).txt",
+      "data\\library\\Change Signals.txt",
+      "data\\library\\China by Demetrius Charles Boulger.txt",
+      "data\\library\\China under the Empress Dowager.txt",
+      "data\\library\\Christianity and Greek Philosophy.txt",
+      "data\\library\\Christianity and Modern Thought.txt",
+      "data\\library\\Civics and Health.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 1.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 2.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 3.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 4.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 5.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 6.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 7.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 8.txt",
+      "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 9.txt",
+      "data\\library\\Commentary on the Maya Manuscript in the Royal Public Library of Dresden.txt",
+      "data\\library\\Commercial Law.txt",
+      "data\\library\\Comparative-Economic-Systems.pdf",
+      "data\\library\\Complete Works of Plutarch volume 3.txt",
+      "data\\library\\Continuous Vaudeville.txt",
+      "data\\library\\Cosmos.pdf",
+      "data\\library\\Covey - The 7 habits of highly effective people.pdf",
+      "data\\library\\Criminal Behavior and Learning Theory.pdf",
+      "data\\library\\Crofton Chums.txt",
+      "data\\library\\Cronos.pdf",
+      "data\\library\\Cruikshank's Water Colours.txt",
+      "data\\library\\Curiosities of Literature, Vol. 1.txt",
+      "data\\library\\Curiosities of Literature, Vol. 2.txt",
+      "data\\library\\Curiosities of Literature, Vol. 3.txt",
+      "data\\library\\DAO Governance.pdf",
+      "data\\library\\DEAD SHOT.txt",
+      "data\\library\\DESIGN AND DEVELOPMENT OF DELTA WING WITH LOITERING Capability.pdf",
+      "data\\library\\DRV5023 Digital-Switch Hall Effect Sensor.pdf",
+      "data\\library\\Danes, Saxons and Normans; or, Stories of our ancestors.txt",
+      "data\\library\\Dante and the early astronomers.txt",
+      "data\\library\\Day of the Druid.txt",
+      "data\\library\\Decline.txt",
+      "data\\library\\DeepSeek_V41_Tech_Report.pdf",
+      "data\\library\\Desert.txt",
+      "data\\library\\Desiring God.pdf",
+      "data\\library\\Diary of a U-Boat Commander.txt",
+      "data\\library\\Dif-MAML_Decentralized_Multi-Agent_Meta-Learning.pdf",
+      "data\\library\\Discoveries in Egypt, Ethiopia, and the Peninsula of Sinai.txt",
+      "data\\library\\Don Quixote.txt",
+      "data\\library\\Dr. Paull's Theory.txt",
+      "data\\library\\Dynamic population-based meta-learning for multi-agent communication with natural language.pdf",
+      "data\\library\\ENHANCING EFFECTIVE DECISION-MAKING THROUGH LEADERSHIP intelligence.pdf",
+      "data\\library\\EUROPEAN_CONFERENCE_FOR_AEROSPACE_SCIENC.pdf",
+      "data\\library\\Early Israel and the Surrounding Nations.txt",
+      "data\\library\\Early Lives of Charlemagne.txt",
+      "data\\library\\Economic Freedom of the World, 2024 Annual Report.pdf",
+      "data\\library\\Economic-mobility-and-the-rise-of-the-Latin-American-middle-class.pdf",
+      "data\\library\\Empathic_LivingLabs_TUe_Boekje_maart_2018.pdf",
+      "data\\library\\English Grammar.txt",
+      "data\\library\\English Prose.txt",
+      "data\\library\\English-Quran-plain-text.txt",
+      "data\\library\\Eric Brighteyes.txt",
+      "data\\library\\Erling the Bold.txt",
+      "data\\library\\Ethereum.pdf",
+      "data\\library\\Exploring Artificial Gravity.pdf",
+      "data\\library\\Extract Silicate Rocks' Oxygen by Electrowinning.pdf",
+      "data\\library\\Fighting Without a War.txt",
+      "data\\library\\Finn_Aslaksen__Steinar_Bergh__Olav_Rand_Bringa__Edel_Kristin_Heggem___Universal_Design__Planning_and_Design_for_All.pdf",
+      "data\\library\\Five Lectures on Reincarnation.txt",
+      "data\\library\\For Yardley.txt",
+      "data\\library\\For the Honor of the School.txt",
+      "data\\library\\Four Afoot.txt",
+      "data\\library\\Four in Camp.txt",
+      "data\\library\\Frank Herbert - Dune 1 - Dune.pdf",
+      "data\\library\\From Lifespan to Healthspan.pdf",
+      "data\\library\\From Memory's Shrine.txt",
+      "data\\library\\From School to Battle-field.txt",
+      "data\\library\\From the Indus to the Tigris.txt",
+      "data\\library\\From_ice_to_space_a_greenhouse_design_for_Moon_or_.pdf",
+      "data\\library\\Functional Programming Principles in Scala.txt",
+      "data\\library\\Fundamentals of Piano Practice.pdf",
+      "data\\library\\Gas-Engines and Producer-Gas Plants.txt",
+      "data\\library\\George_R__R__Martin_-_A_Song_Of_Ice_And_Fire_1b_-_.pdf",
+      "data\\library\\Gibbon.txt",
+      "data\\library\\Global mineral distributions on Mars - J.L. Bandfield.pdf",
+      "data\\library\\Gold of the Gods.txt",
+      "data\\library\\Gospel of Thomas Lambdin.pdf",
+      "data\\library\\Great Expectations.txt",
+      "data\\library\\Great leaders.txt",
+      "data\\library\\Greek Athletic Sports and Festivals.txt",
+      "data\\library\\Greenmantle.txt",
+      "data\\library\\Grettir the Outlaw.txt",
+      "data\\library\\Haifa; or, Life in modern Palestine.txt",
+      "data\\library\\Happy Ending.txt",
+      "data\\library\\Harry Escombe.txt",
+      "data\\library\\Harry's Island.txt",
+      "data\\library\\Hawk's Nest; or, The Last of the Cahoonshees.txt",
+      "data\\library\\Heart of the Sunset.txt",
+      "data\\library\\Hedera.pdf",
+      "data\\library\\Heroes of Israel.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 1.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 2.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 3.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 4.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 5.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 6.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 7.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 8.txt",
+      "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 9.txt",
+      "data\\library\\History of Israel.md",
+      "data\\library\\History of Julius Caesar by Jacob Abbott.txt",
+      "data\\library\\History of Julius Cæsar, Vol. 1 of 2 by Emperor of the French Napoleon III.txt",
+      "data\\library\\History of Julius Cæsar, Vol. 2 of 2 by Emperor of the French Napoleon III.txt",
+      "data\\library\\History of Mexico, Volume 1.txt",
+      "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 1.txt",
+      "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 2.txt",
+      "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 3.txt",
+      "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 4.txt",
+      "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 5.txt",
+      "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 6.txt",
+      "data\\library\\History of the Incas.txt",
+      "data\\library\\History of the Jews in Russia and Poland, Volume 1 [of 3].txt",
+      "data\\library\\History of the Jews in Russia and Poland, Volume 2 [of 3].txt",
+      "data\\library\\History of the Jews in Russia and Poland, Volume 3 [of 3].txt",
+      "data\\library\\History of the Moors of Spain.txt",
+      "data\\library\\Hortense.txt",
+      "data\\library\\Hygiene des Geschlechtslebens.txt",
+      "data\\library\\I am a Nucleus.md",
+      "data\\library\\IN ANCIENT ALBEMARLE.txt",
+      "data\\library\\Ideal Commonwealths.txt",
+      "data\\library\\In Search of Lost Time [Volumes 1 to 7].pdf",
+      "data\\library\\In exitu Israel; an historical novel, volume 1.txt",
+      "data\\library\\In exitu Israel; an historical novel, volume 2.txt",
+      "data\\library\\In pastures new.txt",
+      "data\\library\\In the Russian Ranks.txt",
+      "data\\library\\In the land of the gods.txt",
+      "data\\library\\Inca Land.txt",
+      "data\\library\\Incidents of Travel in Greece, Turkey, Russia, and Poland, Vol. 1 (of 2).txt",
+      "data\\library\\Incidents of Travel in Greece, Turkey, Russia, and Poland, Vol. 2 (of 2).txt",
+      "data\\library\\Indo-China and its primitive people.txt",
+      "data\\library\\Infinite Jest.pdf",
+      "data\\library\\Interplanetary Transport Network.pdf",
+      "data\\library\\Islam and the Divine comedy.txt",
+      "data\\library\\Israel Rank.txt",
+      "data\\library\\Israel in Europe.txt",
+      "data\\library\\It Happened in Japan.txt",
+      "data\\library\\Ivar the Viking.txt",
+      "data\\library\\Jack and the Check Book.txt",
+      "data\\library\\Jesus Calling.pdf",
+      "data\\library\\Joseph II. and His Court.txt",
+      "data\\library\\Josephine by John S. C. Abbott.txt",
+      "data\\library\\Joshua — Complete.txt",
+      "data\\library\\Journals of Expeditions of Discovery into Central Australia and Overland from Adelaide to King George's Sound in the Years 1840-1 v2.txt",
+      "data\\library\\Journeys in Persia and Kurdistan, Volume 1.txt",
+      "data\\library\\Journeys in Persia and Kurdistan, Volume 2.txt",
+      "data\\library\\Kingsford, Quarter.txt",
+      "data\\library\\Laches.txt",
+      "data\\library\\Lectures on Dark Matter.pdf",
+      "data\\library\\Lectures on ancient ethnography and geography, volume 1.txt",
+      "data\\library\\Lectures on ancient ethnography and geography, volume 2.txt",
+      "data\\library\\Left End Edwards.txt",
+      "data\\library\\Left Tackle Thayer.txt",
+      "data\\library\\Legends from River & Mountain.txt",
+      "data\\library\\Les Misérables.txt",
+      "data\\library\\Letters from Egypt, Ethiopia, and the peninsula of Sinai.txt",
+      "data\\library\\Letters from an American Farmer.txt",
+      "data\\library\\Life and adventures of Frank and Jesse James, the noted western outlaws.txt",
+      "data\\library\\Like Another Helen.txt",
+      "data\\library\\Little Dorrit.txt",
+      "data\\library\\Llama_ai.pdf",
+      "data\\library\\Lost Island.txt",
+      "data\\library\\MT6835_Rev.1.3.pdf",
+      "data\\library\\Malazan 2 - Deadhouse Gates.pdf",
+      "data\\library\\Malazan 3 - Memories of Ice.pdf",
+      "data\\library\\Malazan 4 - House of Chains.pdf",
+      "data\\library\\Malazan 5 - Midnight Tides.pdf",
+      "data\\library\\Mandalay to Momien.txt",
+      "data\\library\\Martian lava tubes.pdf",
+      "data\\library\\Measuring Global Crypto Users.pdf",
+      "data\\library\\Mechanical and Tribological Properties of Aluminum-Based Metal-Metrix Composites.pdf",
+      "data\\library\\Meditations by Emperor of Rome Marcus Aurelius.txt",
+      "data\\library\\Memoirs of the Private Life, Return, and Reign of Napoleon in 1815, Vol. II.txt",
+      "data\\library\\Men Like Gods.pdf",
+      "data\\library\\Merrie England in the Olden Time, Vol. 1.txt",
+      "data\\library\\Merrie England in the Olden Time, Vol. 2.txt",
+      "data\\library\\Meta-Learning Representations for Continual Learning.pdf",
+      "data\\library\\Mexico in den ereignißvollen Jahren 1832 und 1833.txt",
+      "data\\library\\Middlemarch.txt",
+      "data\\library\\Mollie and the Unwiseman.txt",
+      "data\\library\\Moorish Remains in Spain.txt",
+      "data\\library\\Mr. Standfast.txt",
+      "data\\library\\Music Theory for the.pdf",
+      "data\\library\\Musical Studies.txt",
+      "data\\library\\Muslims in Spain, 1492 - 1814.pdf",
+      "data\\library\\NEAR.pdf",
+      "data\\library\\Napoleon Bonaparte by John S. C. Abbott.txt",
+      "data\\library\\Napoleon's British visitors and captives, 1801-1815.txt",
+      "data\\library\\Narnia_3_The_horse_and_his_boy.md",
+      "data\\library\\Narrative of the Portuguese embassy to Abyssinia during the years 1520-1527.txt",
+      "data\\library\\Natural Law in the Spiritual World.txt",
+      "data\\library\\Nell and Her Grandfather.txt",
+      "data\\library\\Nerves and Common Sense.txt",
+      "data\\library\\New Forces in Old China.txt",
+      "data\\library\\Neæra.txt",
+      "data\\library\\Nid and Nod.txt",
+      "data\\library\\No Thoroughfare.txt",
+      "data\\library\\Nova Scotia's Part in the Great War.txt",
+      "data\\library\\Nuclear Pulse Propulsion - Orion and beyond.pdf",
+      "data\\library\\ON UNION WITH GOD.txt",
+      "data\\library\\Old Mexico and her lost provinces.txt",
+      "data\\library\\On Your Mark! A Story of College Life and Athletics.txt",
+      "data\\library\\Online Meta-Learning.pdf",
+      "data\\library\\Oppositions of Mars - Numerical Calculation.pdf",
+      "data\\library\\Our Mutual Friend.txt",
+      "data\\library\\Outlines of a mechanical theory of storms.txt",
+      "data\\library\\PCA9685.pdf",
+      "data\\library\\PHANTOM DUEL.md",
+      "data\\library\\Palestine by C. R. Conder.txt",
+      "data\\library\\Palladio_s architectural orders from practice to theory.pdf",
+      "data\\library\\Pan Michael; An Historical Novel of Poland, the Ukraine, and Turkey.txt",
+      "data\\library\\Partners Three.txt",
+      "data\\library\\Pax mundi.txt",
+      "data\\library\\Pelle the Conqueror.txt",
+      "data\\library\\Personality theory.pdf",
+      "data\\library\\Pilgrim Sorrow.txt",
+      "data\\library\\Plato and Platonism.txt",
+      "data\\library\\Plato and the Other Companions of Sokrates Volume 1.txt",
+      "data\\library\\Plato and the Other Companions of Sokrates Volume 2.txt",
+      "data\\library\\Plato and the Other Companions of Sokrates Volume 3.txt",
+      "data\\library\\Plato and the Other Companions of Sokrates Volume 4.txt",
+      "data\\library\\Plot & Strcucture.pdf",
+      "data\\library\\Plutarch's Lives, Volume 1.txt",
+      "data\\library\\Plutarch's Lives, Volume 2.txt",
+      "data\\library\\Plutarch's Lives, Volume 3.txt",
+      "data\\library\\Plutarch's Morals.txt",
+      "data\\library\\PoS_Utility_Consensus.pdf",
+      "data\\library\\Power Through Repose.txt",
+      "data\\library\\Prisoners of War in Britain 1756 to 1815.txt",
+      "data\\library\\Prolegomena to the History of Israel.txt",
+      "data\\library\\Proportional Representation Applied to Party Government.txt",
+      "data\\library\\Protagoras.txt",
+      "data\\library\\README.md",
+      "data\\library\\RESEARCH IN KINEMATICS OF TURN FOR VEHICLES AND SEMITRAILERS.pdf",
+      "data\\library\\RICH MEN’S CHILDREN.txt",
+      "data\\library\\RP2040 Datasheet_A microcontroller by Raspberry Pi.pdf",
+      "data\\library\\Real Gold.txt",
+      "data\\library\\Render.pdf",
+      "data\\library\\Report to Her Majesty's Principal Secretary of State For the Home Department.txt",
+      "data\\library\\Returned Empty.txt",
+      "data\\library\\Ripley_1x01.pdf",
+      "data\\library\\Robot Programming  A Guide to Controlling Autonomous Robots ( PDFDrive.com ).pdf",
+      "data\\library\\Rollo's Philosophy.txt",
+      "data\\library\\Rp2350-datasheet.pdf",
+      "data\\library\\Ruins of Ancient Cities (Vol. 1 of 2).txt",
+      "data\\library\\Ruins of Ancient Cities (Vol. 2 of 2).txt",
+      "data\\library\\SARA_A PRINCESS.md",
+      "data\\library\\SERMONS BY THE LATE Rev.md",
+      "data\\library\\SLAI_Release_Split_Plan_v2_2_v2_3_v2_4_to_v2_5.pdf",
+      "data\\library\\Schools of Gaul in the last century of the Western Empire.txt",
+      "data\\library\\Science and Health, with Key to the Scriptures.txt",
+      "data\\library\\Self-instructor in the art of hair work.txt",
+      "data\\library\\Seventeen trips through Somáliland.txt",
+      "data\\library\\Sex in Education.txt",
+      "data\\library\\Shantaram.pdf",
+      "data\\library\\She.txt",
+      "data\\library\\Shogun_1x01_-_Anjin.pdf",
+      "data\\library\\Silver Pitchers.txt",
+      "data\\library\\Simulating Martian Gravity.pdf",
+      "data\\library\\Sisar Rosa.txt",
+      "data\\library\\Situating universal design architecture  designing with whom .pdf",
+      "data\\library\\Six Months in Mexico.txt",
+      "data\\library\\Sketches from Eastern History.txt",
+      "data\\library\\Sketches of Persia.txt",
+      "data\\library\\Smart Materials Innovative Technologies in Architecture; Towards innovative design paradigm.pdf",
+      "data\\library\\Solana.pdf",
+      "data\\library\\Solomon and Solomonic Literature.txt",
+      "data\\library\\Space Programs in Latin America - Joseph Guzman.pdf",
+      "data\\library\\Stories by Foreign Authors.txt",
+      "data\\library\\Story structure.pdf",
+      "data\\library\\Sui.pdf",
+      "data\\library\\Sweet Hours.txt",
+      "data\\library\\Swiss Fairy Tales.txt",
+      "data\\library\\Syria, the Desert & the Sown.txt",
+      "data\\library\\THE ADVENTURES OF SHERLOCK HOLMES.md",
+      "data\\library\\THE FOUNDATION TRILOGY.md",
+      "data\\library\\THE ODYSSEY.txt",
+      "data\\library\\THE SKELETON SCOUT.txt",
+      "data\\library\\THE STINGY RECEIVER.md",
+      "data\\library\\THE WIND BLOWETH.md",
+      "data\\library\\THE WOLF DEMON; OR, The Queen of the Kanawha.txt",
+      "data\\library\\THE WORLD OF WATERS.md",
+      "data\\library\\Tales of the Sea, and of Our Jack Tars.txt",
+      "data\\library\\Team-Mates.txt",
+      "data\\library\\Texas Instruments TMP117 High-Precision Digital Temperature Sensor.pdf",
+      "data\\library\\The American Egypt.txt",
+      "data\\library\\The Anabasis of Alexander.txt",
+      "data\\library\\The Annual Report on the Health.txt",
+      "data\\library\\The Atomic Theory.pdf",
+      "data\\library\\The Aztec Treasure-House.txt",
+      "data\\library\\The Best American Humorous Short Stories.txt",
+      "data\\library\\The Best Policy.txt",
+      "data\\library\\The Bible KJV.txt",
+      "data\\library\\The Birth of Civilization in the Near East.txt",
+      "data\\library\\The Blind Spot.txt",
+      "data\\library\\The Book of Jubilees.pdf",
+      "data\\library\\The Border Riflemen.txt",
+      "data\\library\\The Bridge of the Gods.txt",
+      "data\\library\\The Brother of a Hero.txt",
+      "data\\library\\The Brothers Karamazov.txt",
+      "data\\library\\The College, the Market, and the Court.txt",
+      "data\\library\\The Common Law.txt",
+      "data\\library\\The Count of Monte Cristo.txt",
+      "data\\library\\The Crimson Sweater.txt",
+      "data\\library\\The Cross and the Hammer.txt",
+      "data\\library\\The Dabistán, or School of manners, Volume 1.txt",
+      "data\\library\\The Dabistán, or School of manners, Volume 2.txt",
+      "data\\library\\The Dabistán, or School of manners, Volume 3.txt",
+      "data\\library\\The Deluge; An Historical Novel of Poland, Sweden, and Russia. Vol. 1.txt",
+      "data\\library\\The Deluge; An Historical Novel of Poland, Sweden, and Russia. Vol. 2.txt",
+      "data\\library\\The Double Life.txt",
+      "data\\library\\The Dove in the Eagle's Nest.txt",
+      "data\\library\\The Earl of Beaconsfield.txt",
+      "data\\library\\The Economy of Growth.pdf",
+      "data\\library\\The Effect of Intellectual Intelligence (IQ) and Emotional Intelligence (EQ).pdf",
+      "data\\library\\The Egyptian Book of the dead.txt",
+      "data\\library\\The Empire and the Papacy.txt",
+      "data\\library\\The Epic of Gilgamesh_by Maureen Gallery Kovacs_Electronic edition by Wolf Carnahan_1998.pdf",
+      "data\\library\\The Fair God; or, The Last of the 'Tzins.txt",
+      "data\\library\\The Fall of the Moghul Empire of Hindustan.txt",
+      "data\\library\\The Feeling.md",
+      "data\\library\\The Fleet.txt",
+      "data\\library\\The Freedom of Life.txt",
+      "data\\library\\The Freedom of Science.txt",
+      "data\\library\\The Gilded Man (El Dorado) and Other Pictures of the Spanish Occupancy of America.txt",
+      "data\\library\\The Golden Asse.txt",
+      "data\\library\\The Gospel According To Peter.pdf",
+      "data\\library\\The Gospel Of The Lord.pdf",
+      "data\\library\\The Gospel of Pseudo-Matthew.pdf",
+      "data\\library\\The Gospel of the Prophet Mani.pdf",
+      "data\\library\\The Great English Short-Story Writers, Volume 1.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 01.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 02.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 03.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 04.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 05.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 06.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 07.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 08.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 09.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 10.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 11.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 12.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 13.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 14.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 17.txt",
+      "data\\library\\The Great Events by Famous Historians, Volume 21.txt",
+      "data\\library\\The Greek Philosophers, Vol. 1 (of 2).txt",
+      "data\\library\\The Greek Philosophers, Vol. 2 (of 2).txt",
+      "data\\library\\The Greek orators.txt",
+      "data\\library\\The Health Master.txt",
+      "data\\library\\The Healthy Life, Vol. V, Nos. 24-28.txt",
+      "data\\library\\The Highlands of Ethiopia.txt",
+      "data\\library\\The History of Ancient America, Anterior to the Time of Columbus.txt",
+      "data\\library\\The History of Antiquity, Vol. 1 (of 6).txt",
+      "data\\library\\The History of Antiquity, Vol. 2 (of 6).txt",
+      "data\\library\\The History of Antiquity, Vol. 3 (of 6).txt",
+      "data\\library\\The History of Antiquity, Vol. 4 (of 6).txt",
+      "data\\library\\The History of Antiquity, Vol. 5 (of 6).txt",
+      "data\\library\\The History of Antiquity, Vol. 6 (of 6).txt",
+      "data\\library\\The History of Herodotus — Volume 2.txt",
+      "data\\library\\The History of Herodotus.txt",
+      "data\\library\\The History of Philosophy in Islam.txt",
+      "data\\library\\The History of Silk, Cotton, Linen, Wool, and Other Fibrous Substances.txt",
+      "data\\library\\The History of the Indian Revolt and of the Expeditions to Persia, China, and Japan.txt",
+      "data\\library\\The Holy Land and Syria.txt",
+      "data\\library\\The Holy Roman Empire.txt",
+      "data\\library\\The Idiot.txt",
+      "data\\library\\The Iliad.txt",
+      "data\\library\\The Indian Scout; A Story of the Aztec City.txt",
+      "data\\library\\The Innovators Dilemma.pdf",
+      "data\\library\\The International Jewish Cook Book.txt",
+      "data\\library\\The Iron Ration.txt",
+      "data\\library\\The Jacket (The Star-Rover).txt",
+      "data\\library\\The Jew, The Gypsy and El Islam.txt",
+      "data\\library\\The Lady of Lynn.txt",
+      "data\\library\\The Land of the Boxers; or, China under the Allies.txt",
+      "data\\library\\The Law Inevitable.txt",
+      "data\\library\\The Law and the Lady.txt",
+      "data\\library\\The Law of Civilization and Decay.txt",
+      "data\\library\\The Law of Hemlock Mountain.txt",
+      "data\\library\\The Law-Breakers.txt",
+      "data\\library\\The Life and Adventures of Bruce, the African Traveller.txt",
+      "data\\library\\The Life of Jesus.txt",
+      "data\\library\\The Life of John Marshall, Volume 1.html",
+      "data\\library\\The Life of John Marshall, Volume 1.txt",
+      "data\\library\\The Life of the Venerable Mother Mary of the Incarnation.txt",
+      "data\\library\\The Lives and Opinions of Eminent Philosophers.txt",
+      "data\\library\\The Lock and Key Library.txt",
+      "data\\library\\The March to Magdala.txt",
+      "data\\library\\The Medicine-Men of the Apache.txt",
+      "data\\library\\The Multiverse.pdf",
+      "data\\library\\The Mystery of Edwin Drood.txt",
+      "data\\library\\The Native Races [of the Pacific states], Volume 1.txt",
+      "data\\library\\The Native Races [of the Pacific states], Volume 2.txt",
+      "data\\library\\The Native Races [of the Pacific states], Volume 3.txt",
+      "data\\library\\The Native Races [of the Pacific states], Volume 4.txt",
+      "data\\library\\The Native Races [of the Pacific states], Volume 5.txt",
+      "data\\library\\The New Jerusalem.txt",
+      "data\\library\\The Nile Tributaries of Abyssinia, and the Sword Hunters of the Hamran Arabs.txt",
+      "data\\library\\The Nursery _Alice_.txt",
+      "data\\library\\The Old Curiosity Shop.txt",
+      "data\\library\\The Oxford Book of American Essays.txt",
+      "data\\library\\The Peacemaker.txt",
+      "data\\library\\The Physical Training of Children.txt",
+      "data\\library\\The Pickwick Papers.txt",
+      "data\\library\\The Pillar of Fire; or, Israel in Bondage.txt",
+      "data\\library\\The Poetical Works of Addison; Gay's Fables; and Somerville's Chase.txt",
+      "data\\library\\The Poetical Works of Mark Akenside.txt",
+      "data\\library\\The Principal Navigations, Voyages, Traffiques and Discoveries of the English Nation.txt",
+      "data\\library\\The Provinces of the Roman Empire, from Caesar to Diocletian. v. 2.txt",
+      "data\\library\\The Provinces of the Roman Empire, from Caesar to Diocletian.txt",
+      "data\\library\\The Queen of the Savannah.txt",
+      "data\\library\\The Red Track; A Story of Social Life in Mexico.txt",
+      "data\\library\\The Republic.txt",
+      "data\\library\\The Rival Trappers_or, Old Pegs, The Mountaineer.txt",
+      "data\\library\\The Romance of Plant Life.txt",
+      "data\\library\\The Romance of an Old Fool.txt",
+      "data\\library\\The Romantic Composers.txt",
+      "data\\library\\The Russian road to China.txt",
+      "data\\library\\The Secret of Toni.txt",
+      "data\\library\\The Shogun's Daughter.txt",
+      "data\\library\\The Short-story.txt",
+      "data\\library\\The Sir Roger de Coverley Papers.txt",
+      "data\\library\\The Sisters-In-Law.txt",
+      "data\\library\\The Sorceress of Rome.txt",
+      "data\\library\\The Spectator.txt",
+      "data\\library\\The Story of Extinct Civilizations of the West.txt",
+      "data\\library\\The Story of Rolf and the Viking's Bow.txt",
+      "data\\library\\The Story of a Siberian Exile.txt",
+      "data\\library\\The Story of the Mind.txt",
+      "data\\library\\The Sworn Brothers.txt",
+      "data\\library\\The Teaching of Epictetus.txt",
+      "data\\library\\The Thirty-Nine Steps.txt",
+      "data\\library\\The Tiger-Slayer.txt",
+      "data\\library\\The Trial of Jesus from a Lawyer's Standpoint, Vol. 1.txt",
+      "data\\library\\The Trial of Jesus from a Lawyer's Standpoint, Vol. 2.txt",
+      "data\\library\\The Turner Twins.txt",
+      "data\\library\\The Tuzuk-i-Jahangiri; or, Memoirs of Jahangir (Volume 1 of 2).txt",
+      "data\\library\\The Tuzuk-i-Jahangiri; or, Memoirs of Jahangir (Volume 2 of 2).txt",
+      "data\\library\\The Two Great Retreats of History.txt",
+      "data\\library\\The Untroubled Mind.txt",
+      "data\\library\\The Viking Age. Volume 1 (of 2).txt",
+      "data\\library\\The Viking Age. Volume 2 (of 2).txt",
+      "data\\library\\The Virgin of the Sun.txt",
+      "data\\library\\The War of Chupas.txt",
+      "data\\library\\The War of Quito.txt",
+      "data\\library\\The Way We Live Now.txt",
+      "data\\library\\The Web of the Golden Spider.txt",
+      "data\\library\\The Wheel of Fortune.txt",
+      "data\\library\\The White Conquerors.txt",
+      "data\\library\\The White Eagle of Poland.txt",
+      "data\\library\\The Woman in White.txt",
+      "data\\library\\The Works of Edgar Allan Poe — Volume 1.txt",
+      "data\\library\\The Works of Edgar Allan Poe.txt",
+      "data\\library\\The World's Greatest Books — Volume 11 — Ancient and Mediæval History.txt",
+      "data\\library\\The Yangtze Valley and beyond.txt",
+      "data\\library\\The Young Mother.txt",
+      "data\\library\\The art of preserving health.txt",
+      "data\\library\\The children of Dickens.txt",
+      "data\\library\\The city without Jews.txt",
+      "data\\library\\The eternal savage.txt",
+      "data\\library\\The fair Mississippian.txt",
+      "data\\library\\The first philosophers of Greece.txt",
+      "data\\library\\The gods of Mexico.txt",
+      "data\\library\\The influence of Greek ideas and usages upon the Christian church.txt",
+      "data\\library\\The law of the sea.txt",
+      "data\\library\\The laws of contrast of colour.txt",
+      "data\\library\\The legend of Perseus, Volume 1.txt",
+      "data\\library\\The legend of Perseus, Volume 2.txt",
+      "data\\library\\The legend of Perseus, Volume 3.txt",
+      "data\\library\\The life of Hector Berlioz.txt",
+      "data\\library\\The metal horde.txt",
+      "data\\library\\The mystery of the Sea-Lark.txt",
+      "data\\library\\The new northland.txt",
+      "data\\library\\The origin of the family, private property, and the state.txt",
+      "data\\library\\The physics of neutron stars.pdf",
+      "data\\library\\The programmed people.txt",
+      "data\\library\\The public library.txt",
+      "data\\library\\The radio gun-runners.txt",
+      "data\\library\\The reformation in Poland.txt",
+      "data\\library\\The river.txt",
+      "data\\library\\The romantic story of the Mayflower pilgrims, and its place in the life of to-day.epub",
+      "data\\library\\The romantic story of the Mayflower pilgrims, and its place in the life of to-day.txt",
+      "data\\library\\The sacred theory of the Earth, Volume 1 (of 2).txt",
+      "data\\library\\The sacred theory of the Earth, Volume 2 (of 2).txt",
+      "data\\library\\The source of the Blue Nile.txt",
+      "data\\library\\The trans-saharan slave trade.pdf",
+      "data\\library\\The travels of Pedro de Cieza de Léon.txt",
+      "data\\library\\The treatise of Lorenzo Valla on the Donation of Constantine.txt",
+      "data\\library\\The truce of God.txt",
+      "data\\library\\The truth about opium.txt",
+      "data\\library\\The unhallowed harvest.txt",
+      "data\\library\\The way of a man.txt",
+      "data\\library\\The_Ice_Maiden.md",
+      "data\\library\\The_Multiverse.pdf",
+      "data\\library\\Tom, Dick and Harriet.txt",
+      "data\\library\\Tradition, Principally with Reference to Mythology and the Law of Nations.txt",
+      "data\\library\\Training the Teacher.txt",
+      "data\\library\\Travels in Ethiopia, above the Second Cataract of the Nile.txt",
+      "data\\library\\Travels in Southern Abyssinia, Volume 1.txt",
+      "data\\library\\Travels in Southern Abyssinia, Volume 2.txt",
+      "data\\library\\Travels in Syria and the Holy Land.txt",
+      "data\\library\\Travels to Discover the Source of the Nile, Volume 1.txt",
+      "data\\library\\Travels to Discover the Source of the Nile, Volume 2.txt",
+      "data\\library\\Travels to Discover the Source of the Nile, Volume 3.txt",
+      "data\\library\\Travels to Discover the Source of the Nile, Volume 4.txt",
+      "data\\library\\Travels to Tana and Persia.txt",
+      "data\\library\\Under the Andes.txt",
+      "data\\library\\Under the Law.txt",
+      "data\\library\\Under the periscope.txt",
+      "data\\library\\Up To Date Business.txt",
+      "data\\library\\VL53L0X.pdf",
+      "data\\library\\Vandrad the Viking.txt",
+      "data\\library\\Vanishing Point.txt",
+      "data\\library\\Vienna 1683.txt",
+      "data\\library\\Viking Tales.txt",
+      "data\\library\\Viva la pay day.txt",
+      "data\\library\\WAR AND PEACE.md",
+      "data\\library\\Ways of Nature.txt",
+      "data\\library\\What a Young Wife Ought to Know.txt",
+      "data\\library\\Whirlpools.txt",
+      "data\\library\\White Ashes.txt",
+      "data\\library\\White Slaves.txt",
+      "data\\library\\Whitepaper v1.docx",
+      "data\\library\\Whitepaper_v1.pdf",
+      "data\\library\\Wisdom's Daughter.txt",
+      "data\\library\\With Fire and Sword; An Historical Novel of Poland and Russia.txt",
+      "data\\library\\With my regiment.txt",
+      "data\\library\\With our army in Palestine.txt",
+      "data\\library\\With the Empress Dowager of China.txt",
+      "data\\library\\Without Dogma.txt",
+      "data\\library\\Woman and Her Saviour in Persia.txt",
+      "data\\library\\World Development Report 2024.pdf",
+      "data\\library\\Xerxes.txt",
+      "data\\library\\Zenobia; or, the Fall of Palmyra.txt",
+      "data\\library\\Ziska.txt",
+      "data\\library\\Zoonomia; Or, the Laws of Organic Life, Vol. 1.txt",
+      "data\\library\\Zoonomia; Or, the Laws of Organic Life, Vol. 2.txt",
+      "data\\library\\a3144 hall effect sensor.pdf",
+      "data\\library\\ads1115.pdf",
+      "data\\library\\ai-05-00070.pdf",
+      "data\\library\\bible-niv.txt",
+      "data\\library\\business_innovaTion_Design_Thinking.pdf",
+      "data\\library\\cardano.pdf",
+      "data\\library\\cs-lewis__spirits-in-bondage.txt",
+      "data\\library\\dTao_whitepaper.pdf",
+      "data\\library\\distance-to-frontier-selection-econ-growth.pdf",
+      "data\\library\\ecap-100016v-1016-105c (1).pdf",
+      "data\\library\\economic-freedom-of-the-world-2021.pdf",
+      "data\\library\\economic-freedom-what-is-it-how-is-it-measured.pdf",
+      "data\\library\\good_to_great.pdf",
+      "data\\library\\history of the world volume 01.txt",
+      "data\\library\\history of the world volume 02.txt",
+      "data\\library\\history of the world volume 03.txt",
+      "data\\library\\history of the world volume 04.txt",
+      "data\\library\\history of the world volume 05.txt",
+      "data\\library\\history of the world volume 06.txt",
+      "data\\library\\history of the world volume 07.txt",
+      "data\\library\\history of the world volume 08.txt",
+      "data\\library\\history of the world volume 09.txt",
+      "data\\library\\history of the world volume 10.txt",
+      "data\\library\\history of the world volume 11.txt",
+      "data\\library\\history of the world volume 17.txt",
+      "data\\library\\music-theory.pdf",
+      "data\\library\\nRF24L01P_Product_Specification_1_0.pdf",
+      "data\\library\\orwellanimalfarm.pdf",
+      "data\\library\\pico_python_sdk.pdf",
+      "data\\library\\rapp_mars_2006_0005.pdf",
+      "data\\library\\raspberry-pi-zero-2-w-product-brief.pdf",
+      "data\\library\\report-for-the-norwegian-ministry-of-finance_april-2024-002.pdf",
+      "data\\library\\running_on_mainnet.md",
+      "data\\library\\running_on_testnet.md",
+      "data\\library\\string theory.pdf",
+      "data\\library\\vl53l1.pdf",
+      "data\\library\\vl53l1x.pdf"
+    ],
+    "fingerprint_sha256": "cef67bdb2a1cfb503802ed6a426c3421c6597423cc0c19e5a09ee8fc98e572d1",
+    "provenance_manifest": "src\\agents\\language\\artifacts\\training\\lantra\\lantra_corpus_manifest_20260918T173210Z.json",
+    "segments": {
+      "test": 2519,
+      "total": 100000,
+      "train": 95196,
+      "validation": 2285
+    }
+  },
+  "run_id": "20260918T173210Z",
+  "schema": "slai.lantra.training-report.v3",
+  "started_at": "2026-09-18T17:32:10.534875Z",
+  "status": "completed",
+  "supervised_dataset": {
+    "counts": {
+      "test": {
+        "tasks": {
+          "classification": 12,
+          "dialogue": 12,
+          "embedding": 12,
+          "generation": 12,
+          "reranking": 12,
+          "summarization": 12,
+          "translation": 12
+        },
+        "total": 84
+      },
+      "train": {
+        "tasks": {
+          "classification": 96,
+          "dialogue": 96,
+          "embedding": 96,
+          "generation": 96,
+          "reranking": 96,
+          "summarization": 96,
+          "translation": 96
+        },
+        "total": 672
+      },
+      "validation": {
+        "tasks": {
+          "classification": 12,
+          "dialogue": 12,
+          "embedding": 12,
+          "generation": 12,
+          "reranking": 12,
+          "summarization": 12,
+          "translation": 12
+        },
+        "total": 84
+      }
+    },
+    "coverage": {
+      "active_tasks": [
+        "generation",
+        "classification",
+        "translation",
+        "summarization",
+        "dialogue",
+        "embedding",
+        "reranking"
+      ],
+      "counts": {
+        "test": {
+          "classification": 12,
+          "dialogue": 12,
+          "embedding": 12,
+          "generation": 12,
+          "reranking": 12,
+          "summarization": 12,
+          "translation": 12
+        },
+        "train": {
+          "classification": 96,
+          "dialogue": 96,
+          "embedding": 96,
+          "generation": 96,
+          "reranking": 96,
+          "summarization": 96,
+          "translation": 96
+        },
+        "validation": {
+          "classification": 12,
+          "dialogue": 12,
+          "embedding": 12,
+          "generation": 12,
+          "reranking": 12,
+          "summarization": 12,
+          "translation": 12
+        }
+      },
+      "missing_tasks": []
+    },
+    "duplicates_removed": 0,
+    "files": [
+      "data\\processed\\lantra\\supervised\\classification.jsonl",
+      "data\\processed\\lantra\\supervised\\dialogue.jsonl",
+      "data\\processed\\lantra\\supervised\\embedding.jsonl",
+      "data\\processed\\lantra\\supervised\\generation.jsonl",
+      "data\\processed\\lantra\\supervised\\reranking.jsonl",
+      "data\\processed\\lantra\\supervised\\summarization.jsonl",
+      "data\\processed\\lantra\\supervised\\translation.jsonl"
+    ],
+    "fingerprint_sha256": "5a80d02d00dd21cf88d6abc7bc608680b1b99e7bac314dc17901b9c12c085e3c"
+  },
+  "tokenizer": {
+    "algorithm": "bpe",
+    "decode_calls": 40,
+    "diagnostics_count": 0,
+    "encode_calls": 63968,
+    "history_length": 200,
+    "merge_count": 50000,
+    "model_path": "data\\bpe_200d_50k_model.json",
+    "request_id": "tokenizer_20260918T175341Z_9ad0d256a268",
+    "special_token_count": 9,
+    "token_counts_size": 0,
+    "tokenize_calls": 63968,
+    "trained": true,
+    "training_runs": 0,
+    "unknown_token_count": 1115711,
+    "version": "2.1",
+    "vocab_path": "data\\bpe_200d_50k_vocab.json",
+    "vocab_size": 49913
+  },
+  "trainer": {
+    "direct_third_party_imports": [],
+    "module": "train_lantra",
+    "slai_components": [
+      "src.agents.language.modules.language_tokenizer.LanguageTokenizer",
+      "src.agents.language.modules.language_transformer.LanguageTransformer",
+      "logs.logger"
+    ],
+    "training_pipeline": [
+      "bpe_tokenizer_bootstrap",
+      "glove_semantic_bootstrap",
+      "raw_text_denoising_pretraining",
+      "supervised_multitask_specialization"
+    ],
+    "transitive_runtime_note": "LanguageTransformer/LanguageTokenizer retain SLAI's own PyTorch/regex dependencies; this trainer does not import those packages directly."
+  },
+  "training": {
+    "final_checkpoint": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260918T173210Z.pt",
+    "mode": "staged_with_supervised_specialization",
+    "model_stats": {
+      "base_stats": {
+        "created_at": "2026-09-19T10:35:07+00:00",
+        "d_model": 256,
+        "decoder_layers": 4,
+        "device": "cpu",
+        "encoder_layers": 4,
+        "history_length": 165,
+        "memory_enabled": false,
+        "nhead": 8,
+        "request_id": "transformer_20260919T103507Z_f3024505badc",
+        "total_parameters": 45707008,
+        "trainable_parameters": 45707008
+      },
+      "beam_width": 5,
+      "current_device": "cpu",
+      "diagnostics_count": 0,
+      "history_length": 64,
+      "length_penalty": 0.6,
+      "max_generation_length": 100,
+      "request_id": "transformer_20260919T103507Z_f3024505badc",
+      "task_type": "generation",
+      "temperature": 1.0,
+      "version": "2.0"
+    },
+    "phases": {
+      "bpe": {
+        "status": "completed",
+        "tokenizer_stats": {
+          "algorithm": "bpe",
+          "decode_calls": 0,
+          "diagnostics_count": 0,
+          "encode_calls": 0,
+          "history_length": 0,
+          "merge_count": 50000,
+          "model_path": "data\\bpe_200d_50k_model.json",
+          "request_id": "tokenizer_20260918T175341Z_9ad0d256a268",
+          "special_token_count": 9,
+          "token_counts_size": 0,
+          "tokenize_calls": 0,
+          "trained": true,
+          "training_runs": 0,
+          "unknown_token_count": 0,
+          "version": "2.1",
+          "vocab_path": "data\\bpe_200d_50k_vocab.json",
+          "vocab_size": 49913
+        },
+        "vocab_size": 49913
+      },
+      "glove": {
+        "reason": "no compatible/configured GloVe resource",
+        "status": "skipped"
+      },
+      "raw_text": {
+        "best_objective": 4.825836198806763,
+        "checkpoint": "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_best.pt",
+        "checkpoint_every_steps": 500,
+        "corpus": {
+          "deduplication": {
+            "duplicate_documents_exact": 0,
+            "duplicate_documents_normalized": 0,
+            "duplicate_files_exact": 1,
+            "duplicate_segments": 3216
+          },
+          "documents": 671,
+          "documents_by_split": {
+            "test": 13,
+            "train": 645,
+            "validation": 13
+          },
+          "documents_by_type": {
+            "docx": 1,
+            "epub": 2,
+            "html": 2,
+            "md": 19,
+            "pdf": 135,
+            "txt": 512
+          },
+          "extraction_failures": [
+            {
+              "error_type": "NoTextExtracted",
+              "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+              "source_path": "data\\library\\View of Sustainable Architecture in Context.pdf",
+              "source_type": "pdf"
+            },
+            {
+              "error_type": "NoTextExtracted",
+              "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+              "source_path": "data\\library\\pdfcoffee.com_fundamentals-of-piano-theory-level-pdf-free.pdf",
+              "source_type": "pdf"
+            },
+            {
+              "error_type": "NoTextExtracted",
+              "message": "Document contained no extractable training text (image-only PDFs require OCR before LANTRA ingestion).",
+              "source_path": "data\\library\\the-four-loves.pdf",
+              "source_type": "pdf"
+            }
+          ],
+          "files": [
+            "data\\library\\00016357.2011.568959.pdf",
+            "data\\library\\1366_keynestheoryofemployment.pdf",
+            "data\\library\\20230223_20minSuburbs-1677186785.pdf",
+            "data\\library\\21162-readme.txt",
+            "data\\library\\3.5_ The Trans-Saharan Slave Trade - Humanities LibreTexts.html",
+            "data\\library\\79426554.pdf",
+            "data\\library\\900-13-082-US-liquid-hydrogen-safetygram-9.pdf",
+            "data\\library\\9789264301085-en.pdf",
+            "data\\library\\A Child of the Orient.txt",
+            "data\\library\\A Collection of College Words and Customs.txt",
+            "data\\library\\A Description of the Coasts of East Africa and Malabar in the Beginning of the Sixteenth Century.txt",
+            "data\\library\\A Discourse Presented to the Most Serene Don Cosimo II..txt",
+            "data\\library\\A Group of Eastern Romances and Stories from the Persian, Tamil, and Urdu.txt",
+            "data\\library\\A Guide to Health.txt",
+            "data\\library\\A History of Matrimonial Institutions, Vol 3 of 3.txt",
+            "data\\library\\A History of Matrimonial Institutions, Vol. 1 of 3.txt",
+            "data\\library\\A History of Matrimonial Institutions, Vol. 2 of 3.txt",
+            "data\\library\\A House to Let.txt",
+            "data\\library\\A Middle English Vocabulary.txt",
+            "data\\library\\A Model of Growth Through Creative Destruction.pdf",
+            "data\\library\\A Narrative of Captivity in Abyssinia.txt",
+            "data\\library\\A New System; or, an Analysis of Antient Mythology. Volume 1 (of 6).txt",
+            "data\\library\\A New System; or, an Analysis of Antient Mythology. Volume 2 (of 6).txt",
+            "data\\library\\A Pilgrimage to Nejd, the Cradle of the Arab Race. Vol. 1.txt",
+            "data\\library\\A Pilgrimage to Nejd, the Cradle of the Arab Race. Vol. 2.txt",
+            "data\\library\\A Sea Queen's Sailing.txt",
+            "data\\library\\A Selection of Cases on the Law of Torts by Ames, Pound, and Smith.txt",
+            "data\\library\\A Struggle for Rome, v. 2.txt",
+            "data\\library\\A Struggle for Rome, v. 3.txt",
+            "data\\library\\A Tale of Two Cities.txt",
+            "data\\library\\A beginner's history.txt",
+            "data\\library\\AN10441.pdf",
+            "data\\library\\ARIANE 6 – TANKS & STRUCTURES FOR THE NEW EUROPEAN.pdf",
+            "data\\library\\ATALA.md",
+            "data\\library\\Across Coveted Lands; or, a Journey from Flushing (Holland) to Calcutta….txt",
+            "data\\library\\Across Mongolian Plains.txt",
+            "data\\library\\Across the Mesa.txt",
+            "data\\library\\Adventures of a Young Naturalist.txt",
+            "data\\library\\Alfred the Great.txt",
+            "data\\library\\All The Light We Cannot See - Anthony Doerr.epub",
+            "data\\library\\All_the_Light_We_Cannot_See_1x01.pdf",
+            "data\\library\\An Old Babylonian Version of the Gilgamesh Epic.txt",
+            "data\\library\\Ancient rhetoric and poetic.txt",
+            "data\\library\\Anna Karenina.txt",
+            "data\\library\\Anomalies of the English law.txt",
+            "data\\library\\Apology, Crito, and Phaedo of Socrates.txt",
+            "data\\library\\Arab-Israeli wars.txt",
+            "data\\library\\Arabian Society in the Middle Ages.txt",
+            "data\\library\\Ardath.txt",
+            "data\\library\\Arethusa.txt",
+            "data\\library\\Around the End.txt",
+            "data\\library\\As a Matter of Course.txt",
+            "data\\library\\Atlas Shrugged.pdf",
+            "data\\library\\Atomic Physics.pdf",
+            "data\\library\\Atomic Theory.pdf",
+            "data\\library\\Avalanche.pdf",
+            "data\\library\\Aztec Land.txt",
+            "data\\library\\BEYOND THE STARS.md",
+            "data\\library\\Bad Memory.txt",
+            "data\\library\\Barbara Blomberg.txt",
+            "data\\library\\Barry Locke, half-back.txt",
+            "data\\library\\Basic Attention Token.pdf",
+            "data\\library\\Behind the Line.txt",
+            "data\\library\\Behind the Veil in Persia and Turkish Arabia.txt",
+            "data\\library\\Belgian Fairy Tales.txt",
+            "data\\library\\Ben, the Trapper.txt",
+            "data\\library\\Betty the retched.pdf",
+            "data\\library\\Big Bang Theory; Origin of Our Universe.pdf",
+            "data\\library\\Billy To-morrow.txt",
+            "data\\library\\Birth control laws.txt",
+            "data\\library\\Bitcoin.pdf",
+            "data\\library\\Black Holes.pdf",
+            "data\\library\\Bleak House.txt",
+            "data\\library\\Brazilian Literature.txt",
+            "data\\library\\Brazilian Tales.txt",
+            "data\\library\\Burnham Breaker.txt",
+            "data\\library\\CRESTLANDS.txt",
+            "data\\library\\Calavar; or, The Knight of The Conquest, A Romance of Mexico.txt",
+            "data\\library\\Camilla; or, A Picture of Youth.txt",
+            "data\\library\\Camps and Trails in China.txt",
+            "data\\library\\Caps and Capers.txt",
+            "data\\library\\Captain Chub.txt",
+            "data\\library\\Captain of the Crew.txt",
+            "data\\library\\Caribbean Football Pyramid Feasibility Study — Group Four.pdf",
+            "data\\library\\Caribbean League Country and Territory Profiles — Group Three.pdf",
+            "data\\library\\Caribbean League Country and Territory Profiles — Group Two.pdf",
+            "data\\library\\Caribbean League Feasibility Study.pdf",
+            "data\\library\\Caribbean League Regional Baseline 01.pdf",
+            "data\\library\\Cassell's Natural History, Vol. 1 (of 6).txt",
+            "data\\library\\Cassell's Natural History, Vol. 2 (of 6).txt",
+            "data\\library\\Cassell's Natural History, Vol. 3 (of 6).txt",
+            "data\\library\\Change Signals.txt",
+            "data\\library\\China by Demetrius Charles Boulger.txt",
+            "data\\library\\China under the Empress Dowager.txt",
+            "data\\library\\Christianity and Greek Philosophy.txt",
+            "data\\library\\Christianity and Modern Thought.txt",
+            "data\\library\\Civics and Health.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 1.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 2.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 3.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 4.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 5.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 6.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 7.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 8.txt",
+            "data\\library\\Clarissa Harlowe; or the history of a young lady — Volume 9.txt",
+            "data\\library\\Commentary on the Maya Manuscript in the Royal Public Library of Dresden.txt",
+            "data\\library\\Commercial Law.txt",
+            "data\\library\\Comparative-Economic-Systems.pdf",
+            "data\\library\\Complete Works of Plutarch volume 3.txt",
+            "data\\library\\Continuous Vaudeville.txt",
+            "data\\library\\Cosmos.pdf",
+            "data\\library\\Covey - The 7 habits of highly effective people.pdf",
+            "data\\library\\Criminal Behavior and Learning Theory.pdf",
+            "data\\library\\Crofton Chums.txt",
+            "data\\library\\Cronos.pdf",
+            "data\\library\\Cruikshank's Water Colours.txt",
+            "data\\library\\Curiosities of Literature, Vol. 1.txt",
+            "data\\library\\Curiosities of Literature, Vol. 2.txt",
+            "data\\library\\Curiosities of Literature, Vol. 3.txt",
+            "data\\library\\DAO Governance.pdf",
+            "data\\library\\DEAD SHOT.txt",
+            "data\\library\\DESIGN AND DEVELOPMENT OF DELTA WING WITH LOITERING Capability.pdf",
+            "data\\library\\DRV5023 Digital-Switch Hall Effect Sensor.pdf",
+            "data\\library\\Danes, Saxons and Normans; or, Stories of our ancestors.txt",
+            "data\\library\\Dante and the early astronomers.txt",
+            "data\\library\\Day of the Druid.txt",
+            "data\\library\\Decline.txt",
+            "data\\library\\DeepSeek_V41_Tech_Report.pdf",
+            "data\\library\\Desert.txt",
+            "data\\library\\Desiring God.pdf",
+            "data\\library\\Diary of a U-Boat Commander.txt",
+            "data\\library\\Dif-MAML_Decentralized_Multi-Agent_Meta-Learning.pdf",
+            "data\\library\\Discoveries in Egypt, Ethiopia, and the Peninsula of Sinai.txt",
+            "data\\library\\Don Quixote.txt",
+            "data\\library\\Dr. Paull's Theory.txt",
+            "data\\library\\Dynamic population-based meta-learning for multi-agent communication with natural language.pdf",
+            "data\\library\\ENHANCING EFFECTIVE DECISION-MAKING THROUGH LEADERSHIP intelligence.pdf",
+            "data\\library\\EUROPEAN_CONFERENCE_FOR_AEROSPACE_SCIENC.pdf",
+            "data\\library\\Early Israel and the Surrounding Nations.txt",
+            "data\\library\\Early Lives of Charlemagne.txt",
+            "data\\library\\Economic Freedom of the World, 2024 Annual Report.pdf",
+            "data\\library\\Economic-mobility-and-the-rise-of-the-Latin-American-middle-class.pdf",
+            "data\\library\\Empathic_LivingLabs_TUe_Boekje_maart_2018.pdf",
+            "data\\library\\English Grammar.txt",
+            "data\\library\\English Prose.txt",
+            "data\\library\\English-Quran-plain-text.txt",
+            "data\\library\\Eric Brighteyes.txt",
+            "data\\library\\Erling the Bold.txt",
+            "data\\library\\Ethereum.pdf",
+            "data\\library\\Exploring Artificial Gravity.pdf",
+            "data\\library\\Extract Silicate Rocks' Oxygen by Electrowinning.pdf",
+            "data\\library\\Fighting Without a War.txt",
+            "data\\library\\Finn_Aslaksen__Steinar_Bergh__Olav_Rand_Bringa__Edel_Kristin_Heggem___Universal_Design__Planning_and_Design_for_All.pdf",
+            "data\\library\\Five Lectures on Reincarnation.txt",
+            "data\\library\\For Yardley.txt",
+            "data\\library\\For the Honor of the School.txt",
+            "data\\library\\Four Afoot.txt",
+            "data\\library\\Four in Camp.txt",
+            "data\\library\\Frank Herbert - Dune 1 - Dune.pdf",
+            "data\\library\\From Lifespan to Healthspan.pdf",
+            "data\\library\\From Memory's Shrine.txt",
+            "data\\library\\From School to Battle-field.txt",
+            "data\\library\\From the Indus to the Tigris.txt",
+            "data\\library\\From_ice_to_space_a_greenhouse_design_for_Moon_or_.pdf",
+            "data\\library\\Functional Programming Principles in Scala.txt",
+            "data\\library\\Fundamentals of Piano Practice.pdf",
+            "data\\library\\Gas-Engines and Producer-Gas Plants.txt",
+            "data\\library\\George_R__R__Martin_-_A_Song_Of_Ice_And_Fire_1b_-_.pdf",
+            "data\\library\\Gibbon.txt",
+            "data\\library\\Global mineral distributions on Mars - J.L. Bandfield.pdf",
+            "data\\library\\Gold of the Gods.txt",
+            "data\\library\\Gospel of Thomas Lambdin.pdf",
+            "data\\library\\Great Expectations.txt",
+            "data\\library\\Great leaders.txt",
+            "data\\library\\Greek Athletic Sports and Festivals.txt",
+            "data\\library\\Greenmantle.txt",
+            "data\\library\\Grettir the Outlaw.txt",
+            "data\\library\\Haifa; or, Life in modern Palestine.txt",
+            "data\\library\\Happy Ending.txt",
+            "data\\library\\Harry Escombe.txt",
+            "data\\library\\Harry's Island.txt",
+            "data\\library\\Hawk's Nest; or, The Last of the Cahoonshees.txt",
+            "data\\library\\Heart of the Sunset.txt",
+            "data\\library\\Hedera.pdf",
+            "data\\library\\Heroes of Israel.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 1.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 2.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 3.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 4.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 5.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 6.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 7.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 8.txt",
+            "data\\library\\History Of Egypt, Chaldæa, Syria, Babylonia, and Assyria, Volume 9.txt",
+            "data\\library\\History of Israel.md",
+            "data\\library\\History of Julius Caesar by Jacob Abbott.txt",
+            "data\\library\\History of Julius Cæsar, Vol. 1 of 2 by Emperor of the French Napoleon III.txt",
+            "data\\library\\History of Julius Cæsar, Vol. 2 of 2 by Emperor of the French Napoleon III.txt",
+            "data\\library\\History of Mexico, Volume 1.txt",
+            "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 1.txt",
+            "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 2.txt",
+            "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 3.txt",
+            "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 4.txt",
+            "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 5.txt",
+            "data\\library\\History of the Decline and Fall of the Roman Empire — Volume 6.txt",
+            "data\\library\\History of the Incas.txt",
+            "data\\library\\History of the Jews in Russia and Poland, Volume 1 [of 3].txt",
+            "data\\library\\History of the Jews in Russia and Poland, Volume 2 [of 3].txt",
+            "data\\library\\History of the Jews in Russia and Poland, Volume 3 [of 3].txt",
+            "data\\library\\History of the Moors of Spain.txt",
+            "data\\library\\Hortense.txt",
+            "data\\library\\Hygiene des Geschlechtslebens.txt",
+            "data\\library\\I am a Nucleus.md",
+            "data\\library\\IN ANCIENT ALBEMARLE.txt",
+            "data\\library\\Ideal Commonwealths.txt",
+            "data\\library\\In Search of Lost Time [Volumes 1 to 7].pdf",
+            "data\\library\\In exitu Israel; an historical novel, volume 1.txt",
+            "data\\library\\In exitu Israel; an historical novel, volume 2.txt",
+            "data\\library\\In pastures new.txt",
+            "data\\library\\In the Russian Ranks.txt",
+            "data\\library\\In the land of the gods.txt",
+            "data\\library\\Inca Land.txt",
+            "data\\library\\Incidents of Travel in Greece, Turkey, Russia, and Poland, Vol. 1 (of 2).txt",
+            "data\\library\\Incidents of Travel in Greece, Turkey, Russia, and Poland, Vol. 2 (of 2).txt",
+            "data\\library\\Indo-China and its primitive people.txt",
+            "data\\library\\Infinite Jest.pdf",
+            "data\\library\\Interplanetary Transport Network.pdf",
+            "data\\library\\Islam and the Divine comedy.txt",
+            "data\\library\\Israel Rank.txt",
+            "data\\library\\Israel in Europe.txt",
+            "data\\library\\It Happened in Japan.txt",
+            "data\\library\\Ivar the Viking.txt",
+            "data\\library\\Jack and the Check Book.txt",
+            "data\\library\\Jesus Calling.pdf",
+            "data\\library\\Joseph II. and His Court.txt",
+            "data\\library\\Josephine by John S. C. Abbott.txt",
+            "data\\library\\Joshua — Complete.txt",
+            "data\\library\\Journals of Expeditions of Discovery into Central Australia and Overland from Adelaide to King George's Sound in the Years 1840-1 v2.txt",
+            "data\\library\\Journeys in Persia and Kurdistan, Volume 1.txt",
+            "data\\library\\Journeys in Persia and Kurdistan, Volume 2.txt",
+            "data\\library\\Kingsford, Quarter.txt",
+            "data\\library\\Laches.txt",
+            "data\\library\\Lectures on Dark Matter.pdf",
+            "data\\library\\Lectures on ancient ethnography and geography, volume 1.txt",
+            "data\\library\\Lectures on ancient ethnography and geography, volume 2.txt",
+            "data\\library\\Left End Edwards.txt",
+            "data\\library\\Left Tackle Thayer.txt",
+            "data\\library\\Legends from River & Mountain.txt",
+            "data\\library\\Les Misérables.txt",
+            "data\\library\\Letters from Egypt, Ethiopia, and the peninsula of Sinai.txt",
+            "data\\library\\Letters from an American Farmer.txt",
+            "data\\library\\Life and adventures of Frank and Jesse James, the noted western outlaws.txt",
+            "data\\library\\Like Another Helen.txt",
+            "data\\library\\Little Dorrit.txt",
+            "data\\library\\Llama_ai.pdf",
+            "data\\library\\Lost Island.txt",
+            "data\\library\\MT6835_Rev.1.3.pdf",
+            "data\\library\\Malazan 2 - Deadhouse Gates.pdf",
+            "data\\library\\Malazan 3 - Memories of Ice.pdf",
+            "data\\library\\Malazan 4 - House of Chains.pdf",
+            "data\\library\\Malazan 5 - Midnight Tides.pdf",
+            "data\\library\\Mandalay to Momien.txt",
+            "data\\library\\Martian lava tubes.pdf",
+            "data\\library\\Measuring Global Crypto Users.pdf",
+            "data\\library\\Mechanical and Tribological Properties of Aluminum-Based Metal-Metrix Composites.pdf",
+            "data\\library\\Meditations by Emperor of Rome Marcus Aurelius.txt",
+            "data\\library\\Memoirs of the Private Life, Return, and Reign of Napoleon in 1815, Vol. II.txt",
+            "data\\library\\Men Like Gods.pdf",
+            "data\\library\\Merrie England in the Olden Time, Vol. 1.txt",
+            "data\\library\\Merrie England in the Olden Time, Vol. 2.txt",
+            "data\\library\\Meta-Learning Representations for Continual Learning.pdf",
+            "data\\library\\Mexico in den ereignißvollen Jahren 1832 und 1833.txt",
+            "data\\library\\Middlemarch.txt",
+            "data\\library\\Mollie and the Unwiseman.txt",
+            "data\\library\\Moorish Remains in Spain.txt",
+            "data\\library\\Mr. Standfast.txt",
+            "data\\library\\Music Theory for the.pdf",
+            "data\\library\\Musical Studies.txt",
+            "data\\library\\Muslims in Spain, 1492 - 1814.pdf",
+            "data\\library\\NEAR.pdf",
+            "data\\library\\Napoleon Bonaparte by John S. C. Abbott.txt",
+            "data\\library\\Napoleon's British visitors and captives, 1801-1815.txt",
+            "data\\library\\Narnia_3_The_horse_and_his_boy.md",
+            "data\\library\\Narrative of the Portuguese embassy to Abyssinia during the years 1520-1527.txt",
+            "data\\library\\Natural Law in the Spiritual World.txt",
+            "data\\library\\Nell and Her Grandfather.txt",
+            "data\\library\\Nerves and Common Sense.txt",
+            "data\\library\\New Forces in Old China.txt",
+            "data\\library\\Neæra.txt",
+            "data\\library\\Nid and Nod.txt",
+            "data\\library\\No Thoroughfare.txt",
+            "data\\library\\Nova Scotia's Part in the Great War.txt",
+            "data\\library\\Nuclear Pulse Propulsion - Orion and beyond.pdf",
+            "data\\library\\ON UNION WITH GOD.txt",
+            "data\\library\\Old Mexico and her lost provinces.txt",
+            "data\\library\\On Your Mark! A Story of College Life and Athletics.txt",
+            "data\\library\\Online Meta-Learning.pdf",
+            "data\\library\\Oppositions of Mars - Numerical Calculation.pdf",
+            "data\\library\\Our Mutual Friend.txt",
+            "data\\library\\Outlines of a mechanical theory of storms.txt",
+            "data\\library\\PCA9685.pdf",
+            "data\\library\\PHANTOM DUEL.md",
+            "data\\library\\Palestine by C. R. Conder.txt",
+            "data\\library\\Palladio_s architectural orders from practice to theory.pdf",
+            "data\\library\\Pan Michael; An Historical Novel of Poland, the Ukraine, and Turkey.txt",
+            "data\\library\\Partners Three.txt",
+            "data\\library\\Pax mundi.txt",
+            "data\\library\\Pelle the Conqueror.txt",
+            "data\\library\\Personality theory.pdf",
+            "data\\library\\Pilgrim Sorrow.txt",
+            "data\\library\\Plato and Platonism.txt",
+            "data\\library\\Plato and the Other Companions of Sokrates Volume 1.txt",
+            "data\\library\\Plato and the Other Companions of Sokrates Volume 2.txt",
+            "data\\library\\Plato and the Other Companions of Sokrates Volume 3.txt",
+            "data\\library\\Plato and the Other Companions of Sokrates Volume 4.txt",
+            "data\\library\\Plot & Strcucture.pdf",
+            "data\\library\\Plutarch's Lives, Volume 1.txt",
+            "data\\library\\Plutarch's Lives, Volume 2.txt",
+            "data\\library\\Plutarch's Lives, Volume 3.txt",
+            "data\\library\\Plutarch's Morals.txt",
+            "data\\library\\PoS_Utility_Consensus.pdf",
+            "data\\library\\Power Through Repose.txt",
+            "data\\library\\Prisoners of War in Britain 1756 to 1815.txt",
+            "data\\library\\Prolegomena to the History of Israel.txt",
+            "data\\library\\Proportional Representation Applied to Party Government.txt",
+            "data\\library\\Protagoras.txt",
+            "data\\library\\README.md",
+            "data\\library\\RESEARCH IN KINEMATICS OF TURN FOR VEHICLES AND SEMITRAILERS.pdf",
+            "data\\library\\RICH MEN’S CHILDREN.txt",
+            "data\\library\\RP2040 Datasheet_A microcontroller by Raspberry Pi.pdf",
+            "data\\library\\Real Gold.txt",
+            "data\\library\\Render.pdf",
+            "data\\library\\Report to Her Majesty's Principal Secretary of State For the Home Department.txt",
+            "data\\library\\Returned Empty.txt",
+            "data\\library\\Ripley_1x01.pdf",
+            "data\\library\\Robot Programming  A Guide to Controlling Autonomous Robots ( PDFDrive.com ).pdf",
+            "data\\library\\Rollo's Philosophy.txt",
+            "data\\library\\Rp2350-datasheet.pdf",
+            "data\\library\\Ruins of Ancient Cities (Vol. 1 of 2).txt",
+            "data\\library\\Ruins of Ancient Cities (Vol. 2 of 2).txt",
+            "data\\library\\SARA_A PRINCESS.md",
+            "data\\library\\SERMONS BY THE LATE Rev.md",
+            "data\\library\\SLAI_Release_Split_Plan_v2_2_v2_3_v2_4_to_v2_5.pdf",
+            "data\\library\\Schools of Gaul in the last century of the Western Empire.txt",
+            "data\\library\\Science and Health, with Key to the Scriptures.txt",
+            "data\\library\\Self-instructor in the art of hair work.txt",
+            "data\\library\\Seventeen trips through Somáliland.txt",
+            "data\\library\\Sex in Education.txt",
+            "data\\library\\Shantaram.pdf",
+            "data\\library\\She.txt",
+            "data\\library\\Shogun_1x01_-_Anjin.pdf",
+            "data\\library\\Silver Pitchers.txt",
+            "data\\library\\Simulating Martian Gravity.pdf",
+            "data\\library\\Sisar Rosa.txt",
+            "data\\library\\Situating universal design architecture  designing with whom .pdf",
+            "data\\library\\Six Months in Mexico.txt",
+            "data\\library\\Sketches from Eastern History.txt",
+            "data\\library\\Sketches of Persia.txt",
+            "data\\library\\Smart Materials Innovative Technologies in Architecture; Towards innovative design paradigm.pdf",
+            "data\\library\\Solana.pdf",
+            "data\\library\\Solomon and Solomonic Literature.txt",
+            "data\\library\\Space Programs in Latin America - Joseph Guzman.pdf",
+            "data\\library\\Stories by Foreign Authors.txt",
+            "data\\library\\Story structure.pdf",
+            "data\\library\\Sui.pdf",
+            "data\\library\\Sweet Hours.txt",
+            "data\\library\\Swiss Fairy Tales.txt",
+            "data\\library\\Syria, the Desert & the Sown.txt",
+            "data\\library\\THE ADVENTURES OF SHERLOCK HOLMES.md",
+            "data\\library\\THE FOUNDATION TRILOGY.md",
+            "data\\library\\THE ODYSSEY.txt",
+            "data\\library\\THE SKELETON SCOUT.txt",
+            "data\\library\\THE STINGY RECEIVER.md",
+            "data\\library\\THE WIND BLOWETH.md",
+            "data\\library\\THE WOLF DEMON; OR, The Queen of the Kanawha.txt",
+            "data\\library\\THE WORLD OF WATERS.md",
+            "data\\library\\Tales of the Sea, and of Our Jack Tars.txt",
+            "data\\library\\Team-Mates.txt",
+            "data\\library\\Texas Instruments TMP117 High-Precision Digital Temperature Sensor.pdf",
+            "data\\library\\The American Egypt.txt",
+            "data\\library\\The Anabasis of Alexander.txt",
+            "data\\library\\The Annual Report on the Health.txt",
+            "data\\library\\The Atomic Theory.pdf",
+            "data\\library\\The Aztec Treasure-House.txt",
+            "data\\library\\The Best American Humorous Short Stories.txt",
+            "data\\library\\The Best Policy.txt",
+            "data\\library\\The Bible KJV.txt",
+            "data\\library\\The Birth of Civilization in the Near East.txt",
+            "data\\library\\The Blind Spot.txt",
+            "data\\library\\The Book of Jubilees.pdf",
+            "data\\library\\The Border Riflemen.txt",
+            "data\\library\\The Bridge of the Gods.txt",
+            "data\\library\\The Brother of a Hero.txt",
+            "data\\library\\The Brothers Karamazov.txt",
+            "data\\library\\The College, the Market, and the Court.txt",
+            "data\\library\\The Common Law.txt",
+            "data\\library\\The Count of Monte Cristo.txt",
+            "data\\library\\The Crimson Sweater.txt",
+            "data\\library\\The Cross and the Hammer.txt",
+            "data\\library\\The Dabistán, or School of manners, Volume 1.txt",
+            "data\\library\\The Dabistán, or School of manners, Volume 2.txt",
+            "data\\library\\The Dabistán, or School of manners, Volume 3.txt",
+            "data\\library\\The Deluge; An Historical Novel of Poland, Sweden, and Russia. Vol. 1.txt",
+            "data\\library\\The Deluge; An Historical Novel of Poland, Sweden, and Russia. Vol. 2.txt",
+            "data\\library\\The Double Life.txt",
+            "data\\library\\The Dove in the Eagle's Nest.txt",
+            "data\\library\\The Earl of Beaconsfield.txt",
+            "data\\library\\The Economy of Growth.pdf",
+            "data\\library\\The Effect of Intellectual Intelligence (IQ) and Emotional Intelligence (EQ).pdf",
+            "data\\library\\The Egyptian Book of the dead.txt",
+            "data\\library\\The Empire and the Papacy.txt",
+            "data\\library\\The Epic of Gilgamesh_by Maureen Gallery Kovacs_Electronic edition by Wolf Carnahan_1998.pdf",
+            "data\\library\\The Fair God; or, The Last of the 'Tzins.txt",
+            "data\\library\\The Fall of the Moghul Empire of Hindustan.txt",
+            "data\\library\\The Feeling.md",
+            "data\\library\\The Fleet.txt",
+            "data\\library\\The Freedom of Life.txt",
+            "data\\library\\The Freedom of Science.txt",
+            "data\\library\\The Gilded Man (El Dorado) and Other Pictures of the Spanish Occupancy of America.txt",
+            "data\\library\\The Golden Asse.txt",
+            "data\\library\\The Gospel According To Peter.pdf",
+            "data\\library\\The Gospel Of The Lord.pdf",
+            "data\\library\\The Gospel of Pseudo-Matthew.pdf",
+            "data\\library\\The Gospel of the Prophet Mani.pdf",
+            "data\\library\\The Great English Short-Story Writers, Volume 1.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 01.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 02.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 03.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 04.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 05.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 06.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 07.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 08.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 09.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 10.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 11.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 12.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 13.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 14.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 17.txt",
+            "data\\library\\The Great Events by Famous Historians, Volume 21.txt",
+            "data\\library\\The Greek Philosophers, Vol. 1 (of 2).txt",
+            "data\\library\\The Greek Philosophers, Vol. 2 (of 2).txt",
+            "data\\library\\The Greek orators.txt",
+            "data\\library\\The Health Master.txt",
+            "data\\library\\The Healthy Life, Vol. V, Nos. 24-28.txt",
+            "data\\library\\The Highlands of Ethiopia.txt",
+            "data\\library\\The History of Ancient America, Anterior to the Time of Columbus.txt",
+            "data\\library\\The History of Antiquity, Vol. 1 (of 6).txt",
+            "data\\library\\The History of Antiquity, Vol. 2 (of 6).txt",
+            "data\\library\\The History of Antiquity, Vol. 3 (of 6).txt",
+            "data\\library\\The History of Antiquity, Vol. 4 (of 6).txt",
+            "data\\library\\The History of Antiquity, Vol. 5 (of 6).txt",
+            "data\\library\\The History of Antiquity, Vol. 6 (of 6).txt",
+            "data\\library\\The History of Herodotus — Volume 2.txt",
+            "data\\library\\The History of Herodotus.txt",
+            "data\\library\\The History of Philosophy in Islam.txt",
+            "data\\library\\The History of Silk, Cotton, Linen, Wool, and Other Fibrous Substances.txt",
+            "data\\library\\The History of the Indian Revolt and of the Expeditions to Persia, China, and Japan.txt",
+            "data\\library\\The Holy Land and Syria.txt",
+            "data\\library\\The Holy Roman Empire.txt",
+            "data\\library\\The Idiot.txt",
+            "data\\library\\The Iliad.txt",
+            "data\\library\\The Indian Scout; A Story of the Aztec City.txt",
+            "data\\library\\The Innovators Dilemma.pdf",
+            "data\\library\\The International Jewish Cook Book.txt",
+            "data\\library\\The Iron Ration.txt",
+            "data\\library\\The Jacket (The Star-Rover).txt",
+            "data\\library\\The Jew, The Gypsy and El Islam.txt",
+            "data\\library\\The Lady of Lynn.txt",
+            "data\\library\\The Land of the Boxers; or, China under the Allies.txt",
+            "data\\library\\The Law Inevitable.txt",
+            "data\\library\\The Law and the Lady.txt",
+            "data\\library\\The Law of Civilization and Decay.txt",
+            "data\\library\\The Law of Hemlock Mountain.txt",
+            "data\\library\\The Law-Breakers.txt",
+            "data\\library\\The Life and Adventures of Bruce, the African Traveller.txt",
+            "data\\library\\The Life of Jesus.txt",
+            "data\\library\\The Life of John Marshall, Volume 1.html",
+            "data\\library\\The Life of John Marshall, Volume 1.txt",
+            "data\\library\\The Life of the Venerable Mother Mary of the Incarnation.txt",
+            "data\\library\\The Lives and Opinions of Eminent Philosophers.txt",
+            "data\\library\\The Lock and Key Library.txt",
+            "data\\library\\The March to Magdala.txt",
+            "data\\library\\The Medicine-Men of the Apache.txt",
+            "data\\library\\The Multiverse.pdf",
+            "data\\library\\The Mystery of Edwin Drood.txt",
+            "data\\library\\The Native Races [of the Pacific states], Volume 1.txt",
+            "data\\library\\The Native Races [of the Pacific states], Volume 2.txt",
+            "data\\library\\The Native Races [of the Pacific states], Volume 3.txt",
+            "data\\library\\The Native Races [of the Pacific states], Volume 4.txt",
+            "data\\library\\The Native Races [of the Pacific states], Volume 5.txt",
+            "data\\library\\The New Jerusalem.txt",
+            "data\\library\\The Nile Tributaries of Abyssinia, and the Sword Hunters of the Hamran Arabs.txt",
+            "data\\library\\The Nursery _Alice_.txt",
+            "data\\library\\The Old Curiosity Shop.txt",
+            "data\\library\\The Oxford Book of American Essays.txt",
+            "data\\library\\The Peacemaker.txt",
+            "data\\library\\The Physical Training of Children.txt",
+            "data\\library\\The Pickwick Papers.txt",
+            "data\\library\\The Pillar of Fire; or, Israel in Bondage.txt",
+            "data\\library\\The Poetical Works of Addison; Gay's Fables; and Somerville's Chase.txt",
+            "data\\library\\The Poetical Works of Mark Akenside.txt",
+            "data\\library\\The Principal Navigations, Voyages, Traffiques and Discoveries of the English Nation.txt",
+            "data\\library\\The Provinces of the Roman Empire, from Caesar to Diocletian. v. 2.txt",
+            "data\\library\\The Provinces of the Roman Empire, from Caesar to Diocletian.txt",
+            "data\\library\\The Queen of the Savannah.txt",
+            "data\\library\\The Red Track; A Story of Social Life in Mexico.txt",
+            "data\\library\\The Republic.txt",
+            "data\\library\\The Rival Trappers_or, Old Pegs, The Mountaineer.txt",
+            "data\\library\\The Romance of Plant Life.txt",
+            "data\\library\\The Romance of an Old Fool.txt",
+            "data\\library\\The Romantic Composers.txt",
+            "data\\library\\The Russian road to China.txt",
+            "data\\library\\The Secret of Toni.txt",
+            "data\\library\\The Shogun's Daughter.txt",
+            "data\\library\\The Short-story.txt",
+            "data\\library\\The Sir Roger de Coverley Papers.txt",
+            "data\\library\\The Sisters-In-Law.txt",
+            "data\\library\\The Sorceress of Rome.txt",
+            "data\\library\\The Spectator.txt",
+            "data\\library\\The Story of Extinct Civilizations of the West.txt",
+            "data\\library\\The Story of Rolf and the Viking's Bow.txt",
+            "data\\library\\The Story of a Siberian Exile.txt",
+            "data\\library\\The Story of the Mind.txt",
+            "data\\library\\The Sworn Brothers.txt",
+            "data\\library\\The Teaching of Epictetus.txt",
+            "data\\library\\The Thirty-Nine Steps.txt",
+            "data\\library\\The Tiger-Slayer.txt",
+            "data\\library\\The Trial of Jesus from a Lawyer's Standpoint, Vol. 1.txt",
+            "data\\library\\The Trial of Jesus from a Lawyer's Standpoint, Vol. 2.txt",
+            "data\\library\\The Turner Twins.txt",
+            "data\\library\\The Tuzuk-i-Jahangiri; or, Memoirs of Jahangir (Volume 1 of 2).txt",
+            "data\\library\\The Tuzuk-i-Jahangiri; or, Memoirs of Jahangir (Volume 2 of 2).txt",
+            "data\\library\\The Two Great Retreats of History.txt",
+            "data\\library\\The Untroubled Mind.txt",
+            "data\\library\\The Viking Age. Volume 1 (of 2).txt",
+            "data\\library\\The Viking Age. Volume 2 (of 2).txt",
+            "data\\library\\The Virgin of the Sun.txt",
+            "data\\library\\The War of Chupas.txt",
+            "data\\library\\The War of Quito.txt",
+            "data\\library\\The Way We Live Now.txt",
+            "data\\library\\The Web of the Golden Spider.txt",
+            "data\\library\\The Wheel of Fortune.txt",
+            "data\\library\\The White Conquerors.txt",
+            "data\\library\\The White Eagle of Poland.txt",
+            "data\\library\\The Woman in White.txt",
+            "data\\library\\The Works of Edgar Allan Poe — Volume 1.txt",
+            "data\\library\\The Works of Edgar Allan Poe.txt",
+            "data\\library\\The World's Greatest Books — Volume 11 — Ancient and Mediæval History.txt",
+            "data\\library\\The Yangtze Valley and beyond.txt",
+            "data\\library\\The Young Mother.txt",
+            "data\\library\\The art of preserving health.txt",
+            "data\\library\\The children of Dickens.txt",
+            "data\\library\\The city without Jews.txt",
+            "data\\library\\The eternal savage.txt",
+            "data\\library\\The fair Mississippian.txt",
+            "data\\library\\The first philosophers of Greece.txt",
+            "data\\library\\The gods of Mexico.txt",
+            "data\\library\\The influence of Greek ideas and usages upon the Christian church.txt",
+            "data\\library\\The law of the sea.txt",
+            "data\\library\\The laws of contrast of colour.txt",
+            "data\\library\\The legend of Perseus, Volume 1.txt",
+            "data\\library\\The legend of Perseus, Volume 2.txt",
+            "data\\library\\The legend of Perseus, Volume 3.txt",
+            "data\\library\\The life of Hector Berlioz.txt",
+            "data\\library\\The metal horde.txt",
+            "data\\library\\The mystery of the Sea-Lark.txt",
+            "data\\library\\The new northland.txt",
+            "data\\library\\The origin of the family, private property, and the state.txt",
+            "data\\library\\The physics of neutron stars.pdf",
+            "data\\library\\The programmed people.txt",
+            "data\\library\\The public library.txt",
+            "data\\library\\The radio gun-runners.txt",
+            "data\\library\\The reformation in Poland.txt",
+            "data\\library\\The river.txt",
+            "data\\library\\The romantic story of the Mayflower pilgrims, and its place in the life of to-day.epub",
+            "data\\library\\The romantic story of the Mayflower pilgrims, and its place in the life of to-day.txt",
+            "data\\library\\The sacred theory of the Earth, Volume 1 (of 2).txt",
+            "data\\library\\The sacred theory of the Earth, Volume 2 (of 2).txt",
+            "data\\library\\The source of the Blue Nile.txt",
+            "data\\library\\The trans-saharan slave trade.pdf",
+            "data\\library\\The travels of Pedro de Cieza de Léon.txt",
+            "data\\library\\The treatise of Lorenzo Valla on the Donation of Constantine.txt",
+            "data\\library\\The truce of God.txt",
+            "data\\library\\The truth about opium.txt",
+            "data\\library\\The unhallowed harvest.txt",
+            "data\\library\\The way of a man.txt",
+            "data\\library\\The_Ice_Maiden.md",
+            "data\\library\\The_Multiverse.pdf",
+            "data\\library\\Tom, Dick and Harriet.txt",
+            "data\\library\\Tradition, Principally with Reference to Mythology and the Law of Nations.txt",
+            "data\\library\\Training the Teacher.txt",
+            "data\\library\\Travels in Ethiopia, above the Second Cataract of the Nile.txt",
+            "data\\library\\Travels in Southern Abyssinia, Volume 1.txt",
+            "data\\library\\Travels in Southern Abyssinia, Volume 2.txt",
+            "data\\library\\Travels in Syria and the Holy Land.txt",
+            "data\\library\\Travels to Discover the Source of the Nile, Volume 1.txt",
+            "data\\library\\Travels to Discover the Source of the Nile, Volume 2.txt",
+            "data\\library\\Travels to Discover the Source of the Nile, Volume 3.txt",
+            "data\\library\\Travels to Discover the Source of the Nile, Volume 4.txt",
+            "data\\library\\Travels to Tana and Persia.txt",
+            "data\\library\\Under the Andes.txt",
+            "data\\library\\Under the Law.txt",
+            "data\\library\\Under the periscope.txt",
+            "data\\library\\Up To Date Business.txt",
+            "data\\library\\VL53L0X.pdf",
+            "data\\library\\Vandrad the Viking.txt",
+            "data\\library\\Vanishing Point.txt",
+            "data\\library\\Vienna 1683.txt",
+            "data\\library\\Viking Tales.txt",
+            "data\\library\\Viva la pay day.txt",
+            "data\\library\\WAR AND PEACE.md",
+            "data\\library\\Ways of Nature.txt",
+            "data\\library\\What a Young Wife Ought to Know.txt",
+            "data\\library\\Whirlpools.txt",
+            "data\\library\\White Ashes.txt",
+            "data\\library\\White Slaves.txt",
+            "data\\library\\Whitepaper v1.docx",
+            "data\\library\\Whitepaper_v1.pdf",
+            "data\\library\\Wisdom's Daughter.txt",
+            "data\\library\\With Fire and Sword; An Historical Novel of Poland and Russia.txt",
+            "data\\library\\With my regiment.txt",
+            "data\\library\\With our army in Palestine.txt",
+            "data\\library\\With the Empress Dowager of China.txt",
+            "data\\library\\Without Dogma.txt",
+            "data\\library\\Woman and Her Saviour in Persia.txt",
+            "data\\library\\World Development Report 2024.pdf",
+            "data\\library\\Xerxes.txt",
+            "data\\library\\Zenobia; or, the Fall of Palmyra.txt",
+            "data\\library\\Ziska.txt",
+            "data\\library\\Zoonomia; Or, the Laws of Organic Life, Vol. 1.txt",
+            "data\\library\\Zoonomia; Or, the Laws of Organic Life, Vol. 2.txt",
+            "data\\library\\a3144 hall effect sensor.pdf",
+            "data\\library\\ads1115.pdf",
+            "data\\library\\ai-05-00070.pdf",
+            "data\\library\\bible-niv.txt",
+            "data\\library\\business_innovaTion_Design_Thinking.pdf",
+            "data\\library\\cardano.pdf",
+            "data\\library\\cs-lewis__spirits-in-bondage.txt",
+            "data\\library\\dTao_whitepaper.pdf",
+            "data\\library\\distance-to-frontier-selection-econ-growth.pdf",
+            "data\\library\\ecap-100016v-1016-105c (1).pdf",
+            "data\\library\\economic-freedom-of-the-world-2021.pdf",
+            "data\\library\\economic-freedom-what-is-it-how-is-it-measured.pdf",
+            "data\\library\\good_to_great.pdf",
+            "data\\library\\history of the world volume 01.txt",
+            "data\\library\\history of the world volume 02.txt",
+            "data\\library\\history of the world volume 03.txt",
+            "data\\library\\history of the world volume 04.txt",
+            "data\\library\\history of the world volume 05.txt",
+            "data\\library\\history of the world volume 06.txt",
+            "data\\library\\history of the world volume 07.txt",
+            "data\\library\\history of the world volume 08.txt",
+            "data\\library\\history of the world volume 09.txt",
+            "data\\library\\history of the world volume 10.txt",
+            "data\\library\\history of the world volume 11.txt",
+            "data\\library\\history of the world volume 17.txt",
+            "data\\library\\music-theory.pdf",
+            "data\\library\\nRF24L01P_Product_Specification_1_0.pdf",
+            "data\\library\\orwellanimalfarm.pdf",
+            "data\\library\\pico_python_sdk.pdf",
+            "data\\library\\rapp_mars_2006_0005.pdf",
+            "data\\library\\raspberry-pi-zero-2-w-product-brief.pdf",
+            "data\\library\\report-for-the-norwegian-ministry-of-finance_april-2024-002.pdf",
+            "data\\library\\running_on_mainnet.md",
+            "data\\library\\running_on_testnet.md",
+            "data\\library\\string theory.pdf",
+            "data\\library\\vl53l1.pdf",
+            "data\\library\\vl53l1x.pdf"
+          ],
+          "fingerprint_sha256": "cef67bdb2a1cfb503802ed6a426c3421c6597423cc0c19e5a09ee8fc98e572d1",
+          "provenance_manifest": "src\\agents\\language\\artifacts\\training\\lantra\\lantra_corpus_manifest_20260918T173210Z.json",
+          "segments": {
+            "test": 2519,
+            "total": 100000,
+            "train": 95196,
+            "validation": 2285
+          }
+        },
+        "heldout_test_loss": 4.733972351312637,
+        "history": [
+          {
+            "epoch": 1,
+            "examples": 20000,
+            "global_optimizer_step": 2500,
+            "mean_train_loss": 5.09525052421987,
+            "optimizer_steps": 2500,
+            "validation_loss": 4.913885673284531
+          },
+          {
+            "epoch": 2,
+            "examples": 20000,
+            "global_optimizer_step": 5000,
+            "mean_train_loss": 4.838261222594976,
+            "optimizer_steps": 2500,
+            "validation_loss": 4.825836198806763
+          }
+        ],
+        "interval_checkpoints": [
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00000500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00001000.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00001500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00002000.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00002500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00003000.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00003500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00004000.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00004500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_raw_pretrain_20260918T173210Z_step_00005000.pt"
+        ],
+        "status": "completed",
+        "test_segments": 2519,
+        "train_segments": 95196,
+        "validation_segments": 2285
+      },
+      "supervised": {
+        "best_epoch": 11,
+        "best_global_optimizer_step": 924,
+        "best_validation_objective": 0.06608235672175403,
+        "checkpoint_every_steps": 500,
+        "checkpoints": {
+          "best": "src\\agents\\language\\checkpoints\\lantra\\lantra_best.pt",
+          "final": "src\\agents\\language\\checkpoints\\lantra\\lantra_20260918T173210Z.pt",
+          "latest": "src\\agents\\language\\checkpoints\\lantra\\lantra_latest.pt"
+        },
+        "epochs_completed": 12,
+        "global_optimizer_steps": 1008,
+        "history": [
+          {
+            "epoch": 1,
+            "global_optimizer_step": 84,
+            "learning_rate": 0.00025199999999999995,
+            "seconds": 82.20642849989235,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 3.451735312030429,
+              "mean_raw_loss": 2.3019174831431535,
+              "mean_weighted_loss": 2.3019174831431535,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 2.411403442422549,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 3.2315807615717254,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.03358202427625656,
+                  "pairwise_accuracy": 0.9791666666666666
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 3.2617037569483123,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.058253439143300056,
+                  "pairwise_accuracy": 0.9583333333333334
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 2.5443279035389423,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 4.57257105410099,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.14033653486259648,
+              "mean_loss": 1.5181657941568465,
+              "seq2seq_mean_task_loss": 2.1254321118195856,
+              "seq2seq_task_perplexity": 8.376516297904994,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 1.4477726717789967,
+                  "normalized_loss": 0.13382952033843343,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 2.4288148482640586,
+                  "normalized_loss": 0.22451530718191545,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 2.35873814423879,
+                  "normalized_loss": 0.2180375418052033,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.5831990639368694,
+                  "normalized_loss": 0.1463480941842722,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 2.8086358308792114,
+                  "normalized_loss": 0.259625280528351,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 2,
+            "global_optimizer_step": 168,
+            "learning_rate": 0.00029590891885874414,
+            "seconds": 82.76421559997834,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 2.3608297946907224,
+              "mean_raw_loss": 1.2674195216525168,
+              "mean_weighted_loss": 1.2674195216525168,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 1.2662299815565348,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 1.5788444640735786,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0004232575496037801,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 1.6309130576749642,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0003850807746251424,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 1.2145914131154616,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 3.1805493968228498,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.09628234579582788,
+              "mean_loss": 1.041585957010587,
+              "seq2seq_mean_task_loss": 1.458220339814822,
+              "seq2seq_task_perplexity": 4.2983031984671,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 1.1053162862857182,
+                  "normalized_loss": 0.10217346362403013,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 1.4180653194586437,
+                  "normalized_loss": 0.1310834257415017,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 1.3541429738203685,
+                  "normalized_loss": 0.1251745582635944,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.170360952615738,
+                  "normalized_loss": 0.10818607642243554,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 2.243216166893641,
+                  "normalized_loss": 0.2073588965192335,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 3,
+            "global_optimizer_step": 252,
+            "learning_rate": 0.0002799331652603371,
+            "seconds": 82.50121070002206,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 2.062901556491852,
+              "mean_raw_loss": 0.9991842786160609,
+              "mean_weighted_loss": 0.9991842786160609,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 1.0298931803554296,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 1.1626585529496272,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0035194147688647113,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 1.1880018760760624,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0001605606327454249,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 1.0364573076367378,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 2.573599057892958,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.08386003418146994,
+              "mean_loss": 0.9072009332123256,
+              "seq2seq_mean_task_loss": 1.270081306497256,
+              "seq2seq_task_perplexity": 3.5611420945748766,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.9198789397875468,
+                  "normalized_loss": 0.08503196646882585,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 1.0850300093491871,
+                  "normalized_loss": 0.10029823641136797,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 1.0631744414567947,
+                  "normalized_loss": 0.09827794674519486,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.1234146455923717,
+                  "normalized_loss": 0.10384644363818236,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 2.1589084963003793,
+                  "normalized_loss": 0.1995656460067185,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 4,
+            "global_optimizer_step": 336,
+            "learning_rate": 0.00025318520461248186,
+            "seconds": 82.73524830001406,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.790923576269831,
+              "mean_raw_loss": 0.8688884990821991,
+              "mean_weighted_loss": 0.8688884990821991,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.918697627261281,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 1.00552230887115,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.004779567631582419,
+                  "pairwise_accuracy": 0.9895833333333334
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 1.0169421409567196,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.9802754024664561,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 2.156002446388205,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07653978271720684,
+              "mean_loss": 0.8280101837146849,
+              "seq2seq_mean_task_loss": 1.159214257200559,
+              "seq2seq_task_perplexity": 3.1874277934751567,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.9375806798537573,
+                  "normalized_loss": 0.08666828370867648,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 1.0060122311115265,
+                  "normalized_loss": 0.09299397410148434,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9848084151744843,
+                  "normalized_loss": 0.0910339312221614,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.1162908871968586,
+                  "normalized_loss": 0.10318793613375012,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.7513790726661682,
+                  "normalized_loss": 0.16189435385437556,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 5,
+            "global_optimizer_step": 420,
+            "learning_rate": 0.00021790849614679626,
+            "seconds": 82.27439459995367,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.5508602666003364,
+              "mean_raw_loss": 0.7953010050668603,
+              "mean_weighted_loss": 0.7953010050668603,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.8726783264428377,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.9324855643014113,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.941889780263106,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.9450535333404938,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.8749998311201732,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07193148148906221,
+              "mean_loss": 0.7781574115866706,
+              "seq2seq_mean_task_loss": 1.089420376221339,
+              "seq2seq_task_perplexity": 2.972550612113934,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8778827836116155,
+                  "normalized_loss": 0.08114991678890154,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9463257243235906,
+                  "normalized_loss": 0.08747666000251685,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9468309581279755,
+                  "normalized_loss": 0.08752336291314473,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.1086378196875255,
+                  "normalized_loss": 0.10248050024007961,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.5674245953559875,
+                  "normalized_loss": 0.14488993047879278,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 6,
+            "global_optimizer_step": 504,
+            "learning_rate": 0.0001770618395381547,
+            "seconds": 83.95273940009065,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.4554095764954884,
+              "mean_raw_loss": 0.7499763876909301,
+              "mean_weighted_loss": 0.7499763876909301,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.8245255071669817,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.8925642433265845,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.00020921478668848673,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.907324111709992,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0012869959076245625,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.9193690561999878,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.704555584738652,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.07151549421911131,
+              "mean_loss": 0.7736572460049674,
+              "seq2seq_mean_task_loss": 1.0831201444069545,
+              "seq2seq_task_perplexity": 2.953881725087464,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8572738716999689,
+                  "normalized_loss": 0.07924486577530311,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9611642509698868,
+                  "normalized_loss": 0.08884830690697369,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9508975396553675,
+                  "normalized_loss": 0.08789927044741203,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0422436992327373,
+                  "normalized_loss": 0.0963431463122436,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.6040213604768117,
+                  "normalized_loss": 0.14827287009184678,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 7,
+            "global_optimizer_step": 588,
+            "learning_rate": 0.00013407120845444968,
+            "seconds": 83.97465509991162,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.253936020391328,
+              "mean_raw_loss": 0.7103877147171824,
+              "mean_weighted_loss": 0.7103877147171824,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.8079039603471756,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.8661391542603573,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0009630718268454075,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.8782907538115978,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.8904856871813536,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.528931375592947,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.06881836539898625,
+              "mean_loss": 0.7444796072585242,
+              "seq2seq_mean_task_loss": 1.042271450161934,
+              "seq2seq_task_perplexity": 2.8356507439788285,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8311726202567419,
+                  "normalized_loss": 0.0768321127036571,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9584580411513647,
+                  "normalized_loss": 0.08859814970411467,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9543248564004898,
+                  "normalized_loss": 0.08821608548680905,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0383249421914418,
+                  "normalized_loss": 0.09598090340948524,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.4290767908096313,
+                  "normalized_loss": 0.13210130648883775,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 8,
+            "global_optimizer_step": 672,
+            "learning_rate": 9.254240034123492e-05,
+            "seconds": 84.48612689995207,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.1609619706869125,
+              "mean_raw_loss": 0.6847821211531049,
+              "mean_weighted_loss": 0.6847821211531049,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.7902621527512869,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.8487279123316208,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.859813192859292,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.8829829550037781,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.4116886351257563,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.06840973088630105,
+              "mean_loss": 0.7400589840752738,
+              "seq2seq_mean_task_loss": 1.0360825777053833,
+              "seq2seq_task_perplexity": 2.818155457084821,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8266944090525309,
+                  "normalized_loss": 0.07641815485715532,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9386152476072311,
+                  "normalized_loss": 0.08676391730427052,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9451502511898676,
+                  "normalized_loss": 0.08736800136520222,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0442908902963002,
+                  "normalized_loss": 0.0965323849982737,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.4256620903809865,
+                  "normalized_loss": 0.13178565767920558,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 9,
+            "global_optimizer_step": 756,
+            "learning_rate": 5.595860366159594e-05,
+            "seconds": 85.83189709996805,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 1.0205314102626981,
+              "mean_raw_loss": 0.662339096711505,
+              "mean_weighted_loss": 0.662339096711505,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.7766602989286184,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.8431710259368023,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.8490664381533861,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.8654689832280079,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.3020069307337205,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.0674840489320918,
+              "mean_loss": 0.7300449226583753,
+              "seq2seq_mean_task_loss": 1.0220628917217254,
+              "seq2seq_task_perplexity": 2.7789214692412227,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8122192869583765,
+                  "normalized_loss": 0.07508010042052851,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.941601981719335,
+                  "normalized_loss": 0.08704000567186633,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9470145454009374,
+                  "normalized_loss": 0.08754033339280612,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 1.0040030380090077,
+                  "normalized_loss": 0.09280824787911618,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.4054756065209706,
+                  "normalized_loss": 0.12991965516032544,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 10,
+            "global_optimizer_step": 840,
+            "learning_rate": 2.7388248845392144e-05,
+            "seconds": 82.21766770002432,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 0.994848255600248,
+              "mean_raw_loss": 0.6514019532838747,
+              "mean_weighted_loss": 0.6514019532838747,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.7739711906760931,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.8319964638600746,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.00037677368770043057,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.8414908566822609,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.8538113919397196,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.2581669961412747,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.06620780316438273,
+              "mean_loss": 0.7162384490172068,
+              "seq2seq_mean_task_loss": 1.0027338286240897,
+              "seq2seq_task_perplexity": 2.7257233123661937,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8161022265752157,
+                  "normalized_loss": 0.07543903242453309,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9412015130122503,
+                  "normalized_loss": 0.08700298705974277,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9438901245594025,
+                  "normalized_loss": 0.08725151750982345,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 0.9835646698872248,
+                  "normalized_loss": 0.09091896162889467,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.3289106090863545,
+                  "normalized_loss": 0.12284212352768512,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 11,
+            "global_optimizer_step": 924,
+            "learning_rate": 9.227646665876668e-06,
+            "seconds": 84.60602730000392,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 0.9442062413408643,
+              "mean_raw_loss": 0.6424997328292756,
+              "mean_weighted_loss": 0.6424997328292756,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.7778848111629486,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.8268996390203635,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.8330230433493853,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.8504814965029558,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.209209139769276,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.06608235672175403,
+              "mean_loss": 0.7148813647883279,
+              "seq2seq_mean_task_loss": 1.000833910703659,
+              "seq2seq_task_perplexity": 2.7205495781903286,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.811441108584404,
+                  "normalized_loss": 0.07500816700131394,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9395125110944113,
+                  "normalized_loss": 0.08684685873868712,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9466174244880676,
+                  "normalized_loss": 0.08750362424480126,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 0.9794031729300817,
+                  "normalized_loss": 0.0905342802818017,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.3271953364213307,
+                  "normalized_loss": 0.12268356678567416,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          },
+          {
+            "epoch": 12,
+            "global_optimizer_step": 1008,
+            "learning_rate": 3e-06,
+            "seconds": 84.22244819998741,
+            "train": {
+              "examples": 672,
+              "mean_gradient_norm": 0.9066096200119882,
+              "mean_raw_loss": 0.639770011816706,
+              "mean_weighted_loss": 0.639770011816706,
+              "optimizer_steps": 84,
+              "tasks": {
+                "classification": {
+                  "examples": 96,
+                  "mean_loss": 0.7688707386453947,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 96,
+                  "mean_loss": 0.8275407335410515,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 96,
+                  "mean_loss": 0.8343858327716589,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 96,
+                  "mean_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 96,
+                  "mean_loss": 0.8444467435280482,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 96,
+                  "mean_loss": 1.2031460342307885,
+                  "pairwise_accuracy": null
+                }
+              }
+            },
+            "validation": {
+              "examples": 84,
+              "macro_normalized_task_loss": 0.06621519540816802,
+              "mean_loss": 0.7163184185822805,
+              "seq2seq_mean_task_loss": 1.0028457860151927,
+              "seq2seq_task_perplexity": 2.7260284943204836,
+              "tasks": {
+                "classification": {
+                  "examples": 12,
+                  "mean_loss": 0.8122313618659973,
+                  "normalized_loss": 0.07508121660342554,
+                  "pairwise_accuracy": null
+                },
+                "dialogue": {
+                  "examples": 12,
+                  "mean_loss": 0.9412191410859426,
+                  "normalized_loss": 0.08700461656739457,
+                  "pairwise_accuracy": null
+                },
+                "embedding": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "generation": {
+                  "examples": 12,
+                  "mean_loss": 0.9477171103159586,
+                  "normalized_loss": 0.08760527723890618,
+                  "pairwise_accuracy": null
+                },
+                "reranking": {
+                  "examples": 12,
+                  "mean_loss": 0.0,
+                  "normalized_loss": 0.0,
+                  "pairwise_accuracy": 1.0
+                },
+                "summarization": {
+                  "examples": 12,
+                  "mean_loss": 0.9790826837221781,
+                  "normalized_loss": 0.09050465483175459,
+                  "pairwise_accuracy": null
+                },
+                "translation": {
+                  "examples": 12,
+                  "mean_loss": 1.3339786330858867,
+                  "normalized_loss": 0.12331060261569528,
+                  "pairwise_accuracy": null
+                }
+              }
+            }
+          }
+        ],
+        "interval_checkpoints": [
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_supervised_20260918T173210Z_step_00000500.pt",
+          "src\\agents\\language\\checkpoints\\lantra\\lantra_supervised_20260918T173210Z_step_00001000.pt"
+        ],
+        "model_stats": {
+          "base_stats": {
+            "created_at": "2026-09-19T10:35:07+00:00",
+            "d_model": 256,
+            "decoder_layers": 4,
+            "device": "cpu",
+            "encoder_layers": 4,
+            "history_length": 165,
+            "memory_enabled": false,
+            "nhead": 8,
+            "request_id": "transformer_20260919T103507Z_f3024505badc",
+            "total_parameters": 45707008,
+            "trainable_parameters": 45707008
+          },
+          "beam_width": 5,
+          "current_device": "cpu",
+          "diagnostics_count": 0,
+          "history_length": 64,
+          "length_penalty": 0.6,
+          "max_generation_length": 100,
+          "request_id": "transformer_20260919T103507Z_f3024505badc",
+          "task_type": "generation",
+          "temperature": 1.0,
+          "version": "2.0"
+        },
+        "selection_metric": "macro_normalized_task_loss",
+        "test": {
+          "examples": 84,
+          "generation_quality": {
+            "classification": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "classification-0109",
+                  "prediction": "",
+                  "reference": "configuration_error"
+                },
+                {
+                  "id": "classification-0110",
+                  "prediction": "",
+                  "reference": "dependency_error"
+                },
+                {
+                  "id": "classification-0111",
+                  "prediction": "",
+                  "reference": "authentication_error"
+                },
+                {
+                  "id": "classification-0112",
+                  "prediction": "",
+                  "reference": "authorization_error"
+                },
+                {
+                  "id": "classification-0113",
+                  "prediction": "",
+                  "reference": "data_validation_error"
+                },
+                {
+                  "id": "classification-0114",
+                  "prediction": "",
+                  "reference": "network_error"
+                },
+                {
+                  "id": "classification-0115",
+                  "prediction": "",
+                  "reference": "storage_error"
+                },
+                {
+                  "id": "classification-0116",
+                  "prediction": "",
+                  "reference": "software_error"
+                }
+              ],
+              "token_f1": 0.0
+            },
+            "dialogue": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "dialogue-0109",
+                  "prediction": "",
+                  "reference": "Fault tolerance allows a system to continue operating when individual components fail. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0110",
+                  "prediction": "",
+                  "reference": "Data provenance records where information originated, how it was transformed, and which processing steps produced the current result. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0111",
+                  "prediction": "",
+                  "reference": "Deduplication identifies repeated data and removes unnecessary copies while preserving required information. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0112",
+                  "prediction": "",
+                  "reference": "Retrieval augmented generation combines a language model with external retrieval so responses can use relevant context. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0113",
+                  "prediction": "",
+                  "reference": "Vector embeddings encode items as numeric representations so semantic relationships can be measured geometrically. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0114",
+                  "prediction": "",
+                  "reference": "Cosine similarity compares vector direction and is commonly used to measure similarity between embeddings. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0115",
+                  "prediction": "",
+                  "reference": "Regularization constrains model learning to reduce overfitting and improve generalization. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                },
+                {
+                  "id": "dialogue-0116",
+                  "prediction": "",
+                  "reference": "Cross validation estimates model performance by evaluating it on held-out partitions of available data. A key caution is not to apply it mechanically; validate assumptions and confirm that it fits the system's real constraints."
+                }
+              ],
+              "token_f1": 0.0
+            },
+            "generation": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "generation-0109",
+                  "prediction": "",
+                  "reference": "Fault tolerance allows a system to continue operating when individual components fail. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0110",
+                  "prediction": "",
+                  "reference": "Data provenance records where information originated, how it was transformed, and which processing steps produced the current result. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0111",
+                  "prediction": "",
+                  "reference": "Deduplication identifies repeated data and removes unnecessary copies while preserving required information. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0112",
+                  "prediction": "",
+                  "reference": "Retrieval augmented generation combines a language model with external retrieval so responses can use relevant context. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0113",
+                  "prediction": "",
+                  "reference": "Vector embeddings encode items as numeric representations so semantic relationships can be measured geometrically. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0114",
+                  "prediction": "",
+                  "reference": "Cosine similarity compares vector direction and is commonly used to measure similarity between embeddings. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0115",
+                  "prediction": "",
+                  "reference": "Regularization constrains model learning to reduce overfitting and improve generalization. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                },
+                {
+                  "id": "generation-0116",
+                  "prediction": "",
+                  "reference": "Cross validation estimates model performance by evaluating it on held-out partitions of available data. One practical use is to apply the concept as part of a measurable design, validation, or operational decision."
+                }
+              ],
+              "token_f1": 0.0
+            },
+            "summarization": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "summarization-0109",
+                  "prediction": "",
+                  "reference": "When reviewing fault tolerance together with encryption in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0110",
+                  "prediction": "",
+                  "reference": "When reviewing data provenance together with fault tolerance in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0111",
+                  "prediction": "",
+                  "reference": "When reviewing deduplication together with cross validation in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0112",
+                  "prediction": "",
+                  "reference": "When reviewing retrieval augmented generation together with Building Information Modeling in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0113",
+                  "prediction": "",
+                  "reference": "When reviewing vector embeddings together with thermal insulation in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0114",
+                  "prediction": "",
+                  "reference": "When reviewing cosine similarity together with load balancing in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0115",
+                  "prediction": "",
+                  "reference": "When reviewing regularization together with cosine similarity in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                },
+                {
+                  "id": "summarization-0116",
+                  "prediction": "",
+                  "reference": "When reviewing cross validation together with transformer neural networks in a university engineering project, use explicit requirements, measurable evidence, and documented assumptions to support the final decision."
+                }
+              ],
+              "token_f1": 0.0
+            },
+            "translation": {
+              "exact_match": 0.0,
+              "examples": 8,
+              "rouge_l_f1": 0.0,
+              "samples": [
+                {
+                  "id": "translation-0109",
+                  "prediction": "",
+                  "reference": "Technische notitie: De server gaf een succesvolle respons terug."
+                },
+                {
+                  "id": "translation-0110",
+                  "prediction": "",
+                  "reference": "Engineering note: The server returned a successful response."
+                },
+                {
+                  "id": "translation-0111",
+                  "prediction": "",
+                  "reference": "Nota técnica: El servidor devolvió una respuesta correcta."
+                },
+                {
+                  "id": "translation-0112",
+                  "prediction": "",
+                  "reference": "Engineering note: The server returned a successful response."
+                },
+                {
+                  "id": "translation-0113",
+                  "prediction": "",
+                  "reference": "Technische notitie: Het verzoek is mislukt omdat het token is verlopen."
+                },
+                {
+                  "id": "translation-0114",
+                  "prediction": "",
+                  "reference": "Engineering note: The request failed because the token expired."
+                },
+                {
+                  "id": "translation-0115",
+                  "prediction": "",
+                  "reference": "Nota técnica: La solicitud falló porque el token expiró."
+                },
+                {
+                  "id": "translation-0116",
+                  "prediction": "",
+                  "reference": "Engineering note: The request failed because the token expired."
+                }
+              ],
+              "token_f1": 0.0
+            }
+          },
+          "macro_normalized_task_loss": 0.06714708343636121,
+          "mean_loss": 0.7263996175357273,
+          "seq2seq_mean_task_loss": 1.0169594645500182,
+          "seq2seq_task_perplexity": 2.7647755728854113,
+          "tasks": {
+            "classification": {
+              "examples": 12,
+              "mean_loss": 0.8117553492387136,
+              "normalized_loss": 0.07503721484622554,
+              "pairwise_accuracy": null
+            },
+            "dialogue": {
+              "examples": 12,
+              "mean_loss": 0.9253937900066376,
+              "normalized_loss": 0.08554174937462716,
+              "pairwise_accuracy": null
+            },
+            "embedding": {
+              "examples": 12,
+              "mean_loss": 0.0,
+              "normalized_loss": 0.0,
+              "pairwise_accuracy": 1.0
+            },
+            "generation": {
+              "examples": 12,
+              "mean_loss": 0.9326110531886419,
+              "normalized_loss": 0.08620890029454129,
+              "pairwise_accuracy": null
+            },
+            "reranking": {
+              "examples": 12,
+              "mean_loss": 0.0,
+              "normalized_loss": 0.0,
+              "pairwise_accuracy": 1.0
+            },
+            "summarization": {
+              "examples": 12,
+              "mean_loss": 0.964101031422615,
+              "normalized_loss": 0.08911977764750437,
+              "pairwise_accuracy": null
+            },
+            "translation": {
+              "examples": 12,
+              "mean_loss": 1.4509360988934834,
+              "normalized_loss": 0.13412194189163013,
+              "pairwise_accuracy": null
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 import threading
 import time
-import yaml # type: ignore
+import yaml
 
 from pathlib import Path
 from typing import Any, Dict, Optional, Union

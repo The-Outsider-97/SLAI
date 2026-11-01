@@ -26,6 +26,7 @@ learning_memory:
   # Diagnostics
   max_recent_rewards: 1000
 
+
 evolutionary:
   population_size: 10
   generations: 20
@@ -39,6 +40,7 @@ evolutionary:
   garbage_collect_interval: 1000
   step_size_adaptation: true   # enable self-adaptive step size
 
+
 dqn:
   hidden_size: 128
   gamma: 0.99
@@ -50,6 +52,18 @@ dqn:
   target_update_frequency: 100
   buffer_size: 10000
   replay_backend: "distributed"
+
+operational_dqn:
+  enabled: true
+  profiles:
+    scheduling:
+      enabled: true
+      mode: shadow
+      path: "src/agents/learning/models/StandardDQN.pt"
+      device: cpu
+      fallback: shortest_job
+      authorized_active: false
+
 
 maml:
   hidden_size: 64
@@ -107,6 +121,7 @@ maml:
   # Persistence
   checkpoint_dir: "src/agents/learning/checkpoints/maml"
 
+
 rl:
   learning_rate: 0.1
   discount_factor: 0.9
@@ -115,6 +130,25 @@ rl:
   state_dim: 128
   double_q: false               # enable Double Q-learning (two Q-tables)
   trace_type: "accumulating"    # "accumulating" or "replacing"
+
+operational_trl:
+  enabled: true
+
+  profiles:
+    scheduling:
+      enabled: true
+      mode: shadow
+      path: "src/agents/learning/models/tabularRL.pt"
+      fallback: shortest_job
+      authorized_active: false
+
+    allocation:
+      enabled: false
+      mode: disabled
+      path: "src/agents/learning/models/tabularRL_allocation.pt"
+      fallback: least_loaded
+      authorized_active: false
+
 
 rsi:
   gamma: 0.95               # discount rate
@@ -130,14 +164,17 @@ rsi:
   improvement_threshold: 0.05      # 5% minimum improvement
   target_update_frequency: 100
 
+
 unified:
   validation_episodes: 5
   early_stop_patience: 20
+
 
 learning_calculations:
   trend_window: 50
   epsilon: 1e-12
   k: 5
+
 
 learning_env:
   max_steps: 500
@@ -227,6 +264,13 @@ learning_env:
   render_size: 400
   auto_reset_on_step: false
 
+
+learning_signals:
+  history_limit: 2000
+  context_min_evidence: 3
+  restore_memory_on_init: true
+
+
 multi_task_learner:
   initial_weights: null                # Optional per-task starting weights, e.g. {policy: 0.5, value: 0.5}
   rebalance_strategy: "softmax"        # none|uniform|softmax|inverse_softmax|proportional|inverse_proportional|dwa|uncertainty
@@ -245,7 +289,9 @@ multi_task_learner:
   checkpoint_dir: "src/agents/learning/checkpoints/multi_task_learner"
   round_precision: 8                   # Precision used when returning display weights
 
+
 neural_network:
+  dueling: true
   layer_dims: [784, 128, 64, 10]   # First/last are overridden by constructor input_dim/output_dim.
   hidden_activation: "relu"        # relu|leaky_relu|elu|sigmoid|tanh|gelu|mish|silu|swish|linear
   output_activation: "linear"      # linear for value/Q heads; softmax/sigmoid/tanh when needed for prediction output.
@@ -267,6 +313,7 @@ neural_network:
   gradient_explosion_threshold: 10000.0
   use_output_activation_for_loss: false
   nan_guard: true
+
 
 policy_network:
   hidden_size: 64                    # Backward-compatible shorthand used by some learning modules.
@@ -295,6 +342,7 @@ policy_network:
     activation: 'relu'
     gradient_clip_norm: 1.0
     target_update_tau: 0.01
+
 
 recovery_system:
   enabled: true
@@ -374,6 +422,7 @@ recovery_system:
     - training_steps
     - episode_count
 
+
 rl_engine:
   state_processor:
     tiling_resolution: 0.1
@@ -410,6 +459,7 @@ rl_engine:
     delta_precision: 6
     max_sparse_entries: 100000
 
+
 state_processor_config:
   normalize: false                 # Enable low/high normalization.
   normalize_mode: "minmax"         # minmax|centered
@@ -427,6 +477,7 @@ state_processor_config:
   clip_values: null                # Optional symmetric raw input clamp before normalization.
   round_precision: 8               # Diagnostics precision.
   max_history: 100                 # Recent norm history for diagnostics.
+
 
 strategy_selector:
   task_embedding_dim: 256
@@ -453,18 +504,19 @@ strategy_selector:
   seed: null
   max_history: 200
 
+
 temporal_processing:
   use_sequence_modeling: True
   sequence_length: 10
+
 
 visual_processing:
   use_visual_observations: True
   encoder_type: "transformer"  # or "cnn"
   pretrained_weights: "path/to/weights.pth" # not available yet
 
+
 rl_visualization:
   heatmap_resolution: 50
   use_gpu_acceleration: true
 
-state_processor_config:
-  normalize: False

@@ -39,7 +39,7 @@ from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissi
 logger = get_logger("Security Error")
 printer = PrettyPrinter()
 
-MODULE_VERSION = "2.1.0"
+MODULE_VERSION = "2.3.0"
 AUDIT_SCHEMA_VERSION = "security_error.audit.v2"
 PUBLIC_SCHEMA_VERSION = "security_error.public.v1"
 DEFAULT_PUBLIC_ERROR_MESSAGE = "A safety or security control blocked this operation."
@@ -866,6 +866,49 @@ class SecurityError(Exception):
 # ---------------------------------------------------------------------------
 # Concrete error classes
 # ---------------------------------------------------------------------------
+class NeuralNetworkDataError(SecurityError):
+    """Raised when neural-network input/target/training state is malformed."""
+
+    def __init__(self, message: str, context: Optional[Mapping[str, Any]] = None):
+        super().__init__(
+            SecurityErrorType.UNSAFE_EXECUTION_ATTEMPT,
+            message,
+            severity=SecuritySeverity.HIGH,
+            context=context or {},
+            component="neural_network",
+            response_action=SecurityResponseAction.BLOCK,
+            remediation_guidance=(
+                "Reject malformed neural-network data before training or inference.",
+                "Validate feature dimensions, target dimensions, and numeric finiteness.",
+                "Add a regression test for the rejected shape or numeric condition.",
+            ),
+        )
+
+
+class NeuralNetworkPersistenceError(SecurityError):
+    """Raised for model state, persistence, or artifact-integrity failures."""
+
+    def __init__(self, message: str, context: Optional[Mapping[str, Any]] = None, *, cause: Optional[BaseException] = None):
+        error_type = (
+            SecurityErrorType.MODEL_TAMPERING
+            if any(token in message.lower() for token in ("signature", "integrity", "dimension", "state"))
+            else SecurityErrorType.SYSTEM_INTEGRITY_VIOLATION
+        )
+        super().__init__(
+            error_type,
+            message,
+            severity=SecuritySeverity.CRITICAL,
+            context=context or {},
+            component="neural_network.persistence",
+            response_action=SecurityResponseAction.QUARANTINE,
+            cause=cause,
+            remediation_guidance=(
+                "Do not serve the affected model artifact until validated.",
+                "Verify model provenance, architecture, path, permissions, and signature policy.",
+                "Restore a known-good signed artifact if integrity cannot be established.",
+            ),
+        )
+
 
 
 class PrivacyPolicyViolationError(SecurityError):
@@ -1546,6 +1589,8 @@ __all__ = [
     "EvidenceRecord",
     "RemediationStep",
     "SecurityError",
+    "NeuralNetworkDataError",
+    "NeuralNetworkPersistenceError",
     "PrivacyPolicyViolationError",
     "PiiLeakageError",
     "ConsentMissingError",

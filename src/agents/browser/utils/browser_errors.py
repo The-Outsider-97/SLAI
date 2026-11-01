@@ -21,8 +21,10 @@ paths.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import traceback
+import urllib.response
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -35,7 +37,7 @@ from .config_loader import load_global_config, get_config_section
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Browser Error")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 T = TypeVar("T", bound="BrowserError")
 ErrorFactory = Union[Type["BrowserError"], Callable[..., "BrowserError"]]
@@ -581,6 +583,13 @@ class BrowserValidationError(BrowserError):
     default_severity = BrowserErrorSeverity.MEDIUM.value
     default_retryable = False
     default_category = "browser.validation"
+
+
+@dataclass
+class RuleDefinitionError(BrowserValidationError):
+    """Raised when rule callable, signature, weight, or metadata is invalid."""
+
+    code: str = "rule_definition_error"
 
 
 class InvalidURLError(BrowserValidationError):
@@ -1349,3 +1358,187 @@ class ClipboardVerificationError(ClipboardError):
     default_code = "BRW-2108"
     default_message = "Clipboard verification failed"
     default_retryable = False
+
+
+# ---------------------------------------------------------------------------
+# URL errors
+# ---------------------------------------------------------------------------
+class URLError(OSError):
+    # URLError is a sub-type of OSError, but it doesn't share any of
+    # the implementation.  need to override __init__ and __str__.
+    # It sets self.args for compatibility with other OSError
+    # subclasses, but args doesn't have the typical format with errno in
+    # slot 0 and strerror in slot 1.  This may be better than nothing.
+    def __init__(self, reason, filename=None):
+        self.args = reason,
+        self.reason = reason
+        if filename is not None:
+            self.filename = filename
+
+    def __str__(self):
+        return '<urlopen error %s>' % self.reason
+
+
+class HTTPError(URLError, urllib.response.addinfourl):
+    """Raised when HTTP error occurs, but also acts like non-error return"""
+    __super_init = urllib.response.addinfourl.__init__
+
+    def __init__(self, url, code, msg, hdrs, fp):
+        self.code = code
+        self.msg = msg
+        self.hdrs = hdrs
+        self.fp = fp
+        self.filename = url
+        if fp is None:
+            fp = io.BytesIO()
+        self.__super_init(fp, hdrs, url, code)
+
+
+__all__ = [
+    # Enums
+    "BrowserErrorType",
+    "BrowserErrorSeverity",
+    # Constants
+    "VALID_SEVERITIES",
+    "SENSITIVE_KEY_PATTERNS",
+    "DEFAULT_MAX_STRING_LENGTH",
+    "DEFAULT_MAX_SEQUENCE_LENGTH",
+    "DEFAULT_MAX_MAPPING_LENGTH",
+    "REDACTION_PLACEHOLDER",
+    # Dataclasses
+    "BrowserErrorPayload",
+    # Serialization / redaction helpers
+    "safe_serialize",
+    "sanitize_context",
+    # Wrapping / result helpers
+    "wrap_browser_exception",
+    "error_result",
+    "raise_for_error_result",
+    "is_retryable",
+    # Validation helpers
+    "require",
+    "require_mapping",
+    "require_sequence",
+    "require_non_empty_str",
+    "validate_url",
+    "validate_css_selector",
+    "validate_timeout",
+    "validate_choice",
+    "validate_config_section",
+    "validate_workflow_step",
+    "validate_workflow_script",
+    "validate_browser_task_payload",
+    # Convenience constructors
+    "element_not_found",
+    "captcha_detected",
+    "retry_exhausted",
+    # Base exception
+    "BrowserError",
+    # General / system errors
+    "UnknownBrowserError",
+    "BrowserConfigurationError",
+    "MissingConfigurationError",
+    "InvalidConfigurationError",
+    "BrowserInitializationError",
+    "BrowserDriverStartupError",
+    "BrowserDependencyError",
+    "BrowserValidationError",
+    "RuleDefinitionError",
+    "InvalidURLError",
+    "InvalidSelectorError",
+    "InvalidTaskPayloadError",
+    "MissingRequiredFieldError",
+    "InvalidTimeoutError",
+    # Driver errors
+    "BrowserDriverError",
+    "BrowserTimeoutError",
+    "BrowserSessionError",
+    "BrowserWindowError",
+    # Navigation errors
+    "NavigationError",
+    "PageLoadTimeoutError",
+    "NavigationHistoryError",
+    "RedirectError",
+    # Search errors
+    "SearchError",
+    "SearchBoxNotFoundError",
+    "SearchResultsNotFoundError",
+    "CookieConsentError",
+    # Element errors
+    "ElementError",
+    "ElementNotFoundError",
+    "ElementNotVisibleError",
+    "ElementNotInteractableError",
+    "StaleElementError",
+    "ShadowDomError",
+    # Click errors
+    "ClickError",
+    "ClickInterceptedError",
+    "JavaScriptClickError",
+    "SpecialElementHandlingError",
+    # Typing errors
+    "BrowserTypingError",
+    "InputClearError",
+    "InputSendKeysError",
+    # Scroll errors
+    "ScrollError",
+    "InvalidScrollTargetError",
+    # Clipboard errors
+    "ClipboardError",
+    "CopyError",
+    "CutError",
+    "PasteError",
+    # Content extraction errors
+    "ContentExtractionError",
+    "PDFExtractionError",
+    "ArxivExtractionError",
+    "PageSnapshotError",
+    "UnsupportedContentTypeError",
+    # Security errors
+    "BrowserSecurityError",
+    "CaptchaDetectedError",
+    "BotDetectionError",
+    "RateLimitError",
+    "PermissionDeniedError",
+    # Workflow errors
+    "WorkflowError",
+    "WorkflowValidationError",
+    "UnsupportedWorkflowActionError",
+    "WorkflowStepFailedError",
+    # Retry errors
+    "RetryError",
+    "RetryExhaustedError",
+    "BackoffError",
+    # Network errors
+    "NetworkError",
+    "NetworkTimeoutError",
+    "HTTPRequestError",
+    # Task errors
+    "BrowserTaskError",
+    "UnsupportedBrowserTaskError",
+    # State errors
+    "BrowserStateError",
+    "ClosedDriverError",
+    "MissingDriverError",
+    # Script errors
+    "JavaScriptExecutionError",
+    # Drag-and-drop errors
+    "DragAndDropError",
+    "DragAndDropValidationError",
+    "DragSourceNotFoundError",
+    "DragTargetNotFoundError",
+    "DragSourceNotReadyError",
+    "DragTargetNotReadyError",
+    "DragStrategyError",
+    "Html5DragAndDropError",
+    "DragVerificationError",
+    # Extended clipboard errors
+    "ClipboardValidationError",
+    "ClipboardReadError",
+    "ClipboardWriteError",
+    "ClipboardStrategyError",
+    "ClipboardVerificationError",
+    # URL
+    "URLError",
+    "HTTPError",
+]

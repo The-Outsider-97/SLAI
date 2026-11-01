@@ -14,26 +14,24 @@ from __future__ import annotations
 
 import json
 import math
-import time
 import threading
-import jsonschema
-import numpy as np
+import jsonschema # type: ignore
+import numpy as np # type: ignore
 
 from pathlib import Path
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .utils.config_loader import load_global_config, get_config_section
 from .evaluators_memory import EvaluatorsMemory
-from .utils.evaluation_errors import (ConfigLoadError, OperationalError, MemoryAccessError,
-                                      StatisticalAnalysisError, ValidationFailureError,
-                                      SerializationError, DocumentationProcessingError)
-from logs.logger import PrettyPrinter, get_logger
+from .utils.evaluation_errors import *
+from .utils.evaluation_helpers import *
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Adaptive Risk")
-printer = PrettyPrinter
+printer = PrettyPrinter()
 
 
 SAFETY_CASE_SCHEMA: Dict[str, Any] = {
@@ -1270,105 +1268,14 @@ class RiskAdaptation:
         }
 
 
-# ----------------------------------------------------------------------
-# Utility functions
-# ----------------------------------------------------------------------
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _coerce_timestamp(value: str) -> datetime:
-    if not isinstance(value, str) or not value.strip():
-        raise ValidationFailureError("timestamp", value, "non-empty ISO-8601 string")
-    normalized = value.strip().replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise ValidationFailureError("timestamp", value, "valid ISO-8601 string") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _normalize_non_empty_string(value: Any, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValidationFailureError(field_name, value, "non-empty string")
-    return value.strip()
-
-
-def _normalize_string_list(value: Any, field_name: str) -> List[str]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValidationFailureError(field_name, type(value).__name__, "sequence of strings")
-    normalized: List[str] = []
-    seen: set[str] = set()
-    for item in value:
-        text = _normalize_non_empty_string(item, field_name)
-        key = text.casefold()
-        if key not in seen:
-            normalized.append(text)
-            seen.add(key)
-    if not normalized:
-        raise ValidationFailureError(field_name, value, "non-empty sequence of strings")
-    return normalized
-
-
-def _require_positive_float(value: Any, field_name: str) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigLoadError("<config>", field_name, f"Expected a positive float, got {value!r}") from exc
-    if number <= 0:
-        raise ConfigLoadError("<config>", field_name, f"Expected a positive float, got {number!r}")
-    return number
-
-
-def _require_non_negative_float(value: Any, field_name: str) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigLoadError("<config>", field_name, f"Expected a non-negative float, got {value!r}") from exc
-    if number < 0:
-        raise ConfigLoadError("<config>", field_name, f"Expected a non-negative float, got {number!r}")
-    return number
-
-
-def _require_positive_int(value: Any, field_name: str) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigLoadError("<config>", field_name, f"Expected a positive integer, got {value!r}") from exc
-    if number <= 0:
-        raise ConfigLoadError("<config>", field_name, f"Expected a positive integer, got {number!r}")
-    return number
-
-
-def _require_non_negative_int(value: Any, field_name: str) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValidationFailureError(field_name, value, "non-negative integer") from exc
-    if number < 0:
-        raise ValidationFailureError(field_name, value, "non-negative integer")
-    return number
-
-
-def _coerce_probability(value: Any, field_name: str, *, inclusive_zero: bool, inclusive_one: bool) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigLoadError("<config>", field_name, f"Expected a probability, got {value!r}") from exc
-
-    lower_ok = number > 0.0 or (inclusive_zero and number == 0.0)
-    upper_ok = number < 1.0 or (inclusive_one and number == 1.0)
-    if not (lower_ok and upper_ok):
-        comparator = (
-            "[0, 1]" if inclusive_zero and inclusive_one else
-            "(0, 1]" if not inclusive_zero and inclusive_one else
-            "[0, 1)" if inclusive_zero and not inclusive_one else
-            "(0, 1)"
-        )
-        raise ConfigLoadError("<config>", field_name, f"Expected probability in {comparator}, got {number!r}")
-    return number
+__all__ = [
+    "SAFETY_CASE_SCHEMA",
+    "HazardBayesianState",
+    "RiskObservation",
+    "SchedulerJob",
+    "BackgroundScheduler",
+    "RiskAdaptation",
+]
 
 
 if __name__ == "__main__":

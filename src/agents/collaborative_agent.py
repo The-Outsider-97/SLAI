@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.3.0"
 
 """
 Production-grade Collaborative Agent built on the shared BaseAgent architecture.
@@ -579,13 +579,21 @@ class CollaborativeAgent(BaseAgent):
     # ------------------------------------------------------------------
     def _build_collaboration_manager(self) -> CollaborationManager:
         signature = inspect.signature(CollaborationManager.__init__)
+
         kwargs: Dict[str, Any] = {"shared_memory": self.shared_memory}
+
+        if ("agent_factory" in signature.parameters and self.agent_factory is not None):
+            kwargs["agent_factory"] = self.agent_factory
+
         if "config" in signature.parameters:
             kwargs["config"] = self.collaborative_config.get("manager_config", {})
-        if "policy_engine" in signature.parameters and self.policy_engine is not None:
+
+        if ("policy_engine" in signature.parameters and self.policy_engine is not None):
             kwargs["policy_engine"] = self.policy_engine
-        if "contract_registry" in signature.parameters and self.task_contracts is not None:
+
+        if ("contract_registry" in signature.parameters and self.task_contracts is not None):
             kwargs["contract_registry"] = self.task_contracts
+
         return CollaborationManager(**kwargs)
 
     def _adopt_manager_components(self) -> None:

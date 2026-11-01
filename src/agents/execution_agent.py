@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 
 __version__ = "2.2.0"
 
@@ -38,7 +39,8 @@ import copy
 import json
 import time
 import uuid
-import numpy as np
+import numpy as np # type: ignore
+import threading
 
 from datetime import datetime, timedelta
 from typing import Any, Dict, Mapping, Optional, Sequence, Type
@@ -93,14 +95,18 @@ class ExecutionAgent(BaseAgent):
         "led": LedAction,
         "sequence": SequenceAction,
     }
+    CHECKPOINTING_SUPPORTED = True
 
 
     def __init__(self, shared_memory, agent_factory, config: Optional[Mapping[str, Any]]=None,
                  execution_memory: Optional[ExecutionMemory] = None, task_coordinator: Optional[TaskCoordinator] = None,
                  action_selector: Optional[ActionSelector] = None, validator: Optional[ExecutionValidator] = None,
                  recovery: Optional[ExecutionRecovery] = None, scheduler: Optional[DeadlineAwareScheduler] = None,
-                 robot: Optional[RobotInterface] = None, action_registry: Optional[Mapping[str, Type[BaseAction]]] = None,):
-        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
+                 robot: Optional[RobotInterface] = None, action_registry: Optional[Mapping[str, Type[BaseAction]]] = None,
+                 *,
+                 checkpoint_manager: Any = None,
+                 ):
+        super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config, checkpoint_manager=checkpoint_manager)
         self.adaptive_agent = None
         self.shared_memory = shared_memory
         self.agent_factory = agent_factory
@@ -127,9 +133,7 @@ class ExecutionAgent(BaseAgent):
         self.validator = validator if validator is not None else ExecutionValidator(memory=self.execution_memory)
         self.recovery = ExecutionRecovery(task_coordinator=self.task_coordinator)
         self._scheduler_initialization_error: Optional[Exception] = None
-        self.scheduler = (scheduler
-            if scheduler is not None
-            else DeadlineAwareScheduler())
+        self.scheduler = scheduler if scheduler is not None else DeadlineAwareScheduler()
         self.robot = robot
 
         # Local runtime state
@@ -139,9 +143,9 @@ class ExecutionAgent(BaseAgent):
         self.state: Dict[str, Any] = self._initialize_state()
         self.current_task: Optional[Dict[str, Any]] = None
         self.active_tasks: Dict[str, Dict[str, Any]] = {}
+        self._task_state_lock = threading.RLock()
 
         self._register_actions()
-
         logger.info("ExecutionAgent initialized")
 
     def _require_scheduler(self) -> Any:
@@ -155,10 +159,7 @@ class ExecutionAgent(BaseAgent):
         self._mark_runtime_recovered("dependency", "execution.scheduler.initialize")
         return self.scheduler
 
-    def _build_action_registry(
-        self,
-        injected_registry: Optional[Mapping[str, Type[BaseAction]]],
-    ) -> Dict[str, Type[BaseAction]]:
+    def _build_action_registry(self, injected_registry: Optional[Mapping[str, Type[BaseAction]]]) -> Dict[str, Type[BaseAction]]:
         available = {**self.DEFAULT_ACTIONS, **self.ROBOT_ACTIONS}
         if injected_registry is not None:
             for name, action_class in injected_registry.items():
@@ -276,28 +277,49 @@ class ExecutionAgent(BaseAgent):
         normalized.setdefault("action_sequence", self._generate_default_plan(normalized))
         return normalized
 
+
     def perform_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
         printer.status("EXECUTION", "Task performer", "info")
-
         task = self._normalize_task_input(task_data)
-        lock_key = f"task_in_progress:{task['name']}"
 
-        if self.shared_memory.get(lock_key):
-            return {"status": "failed", "reason": "Task already in progress"}
+        # Preserve the existing task-name lock namespace.
+        task_name = str(task["name"])
+        lock_key = f"task_in_progress:{task_name}"
+        owner_token = uuid.uuid4().hex
+        ttl = (float(task["timeout"]) + self.task_lock_ttl_buffer_seconds)
+        if not math.isfinite(ttl) or ttl <= 0:
+            raise ValueError("Task lock TTL must be finite and positive")
 
-        self.shared_memory.set(
-            lock_key,
-            {"agent": self.name, "start_time": time.time(), "task_id": task["id"]},
-            ttl=int(task["timeout"]) + self.task_lock_ttl_buffer_seconds,
-        )
+        lease_value = {
+            "agent": self.name,
+            "start_time": time.time(),
+            "task_id": task["id"],
+        }
+
+        acquired = self.shared_memory.acquire_lease(lock_key, owner_token, ttl, value=lease_value)
+        if not acquired:
+            return {
+                "status": "failed",
+                "reason": "Task already in progress",
+                "task": task_name,
+                "task_id": task["id"],
+            }
 
         try:
-            self._preflight_task(task)
-            self._start_task(task)
-            self._run_task_loop(task)
-            return self._finalize_task_result(task)
+            with self._task_state_lock:
+                self._preflight_task(task)
+                self._start_task(task)
+                self._run_task_loop(task)
+                return self._finalize_task_result(task)
+
         finally:
-            self.shared_memory.delete(lock_key)
+            try:
+                released = self.shared_memory.release_lease(lock_key, owner_token)
+            except Exception:
+                logger.exception("Failed to release task lease: %s", lock_key)
+            else:
+                if not released:
+                    logger.warning("Task lease was expired, replaced, or already removed: %s", lock_key)
 
     def _preflight_task(self, task: Dict[str, Any]) -> None:
         self.current_plan = list(task.get("action_sequence") or [])
