@@ -304,6 +304,15 @@ class SceneDocument(SpatialDocument):
         self._live()
         return self._model.evaluate(time)
 
+    def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
+                            translation_scales=None):
+        """Propose an explicit joint-channel clip conversion without committing it."""
+        self._live()
+        source = source_scene._model if isinstance(source_scene, SceneDocument) else source_scene
+        return self._model.retarget_joint_clip(
+            source, source_clip_id, joint_map, translation_scales=translation_scales,
+        )
+
     def animation_events(self, start, end, *, include_start: bool = False):
         """Query native v2 animation markers without executing callbacks."""
         self._live()
