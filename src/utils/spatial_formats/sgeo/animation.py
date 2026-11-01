@@ -129,8 +129,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) != {"duration", "tracks"}:
-        raise ValidationError("v2 animation requires exactly duration and tracks")
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints"} or not {"duration", "tracks"} <= set(spec):
+        raise ValidationError("v2 animation requires duration/tracks and optional drivers/constraints")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
         raise ValidationError("animation duration must be positive")
@@ -234,7 +234,143 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                         vector(frame[direction], 3, direction)
                     else:
                         finite(frame[direction], direction, limit=1e9)
+    _validate_drivers(spec.get("drivers", []), objects, seen)
+    _validate_constraints(spec.get("constraints", []), objects)
     return deepcopy(spec)
+
+
+
+def _validate_drivers(drivers, objects, track_targets) -> tuple:
+    """Validate bounded directed scalar mechanical couplings and detect cycles."""
+    if not isinstance(drivers, list) or len(drivers) > MAX_TRACKS:
+        raise ValidationError("drivers must be a bounded list")
+    graph = {}
+    destinations = set()
+    for driver in drivers:
+        if not isinstance(driver, dict) or set(driver) - {
+            "source_object_id", "source_property", "target_object_id",
+            "target_property", "factor", "offset", "axis"
+        } or not {"source_object_id", "source_property", "target_object_id",
+                  "target_property", "factor"} <= set(driver):
+            raise ValidationError("invalid mechanical driver fields")
+        src = require_id(driver["source_object_id"])
+        dst = require_id(driver["target_object_id"])
+        if src not in objects or dst not in objects:
+            raise ReferenceError("driver references a missing object")
+        sp, tp = driver["source_property"], driver["target_property"]
+        if sp != "rotation_angle" and not (isinstance(sp, str) and sp.startswith("parameter.")):
+            raise ValidationError("driver source must be an animated scalar")
+        if tp not in {"rotation_angle", "translation"}:
+            raise ValidationError("driver target must be rotation_angle or translation")
+        source = (src, sp)
+        target = (dst, tp)
+        if target in track_targets or target in destinations:
+            raise ValidationError("driver target conflicts with a track or another driver")
+        if sp.startswith("parameter."):
+            # Native family parameter dependency must have an evaluated source track.
+            if source not in track_targets and source not in destinations:
+                raise ValidationError("driver source must be an existing animated property")
+        if source not in track_targets and source not in destinations:
+            raise ValidationError("driver source must be an existing animated property")
+        destinations.add(target)
+        finite(driver["factor"], "driver factor")
+        finite(driver.get("offset", 0), "driver offset")
+        if tp in {"rotation_angle", "translation"}:
+            axis = vector(driver.get("axis"), 3, "driver axis")
+            if sum(component*component for component in axis) < 1e-24:
+                raise ValidationError("driver axis must be nonzero")
+        graph.setdefault(source, set()).add(target)
+    # Kahn's algorithm: a coupled relationship requires a solver, not silent
+    # evaluation-order-dependent feedback.
+    nodes = set(graph) | {x for targets in graph.values() for x in targets}
+    indegree = {node: 0 for node in nodes}
+    for targets in graph.values():
+        for target in targets:
+            indegree[target] += 1
+    ready = sorted(node for node, degree in indegree.items() if degree == 0)
+    visited = 0
+    while ready:
+        node = ready.pop(0)
+        visited += 1
+        for target in sorted(graph.get(node, ())):
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+        ready.sort()
+    if visited != len(nodes):
+        raise ValidationError("mechanical driver dependency cycle requires simultaneous solving")
+    return tuple(sorted(nodes))
+
+
+def _evaluate_drivers(drivers: list, grouped: dict):
+    pending = list(drivers)
+    while pending:
+        remaining = []
+        progress = False
+        for driver in pending:
+            source = grouped.get(driver["source_object_id"], {}).get(driver["source_property"])
+            if source is None:
+                remaining.append(driver)
+                continue
+            value = source[1]
+            if isinstance(value, bool) or not isinstance(value, (float, int)):
+                raise ValidationError("mechanical driver source is not scalar")
+            scalar = finite(value * driver["factor"] + driver.get("offset", 0), "driven motion")
+            target_prop = driver["target_property"]
+            axis = vector(driver["axis"], 3, "driver axis")
+            if target_prop == "translation":
+                driven = [component * scalar for component in axis]
+            else:
+                driven = scalar
+            grouped.setdefault(driver["target_object_id"], {})[target_prop] = (
+                {"axis": list(axis), "property": target_prop}, driven
+            )
+            progress = True
+        if not progress:
+            raise ValidationError("unresolved mechanical driver dependency")
+        pending = remaining
+
+
+def _validate_constraints(constraints, objects) -> None:
+    """Validate supported time-independent world-position constraints."""
+    if not isinstance(constraints, list) or len(constraints) > 128:
+        raise ValidationError("constraints must be a bounded list (max 128)")
+    identifiers = set()
+    for item in constraints:
+        if not isinstance(item, dict) or set(item) - {
+            "id", "kind", "object_id", "other_id", "target", "distance",
+            "tolerance", "movable"
+        } or not {"id", "kind", "object_id", "movable"} <= set(item):
+            raise ValidationError("invalid constraint record")
+        ident = require_id(item["id"])
+        if ident in identifiers:
+            raise ValidationError("duplicate constraint id")
+        identifiers.add(ident)
+        oid = require_id(item["object_id"])
+        if oid not in objects:
+            raise ReferenceError("constraint refers to a missing object")
+        movable = item["movable"]
+        if type(movable) is not bool:
+            raise ValidationError("constraint movable must be boolean")
+        if movable and objects[oid].get("parent") is not None:
+            raise ValidationError("currently movable constraints require root objects")
+        tolerance = finite(item.get("tolerance", 1e-6), "constraint tolerance", limit=1e6)
+        if tolerance <= 0:
+            raise ValidationError("constraint tolerance must be positive")
+        if item["kind"] == "position":
+            if "other_id" in item or "distance" in item:
+                raise ValidationError("position constraint cannot have distance fields")
+            vector(item.get("target"), 3, "position target")
+        elif item["kind"] == "distance":
+            if "target" in item:
+                raise ValidationError("distance constraint cannot have a position target")
+            other = require_id(item.get("other_id"))
+            if other not in objects or other == oid:
+                raise ReferenceError("invalid distance constraint endpoint")
+            if finite(item.get("distance"), "constraint distance", limit=1e9) < 0:
+                raise ValidationError("distance must be nonnegative")
+        else:
+            raise ValidationError("unsupported animation constraint kind")
 
 
 def _sample_v2(track: dict, time: float):
@@ -382,6 +518,8 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
     grouped: dict[str, dict[str, tuple[dict, object]]] = {}
     for track in spec["tracks"]:
         grouped.setdefault(track["object_id"], {})[track["property"]] = (track, _sample_v2(track, timestamp) if active == ANIMATION_V2_KEY else _sample(track, timestamp))
+    if active == ANIMATION_V2_KEY and spec.get("drivers"):
+        _evaluate_drivers(spec["drivers"], grouped)
     invisible: set[str] = set()
     for oid, tracks in grouped.items():
         obj = index[oid]
