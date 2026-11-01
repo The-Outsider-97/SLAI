@@ -764,9 +764,12 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             occupied.add(target)
     for windows in instance_intervals.values():
         windows.sort()
-        if any(current[0] <= previous[1] and frozenset((current[2], previous[2])) not in transition_pairs
-               for previous, current in zip(windows, windows[1:])):
-            raise ValidationError("overlapping clips cannot write the same property")
+        for i, previous in enumerate(windows):
+            for current in windows[i+1:]:
+                if current[0] > previous[1]:
+                    break
+                if frozenset((current[2], previous[2])) not in transition_pairs:
+                    raise ValidationError("overlapping clips cannot write the same property")
     # Validate even dormant reusable assets with a supported scene binding.
     # Without a compatible target, their property semantics remain checked
     # only when an instance is added; no claim of evaluated functionality.
