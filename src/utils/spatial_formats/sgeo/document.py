@@ -324,6 +324,15 @@ class SceneDocument(SpatialDocument):
             max_iterations=max_iterations, tolerance=tolerance,
         )
 
+    def retarget_rig_motion(self, source_scene, source_clips, joint_map, *,
+                            translation_scales=None):
+        """Propose multiple synchronized joint clips using native SGEO validation."""
+        self._live()
+        source = source_scene._model if isinstance(source_scene, SceneDocument) else source_scene
+        return self._model.retarget_rig_motion(
+            source, source_clips, joint_map, translation_scales=translation_scales,
+        )
+
     def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
                             translation_scales=None):
         """Propose an explicit joint-channel clip conversion without committing it."""
