@@ -304,6 +304,16 @@ class SceneDocument(SpatialDocument):
         self._live()
         return self._model.evaluate(time)
 
+    def generate_joint_motion(self, end_effector, target, duration, *,
+                              expected_revision=None, max_iterations=200,
+                              tolerance=1e-5):
+        """Propose a verified native joint animation without modifying this document."""
+        self._live()
+        return self._model.generate_joint_motion(
+            end_effector, target, duration, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+
     def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
                             translation_scales=None):
         """Propose an explicit joint-channel clip conversion without committing it."""
