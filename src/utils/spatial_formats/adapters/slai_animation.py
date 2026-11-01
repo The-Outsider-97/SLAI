@@ -74,6 +74,18 @@ class SGEOAnimationAdapter:
         """Delegate explicit native v1-to-v2 migration and revision check."""
         return self._scene.upgrade_animation(expected_revision=expected_revision)
 
+    def animation_events(self, start, end, *, include_start: bool = False):
+        """Delegate pure marker queries to authoritative SGEO."""
+        return self._scene.animation_events(start, end, include_start=include_start)
+
+    def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
+                            translation_scales=None):
+        """Request a validated, non-committing native joint clip conversion."""
+        source = source_scene._scene if isinstance(source_scene, SGEOAnimationAdapter) else source_scene
+        return self._scene.retarget_joint_clip(
+            source, source_clip_id, joint_map, translation_scales=translation_scales,
+        )
+
     def forward_kinematics(self, values: dict | None = None):
         """Use SGEO's native FK and stable scene revision."""
         return self._scene.forward_kinematics(values)
