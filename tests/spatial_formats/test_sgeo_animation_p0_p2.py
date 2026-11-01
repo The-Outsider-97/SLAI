@@ -546,3 +546,36 @@ def test_single_bounds_constraint_analytical_projection():
     result = scene.evaluate(0)
     assert tuple(result.world_transform(source)[i] for i in (3, 7, 11)) == pytest.approx((1, 2, 3))
     assert result.constraint_report["solver_status"] == "analytic"
+
+
+def test_sequential_reusable_clips_share_target_without_overlapping():
+    scene = Scene()
+    oid = scene.add_object(name="sequential")
+    cid = uid()
+    clip = {
+        "id": cid, "duration": 1, "tracks": [{
+            "property": "translation", "interpolation": "linear",
+            "keyframes": [
+                {"time": 0, "value": [0, 0, 0]},
+                {"time": 1, "value": [1, 0, 0]},
+            ],
+        }],
+    }
+    first, second = (
+        {"id": uid(), "clip_id": cid, "object_id": oid, "start": start}
+        for start in (0, 1.1)
+    )
+    spec = {"duration": 2.2, "tracks": [], "clips": [clip],
+            "instances": [second, first]}
+    scene.set_animation(spec, version=2)
+    assert scene.evaluate(.5).world_transform(oid)[3] == pytest.approx(.5)
+    assert scene.evaluate(1.6).world_transform(oid)[3] == pytest.approx(.5)
+    assert scene.evaluate(1.05).world_transform(oid)[3] == pytest.approx(0)
+    bad = {**spec, "instances": [
+        first,
+        {**second, "start": 0.5},
+    ]}
+    baseline = scene.as_dict()
+    with pytest.raises(ValidationError, match="overlapping"):
+        scene.set_animation(bad)
+    assert scene.as_dict() == baseline
