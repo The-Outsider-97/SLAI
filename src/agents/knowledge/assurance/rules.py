@@ -19,9 +19,9 @@ from typing import Any, Mapping
 
 from .contracts import *
 from .repository import KnowledgeRepository
-from ..utils.config_loader import get_config_section, load_global_config
-from ..utils.knowledge_errors import *
-from ..utils.knowledge_helpers import *
+from src.agents.knowledge.utils.config_loader import get_config_section, load_global_config
+from src.agents.knowledge.utils.knowledge_errors import *
+from src.agents.knowledge.utils.knowledge_helpers import *
 from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
 
 
