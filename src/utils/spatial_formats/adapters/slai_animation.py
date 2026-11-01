@@ -78,6 +78,15 @@ class SGEOAnimationAdapter:
         """Delegate pure marker queries to authoritative SGEO."""
         return self._scene.animation_events(start, end, include_start=include_start)
 
+    def generate_joint_motion(self, end_effector, target, duration, *,
+                              expected_revision=None, max_iterations=200,
+                              tolerance=1e-5):
+        """Delegate kinematic motion construction to SGEO's authoritative kernel."""
+        return self._scene.generate_joint_motion(
+            end_effector, target, duration, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+
     def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
                             translation_scales=None):
         """Request a validated, non-committing native joint clip conversion."""
