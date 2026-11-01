@@ -385,17 +385,18 @@ class AnimationAgent(BaseAgent):
 
     def _kinematics(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Route FK/IK to the authoritative SGEO scene, never solve in agent."""
-        from src.utils.spatial_formats.sgeo.scene import Scene
-        if not isinstance(scene, Scene):
+        fk = getattr(scene, "forward_kinematics", None)
+        ik = getattr(scene, "solve_inverse_kinematics", None)
+        if not callable(fk) or not callable(ik):
             raise AnimationUnsupportedOperationError(
-                "native articulated operations require a bound SGEO Scene"
+                "bound provider does not expose the native articulated SGEO operations"
             )
         scene_id = request.scene_id
         if request.operation == "forward_kinematics":
             if request.expected_revision is not None and scene.revision != request.expected_revision:
                 raise AnimationRevisionConflictError("scene revision mismatch")
             values = request.payload.get("values")
-            matrices = scene.forward_kinematics(values)
+            matrices = fk(values)
             keys = sorted(matrices)
             limit = self._policy.max_result_objects
             return {
@@ -408,7 +409,7 @@ class AnimationAgent(BaseAgent):
         payload = request.payload
         if "end_effector" not in payload or "target" not in payload:
             raise AnimationValidationError("solve_ik requires end_effector and target")
-        result = scene.solve_inverse_kinematics(
+        result = ik(
             payload["end_effector"], payload["target"],
             expected_revision=request.expected_revision,
             max_iterations=payload.get("max_iterations", 200),
