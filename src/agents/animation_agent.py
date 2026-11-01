@@ -58,7 +58,7 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "query_events",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
@@ -275,6 +275,8 @@ class AnimationAgent(BaseAgent):
                     result = self._evaluate_frames(request, scene)
                 elif op == "get_animation":
                     result = self._get_animation(request, scene)
+                elif op == "query_events":
+                    result = self._query_events(request, scene)
                 elif op in {"forward_kinematics", "solve_ik", "apply_ik"}:
                     result = self._kinematics(request, scene)
                 elif op == "upgrade_animation":
@@ -385,6 +387,37 @@ class AnimationAgent(BaseAgent):
             revision = scene.revision
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
+
+    def _query_events(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route a bounded, non-executing marker interval query to SGEO."""
+        query = getattr(scene, "animation_events", None)
+        if not callable(query):
+            raise AnimationUnsupportedOperationError(
+                "scene provider does not implement native animation event queries"
+            )
+        payload = request.payload
+        if "start" not in payload or "end" not in payload:
+            raise AnimationValidationError("query_events requires start and end")
+        lock = get_animation_edit_lock(scene)
+        if lock is None:
+            raise AnimationUnsupportedOperationError(
+                "query_events requires the authoritative scene edit lock"
+            )
+        with lock:
+            if request.expected_revision is not None and request.expected_revision != scene.revision:
+                raise AnimationRevisionConflictError("scene revision mismatch")
+            markers = query(
+                payload["start"], payload["end"],
+                include_start=payload.get("include_start", False),
+            )
+            revision = scene.revision
+        limit = self._policy.max_result_objects
+        return {
+            "status": "ok", "request_id": request.request_id,
+            "scene_id": request.scene_id, "revision": revision,
+            "marker_count": len(markers), "markers_truncated": len(markers) > limit,
+            "markers": list(markers[:limit]),
+        }
 
     def _upgrade_animation(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Route one explicit v1-to-v2 migration through native SGEO revision."""
