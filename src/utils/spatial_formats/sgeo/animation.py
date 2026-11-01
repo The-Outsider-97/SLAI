@@ -16,6 +16,7 @@ below are SGEO format limits, not application configuration defaults.
 from __future__ import annotations
 
 from copy import deepcopy
+from math import isfinite
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
@@ -178,7 +179,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances"} or not {"duration", "tracks"} <= set(spec):
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances", "layers"} or not {"duration", "tracks"} <= set(spec):
         raise ValidationError("v2 animation requires duration/tracks and optional drivers/constraints")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
@@ -307,9 +308,135 @@ def validate_animation_v2(spec: dict, scene) -> dict:
             )
     _validate_drivers(spec.get("drivers", []), objects, seen, joints, occupied)
     _validate_constraints(spec.get("constraints", []), objects, duration=duration)
+    _validate_layers(spec, scene)
     return deepcopy(spec)
 
 
+
+
+
+def _validate_layers(spec, scene):
+    """Validate bounded native v2 composition using the existing track validator.
+
+    Layer tracks are authored in object-local coordinates. Additive layers
+    require explicit reference values and support only translation, positive
+    scale, and quaternion rotation; no implicit reference pose is assumed.
+    """
+    layers = spec.get("layers", [])
+    if not isinstance(layers, list) or len(layers) > 64:
+        raise ValidationError("layers must be a list of at most 64 entries")
+    ids = set()
+    count = 0
+    for layer in layers:
+        if not isinstance(layer, dict) or set(layer) - {
+            "id", "mode", "weight", "enabled", "tracks", "reference"
+        } or not {"id", "mode", "weight", "tracks"} <= set(layer):
+            raise ValidationError("invalid animation layer fields")
+        lid = require_canonical_id(layer["id"])
+        if lid in ids:
+            raise ValidationError("duplicate layer identifier")
+        ids.add(lid)
+        mode = layer["mode"]
+        if mode not in {"override", "additive"}:
+            raise ValidationError("unsupported animation layer mode")
+        weight = finite(layer["weight"], "layer weight", limit=1)
+        if not 0 <= weight <= 1 or type(layer.get("enabled", True)) is not bool:
+            raise ValidationError("layer weight must be [0,1] and enabled boolean")
+        tracks = layer["tracks"]
+        if not isinstance(tracks, list) or not tracks:
+            raise ValidationError("layer tracks must be a nonempty list")
+        count += len(tracks)
+        if count > MAX_TRACKS:
+            raise ResourceLimitError("layer track count exceeds native budget")
+        # This recursive call reuses the authoritative v2 track checks, without
+        # nested layers, clips, drivers, or other composition state.
+        validate_animation_v2({
+            "duration": spec["duration"], "tracks": tracks,
+            "joints": spec.get("joints", []),
+        }, scene)
+        refs = layer.get("reference", {})
+        if not isinstance(refs, dict):
+            raise ValidationError("layer reference must be a property mapping")
+        if mode == "override" and refs:
+            raise ValidationError("override layers do not accept additive references")
+        keys = {t["object_id"] + ":" + t["property"] for t in tracks}
+        if mode == "additive":
+            if set(refs) != keys:
+                raise ValidationError("additive references must match every layer track")
+            for track in tracks:
+                prop = track["property"]
+                if prop not in {"translation", "rotation_quaternion", "scale"}:
+                    raise ValidationError("additive layer property is unsupported")
+                value = refs[track["object_id"] + ":" + prop]
+                if prop == "rotation_quaternion":
+                    unit_quaternion(value)
+                else:
+                    components = vector(value, 3, "additive reference")
+                    if prop == "scale" and any(x <= 0 for x in components):
+                        raise ValidationError("additive reference scale must be positive")
+                    if prop == "scale":
+                        for frame in track["keyframes"]:
+                            if any(x <= 0 for x in frame["value"]):
+                                raise ValidationError("additive scale must be positive")
+
+
+def _quat_product(a, b):
+    w,x,y,z = a
+    v,p,q,r = b
+    return unit_quaternion((
+        w*v-x*p-y*q-z*r, w*p+x*v+y*r-z*q,
+        w*q-x*r+y*v+z*p, w*r+x*q-y*p+z*v,
+    ))
+
+
+def _compose_layer(grouped, layer, timestamp):
+    """Apply layer-local values to the existing sampled-property state."""
+    if not layer.get("enabled", True) or layer["weight"] == 0:
+        return
+    weight = layer["weight"]
+    mode = layer["mode"]
+    for track in layer["tracks"]:
+        oid, prop = track["object_id"], track["property"]
+        value = _sample_v2(track, timestamp)
+        target = grouped.setdefault(oid, {})
+        previous = target.get(prop)
+        if prop == "rotation_quaternion" and "rotation_angle" in target:
+            raise ValidationError("layer quaternion conflicts with axis-angle rotation")
+        if prop == "rotation_angle" and "rotation_quaternion" in target:
+            raise ValidationError("layer axis-angle conflicts with quaternion rotation")
+        if mode == "override":
+            if previous is None or weight == 1:
+                if previous is None and weight < 1:
+                    raise ValidationError("partial override requires an existing base channel")
+                result = value
+            elif prop == "rotation_quaternion":
+                result = list(slerp_quaternion(previous[1], value, weight))
+            elif prop == "visibility":
+                result = value if weight >= 0.5 else previous[1]
+            elif isinstance(value, (list, tuple)):
+                result = [a + weight*(b-a) for a,b in zip(previous[1], value)]
+            else:
+                result = previous[1] + weight*(value-previous[1])
+        else:
+            reference = layer["reference"][oid + ":" + prop]
+            if prop == "translation":
+                base = previous[1] if previous else [0.,0.,0.]
+                result = [b + weight*(a-r) for b,a,r in zip(base,value,reference)]
+            elif prop == "scale":
+                base = previous[1] if previous else [1.,1.,1.]
+                result = [b * (a/r)**weight for b,a,r in zip(base,value,reference)]
+                if any(not isfinite(x) or x < 1e-9 for x in result):
+                    raise ValidationError("additive scale produced singular result")
+            elif prop == "rotation_quaternion":
+                base = previous[1] if previous else [1.,0.,0.,0.]
+                qref = unit_quaternion(reference)
+                qinv = (qref[0], -qref[1], -qref[2], -qref[3])
+                delta = _quat_product(qinv, unit_quaternion(value))
+                offset = slerp_quaternion((1.,0.,0.,0.), delta, weight)
+                result = list(_quat_product(unit_quaternion(base), offset))
+            else:
+                raise ValidationError("unsupported additive property")
+        target[prop] = (track, result)
 
 
 def _validate_clips(spec, scene, direct_targets) -> set:
@@ -1046,6 +1173,9 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
                 grouped.setdefault(instance["object_id"], {})[track["property"]] = (
                     track, _sample_v2(track, local_time)
                 )
+    if active == ANIMATION_V2_KEY and spec.get("layers"):
+        for layer in spec["layers"]:
+            _compose_layer(grouped, layer, timestamp)
     if active == ANIMATION_V2_KEY and spec.get("drivers"):
         _evaluate_drivers(spec["drivers"], grouped)
     joint_index = {}
