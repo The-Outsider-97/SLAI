@@ -95,6 +95,14 @@ class SGEOAnimationAdapter:
             max_iterations=max_iterations, tolerance=tolerance,
         )
 
+    def retarget_rig_motion(self, source_scene, source_clips, joint_map, *,
+                            translation_scales=None):
+        """Delegate synchronized retargeting proposals to the native SGEO scene."""
+        source = source_scene._scene if isinstance(source_scene, SGEOAnimationAdapter) else source_scene
+        return self._scene.retarget_rig_motion(
+            source, source_clips, joint_map, translation_scales=translation_scales,
+        )
+
     def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
                             translation_scales=None):
         """Request a validated, non-committing native joint clip conversion."""
