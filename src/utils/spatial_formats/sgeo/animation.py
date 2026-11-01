@@ -519,36 +519,44 @@ def _validate_drivers(drivers, objects, track_targets, joints, occupied_targets=
 
 
 def _evaluate_drivers(drivers: list, grouped: dict):
-    pending = list(drivers)
-    while pending:
-        remaining = []
-        progress = False
-        for driver in pending:
-            source = grouped.get(driver["source_object_id"], {}).get(driver["source_property"])
-            if source is None:
-                remaining.append(driver)
-                continue
-            value = source[1]
-            if isinstance(value, bool) or not isinstance(value, (float, int)):
+    """Resolve validated scalar mechanical drivers once, in stable DAG order.
+
+    The source-to-consumer index avoids rescanning all drivers for every
+    depth of a long motion chain; no independent graph/store is introduced.
+    """
+    from heapq import heappop, heappush
+    consumers: dict[tuple, list] = {}
+    for index, driver in enumerate(drivers):
+        source = (driver["source_object_id"], driver["source_property"])
+        consumers.setdefault(source, []).append((index, driver))
+    ready = []
+    for oid, properties in grouped.items():
+        for prop in properties:
+            heappush(ready, (oid, prop))
+    resolved = 0
+    while ready:
+        source_oid, source_prop = heappop(ready)
+        sampled = grouped[source_oid][source_prop][1]
+        for _, driver in consumers.pop((source_oid, source_prop), ()):
+            if isinstance(sampled, bool) or not isinstance(sampled, (int, float)):
                 raise ValidationError("mechanical driver source is not scalar")
-            scalar = finite(value * driver["factor"] + driver.get("offset", 0), "driven motion")
+            scalar = finite(sampled * driver["factor"] + driver.get("offset", 0),
+                            "driven motion")
             target_prop = driver["target_property"]
+            target_oid = driver["target_object_id"]
             axis = (vector(driver["axis"], 3, "driver axis")
                     if target_prop != "joint" else None)
-            if target_prop == "translation":
-                driven = [component * scalar for component in axis]
-            else:
-                driven = scalar
+            driven = ([component * scalar for component in axis]
+                      if target_prop == "translation" else scalar)
             generated = {"property": target_prop}
             if axis is not None:
                 generated["axis"] = list(axis)
-            grouped.setdefault(driver["target_object_id"], {})[target_prop] = (
-                generated, driven
-            )
-            progress = True
-        if not progress:
-            raise ValidationError("unresolved mechanical driver dependency")
-        pending = remaining
+            grouped.setdefault(target_oid, {})[target_prop] = (generated, driven)
+            heappush(ready, (target_oid, target_prop))
+            resolved += 1
+    if consumers or resolved != len(drivers):
+        raise ValidationError("unresolved mechanical driver dependency")
+
 
 
 def _validate_constraints(constraints, objects, *, duration=MAX_TIME) -> None:
