@@ -78,6 +78,14 @@ class SGEOAnimationAdapter:
         """Delegate pure marker queries to authoritative SGEO."""
         return self._scene.animation_events(start, end, include_start=include_start)
 
+    def undo_animation(self, *, expected_revision=None):
+        """Delegate animation undo to SGEO's transaction-aware scene journal."""
+        return self._scene.undo_animation(expected_revision=expected_revision)
+
+    def redo_animation(self, *, expected_revision=None):
+        """Delegate animation redo to SGEO's transaction-aware scene journal."""
+        return self._scene.redo_animation(expected_revision=expected_revision)
+
     def generate_joint_motion(self, end_effector, target, duration, *,
                               expected_revision=None, max_iterations=200,
                               tolerance=1e-5):
