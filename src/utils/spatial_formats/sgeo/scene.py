@@ -207,6 +207,9 @@ class Scene:
         """Return validated joint proposals without editing authoritative state."""
         from .kinematics import solve_inverse_kinematics
         from .animation import ANIMATION_V2_KEY
+        if expected_revision is not None and (
+                type(expected_revision) is not int or expected_revision < 1):
+            raise ValidationError("expected_revision must be a positive integer")
         with self._mutation_lock:
             if expected_revision is not None and self.revision != expected_revision:
                 from ..common.errors import ConflictError
