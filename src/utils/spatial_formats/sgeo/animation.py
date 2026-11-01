@@ -817,7 +817,9 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
         objectives=(objective,), constraints=(),
         problem_class=ProblemClass.NLP, deterministic=True,
     )
-    from src.agents.optimization.utils.optimization_errors import OptimizationError
+    from src.agents.optimization.utils.optimization_errors import (
+        OptimizationError, SolverUnavailableError, OptimizationConfigurationError,
+    )
     try:
         result = OptimizationSolver().solve_single_detailed(
             problem, solver="scipy_nonlinear",
@@ -827,7 +829,13 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
             allow_fallback=False,
         )
         solution = result.solution
-    except (OptimizationError, ImportError, RuntimeError, ArithmeticError) as exc:
+    except (SolverUnavailableError, ImportError) as exc:
+        return {**original_report, "status": "unsupported",
+                "solver_status": type(exc).__name__}
+    except OptimizationConfigurationError as exc:
+        return {**original_report, "status": "invalid",
+                "solver_status": type(exc).__name__}
+    except (OptimizationError, RuntimeError, ArithmeticError) as exc:
         return {**original_report, "status": "numerically_unresolved",
                 "solver_status": type(exc).__name__}
     if solution is None or solution.primal_solution is None:
