@@ -282,6 +282,63 @@ class Scene:
             committed_revision = self.set_animation(spec, version=2)
         return {**solution, "revision": committed_revision, "committed": True}
 
+    def generate_joint_motion(self, end_effector, target, duration, *,
+                              expected_revision=None, max_iterations=200,
+                              tolerance=1e-5):
+        """Build (without committing) smooth native joint motion toward an IK goal.
+
+        The output is an authored SGEO v2 animation proposal, not a claim of
+        collision avoidance, dynamics, or general-purpose task planning.
+        Commit with set_animation(proposal, version=2) at its reported revision.
+        """
+        from .animation import ANIMATION_V2_KEY, validate_animation_v2, evaluate_scene
+        from ..common.helpers import finite
+        from ..common.errors import ConflictError
+        seconds = finite(duration, "motion duration", limit=1e7)
+        if seconds <= 0:
+            raise ValidationError("motion duration must be positive")
+        solution = self.solve_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+        if solution["status"] != "solved":
+            return {**solution, "animation": None, "status": solution["status"]}
+        with self._mutation_lock:
+            if self.revision != solution["revision"]:
+                raise ConflictError("scene changed during motion generation")
+            preview_scene = self._detached_copy()
+        spec = deepcopy(preview_scene.metadata[ANIMATION_V2_KEY])
+        if seconds > spec["duration"]:
+            raise ValidationError("generated motion exceeds existing animation duration")
+        if any(spec.get(key) for key in ("tracks", "instances", "layers", "drivers", "constraints", "transitions")):
+            raise ValidationError("joint motion generation requires a clean articulated animation baseline")
+        defaults = {joint["object_id"]: joint.get("value", 0.0)
+                    for joint in spec.get("joints", [])}
+        for oid, value in sorted(solution["joint_values"].items()):
+            base = defaults[oid]
+            spec["tracks"].append({
+                "object_id": oid, "property": "joint", "interpolation": "cubic",
+                "keyframes": [
+                    {"time": 0, "value": base, "in_tangent": 0.0, "out_tangent": 0.0},
+                    {"time": seconds, "value": value, "in_tangent": 0.0, "out_tangent": 0.0},
+                ],
+            })
+        validate_animation_v2(spec, preview_scene)
+        preview_scene.metadata[ANIMATION_V2_KEY] = spec
+        preview_scene.validate()
+        endpoint = evaluate_scene(preview_scene, seconds)
+        actual_world = endpoint.world_transform(end_effector)
+        actual = [actual_world[3], actual_world[7], actual_world[11]]
+        goal = solution["target"]
+        from math import hypot
+        endpoint_error = hypot(*(actual[i] - goal[i] for i in range(3)))
+        if endpoint_error > tolerance:
+            raise ValidationError("generated trajectory failed end-effector verification",
+                                  context={"error": endpoint_error, "tolerance": tolerance})
+        return {**solution, "status": "proposed", "animation": spec,
+                "duration": seconds, "endpoint_position_error": endpoint_error,
+                "verified_endpoint": actual}
+
     def add_object(self, *, name="", geometry=None, parent=None, transform=None, metadata=None, object_id=None,
                    material=None):
         """Commit one individually validated leaf object under the scene lock.
