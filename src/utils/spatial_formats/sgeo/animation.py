@@ -129,8 +129,8 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) != {"duration", "tracks"}:
-        raise ValidationError("v2 animation requires exactly duration and tracks")
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "clips", "instances", "layers", "events"} or not {"duration", "tracks"} <= set(spec):
+        raise ValidationError("invalid v2 animation document fields")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
         raise ValidationError("animation duration must be positive")
@@ -234,7 +234,112 @@ def validate_animation_v2(spec: dict, scene) -> dict:
                         vector(frame[direction], 3, direction)
                     else:
                         finite(frame[direction], direction, limit=1e9)
+
+    _validate_composition(spec, scene)
     return deepcopy(spec)
+
+
+def _validate_composition(spec, scene):
+    """Validate reusable clips, bindings, layers and pure event markers."""
+    clips, instances = spec.get("clips", []), spec.get("instances", [])
+    layers, events = spec.get("layers", []), spec.get("events", [])
+    if not all(isinstance(items, list) for items in (clips, instances, layers, events)):
+        raise ValidationError("composition members must be lists")
+    if len(clips) > 256 or len(instances) > 1024 or len(layers) > 128 or len(events) > 4096:
+        raise ResourceLimitError("animation composition budget exceeded")
+    clip_index, layer_index = {}, {}
+    for clip in clips:
+        if not isinstance(clip, dict) or set(clip) != {"id", "duration", "tracks"}:
+            raise ValidationError("invalid clip definition")
+        cid = require_id(clip["id"])
+        if cid in clip_index:
+            raise ValidationError("duplicate clip ID")
+        duration = finite(clip["duration"], "clip duration", limit=MAX_TIME)
+        if duration <= 0 or not isinstance(clip["tracks"], list):
+            raise ValidationError("invalid clip duration or tracks")
+        clip_index[cid] = clip
+    for layer in layers:
+        if not isinstance(layer, dict) or set(layer) - {"id", "weight", "enabled"} or "id" not in layer:
+            raise ValidationError("invalid layer fields")
+        lid = require_id(layer["id"])
+        if lid in layer_index:
+            raise ValidationError("duplicate layer ID")
+        weight = finite(layer.get("weight", 1), "layer weight", limit=1)
+        if weight < 0 or type(layer.get("enabled", True)) is not bool:
+            raise ValidationError("invalid layer settings")
+        layer_index[lid] = layer
+    objects = {obj["id"] for obj in scene.objects}
+    total = sum(len(track["keyframes"]) for track in spec["tracks"])
+    for instance in instances:
+        if not isinstance(instance, dict) or set(instance) - {
+            "clip_id", "bindings", "layer_id", "start", "speed", "loop", "enabled"
+        } or not {"clip_id", "bindings"} <= set(instance):
+            raise ValidationError("invalid clip instance fields")
+        cid = require_id(instance["clip_id"])
+        if cid not in clip_index:
+            raise ReferenceError("unknown clip")
+        lid = instance.get("layer_id")
+        if lid is not None and require_id(lid) not in layer_index:
+            raise ReferenceError("unknown animation layer")
+        bindings = instance["bindings"]
+        if not isinstance(bindings, dict) or len(bindings) > MAX_TRACKS:
+            raise ValidationError("invalid clip bindings")
+        clip = clip_index[cid]
+        sources = {track.get("object_id") for track in clip["tracks"]}
+        if set(bindings) != sources or any(require_id(v) not in objects for v in bindings.values()):
+            raise ReferenceError("clip bindings must resolve every source to a scene object")
+        start = finite(instance.get("start", 0), "clip start", limit=MAX_TIME)
+        speed = finite(instance.get("speed", 1), "clip speed", limit=1e6)
+        if start < 0 or speed == 0 or type(instance.get("loop", False)) is not bool or type(instance.get("enabled", True)) is not bool:
+            raise ValidationError("invalid clip playback")
+        bound = [{**deepcopy(track), "object_id": bindings[track["object_id"]]}
+                 for track in clip["tracks"]]
+        total += sum(len(track["keyframes"]) for track in bound)
+        validate_animation_v2({"duration": clip["duration"], "tracks": bound}, scene)
+    if total > MAX_KEYFRAMES:
+        raise ResourceLimitError("animation keyframe budget exceeded")
+    for event in events:
+        if not isinstance(event, dict) or set(event) != {"name", "time"}:
+            raise ValidationError("invalid animation event")
+        if not isinstance(event["name"], str) or not 0 < len(event["name"]) <= 128:
+            raise ValidationError("invalid event name")
+        when = finite(event["time"], "event time", limit=MAX_TIME)
+        if when < 0 or when > spec["duration"]:
+            raise ValidationError("event outside animation duration")
+
+
+def _sample_composition(spec, time):
+    clips = {clip["id"]: clip for clip in spec.get("clips", [])}
+    layers = {layer["id"]: layer for layer in spec.get("layers", [])}
+    order = {layer["id"]: i for i, layer in enumerate(spec.get("layers", []))}
+    for _, instance in sorted(enumerate(spec.get("instances", [])),
+                              key=lambda pair: (order.get(pair[1].get("layer_id"), -1), pair[0])):
+        layer = layers.get(instance.get("layer_id"), {})
+        if not instance.get("enabled", True) or not layer.get("enabled", True):
+            continue
+        weight = layer.get("weight", 1)
+        if weight == 0:
+            continue
+        clip = clips[instance["clip_id"]]
+        local = (time - instance.get("start", 0)) * instance.get("speed", 1)
+        if instance.get("loop", False):
+            local %= clip["duration"]
+        elif local < 0 or local > clip["duration"]:
+            continue
+        for track in clip["tracks"]:
+            yield instance["bindings"][track["object_id"]], track["property"], track, _sample_v2(track, local), weight
+
+
+def _blend_value(prop, previous, value, weight):
+    if weight >= 1:
+        return deepcopy(value)
+    if prop == "visibility":
+        return value if weight >= 0.5 else previous
+    if prop == "rotation_quaternion":
+        return list(slerp_quaternion(previous, value, weight))
+    if isinstance(value, (list, tuple)):
+        return [a + (b-a)*weight for a, b in zip(previous, value)]
+    return previous + (value-previous)*weight
 
 
 def _sample_v2(track: dict, time: float):
@@ -382,6 +487,24 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
     grouped: dict[str, dict[str, tuple[dict, object]]] = {}
     for track in spec["tracks"]:
         grouped.setdefault(track["object_id"], {})[track["property"]] = (track, _sample_v2(track, timestamp) if active == ANIMATION_V2_KEY else _sample(track, timestamp))
+    if active == ANIMATION_V2_KEY:
+        for oid, prop, track, value, weight in _sample_composition(spec, timestamp):
+            properties = grouped.setdefault(oid, {})
+            previous = properties.get(prop)
+            if previous is None:
+                if prop == "visibility":
+                    baseline = True
+                elif prop == "translation":
+                    baseline = [0.0, 0.0, 0.0]
+                elif prop == "scale":
+                    baseline = [1.0, 1.0, 1.0]
+                elif prop == "rotation_quaternion":
+                    baseline = [1.0, 0.0, 0.0, 0.0]
+                else:
+                    baseline = 0.0
+            else:
+                baseline = previous[1]
+            properties[prop] = (track, _blend_value(prop, baseline, value, weight))
     invisible: set[str] = set()
     for oid, tracks in grouped.items():
         obj = index[oid]
