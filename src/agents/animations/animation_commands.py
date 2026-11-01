@@ -49,7 +49,7 @@ logger = get_logger("Animation Commands")
 EXTENDED_EDITS = frozenset({
     "add_track", "update_track", "delete_track",
     "set_interpolation", "set_duration",
-    "add_clip", "update_clip", "delete_clip", "add_instance", "update_instance",
+    "set_animation_v2", "add_clip", "update_clip", "delete_clip", "add_instance", "update_instance",
     "delete_instance", "add_layer", "update_layer", "delete_layer",
     "add_event", "delete_event",
 })
@@ -121,7 +121,7 @@ def _stage(current: Any, operation: str, payload: Mapping[str, Any]) -> dict | N
     """
     if not isinstance(payload, Mapping):
         raise AnimationValidationError("animation edit payload must be a mapping")
-    if operation == "set_animation":
+    if operation in {"set_animation", "set_animation_v2"}:
         document = _required(payload, "animation")
         if not isinstance(document, Mapping):
             raise AnimationValidationError("animation must be a mapping")
@@ -303,7 +303,13 @@ def apply_animation_batch(
             candidate = _stage(candidate, operation, payload)
         # For native SGEO this ensures validation before the real commit;
         # for other providers their public validation hook is preferred.
-        _validate_candidate(scene, candidate, required=dry_run)
+        requested_v2 = any(op == "set_animation_v2" for op, _ in normalized)
+        if requested_v2 and not isinstance(scene, SGEOScene):
+            raise AnimationUnsupportedOperationError("v2 schema upgrade requires native SGEO scene")
+        if requested_v2 and candidate is not None:
+            validate_animation_v2(candidate, scene)
+        else:
+            _validate_candidate(scene, candidate, required=dry_run)
         if dry_run:
             changed = candidate != current
             logger.debug(
@@ -312,7 +318,7 @@ def apply_animation_batch(
             )
             return {"revision": revision, "operations_applied": len(normalized), "would_change": changed}
         # Provider owns atomicity and validation, including revision increments.
-        new_revision = scene.set_animation(candidate)
+        new_revision = scene.set_animation(candidate, version=2) if requested_v2 else scene.set_animation(candidate)
         if type(new_revision) is not int or new_revision <= revision:
             logger.error("animation provider violated revision-advance contract")
             raise AnimationStateError(
