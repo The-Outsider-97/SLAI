@@ -213,9 +213,19 @@ class Scene:
             require_id(object_id)
             if any(obj.get("parent")==object_id for obj in self.objects):
                 raise ValidationError("cannot remove scene object with children")
-            if any(track["object_id"] == object_id for key in ("slai.animation.v1", "slai.animation.v2")
-                   for track in self.metadata.get(key, {}).get("tracks", [])):
-                raise ValidationError("cannot remove object referenced by animation")
+            for key in ("slai.animation.v1", "slai.animation.v2"):
+                spec = self.metadata.get(key, {})
+                if any(track["object_id"] == object_id for track in spec.get("tracks", [])):
+                    raise ValidationError("cannot remove object referenced by animation")
+                if key == "slai.animation.v2":
+                    if any(object_id in (d["source_object_id"], d["target_object_id"])
+                           for d in spec.get("drivers", [])):
+                        raise ValidationError("cannot remove object referenced by driver")
+                    if any(object_id in (c["object_id"], c.get("other_id"))
+                           for c in spec.get("constraints", [])):
+                        raise ValidationError("cannot remove object referenced by constraint")
+                    if any(j["object_id"] == object_id for j in spec.get("joints", [])):
+                        raise ValidationError("cannot remove object referenced by joint")
             pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
             if pos is None:
                 raise ValidationError("object ID not found")
