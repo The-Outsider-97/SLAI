@@ -105,6 +105,11 @@ package = false
 lstp = { path = "model/LSTP", editable = true }
 
 [tool.pytest.ini_options]
+# The knowledge-assurance suite imports the standalone existing
+# src/agents/knowledge/assurance package as "assurance". Its dedicated
+# unittest workflow already sets this PYTHONPATH; use the same path when
+# collecting the entire repository with pytest from the project root.
+pythonpath = ["src/agents/knowledge"]
 testpaths = [
     "tests",
     "deployment/test",
