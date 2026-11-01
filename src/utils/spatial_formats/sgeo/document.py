@@ -314,6 +314,17 @@ class SceneDocument(SpatialDocument):
             max_iterations=max_iterations, tolerance=tolerance,
         )
 
+    def apply_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Commit a validated static IK pose through existing writable SGEO facade."""
+        self._writable()
+        with self._edit() as model:
+            return model.apply_inverse_kinematics(
+                end_effector, target, expected_revision=expected_revision,
+                max_iterations=max_iterations, tolerance=tolerance,
+            )
+
     # -- NURBS and B-rep -----------------------------------------------------------------------------
     def add_nurbs_curve(self, control_points, *, degree: int = 3, knots=None, weights=None, **options) -> str:
         """A (rational) B-spline curve. Without ``knots`` a clamped uniform vector is used."""
