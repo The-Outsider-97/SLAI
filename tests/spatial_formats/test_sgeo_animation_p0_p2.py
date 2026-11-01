@@ -519,3 +519,30 @@ def test_many_track_eval_budget_and_repeatability():
     assert snapshots[1].world_transform(ids[-1]) == snapshots[4].world_transform(ids[-1])
     assert snapshots[1].world_transform(ids[-1])[3] == pytest.approx(33.25)
     assert scene.as_dict() == before
+
+
+def test_coincident_distance_constraint_analytical_projection():
+    scene = Scene()
+    source = scene.add_object(name="movable")
+    anchor = scene.add_object(name="fixed")
+    scene.set_animation({"duration": 2, "tracks": [], "constraints": [
+        {"id": uid(), "kind": "distance", "object_id": source,
+         "other_id": anchor, "distance": 2.0, "movable": True,
+         "tolerance": 1e-8},
+    ]}, version=2)
+    snapshot = scene.evaluate(0)
+    assert snapshot.world_transform(source)[3] == pytest.approx(2)
+    assert snapshot.constraint_report["solver_status"] == "analytic"
+    assert scene.world_transform(source)[3] == pytest.approx(0)
+
+
+def test_single_bounds_constraint_analytical_projection():
+    scene = Scene()
+    source = scene.add_object(name="movable")
+    scene.set_animation({"duration": 1, "tracks": [], "constraints": [
+        {"id": uid(), "kind": "bounds", "object_id": source,
+         "minimum": [1, 2, 3], "maximum": [4, 5, 6], "movable": True},
+    ]}, version=2)
+    result = scene.evaluate(0)
+    assert tuple(result.world_transform(source)[i] for i in (3, 7, 11)) == pytest.approx((1, 2, 3))
+    assert result.constraint_report["solver_status"] == "analytic"
