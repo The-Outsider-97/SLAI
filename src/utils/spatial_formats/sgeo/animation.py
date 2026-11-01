@@ -450,7 +450,7 @@ def _validate_transitions(spec):
     ids, pairs = set(), set()
     for transition in transitions:
         if not isinstance(transition, dict) or set(transition) - {
-            "id", "source", "destination", "start", "duration", "easing"
+            "id", "source", "destination", "start", "duration", "easing", "interruption"
         } or not {"id", "source", "destination", "start", "duration"} <= set(transition):
             raise ValidationError("invalid transition fields")
         tid = require_canonical_id(transition["id"])
@@ -470,6 +470,8 @@ def _validate_transitions(spec):
             raise ValidationError("transition requires matching supported continuous channels")
         if transition.get("easing", "linear") not in {"linear", "smoothstep", "ease_in", "ease_out"}:
             raise ValidationError("unsupported transition easing")
+        if transition.get("interruption", "reject") not in {"reject", "from_blended_pose"}:
+            raise ValidationError("unsupported transition interruption policy")
         start = finite(transition["start"], "transition start", limit=MAX_TIME)
         duration = finite(transition["duration"], "transition duration", limit=MAX_TIME)
         if duration <= 0 or start < 0 or start + duration > spec["duration"]:
@@ -483,12 +485,35 @@ def _validate_transitions(spec):
         if pair in pairs:
             raise ValidationError("duplicate transition pair")
         pairs.add(pair)
+    # Explicit interruptions freeze the previous blended pose at the new
+    # transition's start. Destination changes are ordered by start time.
+    by_source = {}
+    for transition in transitions:
+        by_source.setdefault(transition["source"], []).append(transition)
+    for chain in by_source.values():
+        chain.sort(key=lambda item: (item["start"], item["id"]))
+        for i, current in enumerate(chain):
+            if i == 0:
+                if current.get("interruption", "reject") != "reject":
+                    raise ValidationError("first transition cannot interrupt a nonexistent transition")
+                continue
+            previous = chain[i-1]
+            if current["start"] <= previous["start"]:
+                raise ValidationError("simultaneous transition starts are ambiguous")
+            if current["start"] < previous["start"] + previous["duration"]:
+                if current.get("interruption") != "from_blended_pose":
+                    raise ValidationError("overlapping transitions require explicit interruption")
+                if current["destination"] == previous["destination"]:
+                    raise ValidationError("interrupted destination must change")
     for i, a in enumerate(transitions):
         for b in transitions[i+1:]:
-            if (instances[a["source"]]["object_id"] == instances[b["source"]]["object_id"]
-                    and a["start"] < b["start"] + b["duration"]
+            if instances[a["source"]]["object_id"] != instances[b["source"]]["object_id"]:
+                continue
+            if a["source"] == b["source"]:
+                continue  # Same-source chains were checked above.
+            if (a["start"] < b["start"] + b["duration"]
                     and b["start"] < a["start"] + a["duration"]):
-                raise ValidationError("overlapping transitions on the same object are unsupported")
+                raise ValidationError("overlapping unrelated transitions are unsupported")
 
 
 def _blend_transition(a, b, weight):
@@ -834,7 +859,15 @@ def _validate_clips(spec, scene, direct_targets) -> set:
         raise ValidationError("clip cannot contain two rotation representations")
     authored_channels = {(oid, channel(prop)) for oid, prop in direct_targets}
     occupied = set(direct_targets)
-    transition_pairs = {frozenset((t["source"], t["destination"])) for t in spec.get("transitions", [])}
+    transitions = spec.get("transitions", [])
+    transition_pairs = {frozenset((t["source"], t["destination"])) for t in transitions}
+    # Successive destinations in a declared interruption chain can overlap.
+    for prior in transitions:
+        for newer in transitions:
+            if (prior["source"] == newer["source"] and
+                    prior["start"] < newer["start"] and
+                    newer.get("interruption") == "from_blended_pose"):
+                transition_pairs.add(frozenset((prior["destination"], newer["destination"])))
     instance_intervals: dict[tuple, list[tuple[float, float, str]]] = {}
     instance_ids = set()
     total_sampled_frames = sum(len(t["keyframes"]) for t in spec["tracks"])
