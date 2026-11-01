@@ -288,6 +288,11 @@ class SceneDocument(SpatialDocument):
                                                                             "distance": float(distance),
                                                                             "join": "miter"}})
 
+    def upgrade_animation(self, *, expected_revision=None) -> int:
+        """Explicitly migrate an existing v1 animation to native v2."""
+        with self._edit() as model:
+            return model.upgrade_animation(expected_revision=expected_revision)
+
     def animation(self) -> dict | None:
         """Get a detached animation definition, not a live reference."""
         from .animation import ANIMATION_KEY, ANIMATION_V2_KEY
