@@ -435,3 +435,36 @@ def test_ik_unreachable_reports_failure_without_scene_edit():
     assert proposal["status"] != "solved"
     assert proposal["position_error"] > 1e-4
     assert scene.as_dict() == original
+
+
+def test_explicit_v1_migration_preserves_evaluation_and_revisions():
+    scene = Scene()
+    oid = scene.add_object(name="legacy")
+    legacy = {"duration": 2, "tracks": [
+        track(oid, "translation", [0, 0, 0], [2, 0, 0]),
+    ]}
+    scene.set_animation(legacy)
+    baseline = scene.evaluate(0.75).world_transform(oid)
+    before = scene.revision
+    migrated = scene.upgrade_animation(expected_revision=before)
+    assert migrated == before + 1
+    assert "slai.animation.v1" not in scene.metadata
+    assert scene.metadata["slai.animation.v2"] == legacy
+    assert scene.evaluate(0.75).world_transform(oid) == pytest.approx(baseline)
+    with pytest.raises(ValidationError, match="already v2"):
+        scene.upgrade_animation(expected_revision=migrated)
+
+
+def test_agent_adapter_explicit_v1_migration():
+    from src.utils.spatial_formats.adapters.slai_animation import SGEOAnimationAdapter
+    scene = Scene()
+    oid = scene.add_object()
+    scene.set_animation({"duration": 1, "tracks": [
+        {"object_id": oid, "property": "visibility", "interpolation": "step",
+         "keyframes": [{"time": 0, "value": True}]},
+    ]})
+    adapter = SGEOAnimationAdapter(scene)
+    previous_revision = adapter.revision
+    assert adapter.upgrade_animation(expected_revision=previous_revision) == previous_revision + 1
+    assert "slai.animation.v2" in adapter.metadata
+    assert adapter.evaluate(0).visible(oid)
