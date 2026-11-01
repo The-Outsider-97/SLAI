@@ -696,6 +696,65 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
         original_report["status"] = "infeasible"
         return original_report
 
+    def apply_solution(solution):
+        for oid, xyz in solution["positions"].items():
+            obj = objects[oid]
+            transform = list(obj["transform"])
+            for component, value in zip((3, 7, 11), xyz):
+                transform[component] = value
+            obj["transform"] = transform
+        return solution
+
+    if len(constraints) == 1:
+        # Common one-constraint mechanisms have exact geometric projections.
+        # In particular a coincident distance pair has undefined numerical
+        # gradient; choose the deterministic +X direction rather than asking
+        # a local optimizer to escape that degenerate starting state.
+        constraint = constraints[0]
+        if constraint["movable"] and constraint["kind"] in {
+                "distance", "attachment", "alignment", "bounds"}:
+            from math import hypot
+            oid = constraint["object_id"]
+            current = original[oid]
+            kind = constraint["kind"]
+            if kind == "bounds":
+                xyz = [
+                    max(constraint["minimum"][i],
+                        min(constraint["maximum"][i], current[i]))
+                    for i in range(3)
+                ]
+            else:
+                other = original[constraint["other_id"]]
+                if kind == "attachment":
+                    xyz = [other[i] + constraint["offset"][i]
+                           for i in range(3)]
+                elif kind == "distance":
+                    delta = [current[i]-other[i] for i in range(3)]
+                    norm = hypot(*delta)
+                    direction = [1.0, 0.0, 0.0] if norm < 1e-12 else [
+                        value/norm for value in delta
+                    ]
+                    xyz = [
+                        other[i] + constraint["distance"]*direction[i]
+                        for i in range(3)
+                    ]
+                else:
+                    axis = constraint["axis"]
+                    norm = hypot(*axis)
+                    unit = [value/norm for value in axis]
+                    distance_along = sum(
+                        (current[i]-other[i])*unit[i] for i in range(3)
+                    )
+                    xyz = [other[i] + distance_along*unit[i]
+                           for i in range(3)]
+            candidate = dict(start)
+            for component in range(3):
+                candidate[names[(oid, component)]] = xyz[component]
+            analytic = report(candidate, "unsatisfied",
+                              solver_status="analytic")
+            if analytic["status"] == "satisfied":
+                return apply_solution(analytic)
+
     if all(c["kind"] == "position" for c in constraints):
         # Position-only constraints are separable linear systems; satisfy
         # their tolerance intervals analytically instead of invoking NLP.
@@ -723,12 +782,7 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
         solved = report(candidate_point, "infeasible" if impossible else "unsatisfied",
                         solver_status="analytic")
         if solved["status"] == "satisfied":
-            for oid, xyz in solved["positions"].items():
-                transform = list(objects[oid]["transform"])
-                for idx, value in zip((3, 7, 11), xyz):
-                    transform[idx] = value
-                objects[oid]["transform"] = transform
-            return solved
+            return apply_solution(solved)
         if impossible:
             return solved
 
@@ -784,14 +838,8 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
                     iterations=solution.iteration_count)
     if solved["status"] != "satisfied":
         return solved
-    # Commit to the evaluation candidate only after physical residual validation.
-    for oid, xyz in solved["positions"].items():
-        obj = objects[oid]
-        transform = list(obj["transform"])
-        for index, value in zip((3, 7, 11), xyz):
-            transform[index] = value
-        obj["transform"] = transform
-    return solved
+    # Commit only after independently verifying every physical residual.
+    return apply_solution(solved)
 
 
 def _sample_v2(track: dict, time: float):
