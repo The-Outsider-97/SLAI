@@ -294,6 +294,67 @@ class Scene:
         from .animation import evaluate_scene
         return evaluate_scene(self, time)
 
+    def retarget_rig_motion(self, source_scene, source_clips, joint_map, *,
+                            translation_scales=None):
+        """Propose multiple mapped joint clips as one validated SGEO choreography.
+
+        Native clip instances bind to one object, so coordinated articulated
+        motion is expressed through reusable per-joint clips and one shared
+        normalized-phase choreography. Neither source nor target is edited.
+        """
+        from .kinematics import retarget_joint_clip
+        from .animation import ANIMATION_V2_KEY, validate_animation_v2
+        from ..common.ids import new_id
+        if not isinstance(source_scene, Scene):
+            raise ValidationError("source_scene must be a native SGEO Scene")
+        if (not isinstance(joint_map, dict) or not joint_map
+                or not isinstance(source_clips, dict)
+                or set(source_clips) != set(joint_map)):
+            raise ValidationError("source_clips must identify every mapped source joint")
+        scales = {} if translation_scales is None else translation_scales
+        if not isinstance(scales, dict) or set(scales) - set(joint_map):
+            raise ValidationError("invalid joint translation scale map")
+        with source_scene._mutation_lock:
+            source_scene.validate()
+            source_snapshot = source_scene._detached_copy()
+        with self._mutation_lock:
+            self.validate()
+            target_snapshot = self._detached_copy()
+        spec = target_snapshot.metadata.get(ANIMATION_V2_KEY)
+        if spec is None:
+            raise ValidationError("target requires native v2 animation")
+        proposal = deepcopy(spec)
+        clips = proposal.setdefault("clips", [])
+        instances = proposal.setdefault("instances", [])
+        created = []
+        for source_id in sorted(joint_map):
+            part = retarget_joint_clip(
+                source_snapshot, target_snapshot, source_clips[source_id],
+                {source_id: joint_map[source_id]},
+                translation_scales=(
+                    {source_id: scales[source_id]} if source_id in scales else None
+                ),
+            )
+            clip = part["clip"]
+            instance = {"id": new_id(), "clip_id": clip["id"],
+                        "object_id": part["target_object_id"], "start": 0}
+            clips.append(clip)
+            instances.append(instance)
+            created.append(instance)
+        if len(created) > 1:
+            proposal.setdefault("choreographies", []).append({
+                "id": new_id(), "leader": created[0]["id"],
+                "followers": [
+                    {"instance_id": entry["id"]} for entry in created[1:]
+                ],
+            })
+        validate_animation_v2(proposal, target_snapshot)
+        return {"status": "proposed", "animation": proposal,
+                "revision": target_snapshot.revision,
+                "source_revision": source_snapshot.revision,
+                "clip_ids": [entry["clip_id"] for entry in created],
+                "instance_ids": [entry["id"] for entry in created]}
+
     def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
                             translation_scales=None):
         """Propose a compatible target joint clip; no scene mutation occurs."""
