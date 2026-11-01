@@ -189,6 +189,11 @@ class Scene:
         from .animation import evaluate_scene
         return evaluate_scene(self, time)
 
+    def animation_events(self, start, end, *, include_start: bool = False):
+        """Query native v2 declarative markers without executing side effects."""
+        from .animation import query_animation_events
+        return query_animation_events(self, start, end, include_start=include_start)
+
     def forward_kinematics(self, values: dict | None = None):
         """Compute a detached articulated pose from native v2 joint defaults."""
         from .kinematics import forward_kinematics
