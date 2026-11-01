@@ -58,7 +58,7 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
@@ -274,6 +274,8 @@ class AnimationAgent(BaseAgent):
                     result = self._evaluate_frames(request, scene)
                 elif op == "get_animation":
                     result = self._get_animation(request, scene)
+                elif op in {"forward_kinematics", "solve_ik"}:
+                    result = self._kinematics(request, scene)
                 elif op == _BATCH_OPERATION or op in SUPPORTED_EDITS:
                     result = self._edit(request, scene)
                 else:
@@ -380,6 +382,39 @@ class AnimationAgent(BaseAgent):
             revision = scene.revision
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
+
+    def _kinematics(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Route FK/IK to the authoritative SGEO scene, never solve in agent."""
+        from src.utils.spatial_formats.sgeo.scene import Scene
+        if not isinstance(scene, Scene):
+            raise AnimationUnsupportedOperationError(
+                "native articulated operations require a bound SGEO Scene"
+            )
+        scene_id = request.scene_id
+        if request.operation == "forward_kinematics":
+            if request.expected_revision is not None and scene.revision != request.expected_revision:
+                raise AnimationRevisionConflictError("scene revision mismatch")
+            values = request.payload.get("values")
+            matrices = scene.forward_kinematics(values)
+            keys = sorted(matrices)
+            limit = self._policy.max_result_objects
+            return {
+                "status": "ok", "request_id": request.request_id,
+                "scene_id": scene_id, "revision": scene.revision,
+                "object_count": len(keys),
+                "transforms_truncated": len(keys) > limit,
+                "transforms": {key: list(matrices[key]) for key in keys[:limit]},
+            }
+        payload = request.payload
+        if "end_effector" not in payload or "target" not in payload:
+            raise AnimationValidationError("solve_ik requires end_effector and target")
+        result = scene.solve_inverse_kinematics(
+            payload["end_effector"], payload["target"],
+            expected_revision=request.expected_revision,
+            max_iterations=payload.get("max_iterations", 200),
+            tolerance=payload.get("tolerance", 1e-5),
+        )
+        return {"request_id": request.request_id, "scene_id": scene_id, **result}
 
     # ------------------------------------------------------------------
     # Transactional writes; SGEO/provider is authoritative
@@ -540,7 +575,7 @@ class AnimationAgent(BaseAgent):
             "operational_memory": "AnimationMemory",
             "cross_agent_memory": "BaseAgent.shared_memory",
             "checkpointing": False,
-            "unsupported": ["learned_motion", "rigging", "retargeting", "choreography", "physics_simulation"],
+            "unsupported": ["learned_motion", "skeletal_rigging", "retargeting", "choreography", "physics_simulation"],
         }
 
     def _status(self, request: AnimationRequest) -> dict[str, Any]:
