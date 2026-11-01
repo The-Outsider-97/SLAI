@@ -373,6 +373,121 @@ def _validate_constraints(constraints, objects) -> None:
             raise ValidationError("unsupported animation constraint kind")
 
 
+
+def solve_animation_constraints(scene, constraints: list, *, max_iterations: int = 200) -> dict:
+    """Solve supported coupled root-position constraints on a detached scene.
+
+    Uses SLAI's canonical OptimizationProblem and OptimizationSolver rather
+    than maintaining a parallel nonlinear numerical solver. No mutation is
+    performed when numerical convergence cannot be independently verified.
+    A failed optimizer is *unresolved*, never a proof of infeasibility.
+    """
+    if type(max_iterations) is not int or not 1 <= max_iterations <= 2000:
+        raise ValidationError("max_iterations must be an integer in [1, 2000]")
+    objects = {obj["id"]: obj for obj in scene.objects}
+    _validate_constraints(constraints, objects)
+    initial_world = scene.world_transforms()
+    original = {oid: tuple(initial_world[oid][k] for k in (3, 7, 11)) for oid in objects}
+    movable_ids = sorted({c["object_id"] for c in constraints if c["movable"]})
+    names = {(oid, k): "v%d_%d" % (i, k) for i, oid in enumerate(movable_ids) for k in range(3)}
+
+    def location(oid, point):
+        return tuple(point[names[(oid, k)]] if oid in movable_ids else original[oid][k]
+                     for k in range(3))
+
+    def residual(c, point):
+        a = location(c["object_id"], point)
+        if c["kind"] == "position":
+            return [a[k] - c["target"][k] for k in range(3)]
+        b = location(c["other_id"], point)
+        from math import hypot
+        return [hypot(*(a[k]-b[k] for k in range(3))) - c["distance"]]
+
+    def report(point, status, *, solver_status=None, iterations=None):
+        details = []
+        for c in constraints:
+            deviations = residual(c, point)
+            maximum = max((abs(v) for v in deviations), default=0.0)
+            details.append({
+                "id": c["id"], "kind": c["kind"], "residual": maximum,
+                "tolerance": c.get("tolerance", 1e-6),
+                "satisfied": maximum <= c.get("tolerance", 1e-6),
+            })
+        valid = all(d["satisfied"] for d in details)
+        return {"status": "satisfied" if valid else status,
+                "solver_status": solver_status, "iterations": iterations,
+                "constraints": details, "max_residual": max(
+                    (d["residual"] for d in details), default=0.0),
+                "positions": {oid: list(location(oid, point)) for oid in movable_ids}}
+
+    start = {name: original[oid][k] for (oid, k), name in names.items()}
+    original_report = report(start, "unsatisfied")
+    if original_report["status"] == "satisfied":
+        return original_report
+    if not movable_ids:
+        original_report["status"] = "infeasible"
+        return original_report
+
+    # No global optimality guarantee. This is a constrained local nonlinear
+    # solve with residual checks against each physical-space tolerance.
+    from src.agents.optimization.optimization_types import (
+        Variable, VariableDomain, Objective, Constraint, ConstraintSense,
+        OptimizationProblem, ProblemClass,
+    )
+    from src.agents.optimization.optimization_solver import OptimizationSolver
+    variables = tuple(
+        Variable(name=name, domain=VariableDomain.real(-1e9, 1e9), initial=start[name])
+        for name in start
+    )
+    objective = Objective(
+        name="minimum_displacement",
+        function=lambda p: sum((p[name]-initial)**2 for name,initial in start.items()),
+    )
+    equations = []
+    for c in constraints:
+        count = 3 if c["kind"] == "position" else 1
+        for component in range(count):
+            equations.append(Constraint(
+                name="%s_%d" % (c["id"], component),
+                sense=ConstraintSense.EQ,
+                rhs=0.0,
+                tolerance=c.get("tolerance", 1e-6),
+                function=lambda p, item=c, index=component: residual(item, p)[index],
+            ))
+    problem = OptimizationProblem(
+        name="sgeo_animation_constraints", variables=variables,
+        objectives=(objective,), constraints=tuple(equations),
+        problem_class=ProblemClass.NLP, deterministic=True,
+    )
+    try:
+        result = OptimizationSolver().solve_single_detailed(
+            problem, solver="scipy_nonlinear",
+            options={"x0": [start[name] for name in start],
+                     "scipy_options": {"maxiter": max_iterations}},
+            allow_fallback=False,
+        )
+        solution = result.solution
+    except (ImportError, RuntimeError, ValueError, ArithmeticError) as exc:
+        return {**original_report, "status": "numerically_unresolved",
+                "solver_status": type(exc).__name__}
+    if solution is None or solution.primal_solution is None:
+        return {**original_report, "status": "numerically_unresolved",
+                "solver_status": None if solution is None else solution.status.value}
+    solved = report(solution.primal_solution, "numerically_unresolved",
+                    solver_status=solution.status.value,
+                    iterations=solution.iteration_count)
+    if solved["status"] != "satisfied":
+        return solved
+    # Commit to the evaluation candidate only after physical residual validation.
+    for oid, xyz in solved["positions"].items():
+        obj = objects[oid]
+        transform = list(obj["transform"])
+        for index, value in zip((3, 7, 11), xyz):
+            transform[index] = value
+        obj["transform"] = transform
+    return solved
+
+
 def _sample_v2(track: dict, time: float):
     frames = track["keyframes"]
     if time <= frames[0]["time"]:
@@ -445,6 +560,7 @@ class EvaluatedScene:
     revision: int
     _scene: object
     _hidden: frozenset[str]
+    constraint_report: object = None
     _index: object = field(init=False, repr=False)
     _transforms: object = field(init=False, repr=False)
     _bounds: object = field(init=False, repr=False)
@@ -550,9 +666,16 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
                 invisible.add(oid)
                 break
             parent = index[parent].get("parent")
+    diagnostics = None
+    if active == ANIMATION_V2_KEY and spec.get("constraints"):
+        diagnostics = solve_animation_constraints(candidate, spec["constraints"])
+        if diagnostics["status"] != "satisfied":
+            raise ValidationError("animation constraints could not be satisfied",
+                                  context={"constraint_report": diagnostics})
     candidate.validate()
-    return EvaluatedScene(timestamp, candidate.revision, candidate, frozenset(invisible))
+    return EvaluatedScene(timestamp, candidate.revision, candidate, frozenset(invisible), diagnostics)
 
 
 __all__ = ["ANIMATION_KEY", "ANIMATION_V2_KEY", "ANIMATION_KEYS", "EvaluatedScene",
-           "validate_animation", "validate_animation_v2", "evaluate_scene"]
+           "validate_animation", "validate_animation_v2", "evaluate_scene",
+           "solve_animation_constraints"]
