@@ -38,7 +38,7 @@ def validate_joints(joints, objects) -> dict:
         if oid not in objects:
             raise ReferenceError("joint refers to a missing object", context={"object_id": oid})
         kind = joint["kind"]
-        if kind not in {"fixed", "revolute", "prismatic"}:
+        if not isinstance(kind, str) or kind not in {"fixed", "revolute", "prismatic"}:
             raise ValidationError("unsupported joint kind")
         if kind == "fixed":
             if set(joint) - {"id", "object_id", "kind"}:
