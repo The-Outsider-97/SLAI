@@ -1,0 +1,139 @@
+{
+  "accepted_by_family": {
+    "clarification_needed": 183,
+    "code_help_short": 122,
+    "compare_options": 120,
+    "correction_feedback": 121,
+    "emotional_support": 120,
+    "explain_concept": 183,
+    "factual_basic": 177,
+    "greeting": 182,
+    "how_are_you": 120,
+    "identity_capability": 124,
+    "live_data_honesty": 178,
+    "multi_turn_followup": 249,
+    "opinion_preference": 118,
+    "planning_advice": 184,
+    "rewrite_edit": 179,
+    "safe_refusal": 64,
+    "simple_math": 184,
+    "statement_followup": 173,
+    "summarize_short": 121,
+    "thanks_farewell": 115
+  },
+  "accepted_total": 3017,
+  "calls": 1,
+  "evaluation_note": "Teacher dialogues are training-only; validation/test come from gold dialogues.",
+  "gold_records": 117,
+  "prompt_version": "lantra-dialogue-teacher-v1",
+  "provider_metrics": {
+    "accounting": "conservative reservations, not billed usage",
+    "attempts": [
+      {
+        "provider": "gemini",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 2388,
+        "status": "LLMProviderConfigurationError"
+      },
+      {
+        "provider": "gemini",
+        "requests": 22,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 178941,
+        "status": "LLMProviderResponseError"
+      },
+      {
+        "provider": "gemini",
+        "requests": 427,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 3070283,
+        "status": "completed"
+      },
+      {
+        "provider": "groq",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 2388,
+        "status": "LLMProviderConfigurationError"
+      },
+      {
+        "provider": "openai",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 8226,
+        "status": "LLMProviderUnavailable"
+      },
+      {
+        "provider": "openai",
+        "requests": 685,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 5474886,
+        "status": "completed"
+      },
+      {
+        "provider": "openrouter",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 4436,
+        "status": "LLMProviderConfigurationError"
+      },
+      {
+        "provider": "openrouter",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 9698,
+        "status": "LLMProviderRateLimited"
+      },
+      {
+        "provider": "openrouter",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 9630,
+        "status": "LLMProviderRequestError"
+      },
+      {
+        "provider": "openrouter",
+        "requests": 66,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 620418,
+        "status": "completed"
+      }
+    ],
+    "next_provider": "groq"
+  },
+  "providers": [
+    "openai",
+    "groq",
+    "gemini",
+    "openrouter"
+  ],
+  "quotas": {
+    "clarification_needed": 177,
+    "code_help_short": 117,
+    "compare_options": 117,
+    "correction_feedback": 117,
+    "emotional_support": 117,
+    "explain_concept": 177,
+    "factual_basic": 177,
+    "greeting": 177,
+    "how_are_you": 118,
+    "identity_capability": 117,
+    "live_data_honesty": 177,
+    "multi_turn_followup": 236,
+    "opinion_preference": 117,
+    "planning_advice": 177,
+    "rewrite_edit": 177,
+    "safe_refusal": 58,
+    "simple_math": 177,
+    "statement_followup": 236,
+    "summarize_short": 117,
+    "thanks_farewell": 117
+  },
+  "rejected_samples": [],
+  "rejections": {},
+  "schema": "slai.lantra.dialogue-teacher.v1",
+  "stopped": "providers_exhausted",
+  "target_examples": 3000,
+  "taxonomy_fingerprint": "5486badb03eccdf3ef9a99aaa46615cb09401d44c8b6eac1b4060fda05942c03"
+}
