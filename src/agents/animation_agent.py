@@ -58,7 +58,7 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "query_events", "retarget_joint_clip", "generate_joint_motion",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "query_events", "retarget_joint_clip", "retarget_rig_motion", "generate_joint_motion",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
@@ -279,6 +279,8 @@ class AnimationAgent(BaseAgent):
                     result = self._query_events(request, scene)
                 elif op == "retarget_joint_clip":
                     result = self._retarget_joint_clip(request, scene)
+                elif op == "retarget_rig_motion":
+                    result = self._retarget_rig_motion(request, scene)
                 elif op == "generate_joint_motion":
                     result = self._generate_joint_motion(request, scene)
                 elif op in {"undo_animation", "redo_animation"}:
@@ -439,6 +441,42 @@ class AnimationAgent(BaseAgent):
             tolerance=payload.get("tolerance", 1e-5),
         )
         return {"request_id": request.request_id, "scene_id": request.scene_id, **result}
+
+    def _retarget_rig_motion(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Coordinate non-committing multiple-joint retargeting through native SGEO."""
+        provider = getattr(scene, "retarget_rig_motion", None)
+        if not callable(provider):
+            raise AnimationUnsupportedOperationError("target provider cannot retarget articulated rigs")
+        payload = request.payload
+        if not {"source_scene_id", "source_clips", "joint_map"} <= set(payload):
+            raise AnimationValidationError(
+                "retarget_rig_motion requires source_scene_id, source_clips and joint_map"
+            )
+        source = self._scene(payload["source_scene_id"])
+        target_lock = get_animation_edit_lock(scene)
+        source_lock = get_animation_edit_lock(source)
+        if target_lock is None or source_lock is None:
+            raise AnimationUnsupportedOperationError("retargeting requires authoritative scene locks")
+        from contextlib import ExitStack
+        locks = {id(target_lock): target_lock, id(source_lock): source_lock}
+        with ExitStack() as acquired:
+            for lock in (locks[key] for key in sorted(locks)):
+                acquired.enter_context(lock)
+            if request.expected_revision is not None and scene.revision != request.expected_revision:
+                raise AnimationRevisionConflictError("target scene revision mismatch")
+            source_revision = source.revision
+            if "source_expected_revision" in payload:
+                expected = payload["source_expected_revision"]
+                if type(expected) is not int or expected < 1:
+                    raise AnimationValidationError("source_expected_revision must be positive integer")
+                if expected != source_revision:
+                    raise AnimationRevisionConflictError("source scene revision mismatch")
+            result = provider(
+                source, payload["source_clips"], payload["joint_map"],
+                translation_scales=payload.get("translation_scales"),
+            )
+        return {"request_id": request.request_id,
+                "scene_id": request.scene_id, **result}
 
     def _retarget_joint_clip(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Route an explicit, non-committing joint conversion to native SGEO."""
