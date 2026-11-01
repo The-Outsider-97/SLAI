@@ -304,6 +304,11 @@ class SceneDocument(SpatialDocument):
         self._live()
         return self._model.evaluate(time)
 
+    def animation_events(self, start, end, *, include_start: bool = False):
+        """Query native v2 animation markers without executing callbacks."""
+        self._live()
+        return self._model.animation_events(start, end, include_start=include_start)
+
     def forward_kinematics(self, values: dict | None = None):
         """Return a detached native articulated world-transform mapping."""
         self._live()
