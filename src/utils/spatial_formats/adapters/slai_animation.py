@@ -84,4 +84,14 @@ class SGEOAnimationAdapter:
         )
 
 
+    def apply_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Commit a verified native SGEO pose using SGEO's existing transaction."""
+        return self._scene.apply_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+
+
 __all__ = ["SGEOAnimationAdapter"]
