@@ -17,6 +17,8 @@ from .materials import validate_registries, verify_image_bytes
 
 MAX_OBJECTS = 100_000
 MAX_FAMILIES = 10_000
+MAX_ANIMATION_UNDO = 16
+MAX_ANIMATION_HISTORY_BYTES = 32 * 1024 * 1024
 
 class Scene:
     def __init__(self, name="Untitled", *, unit="m", document_id=None, revision=1,
@@ -34,6 +36,10 @@ class Scene:
         self.materials=deepcopy(materials) if materials is not None else []
         self.images=deepcopy(images) if images is not None else []
         self.image_data=dict(image_data) if image_data else {}
+        # Ephemeral journal of animation metadata edits, not a second scene
+        # database. Persisted documents keep authoritative revisions only.
+        self._animation_undo = []
+        self._animation_redo = []
         self.validate()
 
     @staticmethod
@@ -135,6 +141,100 @@ class Scene:
             validate_animation_v2(self.metadata[ANIMATION_V2_KEY], self)
         return self
 
+
+    @staticmethod
+    def _animation_state_bytes(metadata):
+        """Compact, bounded, lossless snapshot of only the two versioned keys."""
+        import json
+        from zlib import compress
+        from .animation import ANIMATION_KEYS
+        payload = {key: metadata[key] for key in ANIMATION_KEYS if key in metadata}
+        return compress(json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8"), 1)
+
+    @staticmethod
+    def _restore_animation_bytes(candidate, payload):
+        from zlib import decompress
+        import json
+        from .animation import ANIMATION_KEYS
+        data = json.loads(decompress(payload).decode("utf-8"))
+        for key in ANIMATION_KEYS:
+            candidate.metadata.pop(key, None)
+        candidate.metadata.update(data)
+
+    def _record_animation_change(self, before, after):
+        """Record an animation-only inverse patch after a validated commit."""
+        if not hasattr(self, "_animation_undo"):
+            self._animation_undo, self._animation_redo = [], []
+        if self._animation_undo and self._animation_undo[-1]["revision"] != self.revision - 1:
+            self._animation_undo.clear()  # unrelated revisions invalidate earlier undo
+        self._animation_redo.clear()
+        entry = {"before": self._animation_state_bytes(before),
+                 "after": self._animation_state_bytes(after),
+                 "revision": self.revision}
+        self._animation_undo.append(entry)
+        while len(self._animation_undo) > MAX_ANIMATION_UNDO or (
+                sum(len(e["before"]) + len(e["after"]) for e in self._animation_undo)
+                > MAX_ANIMATION_HISTORY_BYTES and len(self._animation_undo) > 1):
+            self._animation_undo.pop(0)
+
+    def undo_animation(self, *, expected_revision=None):
+        """Undo one native animation edit without reverting unrelated scene data.
+
+        Interleaved non-animation edits invalidate the journal instead of
+        restoring stale object references. Revisions remain monotonically
+        increasing on both undo and redo.
+        """
+        from ..common.errors import ConflictError
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+            raise ValidationError("expected_revision must be a positive integer")
+        with self._mutation_lock:
+            if expected_revision is not None and expected_revision != self.revision:
+                raise ConflictError("scene revision mismatch")
+            if not getattr(self, "_animation_undo", []):
+                raise ValidationError("no available animation undo revision")
+            entry = self._animation_undo[-1]
+            if entry["revision"] != self.revision:
+                raise ConflictError("intervening scene modifications invalidate animation undo")
+            candidate = self._detached_copy()
+            self._restore_animation_bytes(candidate, entry["before"])
+            candidate.revision += 1
+            candidate.validate()
+            self.metadata, self.revision = candidate.metadata, candidate.revision
+            self._animation_undo.pop()
+            entry["revision"] = self.revision
+            self._animation_redo.append(entry)
+            if self._animation_undo:
+                self._animation_undo[-1]["revision"] = self.revision
+            return self.revision
+
+    def redo_animation(self, *, expected_revision=None):
+        """Reapply one previously undone animation change as a new revision."""
+        from ..common.errors import ConflictError
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+            raise ValidationError("expected_revision must be a positive integer")
+        with self._mutation_lock:
+            if expected_revision is not None and expected_revision != self.revision:
+                raise ConflictError("scene revision mismatch")
+            if not getattr(self, "_animation_redo", []):
+                raise ValidationError("no available animation redo revision")
+            entry = self._animation_redo[-1]
+            if entry["revision"] != self.revision:
+                raise ConflictError("intervening scene modifications invalidate animation redo")
+            candidate = self._detached_copy()
+            self._restore_animation_bytes(candidate, entry["after"])
+            candidate.revision += 1
+            candidate.validate()
+            self.metadata, self.revision = candidate.metadata, candidate.revision
+            self._animation_redo.pop()
+            entry["revision"] = self.revision
+            self._animation_undo.append(entry)
+            if self._animation_redo:
+                self._animation_redo[-1]["revision"] = self.revision
+            return self.revision
+
     def set_animation(self, animation: dict | None, *, version: int | None = None) -> int:
         """Atomically replace animation, preserving the active version by default.
 
@@ -148,6 +248,7 @@ class Scene:
             raise ValidationError("animation version must be 1 or 2")
         with self._mutation_lock:
             candidate = self._detached_copy()
+            previous_metadata = self.metadata
             active_v2 = ANIMATION_V2_KEY in candidate.metadata
             chosen = (2 if active_v2 else 1) if version is None else version
             candidate.metadata.pop(ANIMATION_KEY, None)
@@ -161,6 +262,7 @@ class Scene:
             candidate.validate()
             self.metadata = candidate.metadata
             self.revision = candidate.revision
+            self._record_animation_change(previous_metadata, candidate.metadata)
             return self.revision
 
     def upgrade_animation(self, *, expected_revision: int | None = None) -> int:
