@@ -444,12 +444,13 @@ def _validate_clips(spec, scene, direct_targets) -> set:
             if target in direct_targets:
                 raise ValidationError("clip binding conflicts with an authored property track")
             interval = (start, start + definitions[cid]["duration"]/speed)
-            windows = instance_intervals.setdefault(target, [])
-            if any(max(interval[0], previous[0]) <= min(interval[1], previous[1])
-                   for previous in windows):
-                raise ValidationError("overlapping clips cannot write the same property")
-            windows.append(interval)
+            instance_intervals.setdefault(target, []).append(interval)
             occupied.add(target)
+    for windows in instance_intervals.values():
+        windows.sort()
+        if any(current[0] <= previous[1]
+               for previous, current in zip(windows, windows[1:])):
+            raise ValidationError("overlapping clips cannot write the same property")
     # Validate even dormant reusable assets with a supported scene binding.
     # Without a compatible target, their property semantics remain checked
     # only when an instance is added; no claim of evaluated functionality.
