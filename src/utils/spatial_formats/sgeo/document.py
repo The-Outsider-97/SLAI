@@ -299,6 +299,21 @@ class SceneDocument(SpatialDocument):
         self._live()
         return self._model.evaluate(time)
 
+    def forward_kinematics(self, values: dict | None = None):
+        """Return a detached native articulated world-transform mapping."""
+        self._live()
+        return self._model.forward_kinematics(values)
+
+    def solve_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Return a non-mutating native SGEO IK solution and diagnostics."""
+        self._live()
+        return self._model.solve_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+
     # -- NURBS and B-rep -----------------------------------------------------------------------------
     def add_nurbs_curve(self, control_points, *, degree: int = 3, knots=None, weights=None, **options) -> str:
         """A (rational) B-spline curve. Without ``knots`` a clamped uniform vector is used."""
