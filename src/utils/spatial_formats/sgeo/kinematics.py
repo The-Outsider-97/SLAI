@@ -310,6 +310,9 @@ def retarget_joint_clip(source_scene, target_scene, source_clip_id, joint_map, *
     if len(clips) != 1:
         raise ReferenceError("unknown source animation clip")
     original = clips[0]
+    if not any(i["clip_id"] == source_clip_id and i["object_id"] in joint_map
+               for i in source.get("instances", [])):
+        raise ValidationError("source clip must have an instance bound to a mapped source joint")
     if not original["tracks"] or any(t["property"] != "joint" for t in original["tracks"]):
         raise ValidationError("retargeting currently supports joint-only source clips")
     if len(original["tracks"]) != len(joint_map):
