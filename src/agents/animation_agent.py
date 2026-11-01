@@ -58,11 +58,12 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status",
+    "capabilities", "status", "playback_status", "animation_events",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
-_OPERATIONS = frozenset(SUPPORTED_EDITS | _READ_OPERATIONS | _TRANSPORT_OPERATIONS | {_BATCH_OPERATION})
+_PROCEDURAL_OPERATION = "generate_linear_motion"
+_OPERATIONS = frozenset(SUPPORTED_EDITS | _READ_OPERATIONS | _TRANSPORT_OPERATIONS | {_BATCH_OPERATION, _PROCEDURAL_OPERATION})
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +275,10 @@ class AnimationAgent(BaseAgent):
                     result = self._evaluate_frames(request, scene)
                 elif op == "get_animation":
                     result = self._get_animation(request, scene)
+                elif op == "animation_events":
+                    result = self._animation_events(request, scene)
+                elif op == _PROCEDURAL_OPERATION:
+                    result = self._generate_linear_motion(request, scene)
                 elif op == _BATCH_OPERATION or op in SUPPORTED_EDITS:
                     result = self._edit(request, scene)
                 else:
@@ -380,6 +385,75 @@ class AnimationAgent(BaseAgent):
             revision = scene.revision
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
+
+    def _animation_events(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Return pure event markers in a bounded interval; execute no side effects."""
+        from src.utils.spatial_formats.common.helpers import finite
+        start = finite(request.payload.get("start", 0), "start")
+        end = finite(request.payload.get("end", start), "end")
+        if start < 0 or end < start:
+            raise AnimationValidationError("event interval must be nonnegative and ordered")
+        lock = get_animation_edit_lock(scene)
+        if lock is None:
+            raise AnimationUnsupportedOperationError("event reads require scene lock")
+        with lock:
+            if request.expected_revision is not None and request.expected_revision != scene.revision:
+                raise AnimationRevisionConflictError("scene revision mismatch")
+            spec = scene.metadata.get(ANIMATION_V2_KEY, {})
+            events = [deepcopy(event) for event in spec.get("events", [])
+                      if start <= event["time"] <= end]
+            return {"status": "ok", "request_id": request.request_id,
+                    "revision": scene.revision, "events": events}
+
+    def _generate_linear_motion(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Generate a deterministic translation track through existing SGEO edits.
+
+        This operation does not claim obstacle avoidance, dynamics or IK.
+        The provider validates all target bindings and keyframe values.
+        """
+        from src.utils.spatial_formats.common.helpers import finite, vector
+        from src.utils.spatial_formats.common.ids import require_id
+        if not is_animation_scene_provider(scene):
+            raise AnimationUnsupportedOperationError("motion generation requires mutable SGEO")
+        payload = request.payload
+        oid = require_id(payload.get("object_id"))
+        start = list(vector(payload.get("start"), 3, "motion start"))
+        end = list(vector(payload.get("end"), 3, "motion end"))
+        duration = finite(payload.get("duration"), "motion duration")
+        if duration <= 0 or duration > 1e9:
+            raise AnimationValidationError("motion duration must be positive and bounded")
+        track = {"object_id": oid, "property": "translation", "interpolation": "linear",
+                 "keyframes": [{"time": 0, "value": start},
+                               {"time": duration, "value": end}]}
+        lock = get_animation_edit_lock(scene)
+        if lock is None:
+            raise AnimationUnsupportedOperationError("motion generation requires scene lock")
+        with lock:
+            if request.expected_revision is not None and scene.revision != request.expected_revision:
+                raise AnimationRevisionConflictError("scene revision mismatch")
+            if ANIMATION_V2_KEY in scene.metadata:
+                candidate = deepcopy(scene.metadata[ANIMATION_V2_KEY])
+                if duration > candidate["duration"]:
+                    raise AnimationValidationError("motion exceeds existing animation duration")
+                if any(t["object_id"] == oid and t["property"] == "translation"
+                       for t in candidate["tracks"]):
+                    raise AnimationValidationError("translation track already exists for target")
+                commands = [{"operation": "add_track", "payload": {"track": track}}]
+            elif ANIMATION_KEY in scene.metadata:
+                raise AnimationUnsupportedOperationError(
+                    "explicitly upgrade legacy v1 animation before generating v2 motion"
+                )
+            else:
+                raise AnimationUnsupportedOperationError(
+                    "create a v2 animation document before generating motion"
+                )
+            result = apply_animation_batch(
+                scene, commands, expected_revision=request.expected_revision,
+                dry_run=request.dry_run,
+            )
+        return {"status": "ok", "request_id": request.request_id,
+                "motion_type": "linear_translation", "object_id": oid,
+                "duration": duration, **result}
 
     # ------------------------------------------------------------------
     # Transactional writes; SGEO/provider is authoritative
@@ -540,6 +614,7 @@ class AnimationAgent(BaseAgent):
             "operational_memory": "AnimationMemory",
             "cross_agent_memory": "BaseAgent.shared_memory",
             "checkpointing": False,
+            "procedural_motion": ["linear_translation"],
             "native_composition": ["clips", "instances", "layers", "override_blending", "loop", "reverse", "events"],
             "unsupported": ["learned_motion", "rigging", "retargeting", "choreography", "physics_simulation"],
         }
