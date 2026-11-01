@@ -58,7 +58,7 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "query_events", "retarget_joint_clip",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "query_events", "retarget_joint_clip", "generate_joint_motion",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
@@ -279,6 +279,8 @@ class AnimationAgent(BaseAgent):
                     result = self._query_events(request, scene)
                 elif op == "retarget_joint_clip":
                     result = self._retarget_joint_clip(request, scene)
+                elif op == "generate_joint_motion":
+                    result = self._generate_joint_motion(request, scene)
                 elif op in {"forward_kinematics", "solve_ik", "apply_ik"}:
                     result = self._kinematics(request, scene)
                 elif op == "upgrade_animation":
@@ -389,6 +391,26 @@ class AnimationAgent(BaseAgent):
             revision = scene.revision
             document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
+
+    def _generate_joint_motion(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
+        """Return a mathematically checked native motion proposal, not a scene edit."""
+        native = getattr(scene, "generate_joint_motion", None)
+        if not callable(native):
+            raise AnimationUnsupportedOperationError(
+                "scene provider does not expose native joint motion generation"
+            )
+        payload = request.payload
+        if not {"end_effector", "target", "duration"} <= set(payload):
+            raise AnimationValidationError(
+                "generate_joint_motion requires end_effector, target and duration"
+            )
+        result = native(
+            payload["end_effector"], payload["target"], payload["duration"],
+            expected_revision=request.expected_revision,
+            max_iterations=payload.get("max_iterations", 200),
+            tolerance=payload.get("tolerance", 1e-5),
+        )
+        return {"request_id": request.request_id, "scene_id": request.scene_id, **result}
 
     def _retarget_joint_clip(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Route an explicit, non-committing joint conversion to native SGEO."""
