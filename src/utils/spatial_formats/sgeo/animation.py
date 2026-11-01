@@ -445,24 +445,25 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
         Variable(name=name, domain=VariableDomain.real(-1e9, 1e9), initial=start[name])
         for name in start
     )
-    objective = Objective(
-        name="minimum_displacement",
-        function=lambda p: sum((p[name]-initial)**2 for name,initial in start.items()),
-    )
-    equations = []
-    for c in constraints:
-        count = 3 if c["kind"] == "position" else 1
-        for component in range(count):
-            equations.append(Constraint(
-                name="%s_%d" % (c["id"], component),
-                sense=ConstraintSense.EQ,
-                rhs=0.0,
-                tolerance=c.get("tolerance", 1e-6),
-                function=lambda p, item=c, index=component: residual(item, p)[index],
-            ))
+    # Multi-residual least squares avoids SLSQP's requirement that the
+    # number of strict equality equations not exceed the degrees of freedom.
+    # Hard feasibility is determined AFTER solving by each original tolerance.
+    def weighted_error(point):
+        violation = sum(
+            sum((component / c.get("tolerance", 1e-6)) ** 2
+                for component in residual(c, point))
+            for c in constraints
+        )
+        regularizer = 1e-8 * sum(
+            (point[name] - original_value) ** 2
+            for name, original_value in start.items()
+        )
+        return violation + regularizer
+
+    objective = Objective(name="constraint_residuals", function=weighted_error)
     problem = OptimizationProblem(
         name="sgeo_animation_constraints", variables=variables,
-        objectives=(objective,), constraints=tuple(equations),
+        objectives=(objective,), constraints=(),
         problem_class=ProblemClass.NLP, deterministic=True,
     )
     try:
