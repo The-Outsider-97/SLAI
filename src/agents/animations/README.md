@@ -13,7 +13,8 @@ have executed successfully on supported Python environments.
 Existing `slai.animation.v1` remains supported without changing its original
 fields, interpolation or evaluation semantics. `Scene.set_animation(spec)`
 preserves the currently active schema. An intentional upgrade uses
-`Scene.set_animation(spec, version=2)`, which stores the **exclusive** native
+`Scene.set_animation(spec, version=2)` or the lossless
+`Scene.upgrade_animation(expected_revision=...)` operation, which stores the **exclusive** native
 metadata key `slai.animation.v2`. Passing `None` removes the active
 animation. Native SGEO `.sgeo` packages preserve the metadata key and
 declare `animation-v1` or `animation-v2` in the manifest `requires` list,
