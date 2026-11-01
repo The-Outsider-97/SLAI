@@ -502,8 +502,8 @@ def _validate_constraints(constraints, objects) -> None:
         movable = item["movable"]
         if type(movable) is not bool:
             raise ValidationError("constraint movable must be boolean")
-        if movable and objects[oid].get("parent") is not None:
-            raise ValidationError("currently movable constraints require root objects")
+        if objects[oid].get("parent") is not None:
+            raise ValidationError("native position constraints currently require root objects")
         tolerance = finite(item.get("tolerance", 1e-6), "constraint tolerance", limit=1e6)
         if tolerance <= 0:
             raise ValidationError("constraint tolerance must be positive")
@@ -517,6 +517,8 @@ def _validate_constraints(constraints, objects) -> None:
             other = require_id(item.get("other_id"))
             if other not in objects or other == oid:
                 raise ReferenceError("invalid distance constraint endpoint")
+            if objects[other].get("parent") is not None:
+                raise ValidationError("native distance constraints currently require root objects")
             if finite(item.get("distance"), "constraint distance", limit=1e9) < 0:
                 raise ValidationError("distance must be nonnegative")
         else:
@@ -578,6 +580,42 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
         original_report["status"] = "infeasible"
         return original_report
 
+    if all(c["kind"] == "position" for c in constraints):
+        # Position-only constraints are separable linear systems; satisfy
+        # their tolerance intervals analytically instead of invoking NLP.
+        candidate_point = dict(start)
+        impossible = False
+        for oid in movable_ids:
+            related = [c for c in constraints if c["object_id"] == oid]
+            for coordinate in range(3):
+                lower = max(
+                    c["target"][coordinate] - c.get("tolerance", 1e-6)
+                    for c in related
+                )
+                upper = min(
+                    c["target"][coordinate] + c.get("tolerance", 1e-6)
+                    for c in related
+                )
+                if lower > upper:
+                    impossible = True
+                    break
+                candidate_point[names[(oid, coordinate)]] = (
+                    lower + (upper - lower)/2
+                )
+            if impossible:
+                break
+        solved = report(candidate_point, "infeasible" if impossible else "unsatisfied",
+                        solver_status="analytic")
+        if solved["status"] == "satisfied":
+            for oid, xyz in solved["positions"].items():
+                transform = list(objects[oid]["transform"])
+                for idx, value in zip((3, 7, 11), xyz):
+                    transform[idx] = value
+                objects[oid]["transform"] = transform
+            return solved
+        if impossible:
+            return solved
+
     # No global optimality guarantee. This is a constrained local nonlinear
     # solve with residual checks against each physical-space tolerance.
     from src.agents.optimization.optimization_types import (
@@ -594,8 +632,7 @@ def solve_animation_constraints(scene, constraints: list, *, max_iterations: int
     # Hard feasibility is determined AFTER solving by each original tolerance.
     def weighted_error(point):
         violation = sum(
-            sum((component / c.get("tolerance", 1e-6)) ** 2
-                for component in residual(c, point))
+            sum(component * component for component in residual(c, point))
             for c in constraints
         )
         regularizer = 1e-8 * sum(
