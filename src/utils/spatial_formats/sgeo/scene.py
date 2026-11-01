@@ -189,6 +189,25 @@ class Scene:
         from .animation import evaluate_scene
         return evaluate_scene(self, time)
 
+    def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
+                            translation_scales=None):
+        """Propose a compatible target joint clip; no scene mutation occurs."""
+        from .kinematics import retarget_joint_clip
+        if not isinstance(source_scene, Scene):
+            raise ValidationError("source_scene must be an authoritative SGEO Scene")
+        # The retargeting function validates both detached copies; no live
+        # authoring state is ever exposed to its numerical conversion.
+        with source_scene._mutation_lock:
+            source_scene.validate()
+            source_snapshot = source_scene._detached_copy()
+        with self._mutation_lock:
+            self.validate()
+            target_snapshot = self._detached_copy()
+        return retarget_joint_clip(
+            source_snapshot, target_snapshot, source_clip_id, joint_map,
+            translation_scales=translation_scales,
+        )
+
     def animation_events(self, start, end, *, include_start: bool = False):
         """Query native v2 declarative markers without executing side effects."""
         from .animation import query_animation_events
