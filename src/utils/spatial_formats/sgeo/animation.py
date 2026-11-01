@@ -1498,40 +1498,94 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
         grouped.setdefault(track["object_id"], {})[track["property"]] = (track, _sample_v2(track, timestamp) if active == ANIMATION_V2_KEY else _sample(track, timestamp))
     if active == ANIMATION_V2_KEY and spec.get("instances"):
         definitions = {clip["id"]: clip for clip in spec.get("clips", [])}
-        sampled_instances = {}
         by_instance_id = {instance["id"]: instance for instance in spec["instances"]}
-        choreography_times = _choreography_times(spec, timestamp, definitions, by_instance_id)
-        for instance in spec["instances"]:
+        sample_cache = {}
+
+        def sample_instance(iid, at_time):
+            cache_key = (iid, at_time)
+            if cache_key in sample_cache:
+                return sample_cache[cache_key]
+            instance = by_instance_id[iid]
             clip = definitions[instance["clip_id"]]
-            local_time = choreography_times.get(
-                instance["id"], (timestamp - instance["start"]) * instance.get("speed", 1)
+            remapped = _choreography_times(spec, at_time, definitions, by_instance_id)
+            local_time = remapped.get(
+                iid, (at_time - instance["start"]) * instance.get("speed", 1)
             )
-            cycles = instance.get("repeat", 1)
             span = clip["duration"]
+            cycles = instance.get("repeat", 1)
             if local_time < 0 or local_time > span * cycles:
-                continue
+                sample_cache[cache_key] = None
+                return None
             mode = instance.get("playback", "once")
             if mode == "reverse":
                 local_time = span - local_time
             elif mode in {"loop", "pingpong"}:
-                # Exact endpoint is the final frame, not an accidental restart.
+                # An exact final boundary resolves to the final sample,
+                # rather than spuriously restarting at the first keyframe.
                 cycle = min(int(local_time / span), cycles - 1)
                 phase = local_time - cycle * span
                 if mode == "pingpong" and cycle % 2:
                     phase = span - phase
                 local_time = phase
-            sampled_instances[instance["id"]] = {track["property"]: (track, _sample_v2(track, local_time)) for track in clip["tracks"]}
-            grouped.setdefault(instance["object_id"], {}).update(sampled_instances[instance["id"]])
+            sampled = {
+                track["property"]: (track, _sample_v2(track, local_time))
+                for track in clip["tracks"]
+            }
+            sample_cache[cache_key] = sampled
+            return sampled
+
+        for instance in spec["instances"]:
+            sampled = sample_instance(instance["id"], timestamp)
+            if sampled is not None:
+                grouped.setdefault(instance["object_id"], {}).update(sampled)
+
+        # Transition chains override the temporary clip samples above.
+        # All samples, including interruption snapshots, are evaluated from
+        # explicit time inputs; no frame-to-frame mutable state is retained.
+        chains = {}
         for transition in spec.get("transitions", []):
-            source, destination = transition["source"], transition["destination"]
-            if source not in sampled_instances or destination not in sampled_instances:
-                continue
-            if not transition["start"] <= timestamp <= transition["start"] + transition["duration"]:
-                continue
-            weight = _transition_weight(transition, timestamp)
-            oid = next(i["object_id"] for i in spec["instances"] if i["id"] == source)
-            for prop, source_value in sampled_instances[source].items():
-                grouped.setdefault(oid, {})[prop] = _blend_transition(source_value, sampled_instances[destination][prop], weight)
+            chains.setdefault(transition["source"], []).append(transition)
+
+        for source, chain in chains.items():
+            chain.sort(key=lambda item: (item["start"], item["id"]))
+            oid = by_instance_id[source]["object_id"]
+            properties = {track["property"] for track in definitions[
+                by_instance_id[source]["clip_id"]]["tracks"]}
+
+            def resolve(index, at_time):
+                if index < 0:
+                    return sample_instance(source, at_time)
+                transition = chain[index]
+                if at_time < transition["start"]:
+                    return resolve(index - 1, at_time)
+                destination = sample_instance(transition["destination"], at_time)
+                if destination is None:
+                    return None
+                if at_time >= transition["start"] + transition["duration"]:
+                    return destination
+                if transition.get("interruption") == "from_blended_pose":
+                    previous = resolve(index - 1, transition["start"])
+                else:
+                    previous = sample_instance(source, at_time)
+                if previous is None:
+                    return None
+                weight = _transition_weight(transition, at_time)
+                return {
+                    prop: _blend_transition(previous[prop], destination[prop], weight)
+                    for prop in properties
+                }
+
+            active_transitions = [
+                index for index, transition in enumerate(chain)
+                if transition["start"] <= timestamp
+            ]
+            last_index = active_transitions[-1] if active_transitions else -1
+            resolved = resolve(last_index, timestamp)
+            output = grouped.setdefault(oid, {})
+            for prop in properties:
+                output.pop(prop, None)
+            if resolved is not None:
+                output.update(resolved)
     if active == ANIMATION_V2_KEY and spec.get("layers"):
         for layer in spec["layers"]:
             _compose_layer(grouped, layer, timestamp)
