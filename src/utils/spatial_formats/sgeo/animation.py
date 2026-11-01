@@ -500,6 +500,14 @@ def _validate_transitions(spec):
             previous = chain[i-1]
             if current["start"] <= previous["start"]:
                 raise ValidationError("simultaneous transition starts are ambiguous")
+            if current.get("interruption") == "from_blended_pose":
+                prior_destination = instances[previous["destination"]]
+                prior_duration = clips[prior_destination["clip_id"]]["duration"]
+                prior_end = (prior_destination["start"]
+                             + prior_destination.get("repeat", 1)*prior_duration
+                             / prior_destination.get("speed", 1))
+                if current["start"] > prior_end:
+                    raise ValidationError("interruption cannot reference an expired blended pose")
             if current["start"] < previous["start"] + previous["duration"]:
                 if current.get("interruption") != "from_blended_pose":
                     raise ValidationError("overlapping transitions require explicit interruption")
