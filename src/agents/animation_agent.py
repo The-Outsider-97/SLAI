@@ -31,7 +31,7 @@ from threading import RLock
 from time import perf_counter
 from typing import Any, cast
 
-from src.utils.spatial_formats.sgeo.animation import ANIMATION_KEY # type: ignore
+from src.utils.spatial_formats.sgeo.animation import ANIMATION_KEY, ANIMATION_V2_KEY # type: ignore
 from .base_agent import BaseAgent
 from .base.utils.main_config_loader import get_config_section
 from .animations.animation_commands import SUPPORTED_EDITS, apply_animation_batch, update_animation
@@ -378,7 +378,7 @@ class AnimationAgent(BaseAgent):
             if request.expected_revision is not None and scene.revision != request.expected_revision:
                 raise AnimationRevisionConflictError("scene revision mismatch")
             revision = scene.revision
-            document = deepcopy(scene.metadata.get(ANIMATION_KEY))
+            document = deepcopy(scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY)))
         return {"status": "ok", "request_id": request.request_id, "revision": revision, "animation": document}
 
     # ------------------------------------------------------------------
