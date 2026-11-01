@@ -30,7 +30,7 @@ from .project import ProjectKnowledgeService
 from .repository import KnowledgeRepository
 from .rules import RulesRegistry
 from .standards import StandardsRegistry
-from ..utils.config_loader import get_config_section, load_global_config
+from src.agents.knowledge.utils.config_loader import get_config_section, load_global_config
 from logs.logger import PrettyPrinter, configure_logging, get_logger # pyright: ignore[reportMissingImports]
 
 
