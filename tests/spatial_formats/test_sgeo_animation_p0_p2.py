@@ -179,10 +179,14 @@ def test_inverse_kinematics_uses_existing_nonlinear_backend():
 
 
 def test_v2_dangling_references_prevent_deletion():
-    scene, shoulder, elbow, tip, joints = _arm()
+    scene = Scene()
+    obj = scene.add_object(name="standalone_joint")
+    joints = [{"id": uid(), "object_id": obj, "kind": "revolute",
+               "axis": [0, 0, 1], "lower": -pi, "upper": pi, "value": 0}]
+    scene.set_animation({"duration": 1, "tracks": [], "joints": joints}, version=2)
     before = scene.as_dict()
     with pytest.raises(ValidationError, match="joint"):
-        scene.remove_object(elbow)
+        scene.remove_object(obj)
     assert scene.as_dict() == before
 
 
@@ -196,3 +200,74 @@ def test_version_upgrade_is_explicit_and_legacy_interpolation_unchanged():
     restored = SceneDocument.from_bytes(doc.dumps())
     assert restored.animation() == legacy
     assert restored.evaluate(1).world_transform(oid)[3] == pytest.approx(1)
+
+
+def test_adapter_v2_edit_and_validation_contract():
+    from src.utils.spatial_formats.adapters.slai_animation import SGEOAnimationAdapter
+    from src.agents.animations.animation_commands import update_animation
+    scene = Scene()
+    oid = scene.add_object(name="adapter_object")
+    spec = {"duration": 2, "tracks": [
+        track(oid, "scale", [1, 1, 1], [2, 2, 2]),
+    ]}
+    scene.set_animation(spec, version=2)
+    adapter = SGEOAnimationAdapter(scene)
+    assert adapter.validate_animation(spec) == spec
+    result = update_animation(adapter, "set_interpolation",
+                              {"track_index": 0, "interpolation": "step"},
+                              expected_revision=scene.revision)
+    assert result["revision"] == scene.revision
+    assert scene.metadata["slai.animation.v2"]["tracks"][0]["interpolation"] == "step"
+
+
+def test_unused_clip_malformed_data_rejected_before_scene_mutation():
+    scene = Scene()
+    old = scene.as_dict()
+    spec = {"duration": 2, "tracks": [], "clips": [{
+        "id": uid(), "duration": 1,
+        "tracks": [{
+            "property": "translation", "interpolation": "linear",
+            "keyframes": [{"time": 0, "value": [1, float("nan"), 1]}],
+        }],
+    }]}
+    with pytest.raises(ValidationError):
+        scene.set_animation(spec, version=2)
+    assert scene.as_dict() == old
+
+
+def test_constraint_activation_interval():
+    scene = Scene()
+    oid = scene.add_object(name="moving")
+    spec = {"duration": 2, "tracks": [], "constraints": [
+        {"id": uid(), "kind": "position", "object_id": oid,
+         "movable": True, "target": [2, 0, 0],
+         "start": 1, "end": 2},
+    ]}
+    scene.set_animation(spec, version=2)
+    assert scene.evaluate(0).world_transform(oid)[3] == pytest.approx(0)
+    assert scene.evaluate(1.5).world_transform(oid)[3] == pytest.approx(2)
+
+
+def test_conflicting_analytic_position_constraints_report_infeasibility():
+    scene = Scene()
+    oid = scene.add_object(name="overconstrained")
+    spec = {"duration": 2, "tracks": [], "constraints": [
+        {"id": uid(), "kind": "position", "object_id": oid,
+         "movable": True, "target": [1, 0, 0], "tolerance": 1e-7},
+        {"id": uid(), "kind": "position", "object_id": oid,
+         "movable": True, "target": [2, 0, 0], "tolerance": 1e-7},
+    ]}
+    scene.set_animation(spec, version=2)
+    with pytest.raises(ValidationError, match="constraints could not be satisfied") as exc:
+        scene.evaluate(1)
+    assert exc.value.context["constraint_report"]["status"] == "infeasible"
+
+
+def test_ik_stretched_arm_recovery_requires_bounded_multistart():
+    pytest.importorskip("scipy")
+    pytest.importorskip("numpy")
+    scene, shoulder, elbow, tip, joints = _arm()
+    outcome = scene.solve_inverse_kinematics(tip, [1, 0, 0],
+                                             max_iterations=250, tolerance=2e-3)
+    assert outcome["status"] == "solved", outcome
+    assert outcome["position_error"] <= 2e-3
