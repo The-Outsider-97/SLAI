@@ -196,7 +196,9 @@ def solve_inverse_kinematics(
         constraints=(), problem_class=ProblemClass.NLP,
         deterministic=True,
     )
-    from src.agents.optimization.utils.optimization_errors import OptimizationError
+    from src.agents.optimization.utils.optimization_errors import (
+        OptimizationError, SolverUnavailableError, OptimizationConfigurationError,
+    )
 
     # Repeatable, bounded initializations escape stationary stretched-arm poses
     # where the squared Cartesian residual has vanishing first derivative.
@@ -229,6 +231,14 @@ def solve_inverse_kinematics(
                 allow_fallback=False,
             )
             solution = optimization.solution
+        except SolverUnavailableError as exc:
+            return {**best, "status": "unsupported",
+                    "solver_status": type(exc).__name__,
+                    "attempts": attempts}
+        except OptimizationConfigurationError as exc:
+            return {**best, "status": "invalid",
+                    "solver_status": type(exc).__name__,
+                    "attempts": attempts}
         except (OptimizationError, ArithmeticError, RuntimeError) as exc:
             best = {**best, "solver_status": type(exc).__name__}
             continue
