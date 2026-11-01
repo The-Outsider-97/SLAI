@@ -70,6 +70,10 @@ class SGEOAnimationAdapter:
         """Delegate the only authoritative mutation and revision increment."""
         return self._scene.set_animation(animation, version=version)
 
+    def upgrade_animation(self, *, expected_revision=None) -> int:
+        """Delegate explicit native v1-to-v2 migration and revision check."""
+        return self._scene.upgrade_animation(expected_revision=expected_revision)
+
     def forward_kinematics(self, values: dict | None = None):
         """Use SGEO's native FK and stable scene revision."""
         return self._scene.forward_kinematics(values)
