@@ -22,7 +22,8 @@ from types import MappingProxyType
 
 from ..common.errors import ConflictError, ReferenceError, ResourceLimitError, ValidationError
 from ..common.transforms import (compose, from_axis_angle, from_translation, from_scale,
-                                 from_quaternion, unit_quaternion, slerp_quaternion)
+                                 from_quaternion, unit_quaternion, slerp_quaternion,
+                                 require_transform, invert_transform, transform_point)
 from ..common.helpers import cubic_hermite_value
 from ..common.helpers import finite, vector
 from ..common.ids import require_canonical_id, require_id
@@ -179,7 +180,7 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     SGEO transform representation. Other requested properties require entity
     models and must not be stored as unevaluable tracks.
     """
-    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances", "layers"} or not {"duration", "tracks"} <= set(spec):
+    if not isinstance(spec, dict) or set(spec) - {"duration", "tracks", "drivers", "constraints", "joints", "clips", "instances", "layers", "skins"} or not {"duration", "tracks"} <= set(spec):
         raise ValidationError("v2 animation requires duration/tracks and optional drivers/constraints")
     duration = finite(spec["duration"], "animation duration", limit=MAX_TIME)
     if duration <= 0:
@@ -309,10 +310,96 @@ def validate_animation_v2(spec: dict, scene) -> dict:
     _validate_drivers(spec.get("drivers", []), objects, seen, joints, occupied)
     _validate_constraints(spec.get("constraints", []), objects, duration=duration)
     _validate_layers(spec, scene)
+    _validate_skins(spec, scene)
     return deepcopy(spec)
 
 
 
+
+
+
+def _validate_skins(spec, scene):
+    """Validate bounded mesh-local linear blend skinning bindings.
+
+    Inverse bind transforms map rest mesh-local coordinates to joint-local
+    coordinates. Evaluated matrices are mesh_world^-1 * joint_world * inverse_bind.
+    This explicitly accommodates mesh and skeleton parents in world space.
+    """
+    skins = spec.get("skins", [])
+    if not isinstance(skins, list) or len(skins) > 128:
+        raise ValidationError("skins must be a list of at most 128 bindings")
+    objects = {obj["id"]: obj for obj in scene.objects}
+    bound = set()
+    for skin in skins:
+        if not isinstance(skin, dict) or set(skin) != {
+            "mesh_id", "joints", "inverse_bind_matrices", "influences"
+        }:
+            raise ValidationError("skin requires mesh_id, joints, inverse_bind_matrices, influences")
+        mesh_id = require_canonical_id(skin["mesh_id"])
+        mesh = objects.get(mesh_id)
+        if mesh is None or not isinstance(mesh.get("geometry"), dict) or mesh["geometry"].get("kind") != "mesh":
+            raise ValidationError("skin target must be an existing triangle mesh")
+        if mesh_id in bound:
+            raise ValidationError("mesh cannot have multiple skin bindings")
+        bound.add(mesh_id)
+        joints, inverse, influences = (skin[key] for key in (
+            "joints", "inverse_bind_matrices", "influences"))
+        if not isinstance(joints, list) or not 1 <= len(joints) <= 256:
+            raise ValidationError("skin must have 1..256 joints")
+        if len(set(joints)) != len(joints):
+            raise ValidationError("duplicate skin joints")
+        if any(require_canonical_id(jid) not in objects for jid in joints):
+            raise ReferenceError("skin references a missing joint object")
+        if not isinstance(inverse, list) or len(inverse) != len(joints):
+            raise ValidationError("inverse bind matrix count must equal joint count")
+        for matrix in inverse:
+            require_transform(matrix)
+        if not isinstance(influences, list) or len(influences) != len(mesh["geometry"]["vertices"]):
+            raise ValidationError("skin requires influences for every mesh vertex")
+        for entries in influences:
+            if not isinstance(entries, list) or not 1 <= len(entries) <= 8:
+                raise ValidationError("skin vertex requires 1..8 influences")
+            indices = set()
+            total = 0.0
+            for entry in entries:
+                if not isinstance(entry, list) or len(entry) != 2:
+                    raise ValidationError("skin influence must be [joint_index, weight]")
+                index, weight = entry
+                if type(index) is not int or not 0 <= index < len(joints) or index in indices:
+                    raise ValidationError("skin joint index invalid or repeated")
+                indices.add(index)
+                weight = finite(weight, "skin weight", limit=1)
+                if weight <= 0:
+                    raise ValidationError("skin weights must be positive")
+                total += weight
+            if abs(total - 1.0) > 1e-6:
+                raise ValidationError("skin weights must sum to one")
+
+
+def _deform_skins(scene, skins):
+    """Evaluate LBS on the detached scene; source mesh data is never changed."""
+    worlds = scene.world_transforms()
+    objects = {obj["id"]: obj for obj in scene.objects}
+    for skin in skins:
+        oid = skin["mesh_id"]
+        obj = objects[oid]
+        to_mesh = invert_transform(worlds[oid])
+        matrices = [
+            compose(compose(to_mesh, worlds[jid]), bind)
+            for jid, bind in zip(skin["joints"], skin["inverse_bind_matrices"])
+        ]
+        geometry = obj["geometry"]
+        deformed = []
+        for vertex, entries in zip(geometry["vertices"], skin["influences"]):
+            point = [0.0, 0.0, 0.0]
+            for index, weight in entries:
+                transformed = transform_point(matrices[index], vertex)
+                for axis in range(3):
+                    point[axis] += weight * transformed[axis]
+            if any(not isfinite(value) for value in point):
+                raise ValidationError("skinning generated nonfinite geometry")
+            deformed.append(point)
+        geometry["vertices"] = deformed
 
 
 def _validate_layers(spec, scene):
@@ -1238,6 +1325,8 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
         if diagnostics["status"] != "satisfied":
             raise ValidationError("animation constraints could not be satisfied",
                                   context={"constraint_report": diagnostics})
+    if active == ANIMATION_V2_KEY and spec.get("skins"):
+        _deform_skins(candidate, spec["skins"])
     candidate.validate()
     return EvaluatedScene(timestamp, candidate.revision, candidate, frozenset(invisible), diagnostics)
 
