@@ -319,11 +319,12 @@ class SceneDocument(SpatialDocument):
                                  tolerance=1e-5):
         """Commit a validated static IK pose through existing writable SGEO facade."""
         self._writable()
-        with self._edit() as model:
-            return model.apply_inverse_kinematics(
-                end_effector, target, expected_revision=expected_revision,
-                max_iterations=max_iterations, tolerance=tolerance,
-            )
+        # Do not hold the document edit lock across a bounded nonlinear solve.
+        # Scene snapshots the source and rechecks its revision before commit.
+        return self._model.apply_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
 
     # -- NURBS and B-rep -----------------------------------------------------------------------------
     def add_nurbs_curve(self, control_points, *, degree: int = 3, knots=None, weights=None, **options) -> str:
