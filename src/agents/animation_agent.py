@@ -405,18 +405,30 @@ class AnimationAgent(BaseAgent):
         source_lock = get_animation_edit_lock(source)
         if target_lock is None or source_lock is None:
             raise AnimationUnsupportedOperationError("retargeting requires authoritative scene locks")
-        # Native SGEO validates detached snapshots and never mutates either
-        # scene; advisory scene revisions are checked against returned state.
-        with target_lock:
+        # Cross-scene reads use one consistent lock ordering to avoid
+        # deadlocks when independent animation requests target opposite scenes.
+        from contextlib import ExitStack
+        locks = {id(target_lock): target_lock, id(source_lock): source_lock}
+        with ExitStack() as acquired:
+            for lock in (locks[key] for key in sorted(locks)):
+                acquired.enter_context(lock)
             revision = scene.revision
+            source_revision = source.revision
             if request.expected_revision is not None and revision != request.expected_revision:
                 raise AnimationRevisionConflictError("target scene revision mismatch")
-        result = provider(
-            source, payload["source_clip_id"], payload["joint_map"],
-            translation_scales=payload.get("translation_scales"),
-        )
+            if "source_expected_revision" in payload:
+                expected = payload["source_expected_revision"]
+                if type(expected) is not int or expected < 1:
+                    raise AnimationValidationError("source_expected_revision must be a positive integer")
+                if expected != source_revision:
+                    raise AnimationRevisionConflictError("source scene revision mismatch")
+            result = provider(
+                source, payload["source_clip_id"], payload["joint_map"],
+                translation_scales=payload.get("translation_scales"),
+            )
         return {"status": result["status"], "request_id": request.request_id,
-                "scene_id": request.scene_id, "revision": revision, **result}
+                "scene_id": request.scene_id, "revision": revision,
+                "source_revision": source_revision, **result}
 
     def _query_events(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
         """Route a bounded, non-executing marker interval query to SGEO."""
