@@ -164,16 +164,14 @@ class Scene:
             candidate.metadata.pop(key, None)
         candidate.metadata.update(data)
 
-    def _record_animation_change(self, before, after):
+    def _record_animation_change(self, before: bytes, after: bytes):
         """Record an animation-only inverse patch after a validated commit."""
         if not hasattr(self, "_animation_undo"):
             self._animation_undo, self._animation_redo = [], []
         if self._animation_undo and self._animation_undo[-1]["revision"] != self.revision - 1:
             self._animation_undo.clear()  # unrelated revisions invalidate earlier undo
         self._animation_redo.clear()
-        entry = {"before": self._animation_state_bytes(before),
-                 "after": self._animation_state_bytes(after),
-                 "revision": self.revision}
+        entry = {"before": before, "after": after, "revision": self.revision}
         self._animation_undo.append(entry)
         while len(self._animation_undo) > MAX_ANIMATION_UNDO or (
                 sum(len(e["before"]) + len(e["after"]) for e in self._animation_undo)
@@ -260,9 +258,14 @@ class Scene:
                     candidate.metadata[ANIMATION_KEY] = validate_animation(animation, candidate)
             candidate.revision += 1
             candidate.validate()
+            # Serialization is prepared *before* the authoritative commit so
+            # a failed journal encoding can never leave a committed scene
+            # behind an apparent edit error.
+            before_blob = self._animation_state_bytes(previous_metadata)
+            after_blob = self._animation_state_bytes(candidate.metadata)
             self.metadata = candidate.metadata
             self.revision = candidate.revision
-            self._record_animation_change(previous_metadata, candidate.metadata)
+            self._record_animation_change(before_blob, after_blob)
             return self.revision
 
     def upgrade_animation(self, *, expected_revision: int | None = None) -> int:
