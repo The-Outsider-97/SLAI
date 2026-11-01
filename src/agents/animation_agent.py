@@ -444,7 +444,7 @@ class AnimationAgent(BaseAgent):
         with lock:
             if expected_revision is not None and scene.revision != expected_revision:
                 raise AnimationRevisionConflictError("scene revision mismatch")
-            spec = scene.metadata.get(ANIMATION_KEY)
+            spec = scene.metadata.get(ANIMATION_V2_KEY, scene.metadata.get(ANIMATION_KEY))
             if not isinstance(spec, Mapping):
                 raise AnimationStateError("scene has no animation document for playback")
             duration = ensure_finite_non_negative(spec.get("duration"), "duration")
@@ -465,7 +465,7 @@ class AnimationAgent(BaseAgent):
         if not is_animation_scene_provider(scene):
             return
         with self._scene_lock:
-            if scene_id in self._playbacks and ANIMATION_KEY not in scene.metadata:
+            if scene_id in self._playbacks and not any(key in scene.metadata for key in (ANIMATION_KEY, ANIMATION_V2_KEY)):
                 del self._playbacks[scene_id]
 
     def _playback_operation(self, request: AnimationRequest, scene: Any) -> dict[str, Any]:
