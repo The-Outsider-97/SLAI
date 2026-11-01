@@ -420,7 +420,9 @@ class LanguageTransformer(BaseTransformer):
         """Language-aware forward pass with automatic causal target mask."""
 
         if tgt_mask is None:
-            tgt_mask = self.generate_square_subsequent_mask(tgt.size(1), device=tgt.device)
+            # Keep causal and key-padding masks boolean to avoid PyTorch's
+            # deprecated mixed-type attention-mask behavior.
+            tgt_mask = self.generate_square_subsequent_mask(tgt.size(1), device=tgt.device).isneginf()
         output = super().forward(
             src,
             tgt,
@@ -583,7 +585,7 @@ class LanguageTransformer(BaseTransformer):
                             candidates.append(beam)
                             continue
                         tgt = torch.tensor([list(beam.tokens)], dtype=torch.long, device=src.device)
-                        tgt_mask = self.generate_square_subsequent_mask(tgt.size(1), device=src.device)
+                        tgt_mask = self.generate_square_subsequent_mask(tgt.size(1), device=src.device).isneginf()
                         decoder_output = self.decode(tgt, memory_item, tgt_mask=tgt_mask, memory_key_padding_mask=padding_item)
                         logits = self.output_projection(decoder_output[:, -1, :])
                         logits = logits / effective_temperature
@@ -700,8 +702,7 @@ class LanguageTransformer(BaseTransformer):
         with torch.no_grad():
             decoder_input = tgt[:, :-1]
             targets = tgt[:, 1:]
-            tgt_mask = self.generate_square_subsequent_mask(decoder_input.size(1), device=decoder_input.device)
-            logits = self.language_forward(src, decoder_input, tgt_mask=tgt_mask)
+            tgt_mask = self.generate_square_subsequent_mask(decoder_input.size(1), device=decoder_input.device).isneginf()
             effective_ignore = self.ignore_index if ignore_index is None else int(ignore_index)
             output = self.language_forward(src, decoder_input, tgt_mask=tgt_mask)
             if isinstance(output, dict):
@@ -901,6 +902,12 @@ class LanguageTransformer(BaseTransformer):
             )
             model_config = dict(base_config)
             model_config.update(dict(overrides or {}))
+            # BaseTransformer still accepts the legacy `max_len` alias and gives
+            # it precedence when present in its global configuration. Restore
+            # the checkpoint's explicit positional capacity without allowing
+            # the unrelated global default to silently override it.
+            if "max_position_embeddings" in model_config:
+                model_config["max_len"] = model_config["max_position_embeddings"]
             model = cls(**model_config)
 
             language_config = ensure_mapping(
@@ -1021,7 +1028,7 @@ if __name__ == "__main__":
 
     src_padding_mask = model.make_padding_mask(src)
     tgt_padding_mask = model.make_padding_mask(tgt)
-    tgt_mask = model.generate_square_subsequent_mask(tgt.size(1), device=device)
+    tgt_mask = model.generate_square_subsequent_mask(tgt.size(1), device=device).isneginf()
 
     forward_output = model.language_forward(
         src,
