@@ -468,3 +468,54 @@ def test_agent_adapter_explicit_v1_migration():
     assert adapter.upgrade_animation(expected_revision=previous_revision) == previous_revision + 1
     assert "slai.animation.v2" in adapter.metadata
     assert adapter.evaluate(0).visible(oid)
+
+
+def test_v2_rejects_noncanonical_id_aliases_before_commit():
+    scene = Scene()
+    obj = scene.add_object()
+    spec = {"duration": 2, "tracks": [
+        track(obj.upper(), "translation", [0, 0, 0], [2, 0, 0]),
+    ]}
+    original = scene.as_dict()
+    with pytest.raises(ValidationError, match="canonical"):
+        scene.set_animation(spec, version=2)
+    assert scene.as_dict() == original
+
+
+def test_repeated_arbitrary_time_evaluations_are_deterministic():
+    scene = Scene()
+    oid = scene.add_object(name="cyclic-safe")
+    scene.set_animation({"duration": 2, "tracks": [
+        track(oid, "translation", [0, 0, 0], [2, 0, 0]),
+    ]}, version=2)
+    initial = scene.as_dict()
+    snapshots = [
+        scene.evaluate(t).world_transform(oid)
+        for t in (0, 0.25, 0.5, 1, 1.5, 2, 1, 0.25)
+    ]
+    assert snapshots[3] == snapshots[6]
+    assert snapshots[1] == snapshots[7]
+    assert scene.as_dict() == initial
+
+
+def test_many_track_eval_budget_and_repeatability():
+    from time import perf_counter
+    scene = Scene()
+    ids = [scene.add_object(name="node_%d" % i) for i in range(80)]
+    frames = [{"time": float(i), "value": [float(i), 0, 0]}
+              for i in range(100)]
+    scene.set_animation({
+        "duration": 99.0,
+        "tracks": [{
+            "object_id": oid, "property": "translation",
+            "interpolation": "linear", "keyframes": frames,
+        } for oid in ids],
+    }, version=2)
+    before = scene.as_dict()
+    started = perf_counter()
+    snapshots = [scene.evaluate(t) for t in (0, 33.25, 78.5, 99, 33.25)]
+    elapsed = perf_counter() - started
+    assert elapsed >= 0
+    assert snapshots[1].world_transform(ids[-1]) == snapshots[4].world_transform(ids[-1])
+    assert snapshots[1].world_transform(ids[-1])[3] == pytest.approx(33.25)
+    assert scene.as_dict() == before
