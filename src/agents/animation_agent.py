@@ -58,7 +58,7 @@ printer = PrettyPrinter()
 
 _READ_OPERATIONS = frozenset({
     "evaluate", "evaluate_many", "evaluate_frames", "get_animation", "recent_edits", "edit_counts",
-    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik",
+    "capabilities", "status", "playback_status", "forward_kinematics", "solve_ik", "apply_ik",
 })
 _TRANSPORT_OPERATIONS = frozenset({"play", "pause", "stop", "seek", "advance", "set_playback_rate", "set_loop"})
 _BATCH_OPERATION = "edit_batch"
@@ -274,7 +274,7 @@ class AnimationAgent(BaseAgent):
                     result = self._evaluate_frames(request, scene)
                 elif op == "get_animation":
                     result = self._get_animation(request, scene)
-                elif op in {"forward_kinematics", "solve_ik"}:
+                elif op in {"forward_kinematics", "solve_ik", "apply_ik"}:
                     result = self._kinematics(request, scene)
                 elif op == _BATCH_OPERATION or op in SUPPORTED_EDITS:
                     result = self._edit(request, scene)
@@ -416,12 +416,45 @@ class AnimationAgent(BaseAgent):
         payload = request.payload
         if "end_effector" not in payload or "target" not in payload:
             raise AnimationValidationError("solve_ik requires end_effector and target")
-        result = ik(
-            payload["end_effector"], payload["target"],
-            expected_revision=request.expected_revision,
-            max_iterations=payload.get("max_iterations", 200),
-            tolerance=payload.get("tolerance", 1e-5),
-        )
+        if request.operation == "apply_ik":
+            if request.dry_run:
+                raise AnimationUnsupportedOperationError(
+                    "apply_ik does not provide a nonmutating preview; use solve_ik"
+                )
+            if request.expected_revision is None:
+                raise AnimationRevisionConflictError(
+                    "apply_ik requires expected_revision for optimistic concurrency"
+                )
+            apply = getattr(scene, "apply_inverse_kinematics", None)
+            if not callable(apply):
+                raise AnimationUnsupportedOperationError(
+                    "provider does not support atomic native IK pose commits"
+                )
+            result = apply(
+                payload["end_effector"], payload["target"],
+                expected_revision=request.expected_revision,
+                max_iterations=payload.get("max_iterations", 200),
+                tolerance=payload.get("tolerance", 1e-5),
+            )
+            if result["committed"]:
+                self._run_optional_runtime_operation(
+                    "telemetry", "animation_memory.record",
+                    lambda: self.animation_memory.record(AnimationEditRecord(
+                        request.operation, scene_id, request.expected_revision,
+                        result["revision"],
+                    )),
+                )
+                self._run_optional_runtime_operation(
+                    "telemetry", "playback.reconcile",
+                    lambda: self._refresh_playback_duration(scene_id, scene),
+                )
+        else:
+            result = ik(
+                payload["end_effector"], payload["target"],
+                expected_revision=request.expected_revision,
+                max_iterations=payload.get("max_iterations", 200),
+                tolerance=payload.get("tolerance", 1e-5),
+            )
         return {"request_id": request.request_id, "scene_id": scene_id, **result}
 
     # ------------------------------------------------------------------
