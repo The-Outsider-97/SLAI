@@ -1358,11 +1358,12 @@ def evaluate_scene(scene, time: float, *, expected_revision: int | None = None) 
                     phase = span - phase
                 local_time = phase
             sampled_instances[instance["id"]] = {track["property"]: (track, _sample_v2(track, local_time)) for track in clip["tracks"]}
-            if not any(instance["id"] in (t["source"], t["destination"]) for t in spec.get("transitions", [])):
-                grouped.setdefault(instance["object_id"], {}).update(sampled_instances[instance["id"]])
+            grouped.setdefault(instance["object_id"], {}).update(sampled_instances[instance["id"]])
         for transition in spec.get("transitions", []):
             source, destination = transition["source"], transition["destination"]
             if source not in sampled_instances or destination not in sampled_instances:
+                continue
+            if not transition["start"] <= timestamp <= transition["start"] + transition["duration"]:
                 continue
             weight = _transition_weight(transition, timestamp)
             oid = next(i["object_id"] for i in spec["instances"] if i["id"] == source)
