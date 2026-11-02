@@ -1,4 +1,4 @@
-"""SLAI v2.3 Provenance Agent orchestration façade.
+"""SLAI v2.4 Provenance Agent orchestration façade.
 
 The Agent coordinates the completed provenance subsystem across SLAI while
 preserving a strict evidence-only boundary:
@@ -17,7 +17,7 @@ checkpoint/custody reconstruction without introducing trust or quality scoring.
 """
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
