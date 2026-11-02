@@ -82,6 +82,9 @@ class RevisionEvidence:
             raise ProvenanceValidationError(
                 "commit.confirmed requires artifact_id, revision_id and authoritative commit_id"
             )
+        if self.event_type == "commit.confirmed" and self.revision_id == self.previous_revision_id:
+            from .utils.provenance_errors import ProvenanceValidationError
+            raise ProvenanceValidationError("committed revision cannot be its own parent")
         object.__setattr__(self, "timestamp", normalize_timestamp(self.timestamp))
         object.__setattr__(self, "metadata", normalize_metadata(self.metadata))
 

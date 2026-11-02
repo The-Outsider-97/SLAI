@@ -29,6 +29,10 @@ def test_parallel_groups_respect_conflicting_writes(tmp_path):
     groups = store.ready_groups(plan["plan_id"])
     assert groups == [["a", "b"], ["c"]]
     a = store.claim_task(plan["plan_id"], "a")
+    with pytest.raises(RevisionWorkflowError, match="conflicts with running"):
+        store.claim_task(plan["plan_id"], "c")
+    b = store.claim_task(plan["plan_id"], "b")
+    store.complete_task(plan["plan_id"], "b", b["run_id"])
     store.complete_task(plan["plan_id"], "a", a["run_id"])
     assert "d" in [item for group in store.ready_groups(plan["plan_id"]) for item in group]
 
@@ -135,3 +139,32 @@ def test_interrupted_execution_is_not_automatically_retried(tmp_path):
         recovery.complete_task(plan_id, "task", claim["run_id"])
     assert recovery.resolve_interrupted_task(plan_id, "task", claim["run_id"],
                                              succeeded=True, evidence_id="host-result-1")["status"]["task"] == "succeeded"
+
+
+def test_two_store_instances_cannot_claim_conflicting_writes(tmp_path):
+    path = tmp_path / "plans.db"
+    first = RevisionWorkflowStore(path)
+    second = RevisionWorkflowStore(path)
+    plan = first.create_plan("project", [
+        RevisionTask("a", reads={"model": "r1"}, writes=("model",)),
+        RevisionTask("b", reads={"model": "r1"}, writes=("model",)),
+    ], {"model": "r1"})
+    claimed = first.claim_task(plan["plan_id"], "a")
+    with pytest.raises(RevisionWorkflowError, match="conflicts with running"):
+        second.claim_task(plan["plan_id"], "b")
+    first.complete_task(plan["plan_id"], "a", claimed["run_id"])
+    assert second.claim_task(plan["plan_id"], "b")["status"] == "running"
+
+
+def test_authoritative_provider_refresh_blocks_obsolete_completion(tmp_path):
+    authoritative = {"model": "v1"}
+    store = RevisionWorkflowStore(tmp_path / "plans.db",
+                                  revision_provider=lambda _project: dict(authoritative))
+    state = store.create_plan("project", [RevisionTask("simulate", reads={"model": "v1"})],
+                              {"model": "v1"})
+    plan_id = state["plan_id"]
+    attempt = store.claim_task(plan_id, "simulate")
+    authoritative["model"] = "v2"
+    with pytest.raises(RevisionWorkflowError, match="not running"):
+        store.complete_task(plan_id, "simulate", attempt["run_id"])
+    assert store.get_plan(plan_id)["status"]["simulate"] == "stale"

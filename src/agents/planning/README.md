@@ -299,6 +299,12 @@ Existing `Task` instances can also be registered through
 or dynamic capability is assumed. Tasks with no explicit read set are
 conservatively invalidated by any observed source revision change.
 
+For live projects, inject an authoritative callback via
+`RevisionWorkflowStore(revision_provider=lambda project_id: {...})`.
+It is consulted before tasks start and complete, and missing tracked revision
+identities are rejected. Without a provider, the host **must** deliver change
+sets explicitly; otherwise the planner only knows its last observed state.
+
 Execution attempts carry stable IDs and input snapshots. Verification gates
 must be explicitly satisfied. After a crash, call `mark_interrupted_tasks()`
 and reconcile uncertain outcomes through `resolve_interrupted_task()` with an

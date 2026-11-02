@@ -563,6 +563,10 @@ class ProvenanceAgent(BaseAgent):
         self._ensure_enabled("get_revision_evidence")
         return self.provenance_store.get_revision_events(artifact_id=artifact_id, plan_id=plan_id)
 
+    def get_revision_graph(self, artifact_id: str) -> dict[str, Any]:
+        self._ensure_enabled("get_revision_graph")
+        return self.provenance_store.get_revision_graph(artifact_id)
+
     # ------------------------------------------------------------------
     # Normalized cross-agent event boundary
     # ------------------------------------------------------------------
@@ -782,6 +786,8 @@ class ProvenanceAgent(BaseAgent):
             return self.get_reproducibility_report(str(data["artifact_id"]))
         if operation == "get_revision_evidence":
             return self.get_revision_evidence(**data)
+        if operation == "get_revision_graph":
+            return self.get_revision_graph(str(data["artifact_id"]))
         raise ProvenanceValidationError(
             "unsupported ProvenanceAgent task operation",
             context={"operation": operation},
@@ -823,6 +829,7 @@ class ProvenanceAgent(BaseAgent):
                 "custody_history",
                 "reproducibility",
                 "revision_evidence",
+                "revision_graph",
             ),
             "shared_memory": self.publish_shared_memory,
             "checkpointing": self.checkpointing_enabled,

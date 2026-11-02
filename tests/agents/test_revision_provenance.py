@@ -41,6 +41,14 @@ def test_commit_evidence_cannot_be_claimed_without_host_acknowledgment(tmp_path)
     ))
     assert recorded["commit_id"] == "host-transaction-98"
     assert len(store.get_revision_events(artifact_id="drawing")) == 1
+    assert store.get_revision_graph("drawing")["committed_transitions"] == [{
+        "previous_revision_id": "v2", "revision_id": "v3",
+        "commit_id": "host-transaction-98", "event_id": "c1",
+    }]
+    with pytest.raises(ProvenanceValidationError, match="own parent"):
+        RevisionEvidence(event_id="bad", event_type="commit.confirmed", project_id="project",
+                         artifact_id="drawing", revision_id="v3",
+                         previous_revision_id="v3", commit_id="bad-commit")
 
 
 def test_older_schema_stores_gain_revision_table_without_losing_records(tmp_path):
@@ -94,6 +102,9 @@ def test_provenance_agent_record_event_and_query_facade(tmp_path, monkeypatch):
         assert agent.perform_task({"operation": "get_revision_evidence", "payload": {
             "artifact_id": "drawing",
         }}) == [result]
+        assert agent.perform_task({"operation": "get_revision_graph", "payload": {
+            "artifact_id": "drawing",
+        }})["committed_transitions"] == []
         planning = RevisionWorkflowStore(tmp_path / "plans.db")
         workflow = planning.create_plan("project", [RevisionTask("analyze")], {"document": "r1"})
         assert planning.publish_provenance_events(workflow["plan_id"], agent) == 1

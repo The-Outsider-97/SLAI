@@ -360,6 +360,31 @@ class ProvenanceStore:
             events = [copy.deepcopy(self._state["revision_events"][key]) for key in keys]
             return sorted(events, key=lambda item: (item["timestamp"], item["event_id"]))
 
+    def get_revision_graph(self, artifact_id: str) -> Dict[str, Any]:
+        """Reconstruct confirmed host revision transitions without conflating proposals.
+
+        An unconfirmed calculation may appear in event history but never as an
+        authoritative revision edge. Branches and multiple parent candidates
+        are reported as recorded rather than guessed into a linear history.
+        """
+        events = self.get_revision_events(artifact_id=artifact_id)
+        revisions: Set[str] = set()
+        transitions: List[Dict[str, Any]] = []
+        for event in events:
+            if event["event_type"] != "commit.confirmed":
+                continue
+            revision = str(event["revision_id"])
+            previous = event.get("previous_revision_id")
+            revisions.add(revision)
+            if previous:
+                revisions.add(str(previous))
+            transitions.append({
+                "previous_revision_id": previous, "revision_id": revision,
+                "commit_id": event["commit_id"], "event_id": event["event_id"],
+            })
+        return {"artifact_id": artifact_id, "revisions": sorted(revisions),
+                "committed_transitions": transitions, "event_count": len(events)}
+
     # ------------------------------------------------------------------
     # Lineage
     # ------------------------------------------------------------------

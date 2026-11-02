@@ -115,7 +115,8 @@ class RevisionWorkflowStore:
     can reopen the same database and resume without executing prior effects.
     """
 
-    def __init__(self, path: str | Path = "data/planning/revision_workflows.sqlite3") -> None:
+    def __init__(self, path: str | Path = "data/planning/revision_workflows.sqlite3", *,
+                 revision_provider: Optional[Callable[[str], Mapping[str, str]]] = None) -> None:
         selected = Path(path).expanduser() if str(path) != ":memory:" else None
         if selected is not None and not selected.is_absolute():
             selected = Path(__file__).resolve().parents[3] / selected
@@ -127,6 +128,7 @@ class RevisionWorkflowStore:
         self._connection.execute("PRAGMA busy_timeout=15000")
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.RLock()
+        self.revision_provider = revision_provider
         with self._connection:
             self._connection.execute("CREATE TABLE IF NOT EXISTS revision_workflows ("
                                      "plan_id TEXT PRIMARY KEY, state_version INTEGER NOT NULL, data TEXT NOT NULL)")
@@ -150,6 +152,17 @@ class RevisionWorkflowStore:
     def get_plan(self, plan_id: str) -> dict[str, Any]:
         with self._lock:
             return self._load(_identifier(plan_id, "plan_id"))
+
+    def refresh_authoritative_revisions(self, plan_id: str) -> dict[str, Any]:
+        """Consult an injected host provider; never synthesize project state."""
+        state = self.get_plan(plan_id)
+        if self.revision_provider is None:
+            raise RevisionWorkflowError("no authoritative revision provider is configured")
+        current = dict(self.revision_provider(state["project_id"]))
+        missing = set(state["source_revisions"]) - set(current)
+        if missing:
+            raise RevisionWorkflowError(f"revision provider omitted tracked artifacts: {sorted(missing)}")
+        return self.apply_change_set(plan_id, current, reason="authoritative revision refresh")
 
     def events(self, plan_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -273,11 +286,19 @@ class RevisionWorkflowStore:
 
     def claim_task(self, plan_id: str, task_id: str) -> dict[str, Any]:
         task_id = _identifier(task_id, "task_id")
+        if self.revision_provider is not None:
+            self.refresh_authoritative_revisions(plan_id)
         run_id = uuid.uuid4().hex
 
         def change(state: dict[str, Any]) -> dict[str, Any]:
             if task_id not in state["tasks"] or not self._ready(state, task_id):
                 raise RevisionWorkflowError(f"task {task_id} is not ready against current revisions")
+            selected = RevisionTask.from_dict(state["tasks"][task_id])
+            conflicting = [name for name, status in state["status"].items()
+                           if status == "running" and
+                           _conflicts(selected, RevisionTask.from_dict(state["tasks"][name]))]
+            if conflicting:
+                raise RevisionWorkflowError(f"task {task_id} conflicts with running tasks: {sorted(conflicting)}")
             state["status"][task_id] = "running"
             task = state["tasks"][task_id]
             inputs = dict(task["reads"] or state["source_revisions"])
@@ -290,6 +311,8 @@ class RevisionWorkflowStore:
 
     def complete_task(self, plan_id: str, task_id: str, run_id: str, *,
                       output_refs: Optional[Mapping[str, str]] = None, error: Optional[str] = None) -> dict[str, Any]:
+        if self.revision_provider is not None:
+            self.refresh_authoritative_revisions(plan_id)
         output_refs = dict(output_refs or {})
         for key, value in output_refs.items():
             _identifier(key, "output artifact")
