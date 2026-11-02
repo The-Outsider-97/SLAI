@@ -391,17 +391,29 @@ class SpellChecker:
     def _configured_wordlist_paths(self) -> List[Path]:
         keys = ["structured_wordlist_path", "main_wordlist_path", "wordlist_path"]
         paths: List[Path] = []
+        # Language Agent is imported by desktop applications whose working
+        # directory is not the SLAI root. Configuration paths are repository-
+        # relative; looking them up against the caller's CWD silently selects
+        # the tiny fallback vocabulary and flags almost every ordinary word.
+        project_root = Path(__file__).resolve().parents[4]
+
+        def wordlist_path(value: Any, key: str) -> Path:
+            configured = resolve_path(ensure_text(value), field_name=key)
+            if configured.is_absolute() or configured.exists():
+                return configured
+            return project_root / configured
+
         for key in keys:
             value = self.checker_config.get(key, self.config.get(key))
             if value in (None, "", "none", "None"):
                 continue
-            path = resolve_path(ensure_text(value), field_name=key)
+            path = wordlist_path(value, key)
             if path not in paths:
                 paths.append(path)
         for item in ensure_list(self.checker_config.get("domain_dictionary_paths", [])):
             if not ensure_text(item).strip():
                 continue
-            path = resolve_path(ensure_text(item), field_name="domain_dictionary_paths")
+            path = wordlist_path(item, "domain_dictionary_paths")
             if path not in paths:
                 paths.append(path)
         return paths
