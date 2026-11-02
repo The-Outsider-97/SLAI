@@ -12,7 +12,6 @@ import json
 import sqlite3
 import threading
 import uuid
-
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -227,6 +226,7 @@ class RevisionWorkflowStore:
             "tasks": {key: item.to_dict() for key, item in by_id.items()},
             "order": order, "status": {key: "pending" for key in by_id},
             "attempts": {key: [] for key in by_id},
+            "retired_tasks": {},
         }
         with self._lock, self._connection:
             self._connection.execute("INSERT INTO revision_workflows(plan_id,state_version,data) VALUES (?,?,?)",
@@ -397,6 +397,67 @@ class RevisionWorkflowStore:
             return {"_no_change": True}
 
         return self._mutate(plan_id, "plan.revised", change)
+
+    def revise_task_graph(self, plan_id: str, tasks: Sequence[RevisionTask], *,
+                          reason: str, expected_plan_revision: Optional[int] = None) -> dict[str, Any]:
+        """Atomically revise a dependency graph and retain superseded task history.
+
+        Unchanged tasks retain their results. Changed tasks and their
+        transitive dependents become stale. Running/uncertain tasks cannot be
+        silently edited or removed; their execution owner must reconcile them.
+        """
+        replacements = {task.task_id: task for task in tasks}
+        if not replacements or len(replacements) != len(tasks):
+            raise RevisionWorkflowError("revision requires distinct nonempty tasks")
+        order = _validate_graph(replacements)
+        normalized = {key: task.to_dict() for key, task in replacements.items()}
+
+        def change(state: dict[str, Any]) -> dict[str, Any]:
+            if (expected_plan_revision is not None and
+                    state["plan_revision"] != expected_plan_revision):
+                raise RevisionWorkflowError("plan revision conflict")
+            old = state["tasks"]
+            added = sorted(set(normalized) - set(old))
+            removed = sorted(set(old) - set(normalized))
+            modified = sorted(key for key in set(old) & set(normalized) if old[key] != normalized[key])
+            if not (added or removed or modified):
+                return {"_no_change": True}
+
+            # A downstream node can be invalidated by changed/removed parents
+            # even when its own specification is unchanged.
+            affected = set(modified)
+            for task_id in order:
+                if set(normalized[task_id]["depends_on"]) & affected:
+                    affected.add(task_id)
+            invalidated = affected & set(old)
+            active_edit = set(removed) | invalidated
+            busy = [task_id for task_id in active_edit if
+                    state["status"].get(task_id) in {"running", "outcome_unknown"}]
+            if busy:
+                raise RevisionWorkflowError(f"cannot edit running or uncertain tasks: {sorted(busy)}")
+
+            for task_id in removed:
+                state.setdefault("retired_tasks", {}).setdefault(task_id, []).append({
+                    "specification": old[task_id], "status": state["status"][task_id],
+                    "attempts": state["attempts"][task_id],
+                    "retired_at_plan_revision": state["plan_revision"] + 1,
+                })
+                state["status"].pop(task_id)
+                state["attempts"].pop(task_id)
+            for task_id in added:
+                state["status"][task_id] = "pending"
+                state["attempts"][task_id] = []
+            for task_id in invalidated:
+                if task_id in state["status"]:
+                    state["status"][task_id] = "stale"
+
+            state["tasks"] = normalized
+            state["order"] = order
+            state["plan_revision"] += 1
+            return {"added": added, "removed": removed, "modified": modified,
+                    "invalidated": sorted(invalidated), "reason": reason}
+
+        return self._mutate(plan_id, "plan.graph_revised", change)
 
     def mark_interrupted_tasks(self, plan_id: str) -> dict[str, Any]:
         """On recovery, mark orphaned runs uncertain; never retry them blindly."""

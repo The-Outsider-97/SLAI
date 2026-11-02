@@ -168,3 +168,44 @@ def test_authoritative_provider_refresh_blocks_obsolete_completion(tmp_path):
     with pytest.raises(RevisionWorkflowError, match="not running"):
         store.complete_task(plan_id, "simulate", attempt["run_id"])
     assert store.get_plan(plan_id)["status"]["simulate"] == "stale"
+
+
+def test_graph_revision_preserves_unchanged_results_and_archived_tasks(tmp_path):
+    store = RevisionWorkflowStore(tmp_path / "plans.db")
+    state = store.create_plan("project", [RevisionTask("a"), RevisionTask("b"),
+                                          RevisionTask("c", depends_on=("a",))], {"model": "v1"})
+    plan_id = state["plan_id"]
+    for task_id in ("a", "b", "c"):
+        attempt = store.claim_task(plan_id, task_id)
+        store.complete_task(plan_id, task_id, attempt["run_id"])
+    revised = store.revise_task_graph(plan_id, [
+        RevisionTask("a", reads={"model": "v1"}),
+        RevisionTask("c", depends_on=("a",)), RevisionTask("new", depends_on=("c",)),
+    ], reason="new calculation", expected_plan_revision=1)
+    assert revised["status"] == {"a": "stale", "c": "stale", "new": "pending"}
+    assert revised["retired_tasks"]["b"][0]["status"] == "succeeded"
+    assert len(revised["retired_tasks"]["b"][0]["attempts"]) == 1
+    diff = store.events(plan_id)[-1]["payload"]
+    assert diff["added"] == ["new"]
+    assert diff["removed"] == ["b"]
+    assert diff["invalidated"] == ["a", "c"]
+    with pytest.raises(RevisionWorkflowError, match="plan revision conflict"):
+        store.revise_task_graph(plan_id, [RevisionTask("new")], reason="conflicting editor",
+                                expected_plan_revision=1)
+
+
+def test_graph_revision_rejects_inflight_edits_and_cycles(tmp_path):
+    store = RevisionWorkflowStore(tmp_path / "plans.db")
+    state = store.create_plan("project", [RevisionTask("a"), RevisionTask("b", depends_on=("a",))], {})
+    plan_id = state["plan_id"]
+    store.claim_task(plan_id, "a")
+    with pytest.raises(RevisionWorkflowError, match="running"):
+        store.revise_task_graph(plan_id, [RevisionTask("a", reads={"x": "1"}),
+                                         RevisionTask("b", depends_on=("a",))], reason="edit")
+    with pytest.raises(RevisionWorkflowError, match="cyclic"):
+        store.revise_task_graph(plan_id, [RevisionTask("a", depends_on=("b",)),
+                                         RevisionTask("b", depends_on=("a",))], reason="invalid")
+    unchanged = store.get_plan(plan_id)
+    assert unchanged["plan_revision"] == 1
+    assert unchanged["state_version"] == 2
+    assert unchanged["status"] == {"a": "running", "b": "pending"}
