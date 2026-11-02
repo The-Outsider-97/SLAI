@@ -19,6 +19,7 @@ from .base_agent import BaseAgent
 from .planning.planning_types import Any, ResourceProfile, Task, TaskStatus, TaskType, WorldState
 from .planning.planning_metrics import PlanningMetrics
 from .planning.planning_executor import PlanningExecutor
+from .planning.revision_workflow import RevisionTask, RevisionWorkflowStore
 from .planning.heuristic_selector import HeuristicSelector
 from .planning.task_scheduler import DeadlineAwareScheduler
 from .planning.plan_success_predictor import PlanSuccessPredictor, task_history_from_method_stats
@@ -144,6 +145,9 @@ class PlanningAgent(BaseAgent):
         self._last_replan_at: float = 0.0
         self.last_error: Optional[Dict[str, TypingAny]] = None
         self.last_diagnostics: Dict[str, TypingAny] = {}
+        # Durable project-bound workflows are opt-in. Initializing the legacy
+        # planner does not create a database or change existing task execution.
+        self._revision_workflows: Optional[RevisionWorkflowStore] = None
 
         self.scheduler = DeadlineAwareScheduler()
         self.metrics = PlanningMetrics()
@@ -178,6 +182,37 @@ class PlanningAgent(BaseAgent):
         self._ensure_shared_memory_defaults()
 
         logger.info("PlanningAgent successfully initialized")
+
+    @property
+    def revision_workflows(self) -> RevisionWorkflowStore:
+        """Application-neutral revision planning, opened only when requested."""
+        if self._revision_workflows is None:
+            path = self.agent_config.get("revision_workflow_path", "data/planning/revision_workflows.sqlite3")
+            self._revision_workflows = RevisionWorkflowStore(path)
+        return self._revision_workflows
+
+    def create_revision_plan(
+        self, project_id: str, tasks: Sequence[Task], source_revisions: Dict[str, str],
+        *, plan_id: Optional[str] = None,
+    ) -> Dict[str, TypingAny]:
+        """Bind existing SLAI Tasks to revision-aware, durable dependency nodes.
+
+        Task context may declare ``read_revisions``, ``write_artifacts`` and
+        ``verification_required``. Tasks with no explicit reads conservatively
+        depend on the complete observed project revision set.
+        """
+        specifications = []
+        for task in tasks:
+            context = getattr(task, "context", {}) or {}
+            specifications.append(RevisionTask(
+                task_id=task.id,
+                depends_on=tuple(self._dependency_ids(task)),
+                reads=dict(context.get("read_revisions") or {}),
+                writes=tuple(context.get("write_artifacts") or ()),
+                capability=context.get("capability"),
+                verification_required=bool(context.get("verification_required", False)),
+            ))
+        return self.revision_workflows.create_plan(project_id, specifications, source_revisions, plan_id=plan_id)
 
     # ------------------------------------------------------------------
     # Configuration and shared-memory helpers
@@ -1204,6 +1239,13 @@ class PlanningAgent(BaseAgent):
 
         try:
             self._assert_plan_acyclic(effective_plan)
+            # The legacy path is sequential, but it must still respect data
+            # dependencies even if callers supplied an unordered task list.
+            task_by_id = {task.id: task for task in effective_plan}
+            if len(task_by_id) != len(effective_plan):
+                raise PlanningError("Cannot execute a plan with duplicate task IDs")
+            ordered_ids = topological_sort(list(task_by_id), self._dependency_map_for_schedule(effective_plan))
+            effective_plan = [task_by_id[task_id] for task_id in ordered_ids]
         except PlanningError as exc:
             self._record_error(exc, stage="execute_plan")
             return {"status": TaskStatus.FAILED.name, "world_state": self.world_state, "metrics": execution_metrics, "error": exc.to_dict()}
@@ -1226,6 +1268,19 @@ class PlanningAgent(BaseAgent):
                 if self.execution_interrupted:
                     logger.warning("Execution interrupted by monitor")
                     break
+
+                failed_deps = [dep for dep in self._dependency_ids(task)
+                               if dep in task_by_id and task_by_id[dep].status != TaskStatus.SUCCESS]
+                if failed_deps:
+                    task.status = TaskStatus.FAILED
+                    execution_metrics["failure_count"] += 1
+                    psp_causes.add("dependency")
+                    self._record_error(
+                        PlanningError("Required tasks did not complete successfully",
+                                      context={"task_id": task.id, "dependencies": failed_deps}),
+                        stage="task_dependency", task=task,
+                    )
+                    continue
 
                 start_time = time.time()
                 task.status = TaskStatus.EXECUTING

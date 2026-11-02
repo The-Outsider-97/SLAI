@@ -15,6 +15,7 @@ from __future__ import annotations
 __version__ = "2.3.0"
 
 import threading
+import copy
 
 from collections import defaultdict
 from collections.abc import Mapping
@@ -31,6 +32,7 @@ from .provenance_types import (
     ProvenanceEntity,
     ProvenanceRecord,
     ProvenanceRelation,
+    RevisionEvidence,
     SourceRecord,
     TransformationRecord,
 )
@@ -60,6 +62,7 @@ class ProvenanceStore:
         "checkpoints",
         "dependencies",
         "transformations",
+        "revision_events",
     )
 
     _registry_guard = threading.RLock()
@@ -181,6 +184,8 @@ class ProvenanceStore:
         checkpoints_by_model: Dict[str, List[str]] = defaultdict(list)
         relations_by_subject: Dict[str, List[str]] = defaultdict(list)
         relations_by_object: Dict[str, List[str]] = defaultdict(list)
+        revision_events_by_artifact: Dict[str, List[str]] = defaultdict(list)
+        revision_events_by_plan: Dict[str, List[str]] = defaultdict(list)
 
         for record_id, record in self._state["lineage_records"].items():
             artifact_id = record.get("artifact_id")
@@ -221,6 +226,12 @@ class ProvenanceStore:
             if object_id:
                 relations_by_object[str(object_id)].append(relation_id)
 
+        for event_id, record in self._state["revision_events"].items():
+            if record.get("artifact_id"):
+                revision_events_by_artifact[str(record["artifact_id"])].append(event_id)
+            if record.get("plan_id"):
+                revision_events_by_plan[str(record["plan_id"])].append(event_id)
+
         for mapping in (
             lineage_by_artifact,
             custody_by_artifact,
@@ -230,6 +241,8 @@ class ProvenanceStore:
             checkpoints_by_model,
             relations_by_subject,
             relations_by_object,
+            revision_events_by_artifact,
+            revision_events_by_plan,
         ):
             for values in mapping.values():
                 values.sort()
@@ -244,6 +257,8 @@ class ProvenanceStore:
             "checkpoints_by_model": dict(checkpoints_by_model),
             "relations_by_subject": dict(relations_by_subject),
             "relations_by_object": dict(relations_by_object),
+            "revision_events_by_artifact": dict(revision_events_by_artifact),
+            "revision_events_by_plan": dict(revision_events_by_plan),
         }
 
     @staticmethod
@@ -324,6 +339,26 @@ class ProvenanceStore:
     def save_relation(self, record: ProvenanceRelation | Mapping[str, Any]) -> Dict[str, Any]:
         typed = record if isinstance(record, ProvenanceRelation) else ProvenanceRelation.from_dict(record)
         return self._upsert("relations", typed.relation_id, typed.to_dict())
+
+    def save_revision_event(self, record: RevisionEvidence | Mapping[str, Any]) -> Dict[str, Any]:
+        """Persist an immutable execution/revision fact, idempotently by event_id."""
+        typed = record if isinstance(record, RevisionEvidence) else RevisionEvidence.from_dict(record)
+        return copy.deepcopy(self._upsert("revision_events", typed.event_id, typed.to_dict()))
+
+    def get_revision_events(self, *, artifact_id: Optional[str] = None,
+                            plan_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Query event history; supplied filters are intersected."""
+        with self._lock:
+            self._refresh_if_changed()
+            keys = set(self._state["revision_events"])
+            if artifact_id is not None:
+                artifact = require_identifier(artifact_id, field_name="artifact_id")
+                keys.intersection_update(self._indexes["revision_events_by_artifact"].get(artifact, ()))
+            if plan_id is not None:
+                plan = require_identifier(plan_id, field_name="plan_id")
+                keys.intersection_update(self._indexes["revision_events_by_plan"].get(plan, ()))
+            events = [copy.deepcopy(self._state["revision_events"][key]) for key in keys]
+            return sorted(events, key=lambda item: (item["timestamp"], item["event_id"]))
 
     # ------------------------------------------------------------------
     # Lineage
@@ -541,6 +576,8 @@ class ProvenanceStore:
             relation_keys = set(self._indexes["relations_by_subject"].get(artifact, ()))
             relation_keys.update(self._indexes["relations_by_object"].get(artifact, ()))
             relations = [dict(self._state["relations"][key]) for key in sorted(relation_keys)]
+            revision_keys = self._indexes["revision_events_by_artifact"].get(artifact, ())
+            revision_events = [copy.deepcopy(self._state["revision_events"][key]) for key in revision_keys]
 
             source_ids: Set[str] = set()
             parent_ids: Set[str] = set()
@@ -580,6 +617,7 @@ class ProvenanceStore:
                     transformations,
                     checkpoints,
                     relations,
+                    revision_events,
                 )
             )
             if not has_evidence:
@@ -605,6 +643,7 @@ class ProvenanceStore:
                 "agents": agents,
                 "activities": activities,
                 "relations": relations,
+                "revision_events": sorted(revision_events, key=lambda item: (item["timestamp"], item["event_id"])),
             }
 
     def snapshot(self) -> Dict[str, Any]:
