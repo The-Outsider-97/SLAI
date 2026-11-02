@@ -1119,6 +1119,18 @@ class SceneDocument(SpatialDocument):
         write_bytes_atomic(path, data, overwrite=overwrite)
         return report
 
+    def to_obj(self, object_ids=None, *, policy="best_effort", radial_segments: int = 32, latitude_bands: int = 16):
+        """``(obj_bytes, ConversionReport)``: one OBJ object per selected scene object, in the world frame (geometry only)."""
+        from ..adapters.exchange import scene_to_obj
+        ids = None if object_ids is None else ([object_ids] if isinstance(object_ids, str) else list(object_ids))
+        return scene_to_obj(self.snapshot(), object_ids=ids, policy=policy, radial_segments=radial_segments, latitude_bands=latitude_bands)
+
+    def export_obj(self, path, object_ids=None, *, overwrite: bool = False, **kwargs):
+        from ..common.atomic import write_bytes_atomic
+        data, report = self.to_obj(object_ids, **kwargs)
+        write_bytes_atomic(path, data, overwrite=overwrite)
+        return report
+
     @classmethod
     def from_glb(cls, data: bytes, *, name: str | None = None, policy="best_effort"):
         """``(document, ConversionReport)`` from GLB bytes (meshes + node hierarchy)."""
@@ -1138,6 +1150,18 @@ class SceneDocument(SpatialDocument):
         from ..adapters.exchange import stl_to_scene
         scene, report = stl_to_scene(data, name=name, unit=unit, weld=weld, policy=policy)
         return cls(scene), report
+
+    @classmethod
+    def from_obj(cls, data: bytes, *, name: str = "Imported OBJ", unit: str = "mm", weld: bool = True, policy="best_effort"):
+        """``(document, ConversionReport)`` from Wavefront OBJ bytes (``unit`` is your declaration; one object per o/g group)."""
+        from ..adapters.exchange import obj_to_scene
+        scene, report = obj_to_scene(data, name=name, unit=unit, weld=weld, policy=policy)
+        return cls(scene), report
+
+    @classmethod
+    def import_obj(cls, path, **kwargs):
+        from ..adapters.obj import MAX_BYTES
+        return cls.from_obj(_read_bounded(path, MAX_BYTES, "OBJ"), **kwargs)
 
     @classmethod
     def import_stl(cls, path, **kwargs):

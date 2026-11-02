@@ -25,12 +25,13 @@ from ..common.errors import UnsupportedFeatureError
 from ..common.helpers import MAX_DOCUMENT_NODES, canonical_json, digest
 from ..verification.loss_report import ConversionReport
 from .contracts import Policy, enforce_policy
+from .obj import export_obj, import_obj
 from .stl import export_binary_stl, import_binary_stl
 from .svg import export_svg, import_svg
 
 __all__ = ["mesh_to_stl", "stl_to_mesh", "drawing_to_svg", "svg_to_drawing", "drawing_to_dxf",
            "dxf_to_drawing", "drawing_to_dwg", "dwg_to_drawing", "scene_to_glb", "glb_to_scene",
-           "scene_to_stl", "stl_to_scene", "ifc_to_scene"]
+           "scene_to_stl", "stl_to_scene", "scene_to_obj", "obj_to_scene", "ifc_to_scene"]
 
 _FULL_SWEEP = tau - 1e-9
 
@@ -438,6 +439,70 @@ def stl_to_scene(data, *, name="Imported STL", unit="mm", weld=True, policy="bes
         approximations=["vertex coordinates are float32 values widened to float64"],
         assumptions=[f"STL coordinates interpreted as {unit}",
                      "vertices welded by exact coordinate equality" if weld else "no welding applied"],
+        warnings=warnings)
+    return scene, report
+
+
+def scene_to_obj(scene, *, object_ids=None, policy="best_effort", radial_segments=32, latitude_bands=16):
+    """Export selected (default: all) objects as Wavefront OBJ in the world frame: one ``o`` block per object, so names and separation survive."""
+    from ..sgeo.meshing import extract_meshes
+    scene.validate()
+    extraction = extract_meshes(scene, object_ids, radial_segments=radial_segments, latitude_bands=latitude_bands)
+    if not extraction.meshes:
+        raise UnsupportedFeatureError("selection contains no triangle geometry to export")
+    selected = None if object_ids is None else set(object_ids)
+    in_scope = [o for o in scene.objects if selected is None or o["id"] in selected]
+    dropped = ["scene hierarchy (objects are listed flat)", "units (OBJ declares none)"]
+    if any("material" in o for o in in_scope):
+        dropped.append("materials and textures")
+    if extraction.skipped:
+        dropped.append(f"{len(extraction.skipped)} object(s) without a triangle surface (points, segments, NURBS curves)")
+    if any(o.get("metadata") for o in in_scope) or (scene.metadata and selected is None):
+        dropped.append("semantic metadata")
+    if any("family_id" in o for o in in_scope):
+        dropped.append("parametric family information")
+    approximations = []
+    if extraction.tessellated:
+        kinds = Counter(extraction.tessellated.values())
+        approximations.append("analytic, NURBS and B-rep geometry tessellated to triangles: " + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items())))
+    warnings = []
+    if extraction.mirrored:
+        warnings.append(f"{len(extraction.mirrored)} mirrored object(s): triangle winding was corrected")
+    enforce_policy(policy, losses=dropped, approximations=approximations)
+    names = {o["id"]: o.get("name") or o["id"] for o in in_scope}
+    data = export_obj([(names[oid], mesh) for oid, mesh in extraction.meshes.items()], unit_comment=f"Coordinates are in {scene.unit}, in the world frame")
+    report = ConversionReport(source_digest=_scene_digest(scene), target_digest=digest(data),
+        adapter="wavefront-obj", adapter_version="1", accuracy_class="approximate" if approximations else "exact",
+        object_mapping={oid: f"o {names[oid]}" for oid in extraction.meshes}, dropped=dropped, approximations=approximations,
+        assumptions=[f"coordinates are expressed in the scene unit '{scene.unit}' in the world frame", "object names have spaces replaced by '_'"],
+        warnings=warnings + ["OBJ has no standard physical unit declaration"])
+    return data, report
+
+
+def obj_to_scene(data, *, name="Imported OBJ", unit="mm", weld=True, policy="best_effort"):
+    """Import Wavefront OBJ as a scene with one object per ``o``/``g`` group (optionally welding duplicate vertices within each)."""
+    from ..sgeo.meshing import weld_vertices
+    from ..sgeo.scene import Scene
+    groups, info = import_obj(data)
+    dropped = ["materials, normals, texture coordinates and smoothing groups"] if info["skipped"] else []
+    dropped += [f"{count} {what}" for what, count in sorted(info["skipped"].items())]
+    approximations, warnings = [], []
+    if info["triangulated"]:
+        approximations.append(f"{info['triangulated']} polygon(s) with more than three corners were split into triangle fans (exact for convex polygons only)")
+    enforce_policy(policy, losses=(), approximations=approximations)
+    scene = Scene(name=name, unit=unit)
+    removed = 0
+    for index, (group, mesh) in enumerate(groups, 1):
+        if weld:
+            mesh, collapsed = weld_vertices(mesh)
+            removed += collapsed
+        scene.add_object(name=group or (name if len(groups) == 1 else f"{name} {index}"), geometry=mesh)
+    if removed:
+        warnings.append(f"{removed} degenerate triangle(s) removed while welding")
+    report = ConversionReport(source_digest=digest(data), target_digest=_scene_digest(scene),
+        adapter="wavefront-obj", adapter_version="1", accuracy_class="approximate", dropped=dropped, approximations=approximations,
+        assumptions=[f"OBJ coordinates interpreted as {unit}", "vertices welded by exact coordinate equality" if weld else "no welding applied",
+                     "each o/g group became one object; faces before any group form the first object"],
         warnings=warnings)
     return scene, report
 

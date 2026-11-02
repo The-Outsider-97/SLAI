@@ -74,8 +74,8 @@ bumps the revision once; `apply([...ops], expected_revision=n)` runs a batch as
 * SVG import allocates fresh entity ids unless `preserve_ids=True`. DXF and SVG
   export a full-sweep arc as a circle; arcs with an equal start and end angle do
   not exist.
-* SGEO exports to GLB (metres, +Y up) and STL (merged mesh, no units) tessellate
-  analytic primitives, NURBS and B-reps; both reports list exactly what that cost.
+* SGEO exports to GLB (metres, +Y up), STL (merged mesh, no units) and OBJ (one `o` block per object, no units) tessellate
+  analytic primitives, NURBS and B-reps; each report lists exactly what that cost.
 
 ### Command line
 
@@ -84,11 +84,12 @@ python -m src.utils.spatial_formats inspect  plan.sdrw [--verify digests]
 python -m src.utils.spatial_formats validate room.sgeo [--mode strict|basic]
 python -m src.utils.spatial_formats convert  plan.sdrw plan.svg [--policy strict] [--overwrite]
 python -m src.utils.spatial_formats convert  drawing.dxf plan.sdrw
+python -m src.utils.spatial_formats convert  room.sgeo room.obj [--unit mm]
 python -m src.utils.spatial_formats capabilities
 ```
 
 One JSON document on stdout; exit code 0 ok, 1 failed/invalid (`code` field),
-2 usage error. GLB and STL need no backend (native codecs). DXF needs
+2 usage error. GLB, STL and OBJ need no backend (native codecs). DXF needs
 `ezdxf`; install it with `pip install ".[spatial]"` (the extra also lists
 `trimesh`, which is only used by tests as an independent GLB reader).
 
@@ -252,6 +253,13 @@ face. Mesh vertices, faces and UVs are stored in content-addressed `geometry/sha
   are dropped and reported.
 * **STL** drops materials, textures and UVs (the report says so) and tessellates B-reps; the result is a closed
   solid after welding.
+* **OBJ** (Wavefront, UTF-8 text) carries geometry and the `o`/`g` object names only. Export writes one `o` block per
+  triangle-mesh object with global 1-based indices; units, materials, hierarchy, identity and semantics are dropped
+  and the report says so. Import keeps `v` and `f`, splits every group into its own object with only the vertices
+  its faces use, fans polygons of more than three corners into triangles (exact for convex polygons only; the count is
+  reported), counts and drops normals, texture coordinates, `mtllib`/`usemtl`, smoothing groups, points and lines,
+  and refuses free-form curves and surfaces. OBJ states no unit, so import requires one (default `mm`) and reports it
+  as an assumption. Limits: 64 MB, 2 000 000 faces, 4 000 000 vertices, 10 000 groups.
 
 ## Responsibilities
 
@@ -262,7 +270,7 @@ face. Mesh vertices, faces and UVs are stored in content-addressed `geometry/sha
 | `sgeo` | Hierarchy, analytic/mesh/NURBS/B-rep geometry, materials and textures, solids, tessellation, typed families and transactions |
 | `container` | Deterministic ZIP transport, hashes, binary mesh and texture members, version migration and validated publication |
 | `verification` | Local JSON schemas, semantic validation and conversion reports |
-| `adapters` | Explicit, bounded exchange subsets: SVG, DXF (`ezdxf`), native GLB and STL; optional DWG/STEP/IFC backends |
+| `adapters` | Explicit, bounded exchange subsets: SVG, DXF (`ezdxf`), native GLB, STL and OBJ; optional DWG/STEP/IFC backends |
 
 Coordinates use the document's declared length unit. SGEO is right-handed,
 +Z up; transforms are flat row-major 4×4 matrices acting on column vectors.
@@ -374,7 +382,7 @@ conservative broad-phase bounds, not exact intersection tests.
   `data-cx/cy/r/start/end` attributes and are re-imported only when the path
   data agree with those parameters; any other path is refused. Text, hatches, dimensions and
   inserts are written for viewing only.
-- STL remains a triangle-only presentation format. DWG, STEP and IFC retain
+- STL and OBJ remain triangle-only presentation formats (OBJ also keeps object names). DWG, STEP and IFC retain
   their explicit optional-backend contracts; this package provides no B-rep
   modelling kernel and does not promise lossless industrial CAD/BIM round-trips.
 

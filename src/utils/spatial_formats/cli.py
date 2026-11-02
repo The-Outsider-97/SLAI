@@ -13,7 +13,7 @@ document is invalid (the JSON carries a stable ``code``), 2 usage error.
 ``convert`` picks the direction from the file suffixes:
 
 * into SDRW: ``.svg``, ``.dxf``, ``.dwg``        * out of SDRW: ``.svg``, ``.dxf``, ``.dwg``
-* into SGEO: ``.glb``, ``.stl``, ``.ifc``        * out of SGEO: ``.glb``, ``.stl``
+* into SGEO: ``.glb``, ``.stl``, ``.obj``, ``.ifc``        * out of SGEO: ``.glb``, ``.stl``, ``.obj``
 """
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ EXIT_OK, EXIT_FAILED, EXIT_USAGE = 0, 1, 2
 
 _POLICIES = ("strict", "lossless_where_supported", "allow_approximation", "best_effort")
 _INTO_SDRW = {".svg", ".dxf", ".dwg"}
-_INTO_SGEO = {".glb", ".stl", ".ifc"}
+_INTO_SGEO = {".glb", ".stl", ".obj", ".ifc"}
 _OUT_SDRW = {".svg", ".dxf", ".dwg"}
-_OUT_SGEO = {".glb", ".stl"}
+_OUT_SGEO = {".glb", ".stl", ".obj"}
 _NATIVE = {".sdrw", ".sgeo"}
 
 
@@ -99,7 +99,7 @@ def _convert(src: Path, dst: Path, args):
             return document.export_dwg(dst, executable=_require_dwg_executable(args, d),
                                        overwrite=args.overwrite, policy=args.policy)
         if isinstance(document, SceneDocument) and d in _OUT_SGEO:
-            export = document.export_glb if d == ".glb" else document.export_stl
+            export = {".glb": document.export_glb, ".stl": document.export_stl, ".obj": document.export_obj}[d]
             return export(dst, overwrite=args.overwrite, policy=args.policy)
         raise ValidationError("cannot convert %s to %s" % (s, d))
     if d == ".sdrw" and s in _INTO_SDRW:
@@ -116,6 +116,8 @@ def _convert(src: Path, dst: Path, args):
             document, report = SceneDocument.import_glb(src, policy=args.policy)
         elif s == ".stl":
             document, report = SceneDocument.import_stl(src, unit=args.unit or "mm", policy=args.policy)
+        elif s == ".obj":
+            document, report = SceneDocument.import_obj(src, unit=args.unit or "mm", policy=args.policy)
         else:
             document, report = SceneDocument.import_ifc(src, policy=args.policy)
     else:
@@ -150,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-issues", type=int, default=200)
     p.set_defaults(handler=_cmd_validate)
 
-    p = commands.add_parser("convert", help="convert to or from SVG/DXF/DWG (2D) and GLB/STL/IFC (3D)")
+    p = commands.add_parser("convert", help="convert to or from SVG/DXF/DWG (2D) and GLB/STL/OBJ/IFC (3D)")
     p.add_argument("source")
     p.add_argument("destination")
     p.add_argument("--policy", choices=_POLICIES, default="best_effort")

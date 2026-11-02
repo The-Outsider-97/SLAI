@@ -6,10 +6,11 @@ explicitly configured ODA converter) are imported lazily by the functions that
 need them and fail with :class:`DependencyUnavailableError` when absent.
 """
 from .svg import export_svg, import_svg
+from .obj import export_obj, import_obj
 from .stl import export_binary_stl, import_binary_stl
 from .contracts import Capabilities, Policy
 
-__all__ = ["export_svg", "import_svg", "export_binary_stl", "import_binary_stl", "Capabilities", "Policy",
+__all__ = ["export_svg", "import_svg", "export_binary_stl", "import_binary_stl", "export_obj", "import_obj", "Capabilities", "Policy",
            "capabilities"]
 
 
@@ -27,6 +28,9 @@ def capabilities(*, dwg_executable=None) -> dict:
                              "Display coordinates are not y-flipped")),
         "stl": Capabilities("stl", "struct", True, ("binary",), ("binary",), ("triangle mesh",),
                             ("No units, names, hierarchy or semantics", "float32 coordinates")),
+        "obj": Capabilities("obj", "text", True, ("polygon meshes",), ("triangle meshes",), ("triangle mesh",),
+                            ("Geometry and o/g object names only: no units, materials, hierarchy or semantics",
+                             "Free-form curves and surfaces are refused", "Polygons with more than three corners are fan-triangulated (convex only)")),
     }
     probes = {"dxf": dxf.capabilities, "glb": gltf.capabilities, "ifc": ifc.capabilities,
               "step": step.capabilities, "dwg": lambda: dwg.capabilities(dwg_executable)}

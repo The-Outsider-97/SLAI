@@ -730,12 +730,26 @@ def _validate_sections(sections: Any, ctx: _Context) -> None:
                 template = section[edge]
                 if not isinstance(template, dict):
                     raise SLDCValidationError(f"{label}.{edge} must be an object")
-                _check_keys(template, {"left", "center", "right", "style"}, f"{label}.{edge}")
+                _check_keys(template, {"left", "center", "right", "style", "formats"}, f"{label}.{edge}")
                 for position in ("left", "center", "right"):
                     if position in template:
                         _check_template(template[position], f"{label}.{edge}.{position}")
                 if "style" in template and not _has(ctx.paragraph_styles, template["style"]):
                     raise SLDCValidationError(f"{label}.{edge}.style is not a paragraph style")
+                # Formatting is attached to the semantic header/footer fields,
+                # not a browser-only CSS override. Older SLDC readers can
+                # ignore this optional 1.x field without losing the text.
+                if "formats" in template:
+                    formats = template["formats"]
+                    if not isinstance(formats, dict):
+                        raise SLDCValidationError(f"{label}.{edge}.formats must be an object")
+                    _check_keys(formats, {"left", "center", "right"}, f"{label}.{edge}.formats")
+                    for position, props in formats.items():
+                        where = f"{label}.{edge}.formats.{position}"
+                        if not isinstance(props, dict):
+                            raise SLDCValidationError(f"{where} must be an object")
+                        _check_keys(props, {"font_family", "font_size_pt", "color", "bold", "italic", "underline"}, where)
+                        _validate_style_props(props, where, paragraph=False)
         if "numbering" in section:
             numbering = section["numbering"]
             if not isinstance(numbering, dict):
