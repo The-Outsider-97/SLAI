@@ -1,5 +1,5 @@
 """
-Typed provenance domain model for SLAI v2.3.
+Typed provenance domain model for SLAI v2.4.
 
 The model follows W3C PROV-DM's Entity/Activity/Agent and relationship semantics
 without requiring RDF.  Records are frozen dataclasses so persisted provenance
@@ -14,7 +14,7 @@ lineage extensions.
 
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 from dataclasses import dataclass, field, fields
 from enum import Enum
