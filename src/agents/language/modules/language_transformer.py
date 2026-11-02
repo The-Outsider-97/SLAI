@@ -420,8 +420,6 @@ class LanguageTransformer(BaseTransformer):
         """Language-aware forward pass with automatic causal target mask."""
 
         if tgt_mask is None:
-            # Keep causal and key-padding masks boolean to avoid PyTorch's
-            # deprecated mixed-type attention-mask behavior.
             tgt_mask = self.generate_square_subsequent_mask(tgt.size(1), device=tgt.device).isneginf()
         output = super().forward(
             src,
@@ -661,23 +659,113 @@ class LanguageTransformer(BaseTransformer):
         if normalized_strategy in {"beam", "beam_search"}:
             return self.beam_search_decode(src, return_dict=return_dict, **kwargs)
         if normalized_strategy in {"greedy", "sample", "sampling"}:
-            do_sample = normalized_strategy in {"sample", "sampling"}
-            return super().inference(
-                src,
-                max_len=kwargs.get("max_len", self.max_generation_length),
-                sos_token=kwargs.get("bos_token_id", self.bos_token_id),
-                eos_token=kwargs.get("eos_token_id", self.eos_token_id),
-                temperature=kwargs.get("temperature", self.temperature),
-                do_sample=kwargs.get("do_sample", do_sample),
-                top_k=kwargs.get("top_k", self.top_k),
-                return_dict=return_dict,
-                capture_logits=kwargs.get("capture_logits", False),
-            )
+            do_sample = bool(kwargs.pop("do_sample", normalized_strategy in {"sample", "sampling"}))
+            sequences = self.generate_batch(src, do_sample=do_sample, **kwargs)
+            if return_dict:
+                return GenerationOutput(
+                    sequences=sequences,
+                    logits_history=None,
+                    token_scores=[],
+                    metadata={"strategy": normalized_strategy, "do_sample": do_sample},
+                )
+            return sequences
         raise self._model_error(
             "Unsupported generation strategy.",
             code=LanguageErrorCode.MODEL_INFERENCE_FAILED,
             details={"strategy": strategy, "supported": ["beam", "greedy", "sample"]},
         )
+
+    def generate_batch(
+        self,
+        src: torch.Tensor,
+        *,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+        max_len: Optional[int] = None,
+        do_sample: bool = False,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        repetition_penalty: Optional[float] = None,
+        no_repeat_ngram_size: Optional[int] = None,
+        min_length: Optional[int] = None,
+        bos_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """Batched greedy / sampled decoding with padding masks and anti-repetition constraints.
+
+        Unlike ``BaseTransformer.inference`` this honours the source padding mask (so padded
+        batches are decoded exactly like single sequences) and applies, per row,
+        ``repetition_penalty``, ``no_repeat_ngram_size`` and ``min_length``. A model that has
+        not learnt to stop would otherwise emit ``meta meta meta ...`` under plain argmax.
+        PAD and BOS are never emitted. Defaults come from ``language_transformer.generation``.
+        """
+
+        src = self._coerce_token_tensor(src, field_name="src", device=self._device())
+        steps = coerce_int(max_len if max_len is not None else self.max_generation_length, default=self.max_generation_length, minimum=1)
+        bos = self.bos_token_id if bos_token_id is None else int(bos_token_id)
+        eos = self.eos_token_id if eos_token_id is None else int(eos_token_id)
+        pad = int(self.pad_token_id)
+        temp = coerce_float(temperature if temperature is not None else self.temperature, default=self.temperature, minimum=1e-6)
+        k = coerce_int(top_k if top_k is not None else self.top_k, default=self.top_k, minimum=0)
+        p = 1.0 if top_p is None else float(top_p)
+        penalty = float(self.repetition_penalty if repetition_penalty is None else repetition_penalty)
+        ngram = int(self.no_repeat_ngram_size if no_repeat_ngram_size is None else no_repeat_ngram_size)
+        shortest = coerce_int(min_length if min_length is not None else self.min_generation_length, default=self.min_generation_length, minimum=0)
+
+        was_training = self.training
+        self.eval()
+        try:
+            with torch.no_grad():
+                memory = self.encode(src, src_key_padding_mask=src_key_padding_mask)
+                rows = int(src.size(0))
+                generated = torch.full((rows, 1), bos, dtype=torch.long, device=src.device)
+                finished = torch.zeros(rows, dtype=torch.bool, device=src.device)
+                for step in range(steps):
+                    tgt_mask = self.generate_square_subsequent_mask(generated.size(1), device=src.device).isneginf()
+                    decoded = self.decode(generated, memory, tgt_mask=tgt_mask, memory_key_padding_mask=src_key_padding_mask)
+                    logits = self.output_projection(decoded[:, -1, :]).float()
+                    logits[:, pad] = float("-inf")
+                    logits[:, bos] = float("-inf")
+                    if step < shortest:
+                        logits[:, eos] = float("-inf")
+                    if penalty != 1.0:
+                        seen = generated[:, 1:] if generated.size(1) > 1 else generated[:, :0]
+                        if seen.numel():
+                            picked = logits.gather(1, seen)
+                            picked = torch.where(picked < 0, picked * penalty, picked / penalty)
+                            logits.scatter_(1, seen, picked)
+                    if ngram > 0 and generated.size(1) >= ngram:
+                        for row in range(rows):
+                            if bool(finished[row]):
+                                continue
+                            banned = self._banned_ngram_tokens(generated[row, 1:].tolist(), ngram)
+                            if banned:
+                                logits[row, banned] = float("-inf")
+                    if do_sample:
+                        logits = logits / temp
+                        if k > 0 and k < logits.size(-1):
+                            cutoff = torch.topk(logits, k, dim=-1).values[:, -1:]
+                            logits = logits.masked_fill(logits < cutoff, float("-inf"))
+                        if p < 1.0:
+                            sorted_logits, order = torch.sort(logits, descending=True, dim=-1)
+                            cumulative = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                            drop = cumulative - F.softmax(sorted_logits, dim=-1) > p
+                            sorted_logits = sorted_logits.masked_fill(drop, float("-inf"))
+                            logits = torch.full_like(logits, float("-inf")).scatter(1, order, sorted_logits)
+                        chosen = torch.multinomial(F.softmax(logits, dim=-1), 1, generator=generator)
+                    else:
+                        chosen = logits.argmax(dim=-1, keepdim=True)
+                    chosen = chosen.masked_fill(finished.unsqueeze(1), eos)
+                    generated = torch.cat([generated, chosen], dim=1)
+                    finished = finished | chosen.squeeze(1).eq(eos)
+                    if bool(finished.all()):
+                        break
+        finally:
+            if was_training:
+                self.train()
+        self._record_language_event("generate_batch", batch_size=int(src.size(0)), steps=int(generated.size(1) - 1), sampled=bool(do_sample))
+        return generated
 
     def sequence_score(
         self,
@@ -697,37 +785,47 @@ class LanguageTransformer(BaseTransformer):
                 details={"tgt_shape": list(tgt.shape)},
             )
 
+        decoder_input = tgt[:, :-1]
+        targets = tgt[:, 1:]
+        effective_ignore = self.ignore_index if ignore_index is None else int(ignore_index)
+        token_count = int(targets.ne(effective_ignore).sum().detach().cpu().item())
+        if token_count == 0:
+            raise self._model_error(
+                "Target sequence must contain at least one non-ignored scorable token.",
+                code=LanguageErrorCode.MODEL_INFERENCE_FAILED,
+            )
+
         was_training = self.training
         self.eval()
-        with torch.no_grad():
-            decoder_input = tgt[:, :-1]
-            targets = tgt[:, 1:]
-            tgt_mask = self.generate_square_subsequent_mask(decoder_input.size(1), device=decoder_input.device).isneginf()
-            effective_ignore = self.ignore_index if ignore_index is None else int(ignore_index)
-            output = self.language_forward(src, decoder_input, tgt_mask=tgt_mask)
-            if isinstance(output, dict):
-                logits = output["logits"]
-            elif isinstance(output, tuple):
-                # BaseTransformer.forward returns (logits, memory) when return_dict=False
-                logits = output[0]
-            else:
-                logits = output
-            
-            # Now logits is a tensor, safe to reshape
-            loss_tensor = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                targets.reshape(-1),
-                ignore_index=effective_ignore,
-                reduction="mean",
-            )
-            valid_mask = targets.ne(effective_ignore)
-            token_count = int(valid_mask.sum().detach().cpu().item())
-            loss = float(loss_tensor.detach().cpu().item())
-            perplexity = self._safe_exp(loss)
-            mean_log_probability = -loss
-
-        if was_training:
-            self.train()
+        try:
+            with torch.no_grad():
+                tgt_mask = self.generate_square_subsequent_mask(decoder_input.size(1), device=decoder_input.device).isneginf()
+                src_padding_mask = src.eq(self.pad_token_id)
+                output = self.language_forward(
+                    src,
+                    decoder_input,
+                    tgt_mask=tgt_mask,
+                    src_key_padding_mask=src_padding_mask,
+                    tgt_key_padding_mask=decoder_input.eq(self.pad_token_id),
+                    memory_key_padding_mask=src_padding_mask,
+                )
+                if isinstance(output, dict):
+                    logits = output["logits"]
+                elif isinstance(output, tuple):
+                    logits = output[0]
+                else:
+                    logits = output
+                loss_tensor = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    targets.reshape(-1),
+                    ignore_index=effective_ignore,
+                    reduction="mean",
+                )
+                loss = float(loss_tensor.detach().cpu().item())
+                perplexity = self._safe_exp(loss)
+                mean_log_probability = -loss
+        finally:
+            self.train(was_training)
 
         self._record_language_event("sequence_score", loss=loss, perplexity=perplexity, token_count=token_count)
         return SequenceScore(

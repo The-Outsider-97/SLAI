@@ -26,12 +26,15 @@ safe to expand without turning every downstream module into a correction engine.
 from __future__ import annotations
 
 import math
+import os
 import re
+import tempfile
 import yaml
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from heapq import nlargest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from metaphone import doublemetaphone # pyright: ignore[reportMissingImports]
@@ -267,7 +270,7 @@ class SpellChecker:
         self.enable_phonetic = coerce_bool(self.checker_config.get("enable_phonetic", True), default=True)
         self.phonetic_algorithm = ensure_text(self.checker_config.get("phonetic_algorithm", "soundex")).lower()
         self.max_suggestions = coerce_int(self.checker_config.get("max_suggestions", 5), default=5, minimum=1)
-        self.max_candidates = coerce_int(self.checker_config.get("max_candidates", 2500), default=2500, minimum=1)
+        self.max_candidates = coerce_int(self.checker_config.get("max_candidates", 200), default=200, minimum=1)
         self.max_typo_variants = coerce_int(self.checker_config.get("max_typo_variants", 2500), default=2500, minimum=1)
         self.max_edit_distance = coerce_float(self.checker_config.get("max_edit_distance", 2.0), default=2.0, minimum=0.0)
         self.min_candidate_score = coerce_float(self.checker_config.get("min_candidate_score", 0.0), default=0.0, minimum=0.0, maximum=1.0)
@@ -290,6 +293,17 @@ class SpellChecker:
         self.keyboard_layout = self._load_keyboard_layout()
         self.typo_patterns = self._load_typo_patterns()
         self.ignore_words = self._load_ignore_words()
+        self.rejected_words = {
+            self._normalize_word(value)
+            for value in ensure_list(self.checker_config.get("rejected_words", []))
+            if ensure_text(value)
+        }
+        user_dictionary = self.checker_config.get("user_dictionary_path")
+        self.user_dictionary_path = (
+            Path(ensure_text(user_dictionary)).expanduser()
+            if user_dictionary not in (None, "", "none", "None") else None
+        )
+        self.personal_words: Set[str] = set()
         self.ignore_regexes = self._compile_ignore_patterns()
 
         self.entries: Dict[str, WordEntry] = {}
@@ -298,6 +312,11 @@ class SpellChecker:
         self.length_index: Dict[int, Set[str]] = defaultdict(set)
         self.prefix_index: Dict[str, Set[str]] = defaultdict(set)
         self.phonetic_map: Dict[str, Set[str]] = defaultdict(set)
+        # Lists are much lighter than one hash set per n-gram. Vocabulary
+        # indexing is rebuilt after mutations, so indexed postings are append-only.
+        self.ngram_index: Dict[str, List[str]] = defaultdict(list)
+        self._max_word_frequency = 0.0
+        self._min_word_frequency = 0.0
         self.wordlist_metadata: Dict[str, Any] = {}
         self.diagnostics = LanguageDiagnostics()
         self._check_calls = 0
@@ -379,6 +398,12 @@ class SpellChecker:
             path = resolve_path(ensure_text(value), field_name=key)
             if path not in paths:
                 paths.append(path)
+        for item in ensure_list(self.checker_config.get("domain_dictionary_paths", [])):
+            if not ensure_text(item).strip():
+                continue
+            path = resolve_path(ensure_text(item), field_name="domain_dictionary_paths")
+            if path not in paths:
+                paths.append(path)
         return paths
 
     def _load_lexical_resources(self) -> None:
@@ -393,6 +418,22 @@ class SpellChecker:
         inline_words = ensure_list(self.checker_config.get("additional_words", []))
         for word in inline_words:
             self._add_word_entry(ensure_text(word), source="config.additional_words")
+
+        if self.user_dictionary_path and self.user_dictionary_path.exists():
+            try:
+                payload = load_json_file(self.user_dictionary_path)
+                if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+                    raise ValueError("Personal spell-check dictionary must contain a JSON array of words")
+                for word in payload:
+                    normalized = self._normalize_word(word)
+                    if normalized:
+                        self.personal_words.add(normalized)
+                        self._add_word_entry(word, source="user_dictionary")
+            except (OSError, ValueError, TypeError) as exc:
+                self._record_resource_issue(self.user_dictionary_path, missing=False)
+                logger.warning("Personal dictionary could not be loaded: %s", exc)
+                if self.strict_loading:
+                    raise
 
         if not loaded_any and not self.entries:
             for word in self.DEFAULT_WORD_SEED:
@@ -541,14 +582,46 @@ class SpellChecker:
         self.length_index.clear()
         self.prefix_index.clear()
         self.phonetic_map.clear()
+        self.ngram_index.clear()
+        frequencies = [entry.frequency for entry in self.entries.values() if entry.frequency > 0]
+        self._max_word_frequency = max(frequencies, default=0.0)
+        self._min_word_frequency = min(frequencies, default=0.0)
         for word in self.words:
-            self.length_index[len(word)].add(word)
-            if self.prefix_window > 0:
-                self.prefix_index[word[: self.prefix_window]].add(word)
-            if self.enable_phonetic:
-                key = self._get_phonetic_key(word)
-                if key:
-                    self.phonetic_map[key].add(word)
+            self._index_word(word)
+
+    def _index_word(self, word: str) -> None:
+        self.length_index[len(word)].add(word)
+        if self.prefix_window > 0:
+            self.prefix_index[word[: self.prefix_window]].add(word)
+            if len(word) >= 2:
+                self.prefix_index[word[:2]].add(word)
+        for ngram in self._ngrams(word):
+            self.ngram_index[ngram].append(word)
+        if self.enable_phonetic:
+            key = self._get_phonetic_key(word)
+            if key:
+                self.phonetic_map[key].add(word)
+
+    def _unindex_word(self, word: str) -> None:
+        self.length_index[len(word)].discard(word)
+        if self.prefix_window > 0:
+            self.prefix_index[word[: self.prefix_window]].discard(word)
+            if len(word) >= 2:
+                self.prefix_index[word[:2]].discard(word)
+        for ngram in self._ngrams(word):
+            postings = self.ngram_index.get(ngram, [])
+            if word in postings:
+                postings.remove(word)
+        if self.enable_phonetic:
+            key = self._get_phonetic_key(word)
+            if key:
+                self.phonetic_map[key].discard(word)
+
+    @staticmethod
+    def _ngrams(word: str) -> Set[str]:
+        """Use trigrams for longer words and bigrams for short spellings."""
+        size = 2 if len(word) <= 5 else 3
+        return {word[i : i + size] for i in range(max(len(word) - size + 1, 0))}
 
     # ------------------------------------------------------------------
     # Normalization, filtering, and lookup
@@ -580,6 +653,8 @@ class SpellChecker:
         normalized = self._normalize_word(word)
         if not normalized:
             return False
+        if normalized in self.rejected_words:
+            return False
         if normalized in self.words:
             return True
         if self.enable_hyphenated_check and "-" in normalized:
@@ -595,35 +670,62 @@ class SpellChecker:
         entry = self.entries.get(normalized)
         if entry is None:
             return 0.0
-        if entry.frequency > 0:
-            max_frequency = max((candidate.frequency for candidate in self.entries.values()), default=entry.frequency)
-            return clamp_float(entry.frequency / max(max_frequency, 1.0), 0.0, 1.0)
-        # Resource has no frequencies; use a conservative lexical prior.
-        length_penalty = min(len(normalized), 24) / 24.0
-        return clamp_float(0.35 + (0.15 * length_penalty), 0.0, 0.5)
+        if self._max_word_frequency > self._min_word_frequency and entry.frequency > 0:
+            return clamp_float(entry.frequency / self._max_word_frequency, 0.0, 1.0)
+        # Membership flags and uniformly absent frequencies are not popularity data.
+        return 0.5
 
     # ------------------------------------------------------------------
     # Candidate generation and scoring
     # ------------------------------------------------------------------
-    def _candidate_pool(self, normalized: str) -> Set[str]:
-        candidates: Set[str] = set()
+    def _candidate_pool(self, normalized: str, *, variants: Optional[Set[str]] = None) -> Set[str]:
+        """Retrieve nearby words without alphabetically discarding strong matches.
+
+        Direct single-edit corrections are protected from the candidate limit.
+        Prefix, phonetic, and rare n-gram buckets supply additional candidates;
+        an inexpensive similarity pass limits full edit-distance calculations.
+        """
+        variants = self.generate_typo_variants(normalized) if variants is None else variants
+        direct = self.words.intersection(variants)
+        candidates: Set[str] = set(direct)
         length = len(normalized)
-        for candidate_length in range(max(1, length - self.length_window), length + self.length_window + 1):
-            candidates.update(self.length_index.get(candidate_length, set()))
-        if self.prefix_window > 0 and normalized[: self.prefix_window]:
-            candidates.update(self.prefix_index.get(normalized[: self.prefix_window], set()))
+        if self.prefix_window > 0:
+            candidates.update(self.prefix_index.get(normalized[:2], set()))
         if "phonetic" in self.suggestion_strategies and self.enable_phonetic:
             candidates.update(self.phonetic_map.get(self._get_phonetic_key(normalized), set()))
-        if "typo_patterns" in self.suggestion_strategies and self.enable_typo_patterns:
-            candidates.update(variant for variant in self.generate_typo_variants(normalized) if variant in self.words)
-        if not candidates:
-            # Last resort stays bounded by length buckets rather than scanning every word blindly.
-            for candidate_length in range(max(1, length - self.length_window - 1), length + self.length_window + 2):
-                candidates.update(self.length_index.get(candidate_length, set()))
-        candidates.discard(normalized)
-        if len(candidates) > self.max_candidates:
-            candidates = set(sorted(candidates, key=lambda item: (abs(len(item) - len(normalized)), item))[: self.max_candidates])
-        return candidates
+
+        grams = self._ngrams(normalized)
+        # A small union of the rarest matching grams avoids scanning the full
+        # dictionary, including when the first character itself is mistyped.
+        rare_grams = nlargest(
+            5, (gram for gram in grams if gram in self.ngram_index),
+            key=lambda gram: (-len(self.ngram_index[gram]), gram),
+        )
+        for gram in rare_grams:
+            candidates.update(self.ngram_index[gram])
+        candidates = {
+            candidate for candidate in candidates
+            if candidate != normalized and abs(len(candidate) - length) <= self.length_window
+        }
+        if len(candidates) <= self.max_candidates:
+            return candidates
+
+        # Protect exact one-edit variants (e.g. diagramm -> diagram), then rank
+        # broad retrieval candidates by shape before expensive edit distance.
+        direct.intersection_update(candidates)
+        remainder = candidates - direct
+        budget = max(self.max_candidates - len(direct), 0)
+        original_grams = self._ngrams(normalized)
+
+        def rough_score(candidate: str) -> Tuple[float, float, int, str]:
+            overlap = len(original_grams.intersection(self._ngrams(candidate)))
+            common = self._prefix_similarity(normalized, candidate)
+            similarity = overlap / max(len(original_grams), len(self._ngrams(candidate)), 1)
+            return (similarity, common, -abs(len(candidate) - length), candidate)
+
+        if budget:
+            direct.update(nlargest(budget, remainder, key=rough_score))
+        return direct
 
     def suggest(self, word: Any, max_suggestions: Optional[int] = None) -> List[str]:
         self._suggest_calls += 1
@@ -638,16 +740,30 @@ class SpellChecker:
         normalized = self._normalize_word(original)
         if not normalized or not self._is_checkable(original):
             return ()
-        if normalized in self.words:
+        if normalized in self.words and normalized not in self.rejected_words:
             return (SpellSuggestion(word=self._restore_case(original, self.surface_forms.get(normalized, normalized)), score=1.0, rank=1, source="exact", reasons=("known-word",)),)
 
+        variants = self.generate_typo_variants(normalized)
+        pattern_variants = {
+            self._normalize_word(pattern.sub(replacement, normalized))
+            for pattern, replacement, _ in self.typo_patterns
+        }
+        collapsed_repeats = {
+            normalized[:i] + normalized[i + 1:]
+            for i in range(1, len(normalized)) if normalized[i] == normalized[i - 1]
+        }
         suggestions: List[SpellSuggestion] = []
-        for candidate in self._candidate_pool(normalized):
-            suggestion = self._score_candidate(normalized, candidate)
-            if suggestion.score >= self.min_candidate_score:
+        for candidate in self._candidate_pool(normalized, variants=variants):
+            if candidate in self.rejected_words:
+                continue
+            suggestion = self._score_candidate(
+                normalized, candidate, typo_variants=variants,
+                pattern_variants=pattern_variants, collapsed_repeats=collapsed_repeats,
+            )
+            if suggestion.edit_distance is not None and suggestion.edit_distance <= self.max_edit_distance and suggestion.score >= self.min_candidate_score:
                 suggestions.append(suggestion)
 
-        suggestions.sort(key=lambda item: (-item.score, item.edit_distance if item.edit_distance is not None else math.inf, item.word))
+        suggestions.sort(key=lambda item: (item.edit_distance if item.edit_distance is not None else math.inf, -item.score, item.word))
         limit = max_suggestions or self.max_suggestions
         ranked: List[SpellSuggestion] = []
         for index, suggestion in enumerate(dedupe_preserve_order(suggestions, key=lambda item: item.word)[:limit], start=1):
@@ -671,8 +787,17 @@ class SpellChecker:
             )
         return tuple(ranked)
 
-    def _score_candidate(self, original: str, candidate: str) -> SpellSuggestion:
+    def _score_candidate(
+        self, original: str, candidate: str, *,
+        typo_variants: Optional[Set[str]] = None,
+        pattern_variants: Optional[Set[str]] = None,
+        collapsed_repeats: Optional[Set[str]] = None,
+    ) -> SpellSuggestion:
         distance = self._weighted_edit_distance(original, candidate)
+        if pattern_variants and candidate in pattern_variants:
+            # A configured orthographic transformation (such as f -> ph) is
+            # a recognized single typo operation, even when it changes length.
+            distance = min(distance, 1.0)
         max_len = max(len(original), len(candidate), 1)
         edit_sim = clamp_float(1.0 - (distance / max(max_len, self.max_edit_distance + 1.0)), 0.0, 1.0)
         phonetic_sim = self._phonetic_similarity(original, candidate) if self.enable_phonetic else 0.0
@@ -681,7 +806,11 @@ class SpellChecker:
         prefix_sim = self._prefix_similarity(original, candidate)
         length_sim = 1.0 - min(abs(len(original) - len(candidate)) / max_len, 1.0)
         shape_sim = 1.0 if word_shape(original) == word_shape(candidate) else 0.0
-        typo_bonus = 0.05 if candidate in self.generate_typo_variants(original) else 0.0
+        typo_bonus = 0.05 if candidate in (typo_variants if typo_variants is not None else self.generate_typo_variants(original)) else 0.0
+        if pattern_variants and candidate in pattern_variants:
+            typo_bonus += 0.20
+        if collapsed_repeats and candidate in collapsed_repeats:
+            typo_bonus += 0.15
 
         score = (
             edit_sim * self.score_weights["edit"]
@@ -698,6 +827,10 @@ class SpellChecker:
             reasons.append("close-edit-distance")
         if phonetic_sim >= 0.9:
             reasons.append("phonetic-match")
+        if pattern_variants and candidate in pattern_variants:
+            reasons.append("orthographic-pattern")
+        if collapsed_repeats and candidate in collapsed_repeats:
+            reasons.append("repeated-character")
         if keyboard_sim >= 0.7:
             reasons.append("keyboard-neighbor")
         if frequency_score > 0:
@@ -731,6 +864,7 @@ class SpellChecker:
         insertion_cost = coerce_float(self.checker_config.get("insertion_cost", 1.0), default=1.0, minimum=0.0)
         deletion_cost = coerce_float(self.checker_config.get("deletion_cost", 1.0), default=1.0, minimum=0.0)
         default_sub_cost = coerce_float(self.checker_config.get("default_substitution_cost", 1.5), default=1.5, minimum=0.0)
+        transposition_cost = coerce_float(self.checker_config.get("transposition_cost", 1.0), default=1.0, minimum=0.0)
         a = original if self.case_sensitive else original.lower()
         b = candidate if self.case_sensitive else candidate.lower()
         rows = len(a) + 1
@@ -745,7 +879,7 @@ class SpellChecker:
                 if a[i - 1] == b[j - 1]:
                     sub_cost = 0.0
                 elif self.enable_keyboard and b[j - 1] in self.keyboard_layout.get(a[i - 1], set()):
-                    sub_cost = min(default_sub_cost, 0.55)
+                    sub_cost = min(default_sub_cost, 1.0)
                 else:
                     sub_cost = default_sub_cost
                 dp[i][j] = min(
@@ -753,6 +887,9 @@ class SpellChecker:
                     dp[i][j - 1] + insertion_cost,
                     dp[i - 1][j - 1] + sub_cost,
                 )
+                # Optimal-string-alignment Damerau transposition (adjacent swap).
+                if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                    dp[i][j] = min(dp[i][j], dp[i - 2][j - 2] + transposition_cost)
         return dp[-1][-1]
 
     def _keyboard_similarity(self, word: str, candidate: str) -> float:
@@ -839,9 +976,9 @@ class SpellChecker:
                 for nearby in sorted(self.keyboard_layout.get(char, set())):
                     add(normalized[:index] + nearby + normalized[index + 1:])
 
-        vowels = ensure_text(self.checker_config.get("insertion_characters", "aeiourstln")).lower()
+        insertion_chars = ensure_text(self.checker_config.get("insertion_characters", "abcdefghijklmnopqrstuvwxyz")).lower()
         for index in range(len(normalized) + 1):
-            for char in vowels:
+            for char in insertion_chars:
                 add(normalized[:index] + char + normalized[index:])
 
         return variants
@@ -956,8 +1093,17 @@ class SpellChecker:
     def add_words(self, words: Iterable[Any], *, source: str = "runtime") -> int:
         before = len(self.words)
         for word in words:
-            self._add_word_entry(ensure_text(word), source=source)
-        self._build_indexes()
+            text = ensure_text(word)
+            normalized = self._normalize_word(text)
+            was_new = normalized not in self.words
+            self._add_word_entry(text, source=source)
+            if normalized in self.words and was_new:
+                self._index_word(normalized)
+            if source == "runtime":
+                if normalized:
+                    self.personal_words.add(normalized)
+        if source == "runtime":
+            self._persist_user_dictionary()
         return len(self.words) - before
 
     def remove_words(self, words: Iterable[Any]) -> int:
@@ -965,13 +1111,33 @@ class SpellChecker:
         for word in words:
             normalized = self._normalize_word(word)
             if normalized in self.words:
+                self._unindex_word(normalized)
                 self.words.remove(normalized)
                 self.entries.pop(normalized, None)
                 self.surface_forms.pop(normalized, None)
                 removed += 1
-        if removed:
-            self._build_indexes()
+            self.personal_words.discard(normalized)
+        self._persist_user_dictionary()
         return removed
+
+    def _persist_user_dictionary(self) -> None:
+        """Atomically save explicitly accepted words when a path is configured."""
+        path = self.user_dictionary_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Optional[str] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp", delete=False,
+            ) as handle:
+                temporary_path = handle.name
+                handle.write(json_dumps(sorted(self.personal_words), indent=2))
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     # ------------------------------------------------------------------
     # Diagnostics, stats, and serialization
