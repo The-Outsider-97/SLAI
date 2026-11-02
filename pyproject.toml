@@ -94,7 +94,7 @@ lstp = [
 [dependency-groups]
 dev = [
     "pytest",
-    "pytest-cov>=5",
+    "pytest-cov>=7.1.0",
     "ruff",
 ]
 
