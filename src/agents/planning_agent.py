@@ -4,7 +4,7 @@ Production-hardened Planning Agent entry point for SLAI.
 
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.4.0"
 
 import copy
 import random
