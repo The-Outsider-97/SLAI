@@ -1,3 +1,7 @@
 [submodule "model/LSTP"]
 	path = model/LSTP
 	url = https://github.com/The-Outsider-97/LSTP.git
+
+[submodule "applications/CADCon"]
+	path = applications/CADCon
+	url = https://github.com/The-Outsider-97/CADCon.git
