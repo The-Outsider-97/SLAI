@@ -260,3 +260,58 @@ checkpoint_id = memory.save_checkpoint({"task": task, "method": method})
 - Set conservative `safety_margins` first, then relax with monitored evidence.
 - Persist and rotate checkpoints to support incident replay and postmortem analysis.
 - Use monitor anomalies as triggers for retraining or policy fallback activation.
+
+---
+
+## Revision-aware project workflows (opt-in)
+
+`revision_workflow.py` adds a durable SQLite workflow contract alongside the
+existing HTN scheduler and PlanningMemory checkpoints. It does **not** replace
+`PlanningAgent.execute_plan`, dispatch agents, or commit application documents.
+
+```python
+from src.agents.planning.revision_workflow import RevisionTask, RevisionWorkflowStore
+
+workflows = RevisionWorkflowStore()  # data/planning/revision_workflows.sqlite3
+plan = workflows.create_plan(
+    "engineering-project",
+    [
+        RevisionTask("calculate", reads={"parameters": "revision-1"}),
+        RevisionTask("verify", depends_on=("calculate",), verification_required=True),
+    ],
+    {"parameters": "revision-1"},
+)
+plan_id = plan["plan_id"]
+ready = workflows.ready_groups(plan_id, max_parallel=4)
+attempt = workflows.claim_task(plan_id, "calculate")
+# Dispatch actual computation through the configured SLAI execution facility.
+workflows.complete_task(plan_id, "calculate", attempt["run_id"])
+
+# Supply notifications from the authoritative project owner.
+workflows.apply_change_set(plan_id, {"parameters": "revision-2"})
+workflows.replan_stale(plan_id)
+```
+
+Existing `Task` instances can also be registered through
+`PlanningAgent.create_revision_plan(project_id, tasks, source_revisions)`.
+`Task.context` accepts `read_revisions`, `write_artifacts`, `capability`, and
+`verification_required` for the new contract. No implicit application access
+or dynamic capability is assumed. Tasks with no explicit read set are
+conservatively invalidated by any observed source revision change.
+
+For live projects, inject an authoritative callback via
+`RevisionWorkflowStore(revision_provider=lambda project_id: {...})`.
+It is consulted before tasks start and complete, and missing tracked revision
+identities are rejected. Without a provider, the host **must** deliver change
+sets explicitly; otherwise the planner only knows its last observed state.
+
+Execution attempts carry stable IDs and input snapshots. Verification gates
+must be explicitly satisfied. After a crash, call `mark_interrupted_tasks()`
+and reconcile uncertain outcomes through `resolve_interrupted_task()` with an
+external evidence ID. Never blindly rerun an uncertain side-effecting task.
+
+`publish_provenance_events(plan_id, provenance_agent)` replays durable events
+through `ProvenanceAgent.record_event` using stable identities; retries are
+idempotent. The authoritative host must still enforce expected-revision checks
+at commit time and report confirmed commits separately to Provenance. A
+revision notification cannot be inferred from a cached Planning state alone.
