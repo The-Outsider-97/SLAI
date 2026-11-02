@@ -12,7 +12,7 @@ The store does not score sources, evaluate outputs, or capture runtime traces.
 
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 import threading
 import copy
