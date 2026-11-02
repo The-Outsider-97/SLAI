@@ -5,3 +5,27 @@
 [submodule "applications/CADCon"]
 	path = applications/CADCon
 	url = https://github.com/The-Outsider-97/CADCon.git
+
+[submodule "applications/Documaster"]
+	path = applications/Documaster
+	url = https://github.com/The-Outsider-97/Documaster.git
+
+[submodule "applications/Reader"]
+	path = applications/Reader
+	url = https://github.com/The-Outsider-97/SReader.git
+
+[submodule "applications/scical"]
+	path = applications/scical
+	url = https://github.com/The-Outsider-97/SciCal.git
+
+[submodule "applications/splanner"]
+	path = applications/splanner
+	url = https://github.com/The-Outsider-97/splanner.git
+
+[submodule "applications/GangUP"]
+	path = applications/GangUP
+	url = https://github.com/The-Outsider-97/GangUP.git
+
+[submodule "applications/slai_writer"]
+	path = applications/slai_writer
+	url = https://github.com/The-Outsider-97/slai_writer.git
