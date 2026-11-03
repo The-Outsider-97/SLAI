@@ -29,6 +29,32 @@ class Request:
     max_body: int = MAX_JSON_BYTES
     _json: Any = None
     _read: bool = False
+    _raw: bytes | None = None
+
+    def bytes(self, limit: int | None = None) -> bytes:
+        """Read a bounded raw upload exactly once, without JSON decoding.
+
+        The per-route cap may exceed the smaller default JSON body limit, as
+        with DOCX/PDF imports. A partial upload is never accepted as a file.
+        """
+        cap = limit if limit is not None else self.max_body
+        if not isinstance(cap, int) or cap < 0:
+            raise BadRequest("Invalid upload size limit")
+        if self._read:
+            if self._raw is None:
+                raise BadRequest("The request body has already been decoded as JSON")
+            if len(self._raw) > cap:
+                raise LimitExceeded("The upload is too large")
+            return self._raw
+        if self.length is not None and self.length > cap:
+            raise LimitExceeded("The upload is too large")
+        length = self.length or 0
+        raw = self.stream.read(length) if self.stream is not None else b""
+        if len(raw) != length:
+            raise BadRequest("The upload is incomplete")
+        self._raw = raw
+        self._read = True
+        return raw
 
     def json(self, limit: int | None = None) -> dict[str, Any]:
         """The JSON object in the body (``{}`` when there is none). Read at most ``limit`` bytes; never evaluated."""
@@ -48,20 +74,6 @@ class Request:
         if not isinstance(self._json, dict):
             raise BadRequest("The request body must be a JSON object")
         return self._json
-
-    def bytes(self, limit: int) -> bytes:
-        """The raw request body (an upload), read at most once and only when it is no larger than ``limit`` bytes."""
-        if self._read:
-            raise BadRequest("The request body was already read")
-        self._read = True
-        if self.stream is None or not self.length:
-            return b""
-        if self.length > limit:
-            raise LimitExceeded(f"The upload is larger than the {limit // (1024 * 1024)} MiB limit" if limit >= 1024 * 1024 else "The upload is too large")
-        data = self.stream.read(self.length)
-        if len(data) != self.length:
-            raise BadRequest("The upload was cut short")
-        return data
 
     def str_query(self, name: str, default: str = "", max_len: int = 200) -> str:
         value = self.query.get(name, default)

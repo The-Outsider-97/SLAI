@@ -28,7 +28,10 @@ from __future__ import annotations
 import json
 
 import regex as regex_re
-import torch
+try:
+    import torch
+except ImportError:  # Local NLP and grammar can run without tensor conversion.
+    torch = None
 
 from collections import Counter, defaultdict, deque
 from collections.abc import Mapping, Sequence
@@ -788,6 +791,8 @@ class LanguageTokenizer(BaseTokenizer):
             payload["token_metadata"] = token_metadata[: len(input_ids)]
 
         if return_tensors == "pt":
+            if torch is None:
+                raise RuntimeError("PyTorch is required when return_tensors='pt'")
             for key in ("input_ids", "attention_mask", "special_tokens_mask"):
                 if key in payload:
                     payload[key] = torch.tensor(payload[key], dtype=torch.long)
@@ -833,7 +838,7 @@ class LanguageTokenizer(BaseTokenizer):
         return normalize_spacing_around_punctuation(tokens_to_text(words))
 
     def decode(self, token_ids: Union[List[int], torch.Tensor], **kwargs: Any) -> str:
-        if isinstance(token_ids, torch.Tensor):
+        if torch is not None and isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.detach().cpu().tolist()
         skip_special_tokens = coerce_bool(kwargs.get("skip_special_tokens", getattr(self, "default_skip_special_tokens", True)), default=True)
         clean_up = coerce_bool(kwargs.get("clean_up_tokenization_spaces", getattr(self, "default_clean_up_tokenization_spaces", True)), default=True)

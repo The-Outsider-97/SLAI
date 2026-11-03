@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
-import torch
+try:
+    import torch
+except ImportError:  # Deterministic text tokenization does not require tensors.
+    torch = None
 import unicodedata
 import regex as re
 
@@ -582,6 +585,8 @@ class BaseTokenizer:
             payload["tokens"] = tokens
 
         if return_tensors == "pt":
+            if torch is None:
+                raise RuntimeError("PyTorch is required when return_tensors='pt'")
             for key, value in list(payload.items()):
                 if key != "tokens":
                     payload[key] = torch.tensor(value, dtype=torch.long)
@@ -607,6 +612,8 @@ class BaseTokenizer:
         for key in encoded_items[0].keys() if encoded_items else []:
             values = [item[key] for item in encoded_items]
             if kwargs.get("return_tensors", self.default_return_tensors) == "pt" and key != "tokens":
+                if torch is None:
+                    raise RuntimeError("PyTorch is required when return_tensors='pt'")
                 batch[key] = torch.stack(values)  # type: ignore[arg-type]
             else:
                 batch[key] = values
@@ -623,7 +630,7 @@ class BaseTokenizer:
             self.default_clean_up_tokenization_spaces,
         )
 
-        if isinstance(token_ids, torch.Tensor):
+        if torch is not None and isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
         ensure_sequence(token_ids, "token_ids", config=self.bt_config, error_cls=BaseValidationError)
 

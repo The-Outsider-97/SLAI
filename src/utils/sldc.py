@@ -622,7 +622,8 @@ _REVISION_KEYS = frozenset({"number", "parents", "created", "author", "note"})
 _PUBLICATION_KEYS = frozenset({"subtitle", "authors", "publisher", "published", "identifier",
                                "rights", "keywords", "abstract", "edition", "cover_asset"})
 _CITATION_FIELDS = {"key": 128, "title": 1000, "container": 500, "publisher": 300, "volume": 40,
-                    "issue": 40, "pages": 40, "note": 2000}
+                    "issue": 40, "pages": 40, "note": 2000, "source_type": 50,
+                    "organization": 300, "isbn": 40, "edition": 40, "published": 32}
 
 
 class _Context:
@@ -730,7 +731,7 @@ def _validate_sections(sections: Any, ctx: _Context) -> None:
                 template = section[edge]
                 if not isinstance(template, dict):
                     raise SLDCValidationError(f"{label}.{edge} must be an object")
-                _check_keys(template, {"left", "center", "right", "style", "formats"}, f"{label}.{edge}")
+                _check_keys(template, {"left", "center", "right", "style", "formats", "runs"}, f"{label}.{edge}")
                 for position in ("left", "center", "right"):
                     if position in template:
                         _check_template(template[position], f"{label}.{edge}.{position}")
@@ -750,6 +751,28 @@ def _validate_sections(sections: Any, ctx: _Context) -> None:
                             raise SLDCValidationError(f"{where} must be an object")
                         _check_keys(props, {"font_family", "font_size_pt", "color", "bold", "italic", "underline"}, where)
                         _validate_style_props(props, where, paragraph=False)
+                if "runs" in template:
+                    rich = template["runs"]
+                    if not isinstance(rich, dict):
+                        raise SLDCValidationError(f"{label}.{edge}.runs must be an object")
+                    _check_keys(rich, {"left", "center", "right"}, f"{label}.{edge}.runs")
+                    for position, sequence in rich.items():
+                        where = f"{label}.{edge}.runs.{position}"
+                        if not isinstance(sequence, list) or not 1 <= len(sequence) <= 200:
+                            raise SLDCValidationError(f"{where} must have 1 to 200 text runs")
+                        text_parts = []
+                        for j, run in enumerate(sequence):
+                            item_label = f"{where}[{j}]"
+                            if not isinstance(run, dict):
+                                raise SLDCValidationError(f"{item_label} must be an object")
+                            _check_keys(run, {"text", "format"}, item_label)
+                            value = _text_field(run, "text", item_label, 500, required=True)
+                            text_parts.append(value)
+                            if "format" in run:
+                                _check_keys(run["format"], {"font_family", "font_size_pt", "color", "bold", "italic", "underline"}, item_label)
+                                _validate_style_props(run["format"], f"{item_label}.format", paragraph=False)
+                        if "".join(text_parts) != template.get(position, ""):
+                            raise SLDCValidationError(f"{where} must reproduce the corresponding {position} field")
         if "numbering" in section:
             numbering = section["numbering"]
             if not isinstance(numbering, dict):
@@ -815,7 +838,7 @@ def _validate_references(references: Any, ctx: _Context) -> None:
             _check_keys(entry, {"id", "kind", "text"}, label)
             ctx.add_text(len(_text_field(entry, "text", label, 20_000, required=True) or ""))
         elif kind == "citation":
-            _check_keys(entry, {"id", "kind", "authors", "year", "doi", "url", "accessed"}
+            _check_keys(entry, {"id", "kind", "authors", "editors", "year", "doi", "url", "accessed"}
                         | set(_CITATION_FIELDS), label)
             _text_field(entry, "title", label, _CITATION_FIELDS["title"], required=True)
             for key, limit in _CITATION_FIELDS.items():
@@ -825,6 +848,11 @@ def _validate_references(references: Any, ctx: _Context) -> None:
                 if not isinstance(authors, list) or len(authors) > 100 or not all(
                         isinstance(a, str) and 0 < len(a) <= 200 for a in authors):
                     raise SLDCValidationError(f"{label}.authors must be up to 100 names")
+            if "editors" in entry:
+                editors = entry["editors"]
+                if not isinstance(editors, list) or len(editors) > 100 or not all(
+                        isinstance(a, str) and 0 < len(a) <= 200 for a in editors):
+                    raise SLDCValidationError(f"{label}.editors must be up to 100 names")
             if "year" in entry:
                 _bounded_int(entry["year"], 1, 9999, f"{label}.year")
             if "doi" in entry and (not isinstance(entry["doi"], str)
@@ -1092,9 +1120,21 @@ def _validate_spans(spans: Any, text: str, ctx: _Context, label: str) -> None:
             _check_keys(span, base | {"href"}, where)
             _check_href(span.get("href"), f"{where}.href")
         elif kind == "ref":
-            _check_keys(span, base | {"ref"}, where)
+            _check_keys(span, base | {"ref", "refs", "mode", "locator", "label"}, where)
             if not _has(ctx.references, span.get("ref")):
                 raise SLDCValidationError(f"{where}.ref is not a reference id")
+            if "refs" in span:
+                refs = span["refs"]
+                if not isinstance(refs, list) or not 1 <= len(refs) <= 20 or refs[0] != span["ref"] or len(set(refs)) != len(refs):
+                    raise SLDCValidationError(f"{where}.refs needs 1-20 unique source IDs beginning with ref")
+                if any(not _has(ctx.references, r) for r in refs):
+                    raise SLDCValidationError(f"{where}.refs contains an unknown source")
+            if "mode" in span and span["mode"] not in ("parenthetical", "narrative"):
+                raise SLDCValidationError(f"{where}.mode must be parenthetical or narrative")
+            if "locator" in span:
+                _text_field(span, "locator", where, 100, required=True)
+            if "label" in span and span["label"] not in ("page", "chapter", "paragraph", "section", "figure", "table", "timestamp"):
+                raise SLDCValidationError(f"{where}.label is not a supported locator type")
         elif kind == "xref":
             _check_keys(span, base | {"target"}, where)
             if not _has(ctx.block_ids, span.get("target")):
@@ -1137,10 +1177,12 @@ def _validate_table(table: Any, label: str, ctx: _Context) -> None:
             where = f"{label}.table.rows[{r}]"
             if not isinstance(cell, dict):
                 raise SLDCValidationError(f"{where} cells must be objects like {{'text': ...}}")
-            _check_keys(cell, {"text", "colspan", "rowspan", "align", "header"}, where)
+            _check_keys(cell, {"text", "colspan", "rowspan", "align", "header", "spans"}, where)
             if not isinstance(cell.get("text"), str):
                 raise SLDCValidationError(f"{where} cells need string 'text'")
             ctx.add_text(len(cell["text"]))
+            if "spans" in cell:
+                _validate_spans(cell["spans"], cell["text"], ctx, where)
             colspan = _bounded_int(cell.get("colspan", 1), 1, columns, f"{where}.colspan")
             rowspan = _bounded_int(cell.get("rowspan", 1), 1, len(rows) - r, f"{where}.rowspan")
             if "align" in cell and not _has(_ALIGN, cell["align"]):
@@ -2128,9 +2170,14 @@ def _required_features(document: Mapping[str, Any]) -> list[str]:
     needed = {by_type[b["type"]] for b in document["blocks"] if b["type"] in by_type}
     if document.get("embeds"):
         needed.add("embeds")
+    if any({"source_type", "organization", "editors", "isbn", "edition", "published"}.intersection(ref)
+           for ref in document.get("references", ()) if ref.get("kind") == "citation"):
+        needed.add("csl-sources")
     for section in document.get("sections", ()):
         if {"header_mm", "footer_mm"}.intersection(section.get("page", {})):
             needed.add("page-bands")
+        if any("runs" in section.get(edge, {}) for edge in ("header", "footer")):
+            needed.add("rich-page-bands")
         if section.get("role") or "show" in section.get("numbering", {}):
             needed.add("cover-pages")
     extra_figure_keys = {"height_mm", "crop", "rotation_deg", "flip_horizontal", "flip_vertical", "placement", "credit", "rights"}
@@ -2138,9 +2185,13 @@ def _required_features(document: Mapping[str, Any]) -> list[str]:
         if {"line_height", "space_before_pt", "space_after_pt", "indent_mm", "first_line_indent_mm"}.intersection(block.get("attributes", {})):
             needed.add("paragraph-layout")
         figure = block.get("figure", {})
+        if block["type"] == "table" and any(cell.get("spans") for row in block["table"]["rows"] for cell in row):
+            needed.add("table-rich-text")
         if isinstance(figure, Mapping) and extra_figure_keys.intersection(figure):
             needed.add("image-layout")
         for span in block.get("spans", ()):
+            if span["type"] == "ref" and {"refs", "mode", "locator", "label"}.intersection(span):
+                needed.add("citation-groups")
             if span["type"] == "format" and _INLINE_FONT_PROPS.intersection(span):
                 needed.add("font-runs")
             if span["type"] == "equation":

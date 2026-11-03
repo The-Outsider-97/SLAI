@@ -71,6 +71,17 @@ def lazy(app, req):
     return {"ignored": "body"}                       # never reads the body
 
 
+@router.route("POST", "/api/upload")
+def upload(app, req):
+    first = req.bytes(3500)
+    return {"length": len(first), "repeat": first == req.bytes(3500)}
+
+
+@router.route("GET", "/api/two-cookies")
+def two_cookies(app, req):
+    return Response(cookies=["a=1; HttpOnly; Path=/", "b=2; HttpOnly; Path=/"])
+
+
 class Base(unittest.TestCase):
     server: LocalServer
     tmp: tempfile.TemporaryDirectory
@@ -166,6 +177,18 @@ class AuthTests(Base):
 
 
 class ApiTests(Base):
+    def test_raw_uploads_are_bounded_and_reusable_without_json_parsing(self) -> None:
+        status, data = self.json("POST", "/api/upload", raw=b"x" * 3000)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["data"], {"length": 3000, "repeat": True})
+        self.assertEqual(self.json("POST", "/api/upload", raw=b"y" * 3501)[0], 413)
+
+    def test_response_can_set_multiple_cookies(self) -> None:
+        response, _ = self.request("GET", "/api/two-cookies")
+        self.assertEqual(response.status, 200)
+        self.assertEqual([v for k, v in response.getheaders() if k.lower() == "set-cookie"],
+                         ["a=1; HttpOnly; Path=/", "b=2; HttpOnly; Path=/"])
+
     def test_envelope_params_and_queries(self) -> None:
         self.assertEqual(self.json("GET", "/api/hello"), (200, {"ok": True, "data": {"hello": "world", "count": 3}}))
         status, body = self.json("GET", "/api/items/abc-1?q=hi&n=99")
