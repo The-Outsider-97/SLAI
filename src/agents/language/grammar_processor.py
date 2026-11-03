@@ -360,7 +360,7 @@ class GrammarProcessor:
     NOMINAL_UPOS = {"NOUN", "PROPN", "PRON"}
     CONTENT_UPOS = {"NOUN", "PROPN", "PRON", "VERB", "AUX", "ADJ", "ADV", "NUM"}
 
-    def __init__(self) -> None:
+    def __init__(self, *, rule_engine: Optional[Rules] = None) -> None:
         self.config = load_global_config()
         self.wordlist_path = self.config.get("main_wordlist_path")
         self.grammar_config = get_config_section("grammar_processor") or {}
@@ -395,7 +395,9 @@ class GrammarProcessor:
         self.article_ignore_pos = set(ensure_text(item).upper() for item in ensure_list(self.grammar_config.get("article_ignore_pos", ["PUNCT", "SYM"])))
         self.auxiliaries_requiring_base = set(ensure_text(item).lower() for item in ensure_list(self.grammar_config.get("auxiliaries_requiring_base", ["do", "does", "did", "can", "could", "may", "might", "must", "shall", "should", "will", "would"])))
 
-        self.rule_engine = Rules()
+        # Accept an already initialized NLP rules index.  Both components
+        # otherwise load and index the same large structured dictionary.
+        self.rule_engine = rule_engine if rule_engine is not None else Rules()
         self.diagnostics = LanguageDiagnostics()
         self.history: Deque[Dict[str, Any]] = deque(maxlen=self.history_limit)
         self.analyses_run = 0
@@ -865,8 +867,12 @@ class GrammarProcessor:
         for verb in sentence_tokens:
             if verb.upos not in self.VERBAL_UPOS:
                 continue
+            # Finite auxiliaries carry agreement in passive and compound
+            # predicates ("the components are connected").  Their subject
+            # generally depends on the lexical head, not on the auxiliary.
             if verb.normalized_dep in {"aux", "aux:pass", "cop", "mark"} and not self._acts_as_predicate(verb, sentence_tokens):
-                continue
+                if verb.normalized_dep not in {"aux", "aux:pass", "cop"}:
+                    continue
             if not self._looks_present_finite(verb, sentence_tokens):
                 continue
             subjects = self._subjects_for_verb(sentence_tokens, verb)
@@ -888,7 +894,10 @@ class GrammarProcessor:
                             f"Potential subject-verb agreement error: subject '{subject.text}' "
                             f"({number}/{person}) does not agree with verb '{verb.text}'."
                         ),
-                        tokens=[subject, verb],
+                        # The replacement applies only to the verb.  Spanning
+                        # subject + verb would erase intervening words when a
+                        # client accepts a correction.
+                        tokens=[verb],
                         severity="error",
                         suggestion=f"Use '{suggestion}' instead of '{verb.text}'.",
                         rule_id="grammar.agreement.subject_verb.present",
@@ -1087,6 +1096,16 @@ class GrammarProcessor:
         subjects = [token for token in tokens if token.head == verb.index and token.normalized_dep in self.SUBJECT_DEPS and token.upos in self.NOMINAL_UPOS]
         if subjects:
             return subjects
+        if verb.normalized_dep in {"aux", "aux:pass", "cop"}:
+            # In dependency parses of "components is connected", "is" is
+            # aux:pass of "connected" while "components" is nsubj:pass of
+            # that same head.  Reuse the head's explicit subject only.
+            return [
+                token for token in tokens
+                if token.head == verb.head
+                and token.normalized_dep in self.SUBJECT_DEPS
+                and token.upos in self.NOMINAL_UPOS
+            ]
         if verb.normalized_dep == "root":
             preceding = [token for token in tokens if token.index < verb.index and token.upos in self.NOMINAL_UPOS]
             if preceding:
@@ -1309,9 +1328,13 @@ class GrammarProcessor:
         configured = ensure_mapping(self.grammar_config.get("pronoun_features", {}), field_name="pronoun_features", allow_none=True)
         for pronoun, payload in configured.items():
             if isinstance(payload, Mapping):
+                raw_person = ensure_text(payload.get("person", "3rd")).casefold()
+                normalized_person = {"1": "1st", "first": "1st", "1st": "1st", "2": "2nd", "second": "2nd", "2nd": "2nd", "3": "3rd", "third": "3rd", "3rd": "3rd"}.get(raw_person, "3rd")
+                raw_number = ensure_text(payload.get("number", "singular")).casefold()
+                normalized_number = {"sing": "singular", "plur": "plural"}.get(raw_number, raw_number)
                 defaults[ensure_text(pronoun).lower()] = {
-                    "number": ensure_text(payload.get("number", "singular")),
-                    "person": ensure_text(payload.get("person", "3rd")),
+                    "number": normalized_number,
+                    "person": normalized_person,
                 }
         return defaults
 

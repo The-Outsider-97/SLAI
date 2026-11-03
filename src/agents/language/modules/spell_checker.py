@@ -37,7 +37,10 @@ from dataclasses import asdict, dataclass, field
 from heapq import nlargest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
-from metaphone import doublemetaphone # pyright: ignore[reportMissingImports]
+try:
+    from metaphone import doublemetaphone  # pyright: ignore[reportMissingImports]
+except ImportError:  # Optional phonetic enhancement; Soundex remains available.
+    doublemetaphone = None
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.language_error import *
@@ -935,7 +938,7 @@ class SpellChecker:
         normalized = self._normalize_word(word)
         if not normalized:
             return ""
-        if self.phonetic_algorithm == "metaphone":
+        if self.phonetic_algorithm == "metaphone" and doublemetaphone is not None:
             primary, secondary = doublemetaphone(normalized)
             return primary or secondary or self._soundex(normalized)
         return self._soundex(normalized)
