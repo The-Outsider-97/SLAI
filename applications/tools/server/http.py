@@ -124,6 +124,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         for key, value in resp.headers.items():
             self.send_header(key, value)
+        for cookie in resp.cookies:
+            self.send_header("Set-Cookie", cookie)
         if resp.download_name:
             name = re.sub(r"[^A-Za-z0-9._ -]", "_", resp.download_name)
             self.send_header("Content-Disposition", f'attachment; filename="{name}"')

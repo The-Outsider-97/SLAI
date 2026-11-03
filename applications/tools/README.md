@@ -19,7 +19,7 @@ applications/tools/
     slai-ui.css                                              the one stylesheet
     src/ dom.ts util.ts api.ts icons.ts theme.ts ui.ts       the client kit (strict TypeScript)
   build/build-static.mjs                                     builds any application's client
-  tests/  tests_ts/  typings/                                44 Python tests, 13 TypeScript tests
+  tests/  tests_ts/  typings/                                46 Python tests, 13 TypeScript tests
 ```
 
 ## Python
@@ -48,6 +48,8 @@ applications/tools/
 * Serves the application's `dist/`, the shared stylesheet at `/tools/slai-ui.css`, and images and sounds at `/assets/...`
   (the application's own `assets/` first, then `applications/assets`).
 * Shuts down cleanly on Ctrl+C, Ctrl+Break or SIGTERM.
+* Reads a raw upload with `req.bytes(limit)` (once, refused above `limit` with 413) and lets a response set several cookies through
+  `Response.cookies` (added for SLAI Writer; both are additive and unused by applications that do not call them).
 
 An application writes only its routes:
 
@@ -90,6 +92,22 @@ cd applications/tools && tsc -p tsconfig.test.json && node --test .test-out/test
 
 `build-static.mjs` removes `dist/js`, runs the application's own `typescript` (or a `tsc` on the path) with its
 `tsconfig.build.json`, and copies `src/client/index.html` and `*.css` next to it. Icons and sounds are never copied.
+
+## Revision-aware commits (`commit_host.py`)
+
+SLAI's workflow modules (`src/agents/planning/project_adapter.py` and the reconciliation/revision stores) need an application to say what its
+revisions are, apply a change only if the artifact is still at the expected revision, and find an earlier decision by idempotency key. Only the
+application knows its documents, so `CommitHost` supplies the part that is the same everywhere and easy to get wrong, and nothing else:
+
+* one critical section around the expected-revision check and the change (the application's own lock);
+* the change and its ledger entry in the application's own transaction (`atomic`), so neither exists without the other;
+* idempotency: a decided key returns its stored decision byte for byte, and a key reused for a different request is refused;
+* receipts that state only what happened. An outcome nobody can classify is not turned into `confirmed` or `rejected`; it propagates and the outbox
+  records it as unknown.
+
+The application supplies `revisions`, `apply` (the validated mutation, after the person's consent) and a ledger (`FileCommitLedger` if it has none).
+Connected applications: SPADRA (`SPADRA/commits.py`) and SPlanner (`splanner/commits.py`). Others are not connected (see the SPADRA completion report).
+Tests: `tools/tests/test_commit_host.py`.
 
 ## Adding a new application
 

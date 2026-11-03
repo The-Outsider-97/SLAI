@@ -49,6 +49,20 @@ class Request:
             raise BadRequest("The request body must be a JSON object")
         return self._json
 
+    def bytes(self, limit: int) -> bytes:
+        """The raw request body (an upload), read at most once and only when it is no larger than ``limit`` bytes."""
+        if self._read:
+            raise BadRequest("The request body was already read")
+        self._read = True
+        if self.stream is None or not self.length:
+            return b""
+        if self.length > limit:
+            raise LimitExceeded(f"The upload is larger than the {limit // (1024 * 1024)} MiB limit" if limit >= 1024 * 1024 else "The upload is too large")
+        data = self.stream.read(self.length)
+        if len(data) != self.length:
+            raise BadRequest("The upload was cut short")
+        return data
+
     def str_query(self, name: str, default: str = "", max_len: int = 200) -> str:
         value = self.query.get(name, default)
         if len(value) > max_len:
@@ -73,6 +87,7 @@ class Response:
     content_type: str = "application/json; charset=utf-8"
     headers: dict[str, str] = field(default_factory=dict)
     download_name: str | None = None
+    cookies: list[str] = field(default_factory=list)    # complete Set-Cookie values; a response may set several
 
 
 Handler = Callable[[Any, Request], Any]

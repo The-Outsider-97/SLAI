@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from applications.tools.errors import BadRequest, Conflict, NotFound
-from applications.tools.server import Identity, LocalServer, Router, ServerOptions, created, ok
+from applications.tools.server import Identity, LocalServer, Response, Router, ServerOptions, created, ok
 
 TOKEN = "test-token-123"
 IDENTITY = Identity("toyapp", "ToyApp")
@@ -52,6 +52,18 @@ def db_failure(app, req):
 @router.route("GET", "/api/disk")
 def disk_failure(app, req):
     raise OSError(28, "No space left on device")
+
+
+@router.route("POST", "/api/upload")
+def upload(app, req):
+    return {"size": len(req.bytes(1024))}
+
+
+@router.route("GET", "/api/cookies")
+def cookies(app, req):
+    out = ok({"set": 2})
+    out.cookies.extend(["a=1; Path=/; HttpOnly", "b=2; Path=/; HttpOnly"])
+    return out
 
 
 @router.route("POST", "/api/lazy")
@@ -189,6 +201,17 @@ class ApiTests(Base):
         self.assertEqual(self.json("POST", "/api/echo", raw=b"[1,2]")[0], 400)
         self.assertEqual(self.json("POST", "/api/echo", {"pad": "x" * 4000})[0], 413)
         self.assertEqual(self.json("POST", "/api/echo", {"ok": True})[1]["data"], {"ok": True})
+
+    def test_raw_uploads_are_read_once_and_capped(self) -> None:
+        response, data = self.request("POST", "/api/upload", raw=b"x" * 500)
+        self.assertEqual((response.status, json.loads(data)["data"]["size"]), (200, 500))
+        self.assertEqual(self.request("POST", "/api/upload", raw=b"x" * 1500)[0].status, 413)
+        self.assertEqual(self.request("POST", "/api/upload")[0].status, 200)
+
+    def test_a_response_can_set_several_cookies(self) -> None:
+        response, _ = self.request("GET", "/api/cookies")
+        self.assertEqual(sorted(v for k, v in response.getheaders() if k.lower() == "set-cookie"),
+                         ["a=1; Path=/; HttpOnly", "b=2; Path=/; HttpOnly"])
 
     def test_an_unread_body_does_not_corrupt_the_next_request(self) -> None:
         conn = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)

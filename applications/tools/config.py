@@ -28,6 +28,13 @@ def _load_yaml(path: Path) -> tuple[dict[str, Any], str | None]:
     return bind_config(path).load(), None
 
 
+def load_document(path: Path) -> tuple[dict[str, Any], str | None]:
+    """The whole parsed YAML file and, when the canonical repository could not be used, a note saying why. For applications whose file is
+    not one flat section (a plans file, for instance); :func:`load_section` is the usual entry point."""
+    data, note = _load_yaml(path)
+    return {k: v for k, v in data.items() if k != "__config_path__"}, note      # the repository's own bookkeeping key is not part of the file
+
+
 def load_section(path: Path | None, section: str, fields: Mapping[str, Field], *, label: str = "configuration",
                  overrides: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], str | None]:
     """Return ``({name: value}, note)`` for one YAML section.

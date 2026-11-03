@@ -220,6 +220,17 @@ class ConfigTests(unittest.TestCase):
             config.load_section(broken, "app", self.FIELDS)
 
 
+class ConfigDocumentTests(unittest.TestCase):
+    def test_load_document_returns_the_whole_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            slai.activate(slai.find_slai_root())
+            path = Path(tmp) / "plans.yaml"
+            path.write_text("schema_version: 1\nplans:\n  a:\n    limit: 3\n", encoding="utf-8")
+            data, note = config.load_document(path)
+            self.assertEqual(data, {"schema_version": 1, "plans": {"a": {"limit": 3}}})
+            self.assertIsNone(note)
+
+
 class SlaiLinkTests(unittest.TestCase):
     def test_finds_this_checkout_and_the_canonical_sldc(self) -> None:
         root = slai.find_slai_root()
