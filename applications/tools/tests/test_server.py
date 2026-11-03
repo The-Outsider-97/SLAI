@@ -71,8 +71,8 @@ def lazy(app, req):
     return {"ignored": "body"}                       # never reads the body
 
 
-@router.route("POST", "/api/upload")
-def upload(app, req):
+@router.route("POST", "/api/upload-cached")
+def upload_cached(app, req):
     first = req.bytes(3500)
     return {"length": len(first), "repeat": first == req.bytes(3500)}
 
@@ -178,10 +178,10 @@ class AuthTests(Base):
 
 class ApiTests(Base):
     def test_raw_uploads_are_bounded_and_reusable_without_json_parsing(self) -> None:
-        status, data = self.json("POST", "/api/upload", raw=b"x" * 3000)
+        status, data = self.json("POST", "/api/upload-cached", raw=b"x" * 3000)
         self.assertEqual(status, 200)
         self.assertEqual(data["data"], {"length": 3000, "repeat": True})
-        self.assertEqual(self.json("POST", "/api/upload", raw=b"y" * 3501)[0], 413)
+        self.assertEqual(self.json("POST", "/api/upload-cached", raw=b"y" * 3501)[0], 413)
 
     def test_response_can_set_multiple_cookies(self) -> None:
         response, _ = self.request("GET", "/api/two-cookies")
