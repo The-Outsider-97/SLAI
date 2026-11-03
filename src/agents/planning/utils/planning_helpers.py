@@ -25,15 +25,15 @@ Design principles
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 import tempfile
 import time
 
+from datetime import datetime, timezone
+from pathlib import Path
 from collections import defaultdict, deque
 from typing import (Any, Callable, Dict, FrozenSet, Iterable, Iterator,
                     List, Mapping, Optional, Tuple, TypeVar, Union, Set,)
@@ -1230,6 +1230,12 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         raise
 
 
+def _identifier(value: str, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise RevisionWorkflowError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
 __all__ = [
     # -------------------------------------------------------------------
     # Section 1 – Type-checking & validation helpers
@@ -1243,6 +1249,7 @@ __all__ = [
     "validate_task_id",
     "validate_probability",
     "clamp",
+    "_identifier",
 
     # -------------------------------------------------------------------
     # Section 2 – Task graph helpers

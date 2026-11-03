@@ -5,6 +5,7 @@ from .router_strategy import *
 from .task_contracts import *
 from .task_router import *
 from .collaboration_manager import *
+from .project_coordination import ProjectCoordinationError, ProjectCoordinationStore
 
 
 from .policy_engine import __all__ as _policy_engine_exports
@@ -23,4 +24,6 @@ __all__ = [
     *_task_contracts_exports,
     *_task_router_exports,
     *_collaboration_manager_exports,
+    "ProjectCoordinationError",
+    "ProjectCoordinationStore",
 ] # type: ignore

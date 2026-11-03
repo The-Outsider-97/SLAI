@@ -36,6 +36,7 @@ import json
 import os
 import time
 import traceback
+
 from typing import Any, Dict, List, Optional
 
 
@@ -1026,7 +1027,6 @@ class PlanningConfigError(PlanningError):
         return d
 
 
-
 # ===========================================================================
 # GradientBoostingModelError – ML model persistence / training failures
 # ===========================================================================
@@ -1052,9 +1052,207 @@ class GradientBoostingModelError(PlanningError):
     ]
 
 
-# ---------------------------------------------------------------------------
-# Smoke test
-# ---------------------------------------------------------------------------
+
+class CommitReconciliationError(PlanningError):
+    """An invalid, conflicting, or unverifiable commit transition."""
+
+    _default_recovery_hints = [
+        "verify_commit_intent",
+        "reconcile_with_host",
+        "discard_invalid_receipt",
+    ]
+
+    def __init__(
+        self,
+        message: str = "Commit reconciliation error.",
+        *,
+        idempotency_key: Optional[str] = None,
+        project_id: Optional[str] = None,
+        artifact_id: Optional[str] = None,
+        expected_revision: Optional[str] = None,
+        current_status: Optional[str] = None,
+        host_status: Optional[str] = None,
+        reason: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.idempotency_key = idempotency_key
+        self.project_id = project_id
+        self.artifact_id = artifact_id
+        self.expected_revision = expected_revision
+        self.current_status = current_status
+        self.host_status = host_status
+        self.reason = reason
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d.update(
+            idempotency_key=self.idempotency_key,
+            project_id=self.project_id,
+            artifact_id=self.artifact_id,
+            expected_revision=self.expected_revision,
+            current_status=self.current_status,
+            host_status=self.host_status,
+            reason=self.reason,
+        )
+        return d
+
+
+class RevisionWorkflowError(PlanningError):
+    """Invalid plan, transition, or stale execution attempt."""
+
+    _default_recovery_hints = [
+        "verify_revision_workflow",
+        "discard_stale_execution_attempt",
+        "rebuild_plan_from_latest_revision",
+    ]
+
+    def __init__(
+        self,
+        message: str = "Revision workflow error.",
+        *,
+        plan_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        expected_state: Optional[str] = None,
+        current_state: Optional[str] = None,
+        reason: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.plan_id = plan_id
+        self.task_id = task_id
+        self.run_id = run_id
+        self.expected_state = expected_state
+        self.current_state = current_state
+        self.reason = reason
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d.update(
+            plan_id=self.plan_id,
+            task_id=self.task_id,
+            run_id=self.run_id,
+            expected_state=self.expected_state,
+            current_state=self.current_state,
+            reason=self.reason,
+        )
+        return d
+
+
+class WorkflowAuthorizationError(PlanningError, PermissionError):
+    """A caller is missing a required project-scoped authority.
+
+    Multiple inheritance preserves ``isinstance(exc, PermissionError)`` for
+    callers that already rely on the standard ``PermissionError`` semantics,
+    while adding structured context and recovery hints.
+    """
+
+    _default_recovery_hints = [
+        "verify_authorization_context",
+        "refresh_project_scopes",
+        "escalate_to_project_administrator",
+    ]
+
+    def __init__(
+        self,
+        message: str = "Workflow authorization denied.",
+        *,
+        actor_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        required_scopes: Optional[List[str]] = None,
+        denial_reason: str = "unknown",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.actor_id = actor_id
+        self.project_id = project_id
+        self.required_scopes: List[str] = list(required_scopes or [])
+        self.denial_reason = denial_reason
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d.update(
+            actor_id=self.actor_id,
+            project_id=self.project_id,
+            required_scopes=self.required_scopes,
+            denial_reason=self.denial_reason,
+        )
+        return d
+
+
+class WorkflowDispatchError(PlanningError, RuntimeError):
+    """A specialist failed or returned an ambiguous execution result.
+
+    Multiple inheritance preserves ``isinstance(exc, RuntimeError)`` for
+    callers that rely on the standard ``RuntimeError`` semantics.
+    """
+
+    _default_recovery_hints = [
+        "inspect_specialist_registration",
+        "verify_capability_binding",
+        "retry_with_validated_request",
+    ]
+
+    def __init__(
+        self,
+        message: str = "Workflow dispatch failed.",
+        *,
+        capability: Optional[str] = None,
+        specialty: Optional[str] = None,
+        plan_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        failure_kind: str = "unknown",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.capability = capability
+        self.specialty = specialty
+        self.plan_id = plan_id
+        self.task_id = task_id
+        self.run_id = run_id
+        self.failure_kind = failure_kind
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d.update(
+            capability=self.capability,
+            specialty=self.specialty,
+            plan_id=self.plan_id,
+            task_id=self.task_id,
+            run_id=self.run_id,
+            failure_kind=self.failure_kind,
+        )
+        return d
+
+
+class CapabilityContractError(WorkflowDispatchError):
+    """A registered capability or its actual execution violated its contract."""
+
+    _default_recovery_hints = [
+        "audit_capability_binding",
+        "refresh_specialist_registration",
+        "rebuild_capability_schema",
+    ]
+
+    def __init__(
+        self,
+        message: str = "Capability contract violation.",
+        *,
+        boundary: str = "unknown",
+        location: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.boundary = boundary
+        self.location = location
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d.update(boundary=self.boundary, location=self.location)
+        return d
+
 if __name__ == "__main__":
     print("\n=== Planning Errors – smoke test ===\n")
 

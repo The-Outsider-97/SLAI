@@ -6,8 +6,8 @@ import pytest
 
 from src.agents.planning.revision_workflow import RevisionTask, RevisionWorkflowStore
 from src.agents.planning.workflow_runtime import (
-    AuthorizationContext, CapabilityBinding, OrchestratorCapabilityAdapter,
-    RevisionWorkflowRunner, WorkflowAuthorizationError,
+    AuthorizationContext, CapabilityBinding, CapabilityContractError,
+    OrchestratorCapabilityAdapter, RevisionWorkflowRunner, WorkflowAuthorizationError,
 )
 
 
@@ -112,3 +112,92 @@ def test_revision_change_mid_delegation_discards_stale_result(tmp_path):
 def test_arbitrary_specialist_methods_not_exposed():
     with pytest.raises(ValueError, match="perform_task"):
         CapabilityBinding("execution", action="delete_project")
+
+
+def test_typed_capability_contract_and_authorized_discovery(tmp_path):
+    binding = CapabilityBinding(
+        "stem", version="2.0", description="Compute a numeric result",
+        input_schema={"type": "object", "properties": {"value": {"type": "integer"}},
+                      "required": ["value"], "additionalProperties": False},
+        result_schema={"type": "object", "properties": {"status": {"const": "success"},
+                      "output_refs": {"type": "object"}}, "required": ["status", "output_refs"]},
+    )
+    adapter = OrchestratorCapabilityAdapter(FakeOrchestrator(), {"calculate": binding},
+                                            registered_specialties={"stem"})
+    assert adapter.discover(auth("workflow:execute"))["calculate"]["version"] == "2.0"
+    assert adapter.discover(auth()) == {}
+    assert adapter.execute("calculate", {"input": {"value": 7}, "task_id": "x", "capability_version": "2.0"},
+                           auth("workflow:execute")) == {"x": "result-r1"}
+    with pytest.raises(CapabilityContractError, match="input schema"):
+        adapter.execute("calculate", {"input": {"value": "7"}}, auth("workflow:execute"))
+    with pytest.raises(CapabilityContractError, match="version"):
+        adapter.execute("calculate", {"input": {"value": 7}, "capability_version": "3.0"},
+                        auth("workflow:execute"))
+
+
+def test_invalid_output_fails_execution_and_preserves_provenance(tmp_path):
+    class BadOrchestrator:
+        def perform_task(self, request):
+            return {"status": "success", "output_refs": {}, "verified": False}
+
+    binding = CapabilityBinding("stem", result_schema={"type": "object",
+                                "properties": {"verified": {"const": True}}, "required": ["verified"]})
+    adapter = OrchestratorCapabilityAdapter(BadOrchestrator(), {"calculate": binding},
+                                            registered_specialties={"stem"})
+    store = RevisionWorkflowStore(tmp_path / "workflow.db")
+    plan = store.create_plan("project", [RevisionTask("a", capability="calculate", capability_version="1.0")], {})
+    result = RevisionWorkflowRunner(store, adapter).run_until_blocked(plan["plan_id"], {},
+                                                                     auth=auth("workflow:execute"))
+    assert result["task_results"][0]["status"] == "failed"
+    attempt = store.get_plan(plan["plan_id"])["attempts"]["a"][0]
+    assert attempt["status"] == "failed"
+    assert attempt["run_id"] == result["task_results"][0]["run_id"]
+
+
+def test_invalid_contracts_and_mutation_bindings_are_refused():
+    with pytest.raises(ValueError, match="input_schema"):
+        CapabilityBinding("stem", input_schema={"type": "not-a-json-schema-type"})
+    with pytest.raises(ValueError, match="mutations require host commit"):
+        CapabilityBinding("stem", side_effects="write")
+    with pytest.raises(ValueError, match="capability_version requires"):
+        RevisionTask("x", capability_version="2.0")
+
+
+def test_capability_dispatch_rejects_cross_project_and_actor_impersonation():
+    orchestrator = FakeOrchestrator()
+    adapter = OrchestratorCapabilityAdapter(orchestrator,
+        {"read": CapabilityBinding("reader")}, registered_specialties={"reader"})
+    principal = auth("workflow:execute")
+    with pytest.raises(WorkflowAuthorizationError, match="project boundary"):
+        adapter.execute("read", {"project_id": "another-project"}, principal)
+    with pytest.raises(WorkflowAuthorizationError, match="actor identity"):
+        adapter.execute("read", {"actor_id": "impersonated-user"}, principal)
+    assert not orchestrator.calls
+    adapter.execute("read", {"task_id": "a"}, principal)
+    assert orchestrator.calls[0]["task_data"]["task_data"]["actor_id"] == "trusted-user"
+    assert orchestrator.calls[0]["task_data"]["task_data"]["project_id"] == "project"
+
+
+def test_capability_version_mismatch_blocks_dispatch_before_claim(tmp_path):
+    store = RevisionWorkflowStore(tmp_path / "workflow.db")
+    plan = store.create_plan("project", [RevisionTask("a", capability="calculate", capability_version="2.0")], {})
+    orchestrator = FakeOrchestrator()
+    result = runner(store, orchestrator).run_until_blocked(plan["plan_id"], {}, auth=auth("workflow:execute"))
+    assert result["task_results"][0]["reason"] == "capability version mismatch"
+    assert store.get_plan(plan["plan_id"])["status"]["a"] == "pending"
+    assert not orchestrator.calls
+
+
+def test_live_authorization_revocation_blocks_result_release(tmp_path):
+    allowed = {"workflow:execute"}
+    credentials = AuthorizationContext(
+        "alice", "project", frozenset(allowed),
+        live_scope_check=lambda actor, project, scope: scope in allowed,
+    )
+    store = RevisionWorkflowStore(tmp_path / "workflow.db")
+    plan = store.create_plan("project", [RevisionTask("a", capability="calculate")], {})
+    orchestrator = FakeOrchestrator(on_task=lambda task: allowed.clear())
+    result = runner(store, orchestrator).run_until_blocked(plan["plan_id"], {}, auth=credentials)
+    assert result["task_results"][0]["status"] == "failed"
+    assert "output_refs" not in result["task_results"][0]
+    assert len(orchestrator.calls) == 1

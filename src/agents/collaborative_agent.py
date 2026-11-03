@@ -55,8 +55,10 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base_agent import BaseAgent
 from .collaborative.collaboration_manager import CollaborationManager
+from .collaborative.project_coordination import ProjectCoordinationStore
 from .collaborative.policy_engine import PolicyDecision, PolicyEngine
 from .collaborative.task_contracts import TaskContractRegistry
+from .planning.workflow_runtime import AuthorizationContext
 from .collaborative.utils.collaboration_error import *
 from .collaborative.utils.collaborative_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
@@ -508,10 +510,14 @@ class CollaborativeAgent(BaseAgent):
         "collaboration_management",
     ]
 
-    def __init__(self, shared_memory=None, agent_factory=None, config: Optional[Mapping[str, Any]] = None, **kwargs: Any):
+    def __init__(self, shared_memory=None, agent_factory=None, config: Optional[Mapping[str, Any]] = None,
+                 *, project_store: Optional[ProjectCoordinationStore] = None, **kwargs: Any):
         super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
         self.name = "CollaborativeAgent"
         self._lock = threading.RLock()
+        # The host owns this durable store and its lifecycle. Never create a
+        # second implicit revision authority or derive privileges from tasks.
+        self.project_store = project_store
 
         self.config = load_global_config()
         self.global_config = self.config
@@ -613,6 +619,32 @@ class CollaborativeAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Shared memory wrappers
     # ------------------------------------------------------------------
+    def join_project(self, *, auth: AuthorizationContext, kind: str) -> Dict[str, Any]:
+        """Join with host-verified identity; not exposed to untrusted task modes."""
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.join(auth=auth, kind=kind)
+
+    def acquire_resource_lease(self, resource_id: str, *, auth: AuthorizationContext, ttl: float = 30.0) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.acquire(resource_id, auth=auth, ttl=ttl)
+
+    def release_resource_lease(self, resource_id: str, lease_id: str, fencing_token: int, *, auth: AuthorizationContext) -> None:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        self.project_store.release(resource_id, lease_id, fencing_token, auth=auth)
+
+    def project_events(self, *, auth: AuthorizationContext, after: int = 0) -> list[Dict[str, Any]]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.events(auth=auth, after=after)
+
+    def project_snapshot(self, *, auth: AuthorizationContext) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.snapshot(auth=auth)
+
     def shared_get(self, key: str, default: Any = None) -> Any:
         return memory_get(self.shared_memory, key, default=default)
 
