@@ -45,6 +45,7 @@ class RevisionTask:
     reads: Mapping[str, str] = field(default_factory=dict)
     writes: tuple[str, ...] = ()
     capability: Optional[str] = None
+    capability_version: Optional[str] = None
     verification_required: bool = False
 
     def __post_init__(self) -> None:
@@ -59,12 +60,17 @@ class RevisionTask:
         if len(writes) != len(set(writes)):
             raise RevisionWorkflowError("write artifacts must be unique")
         object.__setattr__(self, "writes", writes)
+        if self.capability_version is not None:
+            object.__setattr__(self, "capability_version", _identifier(self.capability_version, "capability_version"))
+            if not self.capability:
+                raise RevisionWorkflowError("capability_version requires a capability")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id, "depends_on": list(self.depends_on),
             "reads": dict(self.reads), "writes": list(self.writes),
-            "capability": self.capability, "verification_required": self.verification_required,
+            "capability": self.capability, "capability_version": self.capability_version,
+            "verification_required": self.verification_required,
         }
 
     @classmethod
