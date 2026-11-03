@@ -12,23 +12,19 @@ import json
 import sqlite3
 import threading
 import uuid
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from .utils.planning_errors import *
+from .utils.planning_helpers import *
+from logs.logger import get_logger  # pyright: ignore[reportMissingImports]
 
-class RevisionWorkflowError(ValueError):
-    """Invalid plan, transition, or stale execution attempt."""
-
+logger = get_logger("Revision Workflow Store")
 
 _SUCCESS = frozenset({"succeeded", "verified"})
-
-
-def _identifier(value: str, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise RevisionWorkflowError(f"{field_name} must be a non-empty string")
-    return value.strip()
 
 
 @dataclass(frozen=True)
@@ -52,18 +48,30 @@ class RevisionTask:
         object.__setattr__(self, "task_id", _identifier(self.task_id, "task_id"))
         deps = tuple(_identifier(d, "dependency") for d in self.depends_on)
         if len(deps) != len(set(deps)) or self.task_id in deps:
-            raise RevisionWorkflowError("task dependencies must be unique and cannot include self")
+            raise RevisionWorkflowError(
+                "task dependencies must be unique and cannot include self",
+                task_id=self.task_id,
+                reason="invalid_dependencies",
+            )
         object.__setattr__(self, "depends_on", deps)
         reads = {_identifier(k, "read artifact"): _identifier(v, "read revision") for k, v in self.reads.items()}
         object.__setattr__(self, "reads", reads)
         writes = tuple(_identifier(w, "write artifact") for w in self.writes)
         if len(writes) != len(set(writes)):
-            raise RevisionWorkflowError("write artifacts must be unique")
+            raise RevisionWorkflowError(
+                "write artifacts must be unique",
+                task_id=self.task_id,
+                reason="duplicate_writes",
+            )
         object.__setattr__(self, "writes", writes)
         if self.capability_version is not None:
             object.__setattr__(self, "capability_version", _identifier(self.capability_version, "capability_version"))
             if not self.capability:
-                raise RevisionWorkflowError("capability_version requires a capability")
+                raise RevisionWorkflowError(
+                    "capability_version requires a capability",
+                    task_id=self.task_id,
+                    reason="missing_capability",
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,14 +90,22 @@ def _validate_graph(tasks: Mapping[str, RevisionTask]) -> list[str]:
     for task in tasks.values():
         missing = set(task.depends_on) - tasks.keys()
         if missing:
-            raise RevisionWorkflowError(f"{task.task_id}: missing dependencies: {sorted(missing)}")
+            raise RevisionWorkflowError(
+                f"{task.task_id}: missing dependencies: {sorted(missing)}",
+                task_id=task.task_id,
+                reason="missing_dependencies",
+            )
     visiting: set[str] = set()
     visited: set[str] = set()
     ordered: list[str] = []
 
     def visit(task_id: str) -> None:
         if task_id in visiting:
-            raise RevisionWorkflowError(f"cyclic task dependency involving {task_id}")
+            raise RevisionWorkflowError(
+                f"cyclic task dependency involving {task_id}",
+                task_id=task_id,
+                reason="cyclic_dependency",
+            )
         if task_id in visited:
             return
         visiting.add(task_id)
@@ -142,17 +158,23 @@ class RevisionWorkflowStore:
                                      "sequence INTEGER PRIMARY KEY AUTOINCREMENT, plan_id TEXT NOT NULL, "
                                      "event_id TEXT NOT NULL UNIQUE, event_type TEXT NOT NULL, payload TEXT NOT NULL, "
                                      "FOREIGN KEY(plan_id) REFERENCES revision_workflows(plan_id))")
-            self._connection.execute("CREATE INDEX IF NOT EXISTS ix_revision_workflow_events_plan "
-                                     "ON revision_workflow_events(plan_id, sequence)")
+            self._connection.execute("CREATE INDEX IF NOT EXISTS ix_revision_workflow_events_plan ON revision_workflow_events(plan_id, sequence)")
+
+        logger.info("Revision workflow store initialized at %s", self.path)
 
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+            logger.debug("Revision workflow store closed at %s", self.path)
 
     def _load(self, plan_id: str) -> dict[str, Any]:
         row = self._connection.execute("SELECT data FROM revision_workflows WHERE plan_id=?", (plan_id,)).fetchone()
         if row is None:
-            raise RevisionWorkflowError(f"unknown plan_id: {plan_id}")
+            raise RevisionWorkflowError(
+                f"unknown plan_id: {plan_id}",
+                plan_id=plan_id,
+                reason="not_found",
+            )
         return json.loads(row["data"])
 
     def get_plan(self, plan_id: str) -> dict[str, Any]:
@@ -163,12 +185,22 @@ class RevisionWorkflowStore:
         """Consult an injected host provider; never synthesize project state."""
         state = self.get_plan(plan_id)
         if self.revision_provider is None:
-            raise RevisionWorkflowError("no authoritative revision provider is configured")
+            raise RevisionWorkflowError(
+                "no authoritative revision provider is configured",
+                plan_id=plan_id,
+                reason="no_revision_provider",
+            )
         current = dict(self.revision_provider(state["project_id"]))
         missing = set(state["source_revisions"]) - set(current)
         if missing:
-            raise RevisionWorkflowError(f"revision provider omitted tracked artifacts: {sorted(missing)}")
-        return self.apply_change_set(plan_id, current, reason="authoritative revision refresh")
+            raise RevisionWorkflowError(
+                f"revision provider omitted tracked artifacts: {sorted(missing)}",
+                plan_id=plan_id,
+                reason="missing_tracked_artifacts",
+            )
+        result = self.apply_change_set(plan_id, current, reason="authoritative revision refresh")
+        logger.debug("Refreshed authoritative revisions plan_id=%s", plan_id)
+        return result
 
     def events(self, plan_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -215,6 +247,7 @@ class RevisionWorkflowStore:
                 provenance_agent.record_event({"event_type": "revision_event", "event_id": payload["event_id"],
                                                "payload": payload})
                 published += 1
+        logger.info("Published provenance events plan_id=%s count=%d", plan_id, published)
         return published
 
     def create_plan(self, project_id: str, tasks: Sequence[RevisionTask],
@@ -223,7 +256,11 @@ class RevisionWorkflowStore:
         identifier = _identifier(plan_id or uuid.uuid4().hex, "plan_id")
         by_id = {task.task_id: task for task in tasks}
         if not by_id or len(by_id) != len(tasks):
-            raise RevisionWorkflowError("plan requires distinct task identifiers")
+            raise RevisionWorkflowError(
+                "plan requires distinct task identifiers",
+                plan_id=identifier,
+                reason="empty_or_duplicate_tasks",
+            )
         order = _validate_graph(by_id)
         revisions = {_identifier(k, "artifact"): _identifier(v, "revision") for k, v in source_revisions.items()}
         state = {
@@ -238,6 +275,8 @@ class RevisionWorkflowStore:
             self._connection.execute("INSERT INTO revision_workflows(plan_id,state_version,data) VALUES (?,?,?)",
                                      (identifier, 1, json.dumps(state, sort_keys=True)))
             self._event(identifier, "plan.created", {"plan_revision": 1, "tasks": order, "source_revisions": revisions})
+        logger.info("Created plan_id=%s project=%s tasks=%d revisions=%d",
+                    identifier, project, len(by_id), len(revisions))
         return state
 
     def _mutate(self, plan_id: str, event_type: str,
@@ -250,18 +289,34 @@ class RevisionWorkflowStore:
                 detail = dict(modifier(state))
                 if detail.pop("_no_change", False):
                     self._connection.rollback()
+                    logger.debug("No-op mutation plan_id=%s event=%s", plan_id, event_type)
                     return state
                 state["state_version"] = old_version + 1
                 cursor = self._connection.execute("UPDATE revision_workflows SET state_version=?,data=? "
                                                   "WHERE plan_id=? AND state_version=?",
-                                                  (state["state_version"], json.dumps(state, sort_keys=True), plan_id, old_version))
+                                                  (state["state_version"], json.dumps(state, sort_keys=True),
+                                                   plan_id, old_version))
                 if cursor.rowcount != 1:
-                    raise RevisionWorkflowError("concurrent plan update")
+                    raise RevisionWorkflowError(
+                        "concurrent plan update",
+                        plan_id=plan_id,
+                        expected_state=str(old_version),
+                        current_state=str(state["state_version"]),
+                        reason="concurrent_update",
+                    )
                 self._event(plan_id, event_type, {"plan_revision": state["plan_revision"], **detail})
                 self._connection.commit()
+                logger.debug("Mutation plan_id=%s event=%s state_version=%d",
+                             plan_id, event_type, state["state_version"])
                 return state
-            except Exception:
+            except RevisionWorkflowError as exc:
                 self._connection.rollback()
+                logger.debug("Mutation rejected plan_id=%s event=%s err=%s", plan_id, event_type, exc)
+                raise
+            except Exception as exc:
+                self._connection.rollback()
+                logger.error("Mutation failed plan_id=%s event=%s err=%s: %s",
+                             plan_id, event_type, type(exc).__name__, exc)
                 raise
 
     @staticmethod
@@ -275,7 +330,11 @@ class RevisionWorkflowStore:
 
     def ready_groups(self, plan_id: str, *, max_parallel: int = 4) -> list[list[str]]:
         if max_parallel < 1:
-            raise RevisionWorkflowError("max_parallel must be positive")
+            raise RevisionWorkflowError(
+                "max_parallel must be positive",
+                plan_id=plan_id,
+                reason="invalid_max_parallel",
+            )
         state = self.get_plan(plan_id)
         batches: list[list[str]] = []
         candidates = [task_id for task_id in state["order"] if self._ready(state, task_id)]
@@ -299,13 +358,25 @@ class RevisionWorkflowStore:
 
         def change(state: dict[str, Any]) -> dict[str, Any]:
             if task_id not in state["tasks"] or not self._ready(state, task_id):
-                raise RevisionWorkflowError(f"task {task_id} is not ready against current revisions")
+                raise RevisionWorkflowError(
+                    f"task {task_id} is not ready against current revisions",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    expected_state="ready",
+                    current_state=state["status"].get(task_id, "missing"),
+                    reason="not_ready",
+                )
             selected = RevisionTask.from_dict(state["tasks"][task_id])
             conflicting = [name for name, status in state["status"].items()
                            if status == "running" and
                            _conflicts(selected, RevisionTask.from_dict(state["tasks"][name]))]
             if conflicting:
-                raise RevisionWorkflowError(f"task {task_id} conflicts with running tasks: {sorted(conflicting)}")
+                raise RevisionWorkflowError(
+                    f"task {task_id} conflicts with running tasks: {sorted(conflicting)}",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    reason="conflict_with_running",
+                )
             state["status"][task_id] = "running"
             task = state["tasks"][task_id]
             inputs = dict(task["reads"] or state["source_revisions"])
@@ -314,10 +385,12 @@ class RevisionWorkflowStore:
             return {"task_id": task_id, "run_id": run_id, "input_revisions": inputs}
 
         state = self._mutate(plan_id, "task.started", change)
+        logger.info("Claimed task plan_id=%s task=%s run_id=%s", plan_id, task_id, run_id)
         return state["attempts"][task_id][-1].copy()
 
     def complete_task(self, plan_id: str, task_id: str, run_id: str, *,
-                      output_refs: Optional[Mapping[str, str]] = None, error: Optional[str] = None) -> dict[str, Any]:
+                      output_refs: Optional[Mapping[str, str]] = None,
+                      error: Optional[str] = None) -> dict[str, Any]:
         if self.revision_provider is not None:
             self.refresh_authoritative_revisions(plan_id)
         output_refs = dict(output_refs or {})
@@ -327,13 +400,35 @@ class RevisionWorkflowStore:
 
         def change(state: dict[str, Any]) -> dict[str, Any]:
             if state["status"].get(task_id) != "running":
-                raise RevisionWorkflowError("task is not running (possibly invalidated)")
+                raise RevisionWorkflowError(
+                    "task is not running (possibly invalidated)",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    current_state=state["status"].get(task_id),
+                    reason="not_running",
+                )
             attempt = state["attempts"][task_id][-1]
             if attempt["run_id"] != run_id:
-                raise RevisionWorkflowError("execution attempt mismatch")
+                raise RevisionWorkflowError(
+                    "execution attempt mismatch",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    expected_state=attempt["run_id"],
+                    reason="run_id_mismatch",
+                )
             for key, revision in attempt["input_revisions"].items():
                 if state["source_revisions"].get(key) != revision:
-                    raise RevisionWorkflowError("input revision changed during execution")
+                    raise RevisionWorkflowError(
+                        "input revision changed during execution",
+                        plan_id=plan_id,
+                        task_id=task_id,
+                        run_id=run_id,
+                        expected_state=revision,
+                        current_state=state["source_revisions"].get(key),
+                        reason="input_revision_changed",
+                    )
             status = "failed" if error else (
                 "awaiting_verification" if state["tasks"][task_id]["verification_required"] else "succeeded"
             )
@@ -341,20 +436,37 @@ class RevisionWorkflowStore:
             state["status"][task_id] = status
             return {"task_id": task_id, "run_id": run_id, "status": status, "output_refs": output_refs}
 
-        return self._mutate(plan_id, "task.failed" if error else "task.completed", change)
+        state = self._mutate(plan_id, "task.failed" if error else "task.completed", change)
+        if error:
+            logger.warning("Task failed plan_id=%s task=%s run_id=%s err=%s",
+                           plan_id, task_id, run_id, error)
+        else:
+            logger.info("Task completed plan_id=%s task=%s run_id=%s status=%s",
+                        plan_id, task_id, run_id, state["status"][task_id])
+        return state
 
     def verify_task(self, plan_id: str, task_id: str, *, accepted: bool, evidence_id: str) -> dict[str, Any]:
         evidence_id = _identifier(evidence_id, "evidence_id")
 
         def change(state: dict[str, Any]) -> dict[str, Any]:
             if state["status"].get(task_id) != "awaiting_verification":
-                raise RevisionWorkflowError("task has no pending verification")
+                raise RevisionWorkflowError(
+                    "task has no pending verification",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    expected_state="awaiting_verification",
+                    current_state=state["status"].get(task_id),
+                    reason="no_pending_verification",
+                )
             status = "verified" if accepted else "failed"
             state["status"][task_id] = status
             state["attempts"][task_id][-1].update({"status": status, "evidence_id": evidence_id})
             return {"task_id": task_id, "status": status, "evidence_id": evidence_id}
 
-        return self._mutate(plan_id, "verification.completed", change)
+        state = self._mutate(plan_id, "verification.completed", change)
+        logger.info("Verification plan_id=%s task=%s accepted=%s evidence=%s",
+                    plan_id, task_id, accepted, evidence_id)
+        return state
 
     def apply_change_set(self, plan_id: str, changed_revisions: Mapping[str, str],
                          *, reason: str = "source revision changed") -> dict[str, Any]:
@@ -384,17 +496,25 @@ class RevisionWorkflowStore:
             state["plan_revision"] += 1
             return {"changed": actual, "invalidated": sorted(affected), "reason": reason}
 
-        return self._mutate(plan_id, "plan.invalidated", change)
+        state = self._mutate(plan_id, "plan.invalidated", change)
+        return state
 
     def replan_stale(self, plan_id: str, *, reason: str = "recompute invalidated tasks") -> dict[str, Any]:
         """Explicitly rebase stale tasks; completed attempts remain in history."""
+        pre_state = self.get_plan(plan_id)
+        pre_stale = [t for t in pre_state["order"] if pre_state["status"][t] == "stale"]
 
         def change(state: dict[str, Any]) -> dict[str, Any]:
             stale = [task_id for task_id in state["order"] if state["status"][task_id] == "stale"]
             for task_id in stale:
                 task = state["tasks"][task_id]
                 if any(key not in state["source_revisions"] for key in task["reads"]):
-                    raise RevisionWorkflowError(f"cannot rebase {task_id}: required source revision is unknown")
+                    raise RevisionWorkflowError(
+                        f"cannot rebase {task_id}: required source revision is unknown",
+                        plan_id=plan_id,
+                        task_id=task_id,
+                        reason="missing_source_revision",
+                    )
                 task["reads"] = {key: state["source_revisions"][key] for key in task["reads"]}
                 state["status"][task_id] = "pending"
             if stale:
@@ -402,10 +522,15 @@ class RevisionWorkflowStore:
                 return {"reset_tasks": stale, "reason": reason}
             return {"_no_change": True}
 
-        return self._mutate(plan_id, "plan.revised", change)
+        state = self._mutate(plan_id, "plan.revised", change)
+        if pre_stale:
+            logger.info("Rebased stale tasks plan_id=%s tasks=%s reason=%s",
+                        plan_id, pre_stale, reason)
+        return state
 
     def revise_task_graph(self, plan_id: str, tasks: Sequence[RevisionTask], *,
-                          reason: str, expected_plan_revision: Optional[int] = None) -> dict[str, Any]:
+                          reason: str,
+                          expected_plan_revision: Optional[int] = None) -> dict[str, Any]:
         """Atomically revise a dependency graph and retain superseded task history.
 
         Unchanged tasks retain their results. Changed tasks and their
@@ -414,14 +539,24 @@ class RevisionWorkflowStore:
         """
         replacements = {task.task_id: task for task in tasks}
         if not replacements or len(replacements) != len(tasks):
-            raise RevisionWorkflowError("revision requires distinct nonempty tasks")
+            raise RevisionWorkflowError(
+                "revision requires distinct nonempty tasks",
+                plan_id=plan_id,
+                reason="empty_or_duplicate_tasks",
+            )
         order = _validate_graph(replacements)
         normalized = {key: task.to_dict() for key, task in replacements.items()}
 
         def change(state: dict[str, Any]) -> dict[str, Any]:
             if (expected_plan_revision is not None and
                     state["plan_revision"] != expected_plan_revision):
-                raise RevisionWorkflowError("plan revision conflict")
+                raise RevisionWorkflowError(
+                    "plan revision conflict",
+                    plan_id=plan_id,
+                    expected_state=str(expected_plan_revision),
+                    current_state=str(state["plan_revision"]),
+                    reason="plan_revision_conflict",
+                )
             old = state["tasks"]
             added = sorted(set(normalized) - set(old))
             removed = sorted(set(old) - set(normalized))
@@ -440,7 +575,11 @@ class RevisionWorkflowStore:
             busy = [task_id for task_id in active_edit if
                     state["status"].get(task_id) in {"running", "outcome_unknown"}]
             if busy:
-                raise RevisionWorkflowError(f"cannot edit running or uncertain tasks: {sorted(busy)}")
+                raise RevisionWorkflowError(
+                    f"cannot edit running or uncertain tasks: {sorted(busy)}",
+                    plan_id=plan_id,
+                    reason="busy_tasks",
+                )
 
             for task_id in removed:
                 state.setdefault("retired_tasks", {}).setdefault(task_id, []).append({
@@ -463,10 +602,16 @@ class RevisionWorkflowStore:
             return {"added": added, "removed": removed, "modified": modified,
                     "invalidated": sorted(invalidated), "reason": reason}
 
-        return self._mutate(plan_id, "plan.graph_revised", change)
+        state = self._mutate(plan_id, "plan.graph_revised", change)
+        logger.info("Revised task graph plan_id=%s added=%d removed=%d modified=%d reason=%s",
+                    plan_id, len(normalized), 0, 0, reason) if False else None
+        return state
 
     def mark_interrupted_tasks(self, plan_id: str) -> dict[str, Any]:
         """On recovery, mark orphaned runs uncertain; never retry them blindly."""
+        pre_state = self.get_plan(plan_id)
+        interrupted_before = [name for name in pre_state["order"]
+                              if pre_state["status"][name] == "running"]
 
         def change(state: dict[str, Any]) -> dict[str, Any]:
             interrupted = [name for name in state["order"] if state["status"][name] == "running"]
@@ -477,7 +622,11 @@ class RevisionWorkflowStore:
                 state["attempts"][name][-1]["status"] = "outcome_unknown"
             return {"tasks": interrupted, "reason": "recovery requires external outcome reconciliation"}
 
-        return self._mutate(plan_id, "task.outcome_unknown", change)
+        state = self._mutate(plan_id, "task.outcome_unknown", change)
+        if interrupted_before:
+            logger.warning("Marked interrupted tasks plan_id=%s tasks=%s",
+                           plan_id, interrupted_before)
+        return state
 
     def resolve_interrupted_task(self, plan_id: str, task_id: str, run_id: str,
                                  *, succeeded: bool, evidence_id: str) -> dict[str, Any]:
@@ -486,13 +635,34 @@ class RevisionWorkflowStore:
 
         def change(state: dict[str, Any]) -> dict[str, Any]:
             if state["status"].get(task_id) != "outcome_unknown":
-                raise RevisionWorkflowError("task does not have an uncertain execution outcome")
+                raise RevisionWorkflowError(
+                    "task does not have an uncertain execution outcome",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    expected_state="outcome_unknown",
+                    current_state=state["status"].get(task_id),
+                    reason="not_outcome_unknown",
+                )
             attempt = state["attempts"][task_id][-1]
             if attempt["run_id"] != run_id:
-                raise RevisionWorkflowError("execution attempt mismatch")
+                raise RevisionWorkflowError(
+                    "execution attempt mismatch",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    expected_state=attempt["run_id"],
+                    reason="run_id_mismatch",
+                )
             if any(state["source_revisions"].get(key) != value
                    for key, value in attempt["input_revisions"].items()):
-                raise RevisionWorkflowError("cannot certify obsolete inputs as current")
+                raise RevisionWorkflowError(
+                    "cannot certify obsolete inputs as current",
+                    plan_id=plan_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    reason="obsolete_inputs",
+                )
             status = ("awaiting_verification" if state["tasks"][task_id]["verification_required"]
                       else "succeeded") if succeeded else "failed"
             state["status"][task_id] = status
@@ -500,7 +670,10 @@ class RevisionWorkflowStore:
             return {"task_id": task_id, "run_id": run_id, "status": status,
                     "reconciliation_evidence_id": evidence_id}
 
-        return self._mutate(plan_id, "task.reconciled", change)
+        state = self._mutate(plan_id, "task.reconciled", change)
+        logger.info("Reconciled task plan_id=%s task=%s run_id=%s succeeded=%s evidence=%s",
+                    plan_id, task_id, run_id, succeeded, evidence_id)
+        return state
 
 
 __all__ = ["RevisionTask", "RevisionWorkflowError", "RevisionWorkflowStore"]
