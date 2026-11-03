@@ -20,6 +20,9 @@ from .planning.planning_types import Any, ResourceProfile, Task, TaskStatus, Tas
 from .planning.planning_metrics import PlanningMetrics
 from .planning.planning_executor import PlanningExecutor
 from .planning.revision_workflow import RevisionTask, RevisionWorkflowStore
+from .planning.workflow_runtime import (
+    AuthorizationContext, CapabilityBinding, OrchestratorCapabilityAdapter, RevisionWorkflowRunner,
+)
 from .planning.heuristic_selector import HeuristicSelector
 from .planning.task_scheduler import DeadlineAwareScheduler
 from .planning.plan_success_predictor import PlanSuccessPredictor, task_history_from_method_stats
@@ -213,6 +216,30 @@ class PlanningAgent(BaseAgent):
                 verification_required=bool(context.get("verification_required", False)),
             ))
         return self.revision_workflows.create_plan(project_id, specifications, source_revisions, plan_id=plan_id)
+
+    def revise_revision_plan(self, plan_id: str, tasks: Sequence[RevisionTask], *,
+                             reason: str, expected_plan_revision: Optional[int] = None) -> Dict[str, TypingAny]:
+        """Atomically revise an existing persistent graph; retain prior attempts."""
+        return self.revision_workflows.revise_task_graph(
+            plan_id, tasks, reason=reason, expected_plan_revision=expected_plan_revision,
+        )
+
+    def run_revision_plan(self, plan_id: str, payloads: Dict[str, Dict[str, TypingAny]], *,
+                          orchestrator: TypingAny, capability_bindings: Dict[str, CapabilityBinding],
+                          authorization: AuthorizationContext, max_parallel: int = 4) -> Dict[str, TypingAny]:
+        """Execute ready computations via the existing Orchestrator Agent.
+
+        Capability mappings and authorization come from trusted host code;
+        only specialties already registered with AgentFactory can be called.
+        Host-owned document commits remain a separate API operation.
+        """
+        registered = set(self.agent_factory.get_registered_agent_types())
+        dispatcher = OrchestratorCapabilityAdapter(
+            orchestrator, capability_bindings, registered_specialties=registered,
+        )
+        return RevisionWorkflowRunner(
+            self.revision_workflows, dispatcher, max_parallel=max_parallel,
+        ).run_until_blocked(plan_id, payloads, auth=authorization)
 
     # ------------------------------------------------------------------
     # Configuration and shared-memory helpers

@@ -315,3 +315,67 @@ through `ProvenanceAgent.record_event` using stable identities; retries are
 idempotent. The authoritative host must still enforce expected-revision checks
 at commit time and report confirmed commits separately to Provenance. A
 revision notification cannot be inferred from a cached Planning state alone.
+
+## Authorized specialist delegation and graph revisions
+
+`workflow_runtime.py` provides an opt-in `RevisionWorkflowRunner` that runs
+ready tasks using the existing `OrchestratorAgent.perform_task` delegation API.
+Bindings associate capabilities with **already registered** agent specialties,
+and only the `perform_task` method may be invoked. This prevents workflow
+payloads from selecting arbitrary agent methods or dynamically onboarding
+untrusted specialists. Successful delegated results must return a structured
+`status` and `output_refs` mapping. All computations remain proposed work:
+the runner never commits external project mutations.
+
+```python
+from src.agents.planning.workflow_runtime import (
+    AuthorizationContext, CapabilityBinding, OrchestratorCapabilityAdapter,
+    RevisionWorkflowRunner,
+)
+
+# Both these objects MUST be provisioned by the trusted host, not a task payload.
+authorization = AuthorizationContext("actor-id", "engineering-project",
+                                     frozenset({"workflow:execute"}))
+dispatcher = OrchestratorCapabilityAdapter(
+    orchestrator, {"calculate": CapabilityBinding("stem")},
+    registered_specialties=set(agent_factory.get_registered_agent_types()),
+)
+result = RevisionWorkflowRunner(workflows, dispatcher).run_until_blocked(
+    plan_id, {"calculate": {"operation": "estimate"}}, auth=authorization,
+)
+```
+
+`PlanningAgent.run_revision_plan(...)` exposes this orchestration through the
+normal agent entrypoint, checking the actual AgentFactory registration set.
+`revise_task_graph(plan_id, new_tasks, reason=..., expected_plan_revision=...)`
+atomically edits the DAG, archives removed tasks, preserves independent valid
+results and invalidates changed existing tasks with their transitive dependents.
+Busy or outcome-uncertain tasks cannot be silently removed or modified.
+Added tasks begin as pending; use `replan_stale` to rebase stale tasks.
+
+## Application adapters and durable commit reconciliation
+
+`project_adapter.py` defines `AuthoritativeProjectAdapter` and a concrete
+`CallbackProjectAdapter` for applications already exposing authoritative
+revision, commit and reconciliation APIs. Hosts MUST provide atomic
+expected-revision checking and stable idempotency-key lookup. These adapters
+do not invent document revisions or provide automatic application adapters
+for applications that have not wired the callbacks yet.
+
+`commit_reconciliation.py` persists commit intent **before** external
+dispatch. `CommitReconciliationStore.prepare(...)` requires `workflow:commit`;
+`dispatch(...)` invokes the host only for a previously pending intent. If a
+timeout/crash leaves its outcome uncertain, `reconcile(...)` requires the
+additional `workflow:commit:reconcile` scope and queries the authoritative
+host, without reissuing the mutation. `publish_confirmed(...)` requires
+`workflow:provenance:write` and records host-backed `commit.confirmed` evidence
+through Provenance only after a positive receipt. It uses a stable event ID
+for idempotent replay. Reject uncertain/nonconfirmed receipts as proof of
+success. AuthorizationContext values must come from the host's trusted
+identity/permission boundary, not from LLM or specialist-generated content.
+
+For distributed deployments, outbox recovery prioritizes safety: if the host
+cannot establish whether a request was received, its intent remains
+`outcome_unknown` until independently reconciled. This is not a distributed
+transaction coordinator or a promise of exactly-once delivery. Applications
+must supply real durable lookup and atomic idempotent commit semantics.
