@@ -165,6 +165,35 @@ def interior(geometry: Any, point: Any, *, tolerance: float = DEFAULT_ABS_TOL) -
 
 
 class Topology:
+    @staticmethod
+    def validate_polygon(polygon: Polygon, *, tolerance: float = DEFAULT_ABS_TOL) -> dict[str, Any]:
+        """Report duplicate/degenerate edges and crossings in a planar polygon.
+
+        This is a read-only topology diagnostic, not a mesh repair operation.
+        """
+        if not isinstance(polygon, Polygon) or polygon.dimension != 2:
+            raise SpatialTopologyError("validate_polygon requires a 2D Polygon")
+        if not np.isfinite(tolerance) or tolerance < 0:
+            raise SpatialTopologyError("tolerance must be finite and non-negative")
+        points = polygon.vertices
+        n = len(points)
+        findings: list[dict[str, Any]] = []
+        for i in range(n):
+            if float(np.linalg.norm(points[i] - points[(i + 1) % n])) <= tolerance:
+                findings.append({"kind": "degenerate_edge", "edges": [i]})
+        twice_area = float(sum(points[i, 0] * points[(i + 1) % n, 1] - points[(i + 1) % n, 0] * points[i, 1] for i in range(n)))
+        if abs(twice_area) <= tolerance * tolerance:
+            findings.append({"kind": "zero_signed_area"})
+        for i in range(n):
+            a, b = points[i], points[(i + 1) % n]
+            for j in range(i + 1, n):
+                if j == i + 1 or (i == 0 and j == n - 1):
+                    continue  # adjacent edges share a permitted endpoint
+                c, d = points[j], points[(j + 1) % n]
+                if segment_intersection_2d(Segment(a, b), Segment(c, d), tolerance=tolerance):
+                    findings.append({"kind": "self_intersection", "edges": [i, j]})
+        return {"valid": not findings, "findings": findings, "signed_area": twice_area / 2.0}
+
     """Facade for topological predicates with stable method names."""
 
     connected = staticmethod(connected)

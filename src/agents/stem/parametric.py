@@ -188,6 +188,21 @@ class ParametricMath:
             env[name] = self._quantity(value)
         return self._calculate(tree.body, env)
 
+    def inspect_expression(self, expression: str, parameters: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Explain declared dependencies and, when inputs are supplied, evaluated units.
+
+        Uses the same restricted AST and quantity evaluator as regular STEM
+        calculations; it never evaluates Python statements or arbitrary calls.
+        """
+        tree = self._parse(expression)
+        dependencies = sorted(name for name in self._names(tree)
+                              if name not in _CONSTANTS and self._unit_name(name) is None)
+        result: dict[str, Any] = {"expression": expression, "dependencies": dependencies}
+        if parameters is not None:
+            quantity = self.evaluate_expression(expression, parameters)
+            result["result"] = quantity.to_dict()
+        return result
+
     def evaluate(self, expressions: Mapping[str, str],
                  parameters: Mapping[str, Any] | None = None) -> dict[str, Quantity]:
         """Topologically evaluate derived parameters and detect cycles/missing symbols."""
