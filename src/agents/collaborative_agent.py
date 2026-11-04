@@ -1,28 +1,23 @@
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 """
 Production-grade Collaborative Agent built on the shared BaseAgent architecture.
 
-The CollaborativeAgent is the agent-facing orchestration layer for SLAI's
-collaborative runtime. It coordinates safety assessment, multi-agent assignment,
-manager-backed delegation, shared-memory coordination, and operator-facing
-state publication while keeping low-level subsystem ownership in the dedicated
-collaborative modules.
+The CollaborativeAgent is the agent-facing orchestration layer for SLAI's collaborative runtime.
+It coordinates safety assessment, multi-agent assignment, manager-backed delegation, shared-memory coordination, and operator-facing
+state publication while keeping low-level subsystem ownership in the dedicated collaborative modules.
 
 Responsibilities
 ----------------
 - Provide a stable BaseAgent-compatible interface for collaborative operations.
 - Assess task and agent risk through an adaptive Bayesian risk model.
 - Coordinate task-to-agent assignments when the caller supplies explicit agents.
-- Delegate executable tasks through CollaborationManager without importing or
-  owning TaskRouter internals.
-- Publish bounded assessments, coordination decisions, metrics, snapshots, and
-  audit events into shared memory.
+- Delegate executable tasks through CollaborationManager without importing or owning TaskRouter internals.
+- Publish bounded assessments, coordination decisions, metrics, snapshots, and audit events into shared memory.
 - Serialize and restore agent-local coordination state for warm starts.
-- Use collaboration errors and collaborative helpers consistently at runtime
-  boundaries.
+- Use collaboration errors and collaborative helpers consistently at runtime boundaries.
 
 Design principles
 -----------------
@@ -36,8 +31,7 @@ Design principles
 4. Config-backed behavior: CollaborativeAgent tuning belongs in
    agents_config.yaml under ``collaborative_agent``.
 5. Operational transparency: all diagnostics are JSON-safe, redacted by default,
-   bounded, and suitable for logs, shared memory, test assertions, and incident
-   reports.
+   bounded, and suitable for logs, shared memory, test assertions, and incident reports.
 """
 
 import inspect
