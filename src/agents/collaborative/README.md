@@ -241,3 +241,82 @@ print(manager.get_agent_stats())
 - Keep policy and contract semantics in their dedicated modules; avoid duplicating logic in callers.
 - Shared-memory payloads and audit events are designed to be JSON-safe and optionally redacted for operational safety.
 - Manager and agent snapshots/health endpoints are intended for observability, not just debugging.
+
+---
+
+## Durable inter-agent messages and handoffs (v2.4)
+
+`ProjectCoordinationStore` now includes application-independent, project-scoped
+message inboxes and exclusive handoff records in its existing SQLite database.
+`CollaborativeAgent` exposes thin wrappers around that store; it optionally
+publishes opaque message/handoff identifiers through existing `SharedMemory`
+pub/sub as **best-effort wake-up hints**. It never publishes message bodies,
+handoff details, or authorization contexts to the unauthenticated pub/sub bus.
+
+The host must issue `AuthorizationContext` objects from authenticated identities
+and policy, register active agent participants using `join`, and grant the
+`collaboration:message` and/or `collaboration:handoff` scope. An agent-provided
+payload cannot grant itself these privileges.
+
+```python
+from src.agents.collaborative.project_coordination import ProjectCoordinationStore
+from src.agents.collaborative_agent import CollaborativeAgent
+from src.agents.planning.workflow_runtime import AuthorizationContext
+
+# Example for trusted host code; auth is issued by the host, not agent output.
+store = ProjectCoordinationStore("data/collaboration/coordination.sqlite3")
+scopes = frozenset({"collaboration:join", "collaboration:message", "collaboration:handoff"})
+a = AuthorizationContext("agent-a", "project-1", scopes)
+b = AuthorizationContext("agent-b", "project-1", scopes)
+store.join(auth=a, kind="agent")
+store.join(auth=b, kind="agent")
+
+agent = CollaborativeAgent(project_store=store, shared_memory=None, agent_factory=None)
+message = agent.send_agent_message("agent-b", "REQUEST", {"operation": "analyze"},
+                                   auth=a, task_id="task-1", idempotency_key="request-1")
+received = agent.agent_message_inbox(auth=b)
+agent.acknowledge_agent_message(message["message_id"], auth=b)
+
+handoff = agent.prepare_agent_handoff("agent-b", "task-1", "verify", "Verify result",
+                                      auth=a, context_refs=["artifact:revision-1"],
+                                      idempotency_key="handoff-1")
+pending = agent.agent_handoff_inbox(auth=b)  # Durable discovery after missed hints/restart.
+accepted = agent.transition_agent_handoff(handoff["handoff_id"], "accept", auth=b)
+completed = agent.transition_agent_handoff(handoff["handoff_id"], "complete", auth=b,
+                                            result_refs={"verification": "artifact:revision-2"})
+agent.shutdown()
+store.close()
+```
+
+Messages have versioned envelopes, trusted sender IDs, correlation/causation
+references, TTLs, bounded JSON payloads, deduplication keys, and explicit
+recipient acknowledgments. Delivery acknowledgments **never** imply execution
+completion. Handoffs transition `pending -> accepted -> completed/failed`, or
+`pending -> rejected/cancelled/expired`. Before acceptance the sender owns the
+handoff; afterward the recipient owns it. SQLite transactions and an active-task
+uniqueness constraint prevent two simultaneous exclusive handoffs in the same
+project. Repeated terminal transitions are rejected.
+
+Important boundaries and current limitations:
+
+- A handoff record is not a substitute for `RevisionWorkflowStore` task claims,
+  external authorization, revision checks, or host-side commit fencing. The
+  workflow/host remains authoritative for actual side effects.
+- Context references identify host-managed artifacts or memory records. The
+  exchange does not automatically resolve or persist their content, and
+  `SharedMemory` itself remains process-local/manager-backed, not a secure
+  durable cross-host context database.
+- Published hints are optional, non-durable, and carry only opaque identifiers.
+  Consumers must call the authorized store to retrieve records. Polling the
+  inbox is the durable recovery path.
+- Accepted handoffs presently require an explicit completion/failure decision;
+  automatic reassignment of a crashed accepted recipient, exactly-once effects,
+  and distributed transport are not implemented.
+- Authorization is enforced by the store against the supplied trusted host
+  context and participant table; the store cannot authenticate an arbitrary
+  caller who is permitted to forge `AuthorizationContext` objects.
+
+`CollaborativeAgent` provides the agent-facing methods directly when a host
+injects `project_store`; `ProjectCoordinationStore` exposes the same durable
+primitives for other authorized callers. Neither creates or closes a competing
+store, preserving existing factory and workflow responsibilities.

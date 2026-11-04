@@ -645,6 +645,66 @@ class CollaborativeAgent(BaseAgent):
             raise RuntimeError("project collaboration store is not configured")
         return self.project_store.snapshot(auth=auth)
 
+    def _inter_agent_hint(self, project_id: str, recipient_id: str, kind: str, record_id: str) -> None:
+        """Best-effort notification; authoritative content stays in the store."""
+        if not self.runtime_config.shared_memory_enabled:
+            return
+        publisher = getattr(self.shared_memory, "publish", None)
+        if callable(publisher):
+            try:
+                publisher(f"inter_agent:{project_id}:{recipient_id}",
+                          {"kind": kind, "record_id": record_id})
+            except Exception as exc:
+                # Transient pub/sub is not an acknowledgment or a durability boundary.
+                self.logger.debug("Inter-agent notification unavailable: %s", type(exc).__name__)
+
+    def send_agent_message(self, recipient_id: str, message_type: str, payload: Dict[str, Any], *,
+                           auth: AuthorizationContext, **kwargs: Any) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        message = self.project_store.send_message(recipient_id, message_type, payload, auth=auth, **kwargs)
+        self._inter_agent_hint(auth.project_id, recipient_id, "message", message["message_id"])
+        return message
+
+    def agent_message_inbox(self, *, auth: AuthorizationContext, **kwargs: Any) -> list[Dict[str, Any]]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.inbox(auth=auth, **kwargs)
+
+    def acknowledge_agent_message(self, message_id: str, *, auth: AuthorizationContext) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.acknowledge_message(message_id, auth=auth)
+
+    def prepare_agent_handoff(self, recipient_id: str, task_id: str, capability: str, objective: str, *,
+                              auth: AuthorizationContext, **kwargs: Any) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        handoff = self.project_store.prepare_handoff(
+            recipient_id, task_id, capability, objective, auth=auth, **kwargs)
+        self._inter_agent_hint(auth.project_id, recipient_id, "handoff", handoff["handoff_id"])
+        return handoff
+
+    def get_agent_handoff(self, handoff_id: str, *, auth: AuthorizationContext) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.get_handoff(handoff_id, auth=auth)
+
+    def agent_handoff_inbox(self, *, auth: AuthorizationContext, status: str = "pending",
+                            limit: int = 100) -> list[Dict[str, Any]]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.handoff_inbox(auth=auth, status=status, limit=limit)
+
+    def transition_agent_handoff(self, handoff_id: str, action: str, *,
+                                 auth: AuthorizationContext, **kwargs: Any) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        handoff = self.project_store.transition_handoff(handoff_id, action, auth=auth, **kwargs)
+        other = handoff["sender_id"] if auth.actor_id == handoff["recipient_id"] else handoff["recipient_id"]
+        self._inter_agent_hint(auth.project_id, other, "handoff", handoff_id)
+        return handoff
+
     def shared_get(self, key: str, default: Any = None) -> Any:
         return memory_get(self.shared_memory, key, default=default)
 
