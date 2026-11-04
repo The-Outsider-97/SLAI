@@ -375,6 +375,8 @@ class OptimizationAgent(BaseAgent):
                 "problem must be OptimizationProblem or a problem-definition mapping",
                 context={"actual_type": type(spec).__name__},
             )
+        if "objective" in spec and isinstance(spec.get("variables"), Mapping):
+            return self.optimization_solver.parameter_problem(spec)
         return self.problem_definition.build(spec)
 
     @staticmethod
