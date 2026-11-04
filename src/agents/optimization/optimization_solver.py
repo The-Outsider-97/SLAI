@@ -1,13 +1,12 @@
 """Production orchestration for SLAI mathematical optimization solvers.
 
-The orchestrator performs classification, capability-based solver selection,
-deterministic fallback, memory-backed warm starts and evidence recording, and
-multi-objective transformations.  It does not own planning, simulation, or
-SLAI/model hyperparameter tuning.
+The orchestrator performs classification, capability-based solver selection, deterministic fallback,
+memory-backed warm starts and evidence recording, and multi-objective transformations.
+It does not own planning, simulation, or SLAI/model hyperparameter tuning.
 """
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
