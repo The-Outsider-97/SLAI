@@ -4,10 +4,7 @@ import threading
 
 import pytest
 
-from src.agents.collaborative.project_coordination import (
-    ProjectCoordinationError,
-    ProjectCoordinationStore,
-)
+from src.agents.collaborative.project_coordination import ProjectCoordinationError, ProjectCoordinationStore
 from src.agents.collaborative_agent import CollaborativeAgent
 from src.agents.planning.workflow_runtime import AuthorizationContext, WorkflowAuthorizationError
 
