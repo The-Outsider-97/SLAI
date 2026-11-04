@@ -28,6 +28,18 @@ printer = PrettyPrinter()
 
 
 class OptimizationSolver:
+    @staticmethod
+    def inspect_candidate(problem: OptimizationProblem, point: Mapping[str, Any], *, tolerance: float = 1e-8) -> dict[str, Any]:
+        """Inspect feasibility without running a solver or altering a candidate.
+
+        Delegates to the existing domain/constraint verification implementation;
+        this result is not a proof of global or local optimality.
+        """
+        from .optimization_math import feasibility_evidence
+        violation, feasible = feasibility_evidence(problem, point, tolerance=tolerance)
+        return {"feasible": feasible, "maximum_violation": violation,
+                "tolerance": tolerance, "optimality": "not_evaluated"}
+
     def __init__(
         self,
         config: Mapping[str, Any] | None = None,
