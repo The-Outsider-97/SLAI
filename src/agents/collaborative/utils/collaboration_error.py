@@ -539,6 +539,21 @@ class SharedMemoryFailureError(CollaborationError):
         )
 
 
+class ProjectCoordinationError(CollaborationError, ValueError):
+    """Invalid or conflicting project collaboration operation."""
+    def __init__(self, message: str, *, context: Optional[Mapping[str, Any]] = None):
+        merged_context = _merge_context(context)
+        target = f" for context {merged_context}" if merged_context else ""        
+        super().__init__(
+            CollaborationErrorType.REGISTRATION_FAILURE,
+            message,
+            severity=CollaborationSeverity.MEDIUM,
+            context=merged_context,
+            remediation_guidance="Review project collaboration configuration and operation sequence.",
+            retryable=False,
+        )
+
+
 # Backwards-compatible aliases for callers that use shorter names.
 AgentRegistrationError = RegistrationFailureError
 SharedMemoryAccessError = SharedMemoryFailureError
@@ -735,6 +750,24 @@ def _json_dumps(value: Any, *, indent: Optional[int] = None) -> str:
     )
 
 
+__all__ = [
+    "AgentRegistrationError",
+    "CollaborationError",
+    "CollaborationErrorConfig",
+    "CollaborationErrorType",
+    "CollaborationSeverity",
+    "DelegationFailureError",
+    "NoCapableAgentError",
+    "OverloadError",
+    "RegistrationFailureError",
+    "RoutingFailureError",
+    "SharedMemoryAccessError",
+    "SharedMemoryFailureError",
+    "ProjectCoordinationError",
+    "as_collaboration_error",
+]
+
+
 if __name__ == "__main__":
     overload = OverloadError(
         "System load exceeded (120/100)",
@@ -766,19 +799,3 @@ if __name__ == "__main__":
         assert wrapped.to_audit_format()["cause"]["type"] == "RuntimeError"
 
     print("All collaboration_error.py tests passed.")
-
-__all__ = [
-    "AgentRegistrationError",
-    "CollaborationError",
-    "CollaborationErrorConfig",
-    "CollaborationErrorType",
-    "CollaborationSeverity",
-    "DelegationFailureError",
-    "NoCapableAgentError",
-    "OverloadError",
-    "RegistrationFailureError",
-    "RoutingFailureError",
-    "SharedMemoryAccessError",
-    "SharedMemoryFailureError",
-    "as_collaboration_error",
-]

@@ -45,6 +45,7 @@ _EXPORTS = {
     "ReasoningAgent": (".reasoning_agent", "ReasoningAgent"),
     "SafetyAgent": (".safety_agent", "SafetyAgent"),
     "SimulationAgent": (".simulation_agent", "SimulationAgent"),
+    "SoftwareAgent": (".software_agent", "SoftwareAgent"),
     "SpatialAgent": (".spatial_agent", "SpatialAgent"),
     "STEMAgent": (".stem_agent", "STEMAgent"),
     "VerificationAgent": (".verification_agent", "VerificationAgent"),

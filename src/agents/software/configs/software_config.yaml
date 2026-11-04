@@ -1,0 +1,119 @@
+# ============================================================================
+# SLAI Software subsystem configuration.
+# Every key is optional; omitted keys fall back to the in-code defaults shown
+# here.  Agent-level orchestration settings (publishing, TTLs, key prefixes)
+# live in base/configs/agents_config.yaml under `software_agent` and are not
+# read here.
+# ============================================================================
+
+# --- private working memory (bounded, recomputable, process-local) -----------
+memory:
+  model_cache_entries: 8192     # parsed SourceModel cache
+  snapshot_entries: 16          # remembered RepositorySnapshots (by digest)
+  repository_entries: 8         # RepositoryModels
+  derived_entries: 24           # symbol index / dependency graph / call graph
+  ledger_entries: 500           # issued patch proposals
+
+# --- repository snapshots -----------------------------------------------------
+repository:
+  max_files: 20000
+  max_total_bytes: 268435456    # 256 MiB
+  source_roots: ["."]           # "." = repository root; e.g. ["src"] for src-layout
+  test_patterns:
+    - "tests/**"
+    - "**/test_*.py"
+    - "**/*_test.py"
+    - "**/conftest.py"
+  language_map: {}              # extra suffix -> language, e.g. {".pyx": "cython"}
+
+# --- parser ---------------------------------------------------------------------
+parser:
+  max_file_bytes: 2000000
+  max_ast_nodes: 400000
+  retain_ast: false             # keep ASTs in memory (faster rule passes, more RAM)
+  compute_metrics: true
+  max_string_names: 20000
+  recursion_limit: 5000
+
+# --- symbol index and graphs --------------------------------------------------------
+symbol_index:
+  include_heuristic_references: true   # name-match unresolved `.attr` accesses (flagged inexact)
+  heuristic_max_candidates: 3          # skip names shared by more class members than this
+  max_alias_depth: 8                   # re-export / star-import chain depth
+  max_reported_references: 500
+
+graphs:
+  include_reference_edges: true        # symbols used as values (callbacks, decorators)
+  include_heuristic_calls: true
+
+# --- static analysis -----------------------------------------------------------------------
+static_analysis:
+  max_cyclomatic: 15
+  max_cognitive: 20
+  max_function_lines: 100
+  max_parameters: 7
+  max_nesting: 4
+  max_class_methods: 30
+  max_module_lines: 1500
+  check_docstrings: false
+  skip_security_in_tests: true
+  disabled_rules: []                   # e.g. ["SW503", "SW502"]
+  min_severity: info                   # info | low | medium | high
+  max_findings: 2000
+
+# --- dead-code detection ------------------------------------------------------------------------
+dead_code:
+  public_api_is_live: true             # exported/public symbols count as entry points
+  entry_points: []                     # qualified names or globs, e.g. ["app.main.*"]
+  min_confidence: 0.5
+  include_tests_as_roots: true
+  include_private_variables: true
+  max_items: 500
+
+# --- change impact and test selection -------------------------------------------------------------
+change_impact:
+  max_depth: 6
+  decay: 0.9                           # confidence factor per hop
+  inexact_penalty: 0.6                 # extra factor for name-matched / override edges
+  max_impacted: 500
+  max_tests: 200
+  test_threshold: 0.2
+  dependency_depth: 3
+  risk_weights:
+    blast_radius: 0.30
+    public_api: 0.20
+    centrality: 0.15
+    complexity: 0.15
+    test_gap: 0.15
+    breadth: 0.05
+
+# --- architecture ------------------------------------------------------------------------------------
+architecture:
+  hub_count: 10
+  package_level: null                  # truncate package names to N components (null = leaf packages)
+  include_tests: false
+  load_time_only_violations: false
+  layers: []                           # ordered top -> bottom; lower layers must not import higher ones
+  #  - { name: interface, packages: ["app.api*"] }
+  #  - { name: domain,    packages: ["app.core*"] }
+  forbidden: []
+  #  - { from: "app.core*", to: "app.api*", reason: "core must not know the API layer" }
+
+# --- patch synthesis ------------------------------------------------------------------------------------
+patch:
+  max_files: 200
+  max_changed_lines: 20000
+  max_diff_bytes: 4194304
+  context_lines: 3
+  reject_syntax_errors: true
+
+refactoring:
+  min_dead_code_confidence: 0.8
+  min_import_confidence: 0.9
+  regression_check: true               # re-analyze touched files + importers after the edit
+  rename_family: true                  # rename overriding/overridden methods together
+  max_edits: 5000
+
+api_migration:
+  max_rules: 100
+  regression_check: true

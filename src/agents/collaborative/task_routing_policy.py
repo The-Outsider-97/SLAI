@@ -27,6 +27,11 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
+from logs.logger import PrettyPrinter, get_logger # pyright: ignore[reportMissingImports]
+
+logger = get_logger("Task Routing Policy")
+printer = PrettyPrinter()
+
 MODEL_SCHEMA = 1
 ROUTES = ("inline", "cache", "delegate")
 MODEL_ROUTES = ("inline", "delegate")   # routes whose outcomes are learned; cache is a validated rule
@@ -123,6 +128,7 @@ def _task_view(task: Any) -> tuple[str, Any, int]:
             inner = inner["task_data"]
         key = "values" if operation == "numeric_summary" else "records"
         root = inner.get(key) if isinstance(inner, Mapping) else inner
+        assert spec is not None
         fields = spec.get("fields")
         return operation, root, len(fields) if isinstance(fields, (list, tuple)) else 0
     return "other", task, 0
@@ -248,6 +254,7 @@ def validate_observation(row: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(row["latency_ms"], (int, float)):
             raise ValueError("latency_ms")
     except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("Invalid routing observation rejected: %s", exc)
         raise ValueError(f"Invalid routing observation ({type(exc).__name__}: {exc})") from exc
     return dict(row)
 
@@ -283,7 +290,7 @@ def validate_head(head: Any) -> None:
     else:
         trees = head.get("trees")
         ok = _finite(head.get("base")) and isinstance(trees, list) and bool(trees)
-        for tree in trees if ok else ():
+        for tree in trees if isinstance(trees, list) and ok else ():
             f, t, l, r, v = (tree.get(k) for k in ("f", "t", "l", "r", "v"))
             n = len(f)
             ok = ok and n > 0 and all(len(a) == n for a in (t, l, r, v)) and _finite(*t, *v)
@@ -326,33 +333,44 @@ class TaskRoutingPolicy:
     def __init__(self, manifest_path: str | Path, *, allow_experimental: bool = False) -> None:
         p = Path(manifest_path)
         if p.stat().st_size > MAX_ARTIFACT_BYTES:
+            logger.error("TRP artifact %s exceeds %d byte limit", p, MAX_ARTIFACT_BYTES)
             raise ValueError("TRP artifact exceeds size limit")
         raw = p.read_bytes()
         model = json.loads(raw.decode("utf-8"))
         if model.get("schema") != MODEL_SCHEMA or tuple(model.get("features", ())) != FEATURES:
+            logger.error("TRP schema/feature mismatch: schema=%r features_len=%d",
+                         model.get("schema"), len(model.get("features", ())))
             raise ValueError("Incompatible TRP schema or feature order")
         if not allow_experimental and model.get("promotion") != "approved":
+            logger.error("TRP checkpoint %s is not production-approved (promotion=%r)",
+                         p, model.get("promotion"))
             raise ValueError("TRP checkpoint is not production-approved")
         routes = model.get("routes")
         if not isinstance(routes, Mapping) or not routes or any(r not in ROUTES for r in routes):
+            logger.error("TRP artifact has invalid routes: %r", routes)
             raise ValueError("TRP artifact has no valid routes")
         for route, heads in routes.items():
             if any(t not in heads for t in TARGETS):
+                logger.error("TRP artifact missing heads for route '%s'", route)
                 raise ValueError(f"TRP artifact is missing prediction heads for route '{route}'")
             for target in TARGETS:
                 validate_head(heads[target])
             support = model.get("support", {}).get(route, {})
             bounds = support.get("bounds", {})
             if not support.get("task_types") or any(k not in bounds or not _finite(*bounds[k]) for k in CONTINUOUS):
+                logger.error("TRP artifact has invalid support for route '%s'", route)
                 raise ValueError(f"TRP artifact has invalid support for route '{route}'")
         utility, policy = model.get("utility", {}), model.get("policy", {})
         if (set(utility) != set(DEFAULT_UTILITY) or not _finite(*utility.values()) or min(utility.values()) < 0
                 or not _finite(policy.get("min_gain"), policy.get("support_margin")) or policy["min_gain"] < 0):
+            logger.error("TRP utility/policy parameters invalid: utility=%r policy=%r", utility, policy)
             raise ValueError("TRP utility/policy parameters are invalid")
         self.model = model
         self.checksum = hashlib.sha256(raw).hexdigest()
         self.version = str(model.get("version", "unknown"))
         self.routes = tuple(r for r in ROUTES if r in routes)
+        logger.info("Loaded TRP version=%s routes=%s checksum=%s experimental=%s",
+                    self.version, list(self.routes), self.checksum[:12], allow_experimental)
 
     def _vector(self, features: Mapping[str, float]) -> list[float]:
         x = [float(features.get(k, 0.0)) for k in FEATURES]
@@ -392,6 +410,7 @@ class TaskRoutingPolicy:
         """Rank the caller's eligible routes; fall back to the deterministic baseline when unsure."""
         allowed = [r for r in ROUTES if r in set(eligible)]
         if not allowed:
+            logger.error("TRP recommend() called with empty eligible set")
             raise ValueError("No eligible route")
         task_type = task_type_of(features)
         baseline = baseline_route(task_type, allowed)
@@ -399,9 +418,11 @@ class TaskRoutingPolicy:
                                   "model_version": self.version, "predictions": {}, "unscored": {}}
         if len(allowed) == 1:
             result["reason"] = "single_eligible_route"
+            logger.debug("TRP single-route short-circuit: task_type=%s route=%s", task_type, baseline)
             return result
         if "cache" in allowed:
             result["reason"] = "valid_cache_hit"
+            logger.debug("TRP cache short-circuit: task_type=%s", task_type)
             return result
         for route in allowed:
             reason = self.unscored_reason(route, features)
@@ -411,6 +432,8 @@ class TaskRoutingPolicy:
                 result["predictions"][route] = self.predict_route(route, features, deadline_ms)
         if baseline not in result["predictions"] or len(result["predictions"]) < 2:
             result["reason"] = "baseline_or_alternatives_unscored"
+            logger.debug("TRP baseline fallback: task_type=%s baseline=%s unscored=%s",
+                         task_type, baseline, result["unscored"])
             return result
         utilities = {r: p["utility"] for r, p in result["predictions"].items()}
         best = max((r for r in ROUTES if r in utilities), key=lambda r: (utilities[r], r == baseline))
@@ -421,6 +444,8 @@ class TaskRoutingPolicy:
             result.update(route=best, source="model", reason="model_preferred")
         else:
             result["reason"] = "model_agrees" if best == baseline else "gain_below_threshold"
+        logger.debug("TRP decision: task_type=%s route=%s source=%s reason=%s gain=%.4f",
+                     task_type, result["route"], result["source"], result.get("reason"), gain)
         return result
 
 
@@ -429,3 +454,38 @@ __all__ = [
     "CONTINUOUS", "DEFAULT_UTILITY", "TaskRoutingPolicy", "head_value", "validate_head", "routing_features", "task_type_of", "eligible_routes",
     "baseline_route", "route_utility", "on_time_probability", "routing_observation", "validate_observation",
 ]
+
+
+if __name__ == "__main__":
+    printer.section_header("Task Routing Policy Self-Test")
+    printer.status("TEST", "Verifying FEATURES integrity", "info")
+    assert len(FEATURES) == len(set(FEATURES)), "duplicate feature names"
+    assert all(name in FEATURES for name in CONTINUOUS)
+
+    sample = {"task_type": "normalize_payload", "payload": list(range(64))}
+    features = routing_features(sample)
+    assert task_type_of(features) == "normalize_payload"
+    assert features["log_items"] > 0.0
+
+    eligible = eligible_routes("normalize_payload")
+    assert baseline_route("normalize_payload", eligible) == "inline"
+
+    eligible2 = eligible_routes("numeric_summary", specialist_available=True)
+    assert baseline_route("numeric_summary", eligible2) == "delegate"
+
+    assert 0.0 <= on_time_probability(5.0, 0.5, 1000.0) <= 1.0
+    u = route_utility(1.0, 100.0, 1024.0, DEFAULT_UTILITY)
+    assert isinstance(u, float)
+
+    # Observation validation rejects malformed rows without crashing
+    bad_row = {"schema": MODEL_SCHEMA, "group": "g", "case": "c", "route": "invalid",
+               "task_type": "normalize_payload", "x": [0.0] * len(FEATURES),
+               "eligible": ["inline"], "ok": 1, "completed": 1, "latency_ms": 1.0,
+               "source_kind": "controlled_trial"}
+    try:
+        validate_observation(bad_row)
+        raise AssertionError("expected validation failure for bad route")
+    except ValueError:
+        pass
+
+    printer.status("OK", "Task Routing Policy self-test passed", "success")

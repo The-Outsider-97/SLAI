@@ -239,6 +239,7 @@ class AgentFactory:
         "reasoning": {"module_path": "src.agents.reasoning_agent", "class_name": "ReasoningAgent"},
         "safety": {"module_path": "src.agents.safety_agent", "class_name": "SafetyAgent"},
         "simulation": {"module_path": "src.agents.simulation_agent", "class_name": "SimulationAgent"},
+        "software": {"module_path": "src.agents.software_agent", "class_name": "SoftwareAgent"},
         "spatial": {"module_path": "src.agents.spatial_agent", "class_name": "SpatialAgent"},
         "stem": {"module_path": "src.agents.stem_agent", "class_name": "STEMAgent"},
         "verification": {"module_path": "src.agents.verification_agent", "class_name": "VerificationAgent"},
@@ -260,6 +261,7 @@ class AgentFactory:
         "reasoning_agent": "reasoning",
         "safety_agent": "safety",
         "simulation_agent": "simulation",
+        "software_agent": "software",
         "verification_agent": "verification"
     }
 
@@ -285,6 +287,10 @@ class AgentFactory:
         "simulation": {"torch_required": False, "notes": (
                        "Simulation orchestration and numerical execution are torch-free by default;"
                        "externally supplied learned world models may carry their own optional dependencies.")},
+        "software": {"torch_required": False, "notes": (
+            "Software analysis and patch synthesis are torch-free and use only the Python standard library; "
+            "additional language parsers may be registered by the Software subsystem."
+        )},
         "spatial": {"torch_required": False, "notes": "Spatial tracking is torch-free; optional learned models may require torch."},
         "stem": {"torch_required": False, "notes": "STEM tracking is torch-free; optional learned models may require torch."},
         "verification": {"torch_required": False, "notes": (
@@ -509,6 +515,7 @@ class AgentFactory:
             "reasoning",
             "safety",
             "simulation",
+            "software",
             "spatial",
             "stem",
             "verification",

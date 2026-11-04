@@ -1,14 +1,14 @@
 """SLAI v2.3: learned delegation scoring, privacy-minimal event capture.
 
-No SLAI imports are needed here; the router retains ownership of eligibility,
-execution, retry and policy enforcement. No model is fabricated on load failure.
+No SLAI imports are needed here beyond the shared logger/printer; the router
+retains ownership of eligibility, execution, retry and policy enforcement. No
+model is fabricated on load failure.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import math
-import os
 import sqlite3
 import threading
 import time
@@ -18,13 +18,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
+from .utils.collaborative_helpers import *
 from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
-LOG = get_logger("Delegation Ranker")
+logger = get_logger("Delegation Ranker")
 printer = PrettyPrinter()
 
 SCHEMA = 1
-BUCKETS = 16
 FEATURE_NAMES = (
     "bias", "capability_coverage", "capability_jaccard", "required_count_log",
     "candidate_count_log", "active_tasks_log", "history_success_rate",
@@ -33,26 +33,6 @@ FEATURE_NAMES = (
     "deadline_log", "task_type_hash", "capability_interactions_hash",
 )  # last two expand into BUCKETS each
 INPUT_DIM = 16 + 2 * BUCKETS
-
-
-def _number(value: Any, default: float = 0.0, lo: float = 0.0, hi: float = 1e9) -> float:
-    try:
-        z = float(value)
-        return max(lo, min(hi, z)) if math.isfinite(z) else default
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-def _tokens(value: Any) -> set[str]:
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, (list, tuple, set, frozenset)):
-        return set()
-    return {str(v).strip().lower()[:96] for v in value if isinstance(v, str) and v.strip()}
-
-
-def _bucket(name: str) -> int:
-    return int.from_bytes(hashlib.sha256(name.encode("utf-8")).digest()[:4], "big") % BUCKETS
 
 
 def feature_vector(task: Mapping[str, Any], candidate: Mapping[str, Any], stats: Mapping[str, Any]) -> list[float]:
@@ -100,16 +80,6 @@ def feature_vector(task: Mapping[str, Any], candidate: Mapping[str, Any], stats:
     return result
 
 
-def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
-    try:
-        temporary.write_text(json.dumps(value, sort_keys=True, indent=2, allow_nan=False), encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 @contextmanager
 def _sqlite_connect(path: str | Path):
     target = Path(path)
@@ -141,6 +111,7 @@ class DelegationEventStore:
         self.path = str(path)
         with _sqlite_connect(self.path) as con:
             con.execute("PRAGMA user_version=1")
+        logger.debug("DelegationEventStore opened at %s", self.path)
 
     def decision(self, *, task_id: str, task_type: str, mode: str,
                  policy: str, chosen: str, candidates: Mapping[str, list[float]],
@@ -209,6 +180,7 @@ class DelegationRanker:
         checkpoint = self.path / "model.pt"
         digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
         if digest != meta.get("sha256") or meta.get("schema") != SCHEMA or meta.get("input_dim") != INPUT_DIM:
+            logger.error("ADR checkpoint hash or feature schema mismatch at %s", self.path)
             raise ValueError("ADR checkpoint hash or feature schema mismatch")
         self.torch = torch
         self.device = device
@@ -219,21 +191,27 @@ class DelegationRanker:
         features = json.loads((self.path / "features.json").read_text(encoding="utf-8"))
         self.mean, self.scale = features["mean"], features["scale"]
         if len(self.mean) != INPUT_DIM or len(self.scale) != INPUT_DIM:
+            logger.error("ADR preprocessing schema mismatch at %s", self.path)
             raise ValueError("ADR preprocessing schema mismatch")
         self.version = meta["version"]
         self.has_latency = bool(meta.get("has_latency", False))
+        logger.info("ADR model loaded: version=%s device=%s has_latency=%s",
+                    self.version, device, self.has_latency)
 
     def predict(self, rows: list[list[float]]) -> list[dict[str, float | None]]:
         if not rows:
             return []
         torch = self.torch
-        matrix = [[(float(v) - m) / max(1e-6, s) for v, m, s in zip(row, self.mean, self.scale)] for row in rows]
         if any(len(row) != INPUT_DIM for row in rows):
+            logger.error("ADR feature dimensionality mismatch: expected=%d got=%s",
+                         INPUT_DIM, sorted({len(r) for r in rows}))
             raise ValueError("ADR feature dimensionality mismatch")
+        matrix = [[(float(v) - m) / max(1e-6, s) for v, m, s in zip(row, self.mean, self.scale)] for row in rows]
         with torch.inference_mode():
             out = self.net(torch.tensor(matrix, dtype=torch.float32, device=self.device)).cpu()
             probs = torch.sigmoid(out[:, 0]).tolist()
             latencies = torch.expm1(out[:, 1].clamp(min=0, max=18)).tolist()
+        logger.debug("ADR predicted %d candidate(s)", len(rows))
         return [{"success_probability": float(p),
                  "latency_ms": float(t) if self.has_latency else None,
                  "uncertainty_proxy": float(4 * p * (1 - p))} for p, t in zip(probs, latencies)]
@@ -247,6 +225,7 @@ class DelegationRankerStrategy:
         self.baseline = baseline
         self.mode = str(config.get("mode", "disabled")).lower()
         if self.mode not in {"disabled", "shadow", "advisory", "active"}:
+            logger.error("Invalid ADR rollout mode: %r", self.mode)
             raise ValueError("Invalid ADR rollout mode")
         self.model = None
         self.min_confidence = _number(config.get("min_confidence", 0.0), hi=1.0)
@@ -260,8 +239,10 @@ class DelegationRankerStrategy:
             try:
                 self.model = DelegationRanker(config["model_dir"])
             except (FileNotFoundError, ValueError, KeyError, RuntimeError, ImportError) as exc:
-                LOG.warning("ADR unavailable, deterministic routing retained: %s", exc)
+                logger.warning("ADR unavailable, deterministic routing retained: %s", exc)
         self.last_report = None
+        logger.info("DelegationRankerStrategy initialized: mode=%s policy=%s model=%s",
+                    self.mode, self.policy, "loaded" if self.model else "absent")
 
     def rank_agents(self, agents: Mapping[str, Any], stats: Mapping[str, Any], task_data: Mapping[str, Any]):
         baseline = list(self.baseline.rank_agents(agents, stats, task_data))
@@ -289,6 +270,8 @@ class DelegationRankerStrategy:
                     and float(p["uncertainty_proxy"]) <= 1 - self.min_confidence
                     for p in predictions
                 )
+                logger.debug("ADR scoring: candidates=%d confident=%s mode=%s",
+                             len(baseline), confident, self.mode)
                 if self.mode == "active" and confident:
                     ranked = sorted(((n,m,utilities[n]) for n,m,_ in baseline), key=lambda t: (-t[2], t[0]))
                 elif self.mode == "advisory" and confident:
@@ -297,7 +280,7 @@ class DelegationRankerStrategy:
                     combined = [(n,m,(1-self.advisory_mix)*((score-low)/max(high-low,1e-9)) + self.advisory_mix*utilities[n]) for n,m,score in baseline]
                     ranked = sorted(combined, key=lambda t: (-t[2], t[0]))
             except (RuntimeError, ValueError, OverflowError) as exc:
-                LOG.warning("ADR inference failure; baseline retained: %s", exc)
+                logger.warning("ADR inference failure; baseline retained: %s", exc)
                 ranked = baseline
         # Ranking tuple contract preserved; scores report learned utility in active mode.
         task_id = str(task_data.get("task_id", uuid.uuid4().hex))
@@ -309,7 +292,7 @@ class DelegationRankerStrategy:
                     model_version=self.model.version if self.model else None)
                 self._pending.id = (task_id, did)
             except (sqlite3.Error, OSError, ValueError) as exc:
-                LOG.warning("ADR event collection failed (no raw task data logged): %s", exc)
+                logger.warning("ADR event collection failed (no raw task data logged): %s", exc)
         return ranked
 
     def on_route(self, route: Mapping[str, Any]) -> None:
@@ -320,4 +303,38 @@ class DelegationRankerStrategy:
         try:
             self.store.outcomes(pending[1], route)
         except (OSError, sqlite3.Error, ValueError) as exc:
-            LOG.warning("ADR outcome collection failed: %s", exc)
+            logger.warning("ADR outcome collection failed: %s", exc)
+
+
+if __name__ == "__main__":
+    printer.section_header("Delegation Ranker Self-Test")
+    printer.status("TEST", "Building synthetic feature vector", "info")
+
+    task = {"task_type": "translate", "required_capabilities": ["translate"], "priority": 5}
+    candidate = {"name": "translator", "capabilities": ["translate", "language"], "max_tasks": 10}
+    stats = {"successes": 3, "failures": 1, "active_tasks": 2}
+
+    vec = feature_vector(task, candidate, stats)
+    assert len(vec) == INPUT_DIM, f"expected {INPUT_DIM} features, got {len(vec)}"
+    assert vec[0] == 1.0, "bias should be 1.0"
+    assert vec[1] > 0.0, "capability_coverage should be > 0"
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        store = DelegationEventStore(Path(tmp) / "events.sqlite3")
+        did = store.decision(
+            task_id="t-1", task_type="translate", mode="shadow",
+            policy="weighted", chosen="translator",
+            candidates={"translator": vec}, model_version=None,
+        )
+        assert did
+        store.outcomes(did, {"attempts": [
+            {"agent_name": "translator", "status": "success", "duration_ms": 12.5},
+        ]})
+        rows, counts = store.samples()
+        assert len(rows) == 1 and rows[0]["success"] == 1
+        assert counts.get("success") == 1
+        report = store.audit()
+        assert report["decisions"] == 1
+
+    printer.status("OK", "Delegation Ranker self-test passed", "success")

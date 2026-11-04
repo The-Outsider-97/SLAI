@@ -19,41 +19,18 @@ import sqlite3
 import threading
 import time
 import uuid
+
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from src.agents.planning.workflow_runtime import AuthorizationContext
+from ..planning.workflow_runtime import AuthorizationContext
+from .utils.collaboration_error import *
+from .utils.collaborative_helpers import *
+from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
-
-class ProjectCoordinationError(ValueError):
-    """Invalid or conflicting project collaboration operation."""
-
-
-def _id(value: str, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ProjectCoordinationError(f"{label} must be a nonempty string")
-    return value.strip()
-
-
-def _json_record(value: Any, label: str, *, max_bytes: int = 65536) -> str:
-    """Validate a bounded, portable JSON record (no pickle or NaN values)."""
-    try:
-        encoded = json.dumps(value, sort_keys=True, allow_nan=False, separators=(",", ":"))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ProjectCoordinationError(f"{label} must be JSON serializable") from exc
-    if len(encoded.encode("utf-8")) > max_bytes:
-        raise ProjectCoordinationError(f"{label} exceeds {max_bytes} UTF-8 bytes")
-    return encoded
-
-
-def _references(values: Any, label: str) -> list[str]:
-    if not isinstance(values, (tuple, list)) or len(values) > 128:
-        raise ProjectCoordinationError(f"{label} must be a list of up to 128 references")
-    result = [_id(value, label) for value in values]
-    if len(result) != len(set(result)):
-        raise ProjectCoordinationError(f"{label} must contain unique references")
-    return result
+logger = get_logger("Project Coordination")
+printer = PrettyPrinter()
 
 
 class ProjectCoordinationStore:
@@ -88,8 +65,7 @@ class ProjectCoordinationStore:
             self._db.execute("CREATE TABLE IF NOT EXISTS project_coordination_events ("
                              "sequence INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, "
                              "event_type TEXT NOT NULL, payload TEXT NOT NULL)")
-            self._db.execute("CREATE INDEX IF NOT EXISTS ix_project_coordination_events "
-                             "ON project_coordination_events(project_id,sequence)")
+            self._db.execute("CREATE INDEX IF NOT EXISTS ix_project_coordination_events ON project_coordination_events(project_id,sequence)")
             self._db.execute("CREATE TABLE IF NOT EXISTS inter_agent_messages ("
                              "message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sender_id TEXT NOT NULL, "
                              "recipient_id TEXT NOT NULL, message_type TEXT NOT NULL, task_id TEXT, "
@@ -97,8 +73,7 @@ class ProjectCoordinationStore:
                              "context_refs TEXT NOT NULL, fingerprint TEXT NOT NULL, "
                              "idempotency_key TEXT, created_at REAL NOT NULL, expires_at REAL, acked_at REAL, "
                              "UNIQUE(project_id,sender_id,idempotency_key))")
-            self._db.execute("CREATE INDEX IF NOT EXISTS ix_inter_agent_inbox "
-                             "ON inter_agent_messages(project_id,recipient_id,created_at)")
+            self._db.execute("CREATE INDEX IF NOT EXISTS ix_inter_agent_inbox ON inter_agent_messages(project_id,recipient_id,created_at)")
             self._db.execute("CREATE TABLE IF NOT EXISTS inter_agent_handoffs ("
                              "handoff_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, "
                              "sender_id TEXT NOT NULL, recipient_id TEXT NOT NULL, capability TEXT NOT NULL, "
@@ -107,41 +82,46 @@ class ProjectCoordinationStore:
                              "status TEXT NOT NULL, owner_id TEXT NOT NULL, created_at REAL NOT NULL, "
                              "expires_at REAL, accepted_at REAL, finished_at REAL, result_refs TEXT, failure TEXT, "
                              "UNIQUE(project_id,sender_id,idempotency_key))")
-            self._db.execute("CREATE INDEX IF NOT EXISTS ix_inter_agent_handoffs "
-                             "ON inter_agent_handoffs(project_id,recipient_id,status)")
+            self._db.execute("CREATE INDEX IF NOT EXISTS ix_inter_agent_handoffs ON inter_agent_handoffs(project_id,recipient_id,status)")
             self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_inter_agent_active_task "
-                             "ON inter_agent_handoffs(project_id,task_id) "
-                             "WHERE status IN ('pending','accepted')")
+                             "ON inter_agent_handoffs(project_id,task_id) WHERE status IN ('pending','accepted')")
+
+        logger.info("ProjectCoordinationStore initialized at %s", selected)
 
     def close(self) -> None:
         with self._lock:
             self._db.close()
+            logger.debug("ProjectCoordinationStore closed")
 
     def _event(self, project_id: str, name: str, detail: dict[str, Any]) -> None:
+        logger.debug("ProjectCoordinationStore event: project=%s type=%s detail=%s", project_id, name, detail)
         self._db.execute("INSERT INTO project_coordination_events(project_id,event_type,payload) VALUES (?,?,?)",
                          (project_id, name, json.dumps({"time": self._clock(), **detail}, sort_keys=True)))
 
     def _begin(self) -> None:
+        logger.debug("ProjectCoordinationStore transaction begin")
         self._db.execute("BEGIN IMMEDIATE")
 
     def _joined(self, auth: AuthorizationContext) -> None:
         row = self._db.execute("SELECT active FROM project_participants WHERE project_id=? AND actor_id=?",
                                (auth.project_id, auth.actor_id)).fetchone()
         if row is None or not row["active"]:
+            logger.warning("Participant check failed: project=%s actor=%s not joined", auth.project_id, auth.actor_id)
             raise ProjectCoordinationError("participant must join this project first")
 
     def join(self, *, auth: AuthorizationContext, kind: str) -> dict[str, Any]:
         auth.require(auth.project_id, "collaboration:join")
         if kind not in {"human", "agent", "service"}:
+            logger.warning("Rejected join: invalid kind=%r for actor=%s", kind, auth.actor_id)
             raise ProjectCoordinationError("kind must be human, agent, or service")
         with self._lock:
             self._begin()
             try:
-                current = self._db.execute("SELECT kind,active FROM project_participants "
-                                           "WHERE project_id=? AND actor_id=?",
+                current = self._db.execute("SELECT kind,active FROM project_participants WHERE project_id=? AND actor_id=?",
                                            (auth.project_id, auth.actor_id)).fetchone()
                 if current is not None and current["active"] and current["kind"] == kind:
                     self._db.rollback()  # Repeated joins are idempotent, including event publication.
+                    logger.debug("Idempotent join: project=%s actor=%s kind=%s", auth.project_id, auth.actor_id, kind)
                     return {"project_id": auth.project_id, "actor_id": auth.actor_id,
                             "kind": kind, "active": True}
                 self._db.execute("INSERT INTO project_participants(project_id,actor_id,kind,active,updated_at) "
@@ -150,24 +130,26 @@ class ProjectCoordinationStore:
                                  (auth.project_id, auth.actor_id, kind, 1, self._clock()))
                 self._event(auth.project_id, "participant.joined", {"actor_id": auth.actor_id, "kind": kind})
                 self._db.commit()
+                logger.info("Participant joined: project=%s actor=%s kind=%s", auth.project_id, auth.actor_id, kind)
             except Exception:
                 self._db.rollback()
                 raise
         return {"project_id": auth.project_id, "actor_id": auth.actor_id, "kind": kind, "active": True}
 
     def leave(self, *, auth: AuthorizationContext) -> None:
+        logger.debug("ProjectCoordinationStore leave: project=%s actor=%s", auth.project_id, auth.actor_id)
         auth.require(auth.project_id, "collaboration:join")
         with self._lock:
             self._begin()
             try:
                 self._joined(auth)
-                self._db.execute("UPDATE project_participants SET active=0,updated_at=? "
-                                 "WHERE project_id=? AND actor_id=?",
+                self._db.execute("UPDATE project_participants SET active=0,updated_at=? WHERE project_id=? AND actor_id=?",
                                  (self._clock(), auth.project_id, auth.actor_id))
                 self._db.execute("DELETE FROM resource_leases WHERE project_id=? AND actor_id=?",
                                  (auth.project_id, auth.actor_id))
                 self._event(auth.project_id, "participant.left", {"actor_id": auth.actor_id})
                 self._db.commit()
+                logger.info("Participant left: project=%s actor=%s", auth.project_id, auth.actor_id)
             except Exception:
                 self._db.rollback()
                 raise
@@ -176,8 +158,7 @@ class ProjectCoordinationStore:
         auth.require(auth.project_id, "collaboration:read")
         with self._lock:
             self._joined(auth)
-            rows = self._db.execute("SELECT actor_id,kind FROM project_participants "
-                                    "WHERE project_id=? AND active=1 ORDER BY actor_id",
+            rows = self._db.execute("SELECT actor_id,kind FROM project_participants WHERE project_id=? AND active=1 ORDER BY actor_id",
                                     (auth.project_id,)).fetchall()
             return [dict(row) for row in rows]
 
@@ -202,13 +183,13 @@ class ProjectCoordinationStore:
             except Exception:
                 self._db.rollback()
                 raise
-        return {"project_id": auth.project_id, "participants": participants,
-                "leases": leases, "event_cursor": cursor}
+        return {"project_id": auth.project_id, "participants": participants, "leases": leases, "event_cursor": cursor}
 
     def acquire(self, resource_id: str, *, auth: AuthorizationContext, ttl: float = 30.0) -> dict[str, Any]:
         auth.require(auth.project_id, "collaboration:lock")
         resource = _id(resource_id, "resource_id")
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or not 0 < ttl <= 3600:
+            logger.warning("Rejected lease TTL: %r", ttl)
             raise ProjectCoordinationError("lease TTL must be between 0 and 3600 seconds")
         with self._lock:
             self._begin()
@@ -218,6 +199,8 @@ class ProjectCoordinationStore:
                 row = self._db.execute("SELECT * FROM resource_leases WHERE project_id=? AND resource_id=?",
                                        (auth.project_id, resource)).fetchone()
                 if row is not None and row["expires_at"] > now:
+                    logger.warning("Lease acquire denied: resource=%s already held by %s",
+                                   resource, row["actor_id"])
                     raise ProjectCoordinationError("resource already has an active exclusive lease")
                 previous = self._db.execute("SELECT token FROM resource_fences WHERE project_id=? AND resource_id=?",
                                             (auth.project_id, resource)).fetchone()
@@ -234,6 +217,8 @@ class ProjectCoordinationStore:
                 self._event(auth.project_id, "lease.acquired", {"resource_id": resource,
                             "actor_id": auth.actor_id, "token": token, "expires_at": expires_at})
                 self._db.commit()
+                logger.info("Lease acquired: project=%s resource=%s actor=%s token=%d ttl=%.1fs",
+                            auth.project_id, resource, auth.actor_id, token, ttl)
                 return {"project_id": auth.project_id, "resource_id": resource, "actor_id": auth.actor_id,
                         "lease_id": lease_id, "fencing_token": token, "expires_at": expires_at}
             except Exception:
@@ -246,6 +231,10 @@ class ProjectCoordinationStore:
                                (auth.project_id, resource)).fetchone()
         if (row is None or row["actor_id"] != auth.actor_id or row["lease_id"] != lease_id
                 or row["token"] != token or row["expires_at"] <= self._clock()):
+            logger.warning(
+                "Lease ownership check failed: project=%s resource=%s actor=%s",
+                auth.project_id, resource, auth.actor_id,
+            )
             raise ProjectCoordinationError("lease is expired, invalid, or not owned by actor")
         return row
 
@@ -253,6 +242,7 @@ class ProjectCoordinationStore:
               auth: AuthorizationContext, ttl: float = 30.0) -> dict[str, Any]:
         auth.require(auth.project_id, "collaboration:lock")
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or not 0 < ttl <= 3600:
+            logger.warning("Rejected lease renew TTL: %r", ttl)
             raise ProjectCoordinationError("lease TTL must be between 0 and 3600 seconds")
         resource = _id(resource_id, "resource_id")
         with self._lock:
@@ -265,6 +255,8 @@ class ProjectCoordinationStore:
                 self._event(auth.project_id, "lease.renewed", {"resource_id": resource,
                             "actor_id": auth.actor_id, "token": fencing_token, "expires_at": expires_at})
                 self._db.commit()
+                logger.debug("Lease renewed: project=%s resource=%s token=%d expires_at=%.2f",
+                             auth.project_id, resource, fencing_token, expires_at)
                 return {"fencing_token": fencing_token, "lease_id": lease_id, "expires_at": expires_at}
             except Exception:
                 self._db.rollback()
@@ -282,6 +274,8 @@ class ProjectCoordinationStore:
                 self._event(auth.project_id, "lease.released", {"resource_id": resource,
                             "actor_id": auth.actor_id, "token": fencing_token})
                 self._db.commit()
+                logger.info("Lease released: project=%s resource=%s actor=%s token=%d",
+                            auth.project_id, resource, auth.actor_id, fencing_token)
             except Exception:
                 self._db.rollback()
                 raise
@@ -300,6 +294,7 @@ class ProjectCoordinationStore:
         auth.require(auth.project_id, "collaboration:read")
         if (isinstance(after, bool) or not isinstance(after, int) or after < 0
                 or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000):
+            logger.warning("Invalid event cursor/limit: after=%r limit=%r", after, limit)
             raise ProjectCoordinationError("invalid event cursor or limit")
         with self._lock:
             self._joined(auth)
@@ -318,12 +313,14 @@ class ProjectCoordinationStore:
             (project_id, recipient_id),
         ).fetchone()
         if row is None or not row["active"]:
+            logger.warning("Inactive recipient rejected: project=%s recipient=%s", project_id, recipient_id)
             raise ProjectCoordinationError("recipient must be an active project participant")
 
     def _deadline(self, ttl: float | None) -> float | None:
         if ttl is None:
             return None
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or not 0 < ttl <= 86400:
+            logger.warning("Rejected TTL: %r", ttl)
             raise ProjectCoordinationError("TTL must be a finite number in (0, 86400] seconds")
         return self._clock() + ttl
 
@@ -346,6 +343,7 @@ class ProjectCoordinationStore:
         recipient = _id(recipient_id, "recipient_id")
         kind = _id(message_type, "message_type").upper()
         if kind not in {"REQUEST", "RESPONSE", "EVENT", "PROGRESS", "RESULT", "ERROR", "CANCEL", "STATUS", "CONTEXT_UPDATE"}:
+            logger.warning("Unsupported message_type: %r", kind)
             raise ProjectCoordinationError("unsupported message_type")
         if not isinstance(payload, dict):
             raise ProjectCoordinationError("message payload must be a JSON object")
@@ -370,6 +368,7 @@ class ProjectCoordinationStore:
                                              (auth.project_id, auth.actor_id, idem)).fetchone()
                     if prior is not None:
                         if prior["fingerprint"] != fingerprint:
+                            logger.warning("Idempotency key reuse with different message: %s", idem)
                             raise ProjectCoordinationError("idempotency key reused with different message")
                         self._db.rollback()
                         return self._message(prior)
@@ -382,6 +381,8 @@ class ProjectCoordinationStore:
                             "sender_id": auth.actor_id, "recipient_id": recipient, "message_type": kind})
                 row = self._db.execute("SELECT * FROM inter_agent_messages WHERE message_id=?", (message_id,)).fetchone()
                 self._db.commit()
+                logger.debug("Message stored: project=%s msg_id=%s sender=%s recipient=%s type=%s",
+                             auth.project_id, message_id, auth.actor_id, recipient, kind)
                 return self._message(row)
             except Exception:
                 self._db.rollback()
@@ -391,8 +392,10 @@ class ProjectCoordinationStore:
               limit: int = 100, unacknowledged_only: bool = True) -> list[dict[str, Any]]:
         auth.require(auth.project_id, "collaboration:message")
         if not isinstance(after, (float, int)) or isinstance(after, bool) or not math.isfinite(after) or after < 0:
+            logger.warning("Invalid inbox cursor: %r", after)
             raise ProjectCoordinationError("invalid inbox cursor")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            logger.warning("Invalid inbox limit: %r", limit)
             raise ProjectCoordinationError("invalid inbox limit")
         with self._lock:
             self._joined(auth)
@@ -413,8 +416,11 @@ class ProjectCoordinationStore:
                 row = self._db.execute("SELECT * FROM inter_agent_messages WHERE message_id=? AND project_id=?",
                                        (_id(message_id, "message_id"), auth.project_id)).fetchone()
                 if row is None or row["recipient_id"] != auth.actor_id:
+                    logger.warning("Message ack failed: msg=%s not in %s's inbox",
+                                   message_id, auth.actor_id)
                     raise ProjectCoordinationError("message not found in recipient inbox")
                 if row["expires_at"] is not None and row["expires_at"] <= self._clock():
+                    logger.warning("Message ack failed: msg=%s expired", message_id)
                     raise ProjectCoordinationError("message has expired")
                 if row["acked_at"] is None:
                     self._db.execute("UPDATE inter_agent_messages SET acked_at=? WHERE message_id=?",
@@ -442,6 +448,7 @@ class ProjectCoordinationStore:
             self._db.execute("UPDATE inter_agent_handoffs SET status='expired',finished_at=? WHERE handoff_id=?",
                              (self._clock(), row["handoff_id"]))
             self._event(project_id, "handoff.expired", {"handoff_id": row["handoff_id"]})
+            logger.debug("Handoff expired: project=%s handoff=%s", project_id, row["handoff_id"])
 
     def prepare_handoff(self, recipient_id: str, task_id: str, capability: str, objective: str, *,
                         auth: AuthorizationContext, details: dict[str, Any] | None = None,
@@ -456,6 +463,7 @@ class ProjectCoordinationStore:
         recipient, task = _id(recipient_id, "recipient_id"), _id(task_id, "task_id")
         capability, objective = _id(capability, "capability"), _id(objective, "objective")
         if recipient == auth.actor_id:
+            logger.warning("Handoff rejected: actor %s cannot hand off to self", auth.actor_id)
             raise ProjectCoordinationError("handoff recipient must differ from sender")
         if details is None:
             details = {}
@@ -480,6 +488,7 @@ class ProjectCoordinationStore:
                                              (auth.project_id, auth.actor_id, idem)).fetchone()
                     if prior is not None:
                         if prior["fingerprint"] != fingerprint:
+                            logger.warning("Idempotency key reuse with different handoff: %s", idem)
                             raise ProjectCoordinationError("idempotency key reused with different handoff")
                         self._db.commit()  # Commit expiry cleanup, not a duplicate event.
                         return self._handoff(prior)
@@ -490,11 +499,14 @@ class ProjectCoordinationStore:
                                       capability, objective, data, refs, fingerprint, idem, "pending",
                                       auth.actor_id, self._clock(), deadline, None, None, None, None))
                 except sqlite3.IntegrityError as exc:
+                    logger.warning("Active handoff conflict for task=%s", task)
                     raise ProjectCoordinationError("task already has an active exclusive handoff") from exc
                 self._event(auth.project_id, "handoff.prepared", {"handoff_id": handoff_id,
                             "task_id": task, "recipient_id": recipient})
                 row = self._db.execute("SELECT * FROM inter_agent_handoffs WHERE handoff_id=?", (handoff_id,)).fetchone()
                 self._db.commit()
+                logger.debug("Handoff prepared: project=%s handoff=%s task=%s %s->%s",
+                             auth.project_id, handoff_id, task, auth.actor_id, recipient)
                 return self._handoff(row)
             except Exception:
                 self._db.rollback()
@@ -505,6 +517,8 @@ class ProjectCoordinationStore:
         row = self._db.execute("SELECT * FROM inter_agent_handoffs WHERE handoff_id=? AND project_id=?",
                                (_id(handoff_id, "handoff_id"), auth.project_id)).fetchone()
         if row is None or auth.actor_id not in {row["sender_id"], row["recipient_id"]}:
+            logger.warning("Handoff not found for participant: handoff=%s actor=%s",
+                           handoff_id, auth.actor_id)
             raise ProjectCoordinationError("handoff not found for participant")
         return row
 
@@ -527,8 +541,10 @@ class ProjectCoordinationStore:
         """Discover assigned handoffs after restart or missed transient hints."""
         auth.require(auth.project_id, "collaboration:handoff")
         if status not in {"pending", "accepted", "completed", "rejected", "failed", "cancelled", "expired"}:
+            logger.warning("Invalid handoff inbox status: %r", status)
             raise ProjectCoordinationError("invalid handoff inbox status")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            logger.warning("Invalid handoff inbox limit: %r", limit)
             raise ProjectCoordinationError("invalid handoff inbox limit")
         with self._lock:
             self._begin()
@@ -558,6 +574,7 @@ class ProjectCoordinationStore:
                        "cancel": ("pending", "cancelled"), "complete": ("accepted", "completed"),
                        "fail": ("accepted", "failed")}
         if action not in transitions:
+            logger.warning("Unsupported handoff action: %r", action)
             raise ProjectCoordinationError("unsupported handoff action")
         if result_refs is not None and (not isinstance(result_refs, dict) or any(
                 not isinstance(k, str) or not k or not isinstance(v, str) or not v
@@ -577,8 +594,12 @@ class ProjectCoordinationStore:
                 before, after = transitions[action]
                 authorized_actor = row["sender_id"] if action == "cancel" else row["recipient_id"]
                 if auth.actor_id != authorized_actor:
+                    logger.warning("Handoff transition denied: handoff=%s action=%s actor=%s",
+                                   handoff_id, action, auth.actor_id)
                     raise ProjectCoordinationError("actor cannot perform this handoff transition")
                 if row["status"] != before:
+                    logger.warning("Invalid handoff transition: handoff=%s %s->%s (expected %s)",
+                                   handoff_id, row["status"], after, before)
                     raise ProjectCoordinationError(f"invalid handoff transition from {row['status']} to {after}")
                 owner = row["recipient_id"] if action == "accept" else row["owner_id"]
                 self._db.execute("UPDATE inter_agent_handoffs SET status=?,owner_id=?,accepted_at=?, "
@@ -590,10 +611,28 @@ class ProjectCoordinationStore:
                             "task_id": row["task_id"], "actor_id": auth.actor_id})
                 updated = self._db.execute("SELECT * FROM inter_agent_handoffs WHERE handoff_id=?", (handoff_id,)).fetchone()
                 self._db.commit()
+                logger.info("Handoff transition: project=%s handoff=%s %s->%s actor=%s",
+                            auth.project_id, handoff_id, before, after, auth.actor_id)
                 return self._handoff(updated)
             except Exception:
                 self._db.rollback()
                 raise
 
 
-__all__ = ["ProjectCoordinationError", "ProjectCoordinationStore"]
+__all__ = ["ProjectCoordinationStore"]
+
+
+if __name__ == "__main__":
+    printer.section_header("Project Coordination Store Self-Test")
+    printer.status("TEST", "Opening in-memory coordination store", "info")
+
+    store = ProjectCoordinationStore(":memory:")
+    tables = sorted(row["name"] for row in store._db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall())
+    expected = {
+        "project_participants", "resource_fences", "resource_leases",
+        "project_coordination_events", "inter_agent_messages", "inter_agent_handoffs",
+    }
+    assert expected.issubset(set(tables)), f"missing tables: {expected - set(tables)}"
+    store.close()
+
+    printer.status("OK", f"Verified {len(tables)} tables; self-test passed", "success")

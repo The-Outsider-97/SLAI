@@ -13,7 +13,9 @@ Implements:
 - de Moura & Bjørner (2008), Z3: An Efficient SMT Solver
 
 VerificationAgent establishes or refutes formally stated properties over explicit formal models and constraints,
-producing verifiable evidence where possible.
+producing verifiable evidence where possible. It also consumes patch proposals published by SoftwareAgent and checks
+their recorded validation evidence against an explicit admission policy (``proposal_evidence``); that result concerns
+the evidence only, never the behaviour of the patch.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import math
 import uuid
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Callable, TypeAlias, cast
 
@@ -53,6 +55,7 @@ class VerificationOperation(str, Enum):
     REACHABILITY = "reachability"
     ABSTRACT_FIXPOINT = "abstract_fixpoint"
     ABSTRACT_INVARIANT = "abstract_invariant"
+    PROPOSAL_EVIDENCE = "proposal_evidence"
 
 
 FormalResult: TypeAlias = VerificationResult[object] | FixpointResult[object] | AbstractInvariantCheck[object]
@@ -346,6 +349,11 @@ class VerificationAgent(BaseAgent):
         self.error_key_prefix = str(self._cfg("error_key_prefix", "verification_agent.error") or "").strip()
         self.event_key_prefix = str(self._cfg("event_key_prefix", "verification_agent.event") or "").strip()
         self.latest_result_key = str(self._cfg("latest_result_key", "verification_agent.latest") or "").strip()
+        self.proposal_key_prefix = str(self._cfg("proposal_key_prefix", "software_agent.proposal") or "").strip()
+        self.proposal_verdict_key_prefix = str(
+            self._cfg("proposal_verdict_key_prefix", "verification_agent.proposal_verdict") or ""
+        ).strip()
+        self.proposal_policy = ProposalPolicy.from_mapping(self._cfg("proposal_policy", None))  # type: ignore[arg-type]
 
     def _validate_agent_config(self) -> None:
         for field_name in (
@@ -355,6 +363,8 @@ class VerificationAgent(BaseAgent):
             "error_key_prefix",
             "event_key_prefix",
             "latest_result_key",
+            "proposal_key_prefix",
+            "proposal_verdict_key_prefix",
         ):
             if not getattr(self, field_name):
                 raise BaseConfigurationError(
@@ -606,6 +616,13 @@ class VerificationAgent(BaseAgent):
                 initial=request.options.get("initial"),
             )
 
+        if operation is VerificationOperation.PROPOSAL_EVIDENCE:
+            return check_proposal_evidence(
+                self._load_proposal_evidence(request),
+                self._proposal_policy_for(request),
+                property_name=property_name,
+            )
+
         # Enum construction should make this unreachable, but keep the boundary explicit.
         raise UnsupportedVerificationError(
             "unsupported VerificationAgent operation",
@@ -636,6 +653,53 @@ class VerificationAgent(BaseAgent):
         return request.formal_property
 
     @staticmethod
+    def _proposal_patch_id(request: VerificationAgentRequest) -> str | None:
+        artifact = request.artifact
+        if isinstance(artifact, str):
+            return artifact.strip() or None
+        if isinstance(artifact, Mapping):
+            patch_id = artifact.get("patch_id")
+            return patch_id.strip() if isinstance(patch_id, str) and patch_id.strip() else None
+        return None
+
+    def _load_proposal_evidence(self, request: VerificationAgentRequest) -> Mapping[str, object]:
+        """Evidence given inline, or the record SoftwareAgent published under its proposal key."""
+
+        artifact = request.artifact
+        if isinstance(artifact, Mapping):
+            return artifact
+        patch_id = self._proposal_patch_id(request)
+        if patch_id is None:
+            raise MalformedSpecificationError("proposal_evidence requires artifact=patch id or an evidence mapping")
+        if not self.publish_shared_memory:
+            raise MalformedSpecificationError(
+                "loading a proposal by patch id requires publish_shared_memory",
+                context={"patch_id": patch_id},
+            )
+        key = self._key(self.proposal_key_prefix, patch_id)
+        try:
+            record = self.shared_memory.get(key)
+        except Exception as exc:
+            self._handle_shared_memory_error("get", key, exc)
+            record = None
+        if not isinstance(record, Mapping):
+            raise MalformedSpecificationError("no published proposal evidence", context={"patch_id": patch_id, "key": key})
+        recorded_id = record.get("patch_id")
+        if recorded_id is not None and recorded_id != patch_id:
+            raise MalformedSpecificationError(
+                "published proposal record does not match the requested patch id",
+                context={"patch_id": patch_id, "recorded": str(recorded_id)},
+            )
+        return record
+
+    def _proposal_policy_for(self, request: VerificationAgentRequest) -> ProposalPolicy:
+        if isinstance(request.formal_property, ProposalPolicy):
+            return request.formal_property
+        merged = asdict(self.proposal_policy)
+        merged.update({key: value for key, value in request.options.items() if key in merged})
+        return ProposalPolicy.from_mapping(merged)
+
+    @staticmethod
     def _coerce_option_int(value: object, field_name: str, *, minimum: int) -> int:
         if isinstance(value, bool):
             raise MalformedSpecificationError(f"{field_name} must be an integer")
@@ -659,6 +723,9 @@ class VerificationAgent(BaseAgent):
         name = getattr(formal_property, "name", None)
         if isinstance(name, str) and name.strip():
             return name.strip()
+        if request.operation is VerificationOperation.PROPOSAL_EVIDENCE:
+            patch_id = VerificationAgent._proposal_patch_id(request)
+            return f"proposal_evidence:{patch_id}" if patch_id else "proposal_evidence"
         if request.operation is VerificationOperation.SATISFIABILITY:
             return "constraint_system"
         if request.operation is VerificationOperation.VALIDITY:
@@ -819,6 +886,7 @@ class VerificationAgent(BaseAgent):
             "operation": request.operation.value,
             "property_name": request.property_name or self._default_property_name(request),
             "artifact_type": type(request.artifact).__name__,
+            "patch_id": self._proposal_patch_id(request) if request.operation is VerificationOperation.PROPOSAL_EVIDENCE else None,
             "formal_property_type": type(request.formal_property).__name__ if request.formal_property is not None else None,
             "assumptions": assumptions[: self.max_shared_list_items],
             "backend_requested": request.backend_name,
@@ -880,6 +948,7 @@ class VerificationAgent(BaseAgent):
             summary,
             tags=("verification", "latest"),
         )
+        self._publish_proposal_verdict(request, outcome, shared_result)
         self._publish_event(
             "completed",
             {
@@ -888,6 +957,37 @@ class VerificationAgent(BaseAgent):
                 "verification_status": status.value if status is not None else None,
                 "result_kind": self._non_status_label(outcome.result),
             },
+        )
+
+    def _publish_proposal_verdict(
+        self,
+        request: VerificationAgentRequest,
+        outcome: VerificationAgentOutcome,
+        shared_result: Mapping[str, object],
+    ) -> None:
+        """Per-patch verdict key, so the next gate can look a proposal up without knowing request ids."""
+
+        patch_id = self._proposal_patch_id(request)
+        result = outcome.result
+        if request.operation is not VerificationOperation.PROPOSAL_EVIDENCE or patch_id is None:
+            return
+        if not isinstance(result, VerificationResult):
+            return
+        verdicts = {name: str(text).split(":", 1)[0] for name, text in result.model.items()}
+        self._shared_set(
+            self._key(self.proposal_verdict_key_prefix, patch_id),
+            {
+                "schema": "verification_agent.proposal_verdict.v1",
+                "patch_id": patch_id,
+                "request_id": request.request_id,
+                "verification_status": result.status.value,
+                "violated": sorted(name for name, verdict in verdicts.items() if verdict == "violated"),
+                "unknown": sorted(name for name, verdict in verdicts.items() if verdict == "unknown"),
+                "scope": "recorded_evidence",
+                "behaviour_verified": False,
+                "fingerprint": shared_result.get("fingerprint"),
+            },
+            tags=("verification", "proposal_verdict", result.status.value),
         )
 
     def _publish_error(self, request: VerificationAgentRequest, error: BaseException) -> None:

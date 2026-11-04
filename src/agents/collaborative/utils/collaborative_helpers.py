@@ -49,13 +49,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, cast
 
 from .config_loader import get_config_section, load_global_config
-from .collaboration_error import CollaborationError as _collaboration_error_module
+from .collaboration_error import CollaborationError as _collaboration_error_module, ProjectCoordinationError
 from logs.logger import PrettyPrinter, get_logger  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Collaborative Helpers")
 printer = PrettyPrinter()
 
 T = TypeVar("T")
+BUCKETS = 16
 
 JsonDict = Dict[str, Any]
 JsonValue = Union[None, bool, int, float, str, List[Any], Dict[str, Any]]
@@ -2543,73 +2544,61 @@ def filter_agents_for_task(agents: Mapping[str, Mapping[str, Any]], task_type: s
     }
 
 
-if __name__ == "__main__":
-    print("\n=== Running Collaborative Helpers Smoke Tests ===\n")
+def _number(value: Any, default: float = 0.0, lo: float = 0.0, hi: float = 1e9) -> float:
+    try:
+        z = float(value)
+        return max(lo, min(hi, z)) if math.isfinite(z) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
 
-    envelope = build_task_envelope(
-        task_type="translate",
-        payload={"text": "hello", "token": "secret-value"},
-        required_capabilities=["language"],
-        timeout_seconds=30,
-        source="smoke-test",
-    )
-    assert envelope.task_type == "translate"
-    assert validate_task_envelope(envelope).valid
-    assert envelope.deadline_at is not None
 
-    class _Agent:
-        capabilities = ["translate", "language"]
+def _tokens(value: Any) -> set[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return set()
+    return {str(v).strip().lower()[:96] for v in value if isinstance(v, str) and v.strip()}
 
-        def execute(self, data: Mapping[str, Any]) -> Dict[str, Any]:
-            return {"ok": True, "data": dict(data)}
 
-    registration = build_agent_registration("Translator", _Agent(), capabilities=["translate", "language"])
-    assert registration["name"] == "Translator"
-    assert registration["meta"]["capabilities"] == ["translate", "language"]
+def _bucket(name: str) -> int:
+    return int.from_bytes(hashlib.sha256(name.encode("utf-8")).digest()[:4], "big") % BUCKETS
 
-    class _Memory:
-        def __init__(self):
-            self.store: Dict[str, Any] = {}
 
-        def get(self, key: str, default: Any = None) -> Any:
-            return self.store.get(key, default)
+def _id(value: str, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ProjectCoordinationError(f"{label} must be a nonempty string")
+    return value.strip()
 
-        def set(self, key: str, value: Any, **kwargs: Any) -> None:
-            self.store[key] = value
 
-        def delete(self, key: str) -> bool:
-            return self.store.pop(key, None) is not None
+def _json_record(value: Any, label: str, *, max_bytes: int = 65536) -> str:
+    """Validate a bounded, portable JSON record (no pickle or NaN values)."""
+    try:
+        encoded = json.dumps(value, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ProjectCoordinationError(f"{label} must be JSON serializable") from exc
+    if len(encoded.encode("utf-8")) > max_bytes:
+        raise ProjectCoordinationError(f"{label} exceeds {max_bytes} UTF-8 bytes")
+    return encoded
 
-        def get_all_keys(self) -> List[str]:
-            return list(self.store.keys())
 
-    memory = _Memory()
-    touch_agent_heartbeat(memory, "Translator", capabilities=["translate"], version=1.0)
-    set_agent_active_delta(memory, "Translator", +1)
-    record_agent_success(memory, "Translator")
-    stats = get_agent_stats(memory)
-    assert stats["Translator"]["successes"] == 1
-    assert stats["Translator"]["active_tasks"] == 1
+def _references(values: Any, label: str) -> list[str]:
+    if not isinstance(values, (tuple, list)) or len(values) > 128:
+        raise ProjectCoordinationError(f"{label} must be a list of up to 128 references")
+    result = [_id(value, label) for value in values]
+    if len(result) != len(set(result)):
+        raise ProjectCoordinationError(f"{label} must contain unique references")
+    return result
 
-    report = build_health_report(
-        agents={"Translator": registration["meta"]},
-        stats=stats,
-        heartbeats=read_agent_heartbeats(memory, ["Translator"]),
-        shared_memory=memory,
-    )
-    assert report["status"] in {"healthy", "degraded", "overloaded"}
-
-    audit = build_audit_event("task_submitted", "Task submitted", task=envelope, agent_name="Translator")
-    assert audit["event_type"] == "task_submitted"
-    assert audit["task"]["payload"]["token"] == "***REDACTED***"
-
-    result = success_result(action="route", data={"agent": "Translator"})
-    assert result["status"] == "success"
-
-    print("All collaborative_helpers.py smoke tests passed.\n")
 
 __all__ = [
+    "_number",
+    "_tokens",
+    "_bucket",
+    "_json_record",
+    "_references",
+    "_id",
     # Constants
+    "BUCKETS",
     "DEFAULT_AGENT_STATS_KEY",
     "DEFAULT_AGENT_KEY_PREFIX",
     "DEFAULT_AUDIT_KEY",
@@ -2767,3 +2756,69 @@ __all__ = [
     "can_agent_handle_task",
     "filter_agents_for_task",
 ]
+
+
+if __name__ == "__main__":
+    print("\n=== Running Collaborative Helpers Smoke Tests ===\n")
+
+    envelope = build_task_envelope(
+        task_type="translate",
+        payload={"text": "hello", "token": "secret-value"},
+        required_capabilities=["language"],
+        timeout_seconds=30,
+        source="smoke-test",
+    )
+    assert envelope.task_type == "translate"
+    assert validate_task_envelope(envelope).valid
+    assert envelope.deadline_at is not None
+
+    class _Agent:
+        capabilities = ["translate", "language"]
+
+        def execute(self, data: Mapping[str, Any]) -> Dict[str, Any]:
+            return {"ok": True, "data": dict(data)}
+
+    registration = build_agent_registration("Translator", _Agent(), capabilities=["translate", "language"])
+    assert registration["name"] == "Translator"
+    assert registration["meta"]["capabilities"] == ["translate", "language"]
+
+    class _Memory:
+        def __init__(self):
+            self.store: Dict[str, Any] = {}
+
+        def get(self, key: str, default: Any = None) -> Any:
+            return self.store.get(key, default)
+
+        def set(self, key: str, value: Any, **kwargs: Any) -> None:
+            self.store[key] = value
+
+        def delete(self, key: str) -> bool:
+            return self.store.pop(key, None) is not None
+
+        def get_all_keys(self) -> List[str]:
+            return list(self.store.keys())
+
+    memory = _Memory()
+    touch_agent_heartbeat(memory, "Translator", capabilities=["translate"], version=1.0)
+    set_agent_active_delta(memory, "Translator", +1)
+    record_agent_success(memory, "Translator")
+    stats = get_agent_stats(memory)
+    assert stats["Translator"]["successes"] == 1
+    assert stats["Translator"]["active_tasks"] == 1
+
+    report = build_health_report(
+        agents={"Translator": registration["meta"]},
+        stats=stats,
+        heartbeats=read_agent_heartbeats(memory, ["Translator"]),
+        shared_memory=memory,
+    )
+    assert report["status"] in {"healthy", "degraded", "overloaded"}
+
+    audit = build_audit_event("task_submitted", "Task submitted", task=envelope, agent_name="Translator")
+    assert audit["event_type"] == "task_submitted"
+    assert audit["task"]["payload"]["token"] == "***REDACTED***"
+
+    result = success_result(action="route", data={"agent": "Translator"})
+    assert result["status"] == "success"
+
+    print("All collaborative_helpers.py smoke tests passed.\n")
