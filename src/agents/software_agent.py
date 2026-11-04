@@ -64,6 +64,7 @@ class SoftwareOperation(str, Enum):
     MIGRATE_API = "migrate_api"
     APPLY_DIFF = "apply_diff"
     PROPOSAL = "proposal"
+    PARAMETRIC_ANALYSIS = "parametric_analysis"
 
 
 _STATE_KEYS = ("files", "snapshot", "base_patch_id")
@@ -316,6 +317,7 @@ class SoftwareAgent(BaseAgent):
             SoftwareOperation.MIGRATE_API: self._op_migrate_api,
             SoftwareOperation.APPLY_DIFF: self._op_apply_diff,
             SoftwareOperation.PROPOSAL: self._op_proposal,
+            SoftwareOperation.PARAMETRIC_ANALYSIS: self._op_parametric_analysis,
         }
         self._load_agent_config()
         self._validate_agent_config()
@@ -695,6 +697,10 @@ class SoftwareAgent(BaseAgent):
         p = request.parameters
         report = self._analysis.impact(after, symbols=_strings(p.get("symbols"), "symbols"), paths=_strings(p.get("paths"), "paths"), baseline=before)
         return self._read(after, report.to_dict())
+
+    def _op_parametric_analysis(self, request: SoftwareAgentRequest) -> _Dispatch:
+        """Inspect source expressions and an optional caller-owned graph without executing either."""
+        return _Dispatch(self._analysis.parametric(request.parameters))
 
     def _op_compatibility(self, request: SoftwareAgentRequest) -> _Dispatch:
         before, after = self._before_after(request, baseline_required=True)
