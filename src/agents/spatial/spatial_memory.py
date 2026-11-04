@@ -69,6 +69,30 @@ class SpatialMemory:
             raise SpatialValidationError("unknown spatial entity", context={"entity_id": entity_id})
         return entity
 
+    def resolve_reference(self, entity_id: str, *, revision: int | None = None,
+                          frame_id: str | None = None) -> dict[str, Any]:
+        """Resolve a stable entity reference with optional revision/frame guards.
+
+        A stale reference is never silently rebound to current geometry.
+        """
+        key = validate_identifier(entity_id, name="entity_id")
+        if revision is not None and (isinstance(revision, bool) or not isinstance(revision, int) or revision < 0):
+            raise SpatialValidationError("revision must be a non-negative integer")
+        if frame_id is not None:
+            validate_identifier(frame_id, name="frame_id")
+        with self._lock:
+            entity = self._entities.get(key)
+            if entity is None:
+                return {"entity_id": key, "status": "missing", "expected_revision": revision}
+            if revision is not None and entity.revision != revision:
+                return {"entity_id": key, "status": "stale", "expected_revision": revision,
+                        "current_revision": entity.revision}
+            if frame_id is not None and entity.frame_id != frame_id:
+                return {"entity_id": key, "status": "frame_mismatch", "expected_frame": frame_id,
+                        "current_frame": entity.frame_id, "current_revision": entity.revision}
+            return {"entity_id": key, "status": "resolved", "revision": entity.revision,
+                    "frame_id": entity.frame_id, "entity": entity.to_dict()}
+
     def remove_entity(self, entity_id: str) -> SpatialEntity | None:
         key = validate_identifier(entity_id, name="entity_id")
         with self._lock:

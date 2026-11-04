@@ -47,6 +47,7 @@ from .spatial.modules.transform import RigidTransform
 from .spatial.utils.spatial_errors import *
 from .spatial.utils.spatial_helpers import *
 from .spatial.world.geometry import AABB, Mesh, OBB, Plane, PointCloud, Polygon, Ray, Segment, Sphere, Triangle
+from .spatial.world.topology import Topology
 from .spatial.world.occupancy import ESDFVolume, OccupancyGrid2D, OctreeOccupancy, TSDFVolume, VoxelGrid
 from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
 
@@ -164,6 +165,9 @@ class SpatialAgent(BaseAgent):
             "align_point_clouds": self._handle_align_point_clouds,
             "occupancy_lookup": self._handle_occupancy_lookup,
             "occupancy_update": self._handle_occupancy_update,
+            "validate_constraints": self._handle_validate_constraints,
+            "validate_polygon": self._handle_validate_polygon,
+            "resolve_reference": self._handle_resolve_reference,
         }
         self._operation_aliases = {
             "register_entity": "upsert_entity",
@@ -359,6 +363,33 @@ class SpatialAgent(BaseAgent):
     def _handle_get_entity(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         entity = self._require_entity(self._required_str(payload, "entity_id"))
         return {"entity": self._entity_summary(entity)}
+
+    def _handle_resolve_reference(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Revision-guarded reference resolution; never silently remap geometry."""
+        entity_id = self._required_str(payload, "entity_id")
+        revision = payload.get("revision")
+        if revision is not None and (isinstance(revision, bool) or not isinstance(revision, int) or revision < 0):
+            raise SpatialValidationError("revision must be a non-negative integer")
+        entity = self.index.get(entity_id)
+        if entity is None:
+            return {"status": "missing", "entity_id": entity_id}
+        if revision is not None and entity.revision != revision:
+            return {"status": "stale", "entity_id": entity_id, "expected_revision": revision,
+                    "current_revision": entity.revision}
+        expected_frame = payload.get("frame_id")
+        if expected_frame is not None and entity.frame_id != expected_frame:
+            return {"status": "frame_mismatch", "entity_id": entity_id, "current_frame": entity.frame_id}
+        return {"status": "resolved", "entity": self._entity_summary(entity)}
+
+    @staticmethod
+    def _handle_validate_constraints(payload: Mapping[str, Any]) -> dict[str, Any]:
+        return Topology.validate_constraints(payload.get("entities", {}), payload.get("constraints", []),
+                                             tolerance=payload.get("tolerance", DEFAULT_ABS_TOL))
+
+    @staticmethod
+    def _handle_validate_polygon(payload: Mapping[str, Any]) -> dict[str, Any]:
+        return Topology.validate_polygon(Polygon(payload.get("vertices")),
+                                         tolerance=payload.get("tolerance", DEFAULT_ABS_TOL))
 
     def _handle_remove_entity(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         entity_id = self._required_str(payload, "entity_id")

@@ -203,6 +203,38 @@ class ParametricMath:
             result["result"] = quantity.to_dict()
         return result
 
+    def evaluate_checked(self, expression: str, parameters: Mapping[str, Any], *,
+                         output_unit: str | None = None,
+                         allowed_range: tuple[float, float] | None = None,
+                         assumptions: Sequence[str] = ()) -> dict[str, Any]:
+        """Typed, inspectable calculation with optional unit/range contract.
+
+        Uses the existing quantity engine; range values refer to the requested
+        output unit. No engineering design standard is implied or invented.
+        """
+        if not isinstance(assumptions, (tuple, list)) or len(assumptions) > 32 or any(
+            not isinstance(item, str) or not item.strip() or len(item) > 512 for item in assumptions
+        ):
+            raise STEMValidationError("assumptions must contain at most 32 non-empty statements")
+        calculation = self.inspect_expression(expression, parameters)
+        quantity = self.evaluate_expression(expression, parameters)
+        if output_unit is not None:
+            if not isinstance(output_unit, str) or not output_unit.strip():
+                raise STEMValidationError("output_unit must be a non-empty unit symbol")
+            quantity = self.units.convert_quantity(quantity, output_unit)
+        if allowed_range is not None:
+            if not isinstance(allowed_range, (tuple, list)) or len(allowed_range) != 2 or any(
+                isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in allowed_range
+            ) or allowed_range[0] > allowed_range[1]:
+                raise STEMValidationError("allowed_range must be two ordered finite numeric bounds")
+            if not allowed_range[0] <= quantity.magnitude <= allowed_range[1]:
+                raise STEMValidationError("Calculated value violates allowed range", context={
+                    "value": quantity.magnitude, "unit": quantity.unit.symbol, "allowed_range": list(allowed_range)})
+        return {"expression": expression, "dependencies": calculation["dependencies"],
+                "result": quantity.to_dict(), "assumptions": list(assumptions),
+                "validation": "passed", "method": "bounded_ast_quantity_evaluation",
+                "engineering_code_compliance": "not_assessed"}
+
     def evaluate(self, expressions: Mapping[str, str],
                  parameters: Mapping[str, Any] | None = None) -> dict[str, Quantity]:
         """Topologically evaluate derived parameters and detect cycles/missing symbols."""

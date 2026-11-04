@@ -216,6 +216,8 @@ class STEMAgent(BaseAgent):
         ),
         "parametric": (
             "evaluate_expression",
+            "inspect_expression",
+            "evaluate_checked",
             "evaluate",
             "evaluate_serializable",
             "evaluate_series",

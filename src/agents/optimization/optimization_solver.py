@@ -1,12 +1,13 @@
 """Production orchestration for SLAI mathematical optimization solvers.
 
-The orchestrator performs classification, capability-based solver selection, deterministic fallback,
-memory-backed warm starts and evidence recording, and multi-objective transformations.
-It does not own planning, simulation, or SLAI/model hyperparameter tuning.
+The orchestrator performs classification, capability-based solver selection,
+deterministic fallback, memory-backed warm starts and evidence recording, and
+multi-objective transformations.  It does not own planning, simulation, or
+SLAI/model hyperparameter tuning.
 """
 from __future__ import annotations
 
-__version__ = "2.4.0"
+__version__ = "2.3.0"
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -34,10 +35,70 @@ class OptimizationSolver:
         Delegates to the existing domain/constraint verification implementation;
         this result is not a proof of global or local optimality.
         """
-        from .optimization_math import feasibility_evidence
+        from .optimization_math import feasibility_evidence, domain_violation, constraint_violation, objective_values
+        if not isinstance(problem, OptimizationProblem) or not isinstance(point, Mapping):
+            raise OptimizationValidationError("candidate inspection requires a typed problem and mapping")
         violation, feasible = feasibility_evidence(problem, point, tolerance=tolerance)
+        missing = [variable.name for variable in problem.variables if variable.name not in point]
+        per_variable = {} if missing else {variable.name: domain_violation(variable, point[variable.name])
+                                           for variable in problem.variables}
+        per_constraint = {} if missing else {constraint.name: constraint_violation(constraint, point)
+                                             for constraint in problem.constraints}
+        values = None if missing else objective_values(problem, point)
         return {"feasible": feasible, "maximum_violation": violation,
+                "variables": per_variable, "constraints": per_constraint,
+                "objective_values": values, "missing_variables": missing,
                 "tolerance": tolerance, "optimality": "not_evaluated"}
+
+    @staticmethod
+    def parameter_problem(spec: Mapping[str, Any]) -> OptimizationProblem:
+        """Build a generic bounded linear problem; reuse canonical models and solvers.
+
+        Does not accept executable expressions, callback source, or domain objects.
+        Nonlinear and multiobjective problems continue to use OptimizationProblem.
+        """
+        if not isinstance(spec, Mapping):
+            raise OptimizationValidationError("parameter specification must be a mapping")
+        raw_variables = spec.get("variables")
+        raw_objective = spec.get("objective")
+        raw_constraints = spec.get("constraints", [])
+        if not isinstance(raw_variables, Mapping) or not 1 <= len(raw_variables) <= 256 or not isinstance(raw_objective, Mapping):
+            raise OptimizationValidationError("variables and objective must be bounded mappings")
+        if not isinstance(raw_constraints, list) or len(raw_constraints) > 256:
+            raise OptimizationValidationError("constraints must be a list of at most 256 entries")
+        variables = []
+        for name, raw in raw_variables.items():
+            if not isinstance(name, str) or not name.isidentifier() or not isinstance(raw, Mapping):
+                raise OptimizationValidationError("variable must have an identifier and parameter mapping")
+            kind = raw.get("type", "real")
+            if kind == "binary":
+                domain = VariableDomain.binary()
+            elif kind == "integer":
+                domain = VariableDomain.integer(raw.get("lower"), raw.get("upper"))
+            elif kind == "real":
+                domain = VariableDomain.real(raw.get("lower"), raw.get("upper"))
+            else:
+                raise OptimizationValidationError("supported parameter types are real, integer and binary")
+            variables.append(Variable(name, domain))
+        coefficients = raw_objective.get("linear", {})
+        if not isinstance(coefficients, Mapping) or not coefficients:
+            raise OptimizationValidationError("linear objective coefficients are required")
+        objective = Objective("parameter_objective", sense=raw_objective.get("sense", "minimize"), linear=coefficients)
+        constraints = []
+        for index, raw in enumerate(raw_constraints):
+            if not isinstance(raw, Mapping) or not isinstance(raw.get("linear"), Mapping):
+                raise OptimizationValidationError("constraint needs linear coefficient mapping")
+            constraints.append(Constraint(str(raw.get("name", f"constraint_{index}")),
+                                          sense=raw.get("sense", "<="), rhs=raw.get("rhs", 0.0),
+                                          linear=raw["linear"], tolerance=raw.get("tolerance", 1e-8)))
+        return OptimizationProblem(str(spec.get("name", "parameter_search")),
+                                   tuple(variables), (objective,), tuple(constraints))
+
+    def search_parameters(self, spec: Mapping[str, Any], *, solver: str | None = None,
+                          options: Mapping[str, Any] | None = None) -> OptimizationResult:
+        """Solve an explicit generic linear parameter problem via existing registry."""
+        problem = self.parameter_problem(spec)
+        return self.solve_single_detailed(problem, solver=solver, options=options)
 
     def __init__(
         self,
