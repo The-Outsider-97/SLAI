@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from src.agents.planning.revision_workflow import RevisionTask, RevisionWorkflowStore
+from src.agents.planning.revision_workflow import RevisionTask, RevisionWorkflowError, RevisionWorkflowStore
 from src.agents.planning.workflow_runtime import (
     AuthorizationContext, CapabilityBinding, CapabilityContractError,
     OrchestratorCapabilityAdapter, RevisionWorkflowRunner, WorkflowAuthorizationError,
@@ -159,7 +159,7 @@ def test_invalid_contracts_and_mutation_bindings_are_refused():
         CapabilityBinding("stem", input_schema={"type": "not-a-json-schema-type"})
     with pytest.raises(ValueError, match="mutations require host commit"):
         CapabilityBinding("stem", side_effects="write")
-    with pytest.raises(ValueError, match="capability_version requires"):
+    with pytest.raises(RevisionWorkflowError, match="capability_version requires"):
         RevisionTask("x", capability_version="2.0")
 
 
