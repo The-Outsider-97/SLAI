@@ -132,3 +132,40 @@ controls. Each can move to the kit one module at a time, with that application's
 * `Database` is synchronous and uses one connection guarded by a lock. That is right for a single-user local service; it is not a
   connection pool.
 * The kit has no component for rich text, charts or a PDF view. Those stay in the applications that need them.
+
+## Application startup screen
+
+The browser entry page loads `startup/loader.css` in the head. Immediately before the main module, a classic script mounts a modal dialog and makes the rest of the page inert. Supply the application's display name and a same-origin logo URL.
+
+```html
+<script src="startup/loader.js" data-name="SPlanner" data-logo="/assets/img/logo.png"></script>
+```
+
+The authoritative JS and CSS live in `applications/tools/web/startup/`. The shared build publishes them to the client distribution using `build/publish-startup.mjs`. Keep the two generated files with the distribution. Standalone build scripts can refresh these from a sibling tools directory or a checkout identified by SLAI_ROOT. Run the existing npm build after updating either source file. The script accepts an optional `data-fallback` logo. If neither image decodes, the application name stays visible.
+
+Send one of the following window events from the application's genuine startup path.
+
+| Event | When to send | Effect |
+| --- | --- | --- |
+| `slai:ready` | The first usable screen has mounted and required data has loaded | Removes the dialog, timer and window listeners immediately |
+| `slai:startup-error` | A required startup operation failed | Displays the detail string as text, stops motion and offers reload or access to the application's own recovery screen |
+| `slai:startup-update` | A real status message or measurement becomes available | Accepts a detail object with optional message and finite progress from 0 to 1 |
+
+The seven current clients use indeterminate rings. Python's `src/functions/loading.py` wraps the thread-safe `Loader` in `src/functions/loader.py`, which handles progress, ETA, cancellation and callbacks. Those modules operate inside the Python process. A client that already receives measured progress from its host can forward the message and progress to the update event. The browser screen adds no Python progress manager or polling endpoint.
+
+Both reference route loaders center a stationary logo inside a 92 px orb. The outer ring rotates in 2.8 seconds and the inner ring rotates in reverse in 2 seconds with a 12 px inset. BIMAP fills the viewport and uses a 22 px label gap. Miner accommodates its header and uses a 20 px gap. Application startup uses the full window and the 20 px gap. The OS reduced-motion setting disables both rotations. After 45 seconds without completion, recovery controls become available and a later successful startup can still dismiss the dialog.
+
+The modal starts when the loopback host serves the main page. Configuration, imports or server failures that occur before this point use the launcher's existing console diagnostics. The native Windows launch phase has no separate splash window.
+
+### Verification
+
+Run the following from the SLAI root after building the clients and installing their normal Python dependencies.
+
+```powershell
+py -m unittest discover -s applications/tools/tests -t . -q
+py applications/tools/tests/startup_http.py
+```
+
+The HTTP test starts all seven application processes with temporary data folders, opens their printed launch links, compares the served loader bytes with the shared source, decodes the selected logo, requests the compiled entry module and calls an authenticated startup API. It terminates each process before continuing.
+
+For lifecycle tests with the compiled clients, Node 24, happy-dom 21 and @napi-rs/canvas 1 are test-only dependencies. Install them under applications/tools/tests and run the HTTP driver with `--dom`. This exercises successful startup and interrupted service calls in an emulated DOM. SPADRA uses a 2D canvas in this test. For real-browser verification, install Playwright and its Chromium build and run `py applications/tools/tests/startup_browser.py "<launch URL>" "<display name>"` against a freshly launched app. CHROMIUM_PATH may point to an existing Chromium installation.
