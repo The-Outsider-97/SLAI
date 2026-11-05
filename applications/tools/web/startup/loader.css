@@ -1,0 +1,32 @@
+dialog.slai-startup[open] {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  border: 0;
+  padding: 24px;
+  display: grid;
+  justify-items: center;
+  gap: 20px;
+  background: #121318;
+  color: #e0e1e6;
+  font: 500 12px/1.5 monospace;
+  text-align: center;
+  max-width: min(90vw, 38em);
+}
+.slai-startup::backdrop { background: #121318; }
+.slai-startup p { margin: 0; }
+.slai-startup p[role=status] { text-transform: uppercase; letter-spacing: .15em; }
+.slai-startup button { color: inherit; background: #292c34; padding: .5em 1em; border: 1px solid #8a8d98; }
+.slai-startup-orb { position: relative; display: grid; place-items: center; width: 92px; height: 92px; }
+.slai-startup-orb img { width: 38px; height: 38px; object-fit: contain; }
+.slai-startup-orb::before, .slai-startup-orb::after {
+  content: ''; position: absolute; inset: 0; border-radius: 50%;
+  border: 1px solid #484b54; border-top-color: #ebcd48;
+  animation: slai-startup-orbit 2.8s linear infinite;
+}
+.slai-startup-orb::after { inset: 12px; animation-duration: 2s; animation-direction: reverse; }
+@keyframes slai-startup-orbit { to { transform: rotate(1turn); } }
+.slai-startup.failed .slai-startup-orb::before, .slai-startup.failed .slai-startup-orb::after { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .slai-startup-orb::before, .slai-startup-orb::after { animation: none; }
+}
