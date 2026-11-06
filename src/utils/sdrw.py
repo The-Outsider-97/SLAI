@@ -44,7 +44,7 @@ from .spatial_formats.documents import SaveResult
 from .spatial_formats.sdrw.document import DrawingDocument
 from .spatial_formats.verification import ConversionReport, Issue, ValidationReport, report_from_exception
 
-__version__ = "0.2.0"
+__version__ = CURRENT_VERSION
 
 FORMAT_ID = "slai.sdrw"
 FORMAT_VERSION = CURRENT_VERSION  # What new documents are written as.

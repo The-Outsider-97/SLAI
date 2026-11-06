@@ -17,13 +17,13 @@ PKG = Path(sdrw.__file__).parent / "spatial_formats"
 
 # --------------------------------------------------------------------------- constants / layering
 def test_facade_constants_match_the_container_contract():
-    assert (sdrw.FORMAT_VERSION, sgeo.FORMAT_VERSION) == ("0.2.0", "0.2.0")
-    assert (sdrw.SCHEMA, sgeo.SCHEMA) == ("slai.sdrw/0.2", "slai.sgeo/0.2")
+    assert (sdrw.FORMAT_VERSION, sgeo.FORMAT_VERSION) == ("0.3.0", "0.3.0")
+    assert (sdrw.SCHEMA, sgeo.SCHEMA) == ("slai.sdrw/0.3", "slai.sgeo/0.3")
     assert sdrw.MIMETYPE == "application/x-slai-sdrw+zip" and sgeo.MIMETYPE == "application/x-slai-sgeo+zip"
     assert (sdrw.FILE_EXTENSION, sgeo.FILE_EXTENSION) == (".sdrw", ".sgeo")
     assert sgeo.AXIS_UP == "+Z" and sgeo.HANDEDNESS == "right"
     for module in (sdrw, sgeo):
-        assert module.__version__ == "0.2.0"
+        assert module.__version__ == "0.3.0"
         for name in module.__all__:
             assert hasattr(module, name), name
 

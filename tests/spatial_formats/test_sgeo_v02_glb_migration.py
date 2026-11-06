@@ -178,7 +178,7 @@ def test_glb_export_via_file_helpers_and_cli(tmp_path, capsys):
         assert back.inspect()["material_count"] == 1 and back.inspect()["image_count"] == 1
     assert cli.main(["inspect", str(tmp_path / "s.sgeo")]) == 0
     info = json.loads(capsys.readouterr().out)
-    assert info["format_version"] == "0.2.0"
+    assert info["format_version"] == "0.3.0"
     assert {"materials", "textures", "brep"} <= set(info["requires"])
     assert info["summary"]["material_count"] == 1
     assert cli.main(["capabilities"]) == 0
@@ -212,7 +212,7 @@ def legacy_body():
     d.add_box(width=1, depth=2, height=3, name="box")
     d.add_sphere(1, position=(5, 0, 0), name="ball")
     body = d.model.as_dict()
-    body.pop("materials"), body.pop("images")                                  # a 0.1 writer knew neither
+    body.pop("materials"), body.pop("images"), body.pop("modifiers")           # a 0.1 writer knew none
     return body
 
 
@@ -229,9 +229,9 @@ def test_legacy_scene_upgrades_in_memory_and_saves_as_current(tmp_path):
         editable.add_brep_box(width=1, depth=1, height=1, material=mat)
         editable.save(tmp_path / "new.sgeo")
     with SGEODocument.open(tmp_path / "new.sgeo") as new:
-        assert new.source_version == "0.2.0" and new.count() == 3 and new.validate().ok
+        assert new.source_version == "0.3.0" and new.count() == 3 and new.validate().ok
     with ZipFile(tmp_path / "new.sgeo") as z:
-        assert json.loads(z.read("manifest.json"))["format_version"] == "0.2.0"
+        assert json.loads(z.read("manifest.json"))["format_version"] == "0.3.0"
     with ZipFile(tmp_path / "old.sgeo") as z:                                   # the original is never rewritten
         assert json.loads(z.read("manifest.json"))["format_version"] == "0.1.0"
 
@@ -241,7 +241,7 @@ def test_legacy_scene_with_binary_meshes_upgrades(tmp_path):
     d = SGEODocument.new("old", unit="m")
     d.add_mesh(*TRIANGLE, name="tri")
     body = d.model.as_dict()
-    body.pop("materials"), body.pop("images")
+    body.pop("materials"), body.pop("images"), body.pop("modifiers")
     external, assets = externalize_scene(body)
     legacy_package(tmp_path / "old.sgeo", external, assets)
     with SGEODocument.open(tmp_path / "old.sgeo") as old:

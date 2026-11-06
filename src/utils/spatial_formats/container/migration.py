@@ -1,6 +1,6 @@
 """Conservative, explicit version negotiation and migration for spatial artifacts.
 
-Supported paths: ``0.1.0 -> 0.2.0``. A legacy document is first validated
+Supported paths: ``0.1.0/0.2.0 -> 0.3.0``. A legacy document is first validated
 against its *own* frozen schema and content rules (a file labelled 0.1.0 may not
 contain anything introduced later), then upgraded by adding the empty registries
 the current schema requires. Unknown or future versions are never reinterpreted,
@@ -68,14 +68,16 @@ def upgrade_loaded(manifest, document):
     validate_legacy(manifest, document)
     format_id = manifest["format_id"]
     upgraded = deepcopy(document)
-    if format_id == "slai.sdrw":
-        _check_legacy_sdrw(upgraded)
-        upgraded.setdefault("linetypes", [])
-        upgraded.setdefault("blocks", [])
-    else:
-        _check_legacy_sgeo(upgraded)
-        upgraded.setdefault("materials", [])
-        upgraded.setdefault("images", [])
+    if manifest["format_version"] == "0.1.0":
+        if format_id == "slai.sdrw":
+            _check_legacy_sdrw(upgraded)
+            upgraded.setdefault("linetypes", [])
+            upgraded.setdefault("blocks", [])
+        else:
+            _check_legacy_sgeo(upgraded)
+            upgraded.setdefault("materials", [])
+            upgraded.setdefault("images", [])
+    upgraded["modifiers"] = []
     new_manifest = deepcopy(manifest)
     new_manifest["format_version"] = CURRENT_VERSION
     new_manifest["schema"] = schema_id(format_id, CURRENT_VERSION)

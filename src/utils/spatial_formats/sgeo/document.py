@@ -1069,8 +1069,12 @@ class SceneDocument(SpatialDocument):
         """A writable, unsaved deep copy (fresh document id and revision 1 unless ``fresh_id=False``)."""
         snapshot = self.snapshot()
         if fresh_id:
+            from ..common.modifiers import rebase_local_references
+            previous = snapshot.document_id
             snapshot.document_id = new_id()
             snapshot.revision = 1
+            rebase_local_references(snapshot.modifiers, previous_document_id=previous,
+                                    document_id=snapshot.document_id, revision=1)
         if name is not None:
             snapshot.name = name
         return SceneDocument(snapshot.validate())

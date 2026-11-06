@@ -284,6 +284,12 @@ def check_drawing(drawing, *, mode: str = "strict", max_issues: int = DEFAULT_MA
                 used_layers[entity.get("layer", "0")] += 1
             check_entity(entity, path, ident)
 
+        from ..common.modifiers import validate_modifiers
+        c.ran("modifiers")
+        c.guard("/modifiers", lambda: validate_modifiers(
+            drawing.modifiers, format_id="slai.sdrw", document_id=drawing.document_id, revision=drawing.revision,
+            items={e["id"]: e for e in entities if isinstance(e, dict) and isinstance(e.get("id"), str)}))
+
         # Advisory findings never affect `ok`.
         if not entities:
             c.add("info", "drawing.empty", "drawing has no entities", "/entities")
@@ -351,6 +357,13 @@ def check_scene(scene, *, mode: str = "strict", max_issues: int = DEFAULT_MAX_IS
                     c.add("error", ValidationError.code, "duplicate object identifier", path, id=ident)
                 index.setdefault(ident, obj)
             c.guard(path, Scene._check_object, obj, id=ident)
+
+        from ..common.modifiers import validate_modifiers
+        c.ran("modifiers")
+        c.guard("/modifiers", lambda: validate_modifiers(
+            scene.modifiers, format_id="slai.sgeo", document_id=scene.document_id, revision=scene.revision,
+            items={o["id"]: o for o in objects if isinstance(o, dict) and isinstance(o.get("id"), str)
+                   and o.get("geometry") is not None}))
 
         c.ran("hierarchy")
         for position, obj in enumerate(objects):

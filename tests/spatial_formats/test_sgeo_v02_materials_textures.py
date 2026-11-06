@@ -271,7 +271,7 @@ def test_saving_is_deterministic_and_inspect_reports_counts(tmp_path):
     assert d.dumps() == first
     d.save(tmp_path / "a.sgeo")
     info = inspect_package(tmp_path / "a.sgeo")
-    assert info.format_version == "0.2.0"
+    assert info.format_version == "0.3.0"
     summary = d.inspect()
     assert summary["material_count"] == 1 and summary["image_count"] == 1
 

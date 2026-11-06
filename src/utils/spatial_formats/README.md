@@ -1,8 +1,8 @@
 # Native spatial infrastructure
 
 This package implements the versioned SDRW drawing and SGEO scene models used
-by SLAI v2.4. The native **file format is 0.2.0** (files written by 0.1.0 are
-read and upgraded in memory, see [Format 0.2.0](#format-020)); it is separate
+by SLAI v2.4. The native **file format is 0.3.0** (files written by 0.1.0 and
+0.2.0 are read and upgraded in memory, see [Format 0.3.0](#format-030)); it is separate
 from the application version. Application facades in `src/utils/sdrw.py` and
 `src/utils/sgeo.py` are not imported here (they import this package, never the
 reverse; a test enforces it).
@@ -93,13 +93,57 @@ One JSON document on stdout; exit code 0 ok, 1 failed/invalid (`code` field),
 `ezdxf`; install it with `pip install ".[spatial]"` (the extra also lists
 `trimesh`, which is only used by tests as an independent GLB reader).
 
-## Format 0.2.0
+## Format 0.3.0 — non-destructive modifier foundation
 
-`format_version` is `0.2.0` for both formats. A 0.1.0 package still opens: it is
+The current format writes a bounded, explicit `modifiers` list in every SGEO or
+SDRW document. Existing 0.1.0 and 0.2.0 files load only after validation against
+their frozen schemas and upgrade to 0.3.0 **in memory**. Loading never rewrites
+the source file. The `requires` list includes `modifier-graph-v1` only when the
+list is nonempty; older readers must reject unknown mandatory features.
+
+`SceneDocument` and `DrawingDocument` share these application-neutral APIs:
+
+```python
+modifier_id = room.add_modifier(wall)          # SGEO identity: Phase 0 executable fixture
+records = room.modifiers()                     # detached serialized definitions
+dag = room.modifier_graph()                    # validated dependency order
+results = room.evaluate_modifiers()            # read-only, fingerprint-cached evaluation
+room.update_modifier(modifier_id, enabled=False)
+room.remove_modifier(modifier_id)
+```
+
+For both formats `add_modifier`, `update_modifier`, `remove_modifier` and
+`reorder_modifiers` are ordinary atomic revisioned document operations. A
+modifier record has strict `id`, `kind`, `version`, `target`, `operands`,
+`parameters`, `enabled`, `depends_on`, and `evaluation_policy` fields. References
+identify a `document_id` and `item_id`, optionally a pinned `revision` or an
+opaque `subelement` identity. External references are never fetched implicitly.
+
+Only `sgeo.identity` and `sdrw.identity` have Phase 0 evaluators. General
+Booleans, Bend and Chamfer are **not** implemented by this release. Unknown
+required modifier kinds are rejected rather than silently approximated.
+Subelement references have a validated contract but are reported `unsupported`
+until a future evaluator provides explicit topology lineage. Do not interpret
+edge indices as stable identifiers after topology-changing operations.
+
+The evaluator preserves source objects/entities and caches detached results by
+content/dependency fingerprint, not just global document revision. An unrelated
+edit can reuse a cached result; a changed source or dependency cannot. Full
+validation and detached atomic transactions remain authoritative. No new
+general-purpose geometry kernel or numeric constraint solver is claimed.
+
+Reproducible performance evidence can be generated with
+`python -m tests.spatial_formats.benchmark_modifier_phase0 100 500 1000`
+from the repository root. Output is JSON (environment, timings, and peak traced
+allocations); no absolute performance promise is inferred from a single host.
+
+## Format 0.2.0 (historical)
+
+`format_version` was `0.2.0` for both formats. A 0.1.0 package still opens: it is
 validated against the frozen 0.1 schema *and* a content rule (a 0.1.0 file may not
 contain anything newer, even if the JSON would otherwise pass), then upgraded in
 memory by adding the empty registries. `source_version` tells which version a
-document was read from; saving always writes 0.2.0 and never touches the original
+document was read from; saving now writes 0.3.0 and never touches the original
 file. The manifest `requires` list is computed from the content, so a drawing or
 scene that uses none of the new features still declares only the old ones. A reader
 refuses a `requires` entry or a version it does not know instead of guessing.
@@ -174,7 +218,7 @@ Booleans, general offset surfaces or STEP conversion. Those require a verified p
 CAD-kernel backend with explicit topological reference mapping.
 
 Versioned, declarative animation clips can be stored at document metadata key
-`slai.animation.v1` without changing the SGEO 0.2.0 container. This is an **opt-in metadata
+`slai.animation.v1` without requiring a new schema in the 0.2.0 generation. This is an **opt-in metadata
 extension**: older readers can open the file but may display only the static pose. Each clip has
 `duration` in seconds and bounded `tracks`, each with target `object_id`, `property`,
 `interpolation`, and strictly increasing `{time, value}` keyframes. Supported properties are:
@@ -265,7 +309,7 @@ face. Mesh vertices, faces and UVs are stored in content-addressed `geometry/sha
 
 | Module | Responsibility |
 | --- | --- |
-| `common` | Units, UUIDs, bounded JSON, metadata and affine transforms |
+| `common` | Units, UUIDs, bounded JSON, metadata, affine transforms, modifier contracts, references and dependency graph |
 | `sdrw` | Layers, 2D primitives, text, dimensions, hatches, blocks, linetypes, measurements, constraints and drawing transactions |
 | `sgeo` | Hierarchy, analytic/mesh/NURBS/B-rep geometry, materials and textures, solids, tessellation, typed families and transactions |
 | `container` | Deterministic ZIP transport, hashes, binary mesh and texture members, version migration and validated publication |

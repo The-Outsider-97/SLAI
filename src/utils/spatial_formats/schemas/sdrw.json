@@ -10,7 +10,8 @@
     "entities",
     "metadata",
     "linetypes",
-    "blocks"
+    "blocks",
+    "modifiers"
   ],
   "additionalProperties": false,
   "properties": {
@@ -99,6 +100,11 @@
         },
         "additionalProperties": false
       }
+    },
+    "modifiers": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {"$ref": "spatial_core.json#/$defs/modifier"}
     },
     "blocks": {
       "type": "array",

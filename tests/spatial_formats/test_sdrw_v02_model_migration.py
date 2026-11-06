@@ -374,10 +374,10 @@ def test_new_content_survives_save_and_open_with_declared_features(tmp_path):
     d.add_insert("b", (1, 1))
     d.save(tmp_path / "a.sdrw")
     info = inspect_package(tmp_path / "a.sdrw")
-    assert info.format_version == "0.2.0" and info.schema == "slai.sdrw/0.2"
+    assert info.format_version == "0.3.0" and info.schema == "slai.sdrw/0.3"
     assert {"annotations", "blocks", "linetypes", "drawing-primitives"} <= set(info.requires)
     with SDRWDocument.open(tmp_path / "a.sdrw") as back:
-        assert back.source_version == "0.2.0"
+        assert back.source_version == "0.3.0"
         assert back.count() == 2 and back.linetypes() == d.linetypes() and back.blocks() == d.blocks()
     plain = fresh()
     plain.add_line((0, 0), (1, 1))
@@ -417,7 +417,7 @@ def legacy_drawing_dict():
     d.add_line((0, 0), (10, 0), layer="walls", style={"stroke": "#333333", "stroke_width": 0.5})
     d.add_circle((5, 5), 2)
     body = d.model.as_dict()
-    body.pop("linetypes"), body.pop("blocks")                     # exactly what a 0.1 writer produced
+    body.pop("linetypes"), body.pop("blocks"), body.pop("modifiers")  # exactly what a 0.1 writer produced
     return body
 
 
@@ -435,9 +435,9 @@ def test_legacy_drawing_opens_upgrades_and_saves_as_current(tmp_path):
         editable.add_text((1, 1), "migrated", 1)
         editable.save(tmp_path / "new.sdrw")
     with SDRWDocument.open(tmp_path / "new.sdrw") as new:
-        assert new.source_version == "0.2.0" and new.count() == 3 and new.linetypes()[0]["name"] == "dashed"
+        assert new.source_version == "0.3.0" and new.count() == 3 and new.linetypes()[0]["name"] == "dashed"
     with ZipFile(tmp_path / "new.sdrw") as z:
-        assert json.loads(z.read("manifest.json"))["format_version"] == "0.2.0"
+        assert json.loads(z.read("manifest.json"))["format_version"] == "0.3.0"
     with ZipFile(tmp_path / "old.sdrw") as z:                      # the original file is never rewritten
         assert json.loads(z.read("manifest.json"))["format_version"] == "0.1.0"
 
@@ -446,7 +446,7 @@ def test_legacy_scene_opens_and_upgrades(tmp_path):
     s = SGEODocument.new("S", unit="m")
     s.add_box(width=1, depth=2, height=3, name="B")
     body = s.model.as_dict()
-    body.pop("materials"), body.pop("images")
+    body.pop("materials"), body.pop("images"), body.pop("modifiers")
     legacy_package(tmp_path / "old.sgeo", "slai.sgeo", body, "m")
     with SGEODocument.open(tmp_path / "old.sgeo") as old:
         assert old.source_version == "0.1.0" and old.validate().ok
@@ -454,7 +454,7 @@ def test_legacy_scene_opens_and_upgrades(tmp_path):
     with SGEODocument.open(tmp_path / "old.sgeo", mode="write") as editable:
         editable.save(tmp_path / "new.sgeo")
     with SGEODocument.open(tmp_path / "new.sgeo") as new:
-        assert new.source_version == "0.2.0"
+        assert new.source_version == "0.3.0"
 
 
 def test_a_0_1_file_may_not_contain_newer_content(tmp_path):

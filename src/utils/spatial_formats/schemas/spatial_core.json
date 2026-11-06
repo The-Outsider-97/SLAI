@@ -54,6 +54,48 @@
       },
       "additionalProperties": true
     },
+    "modifier_reference": {
+      "type": "object",
+      "required": ["document_id", "item_id"],
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {"$ref": "#/$defs/uuid"},
+        "item_id": {"$ref": "#/$defs/uuid"},
+        "revision": {"type": "integer", "minimum": 1},
+        "subelement": {
+          "type": "object", "required": ["kind", "id"], "additionalProperties": false,
+          "properties": {
+            "kind": {"enum": ["vertex", "edge", "face", "shell", "solid", "segment", "region", "anchor"]},
+            "id": {"$ref": "#/$defs/uuid"}
+          }
+        }
+      }
+    },
+    "evaluation_policy": {
+      "type": "object", "required": ["mode"], "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["exact", "tolerance_controlled", "bounded_approximation", "display_only"]},
+        "absolute": {"type": "number", "minimum": 0},
+        "relative": {"type": "number", "minimum": 0},
+        "angular": {"type": "number", "minimum": 0},
+        "max_error": {"type": "number", "minimum": 0}
+      }
+    },
+    "modifier": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "version", "target", "operands", "parameters", "enabled", "depends_on", "evaluation_policy"],
+      "properties": {
+        "id": {"$ref": "#/$defs/uuid"},
+        "kind": {"type": "string", "maxLength": 128},
+        "version": {"type": "integer", "minimum": 1},
+        "target": {"$ref": "#/$defs/modifier_reference"},
+        "operands": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/modifier_reference"}},
+        "parameters": {"type": "object"},
+        "enabled": {"type": "boolean"},
+        "depends_on": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/uuid"}},
+        "evaluation_policy": {"$ref": "#/$defs/evaluation_policy"}
+      }
+    },
     "part": {
       "type": "object",
       "required": [

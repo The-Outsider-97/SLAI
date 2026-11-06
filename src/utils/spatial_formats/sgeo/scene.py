@@ -10,6 +10,7 @@ from threading import RLock
 from ..common.errors import ReferenceError
 from ..common import ValidationError, ResourceLimitError, new_id, require_id, assert_unique, require_unit, require_metadata
 from ..common.transforms import IDENTITY, compose, require_transform, transform_point
+from ..common.modifiers import validate_modifiers
 from ..container.versions import CURRENT_VERSION, schema_id
 from .geometry import validate_geometry, local_bounds
 from .images import texture_path
@@ -23,7 +24,7 @@ MAX_ANIMATION_HISTORY_BYTES = 32 * 1024 * 1024
 class Scene:
     def __init__(self, name="Untitled", *, unit="m", document_id=None, revision=1,
                  objects=None, metadata=None, document_kind="model", families=None, materials=None, images=None,
-                 image_data=None):
+                 image_data=None, modifiers=None):
         self._mutation_lock=RLock()
         self.name=name
         self.unit=require_unit(unit)
@@ -36,6 +37,8 @@ class Scene:
         self.materials=deepcopy(materials) if materials is not None else []
         self.images=deepcopy(images) if images is not None else []
         self.image_data=dict(image_data) if image_data else {}
+        self.modifiers=deepcopy(modifiers) if modifiers is not None else []
+        self._modifier_cache={}
         # Ephemeral journal of animation metadata edits, not a second scene
         # database. Persisted documents keep authoritative revisions only.
         self._animation_undo = []
@@ -77,6 +80,8 @@ class Scene:
         clone.materials=deepcopy(self.materials)
         clone.images=deepcopy(self.images)
         clone.image_data=dict(self.image_data)
+        clone.modifiers=deepcopy(self.modifiers)
+        clone._modifier_cache=dict(getattr(self, "_modifier_cache", {}))
         return clone
 
     def validate(self):
@@ -132,6 +137,9 @@ class Scene:
                     raise ValidationError("family instance geometry does not match its parameters")
             elif "parameters" in obj:
                 raise ValidationError("parameters require a family reference")
+        validate_modifiers(self.modifiers, format_id="slai.sgeo", document_id=self.document_id,
+                           revision=self.revision,
+                           items={obj["id"]: obj for obj in self.objects if obj.get("geometry") is not None})
         from .animation import ANIMATION_KEY, ANIMATION_V2_KEY, validate_animation, validate_animation_v2
         if ANIMATION_KEY in self.metadata and ANIMATION_V2_KEY in self.metadata:
             raise ValidationError("scene cannot contain both v1 and v2 animation")
@@ -550,6 +558,10 @@ class Scene:
             require_id(object_id)
             if any(obj.get("parent")==object_id for obj in self.objects):
                 raise ValidationError("cannot remove scene object with children")
+            if any(mod["target"]["item_id"] == object_id or
+                   any(ref["item_id"] == object_id for ref in mod["operands"])
+                   for mod in self.modifiers):
+                raise ValidationError("cannot remove object referenced by a modifier")
             for key in ("slai.animation.v1", "slai.animation.v2"):
                 spec = self.metadata.get(key, {})
                 if any(track["object_id"] == object_id for track in spec.get("tracks", [])):
@@ -622,7 +634,7 @@ class Scene:
             self.validate()
             return deepcopy({"document_id":self.document_id,"revision":self.revision,"name":self.name,
                              "objects":self.objects,"families":self.families,"metadata":self.metadata,
-                             "materials":self.materials,"images":self.images})
+                             "materials":self.materials,"images":self.images,"modifiers":self.modifiers})
 
     def manifest(self):
         with self._mutation_lock:
@@ -649,6 +661,8 @@ class Scene:
             requires.append("animation-v1")
         if "slai.animation.v2" in self.metadata:
             requires.append("animation-v2")
+        if self.modifiers:
+            requires.append("modifier-graph-v1")
         return requires
 
     def texture_bytes(self, image_id):

@@ -15,6 +15,7 @@ from ..common.ids import new_id, require_id
 from ..common.metadata import require_metadata
 from ..common.transforms import IDENTITY, require_transform
 from .geometry import validate_geometry
+from ..common.modifiers import apply_modifier_operation
 from .families import generate_geometry
 from .materials import MAX_MATERIALS, describe_image, validate_material
 from .images import MAX_IMAGES
@@ -79,10 +80,14 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
         if not isinstance(op,dict) or not isinstance(op.get("op"),str) or op.get("op") not in {
             "add", "remove", "rename", "transform", "geometry", "reparent", "parameters", "metadata",
             "add_family", "update_family", "remove_family", "instantiate",
-            "add_material", "update_material", "remove_material", "set_material", "add_image", "remove_image"
+            "add_material", "update_material", "remove_material", "set_material", "add_image", "remove_image",
+            "add_modifier", "update_modifier", "remove_modifier", "reorder_modifiers"
         }:
             raise ValidationError("unknown scene mutation operation")
         kind=op["op"]
+        if kind in {"add_modifier", "update_modifier", "remove_modifier", "reorder_modifiers"}:
+            results.append(apply_modifier_operation(candidate.modifiers, op))
+            continue
         if kind in {"add_family","update_family","remove_family"}:
             if set(op)-{"op","id","value"}:
                 raise ValidationError("unexpected family operation arguments")
@@ -228,6 +233,8 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
     scene.images=candidate.images
     scene.image_data=candidate.image_data
     scene.metadata=candidate.metadata
+    scene.modifiers=candidate.modifiers
+    scene._modifier_cache=candidate._modifier_cache
     scene.revision=candidate.revision
     return results
 

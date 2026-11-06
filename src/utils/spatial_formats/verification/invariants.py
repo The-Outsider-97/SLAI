@@ -8,12 +8,13 @@ import json
 
 @lru_cache(maxsize=4)
 def _validator(profile):
-    """``profile`` is ``sdrw``/``sgeo`` (current schema) or ``sdrw_0_1``/``sgeo_0_1`` (frozen legacy)."""
+    """``profile`` selects the current schema or a frozen legacy version."""
     from jsonschema import Draft202012Validator
     from referencing import Registry, Resource
     directory = Path(__file__).resolve().parents[1] / "schemas"
     schemas = [json.loads((directory / name).read_text())
-               for name in ("spatial_core.json", "sdrw.json", "sgeo.json", "sdrw_0_1.json", "sgeo_0_1.json")]
+               for name in ("spatial_core.json", "sdrw.json", "sgeo.json", "sdrw_0_1.json", "sgeo_0_1.json",
+                            "sdrw_0_2.json", "sgeo_0_2.json")]
     registry = Registry().with_resources((schema["$id"], Resource.from_contents(schema))
                                          for schema in schemas)
     return Draft202012Validator(next(s for s in schemas if s["$id"].endswith("/" + profile + ".json")),
@@ -32,7 +33,10 @@ def validate_legacy(manifest:dict,document:dict)->None:
     if not isinstance(document,dict):
         raise ValidationError("document must be a JSON object")
     document=json_safe(document, max_nodes=MAX_DOCUMENT_NODES)
-    _schema_check(format_id.split(".")[-1]+"_0_1",document)
+    version = manifest["format_version"]
+    if version not in ("0.1.0", "0.2.0"):
+        raise UnsupportedFeatureError("unsupported legacy schema version")
+    _schema_check(format_id.split(".")[-1] + ("_0_1" if version == "0.1.0" else "_0_2"), document)
 
 def validate_document(manifest:dict,document:dict)->None:
     from ..container.reader import _manifest

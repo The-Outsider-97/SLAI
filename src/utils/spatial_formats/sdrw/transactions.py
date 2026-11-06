@@ -7,6 +7,7 @@ from .entities import make_entity, validate_entity
 from .linetypes import validate_linetype, MAX_LINETYPES
 from .blocks import validate_block_record, MAX_BLOCKS
 from .operations import transform_entity
+from ..common.modifiers import apply_modifier_operation
 
 _ENTITY_ADD_KEYS = {"kind", "geometry", "layer", "name", "metadata", "style", "entity_id", "create_layer"}
 _UPDATE_KEYS = {"geometry", "layer", "name", "metadata", "style"}
@@ -77,7 +78,9 @@ def apply_drawing_operations(drawing, operations, *, expected_revision=None):
                 raise ValidationError("invalid drawing operation")
             op = deepcopy(operation)
             kind = op.pop("op")
-            if kind == "add":
+            if kind in {"add_modifier", "update_modifier", "remove_modifier", "reorder_modifiers"}:
+                results.append(apply_modifier_operation(candidate.modifiers, {"op": kind, **op}))
+            elif kind == "add":
                 if set(op) - _ENTITY_ADD_KEYS or not {"kind", "geometry"} <= op.keys():
                     raise ValidationError("invalid entity add arguments")
                 create_layer = op.pop("create_layer", False)
@@ -283,5 +286,7 @@ def apply_drawing_operations(drawing, operations, *, expected_revision=None):
         drawing.metadata = candidate.metadata
         drawing.linetypes = candidate.linetypes
         drawing.blocks = candidate.blocks
+        drawing.modifiers = candidate.modifiers
+        drawing._modifier_cache = candidate._modifier_cache
         drawing.revision = candidate.revision
         return results

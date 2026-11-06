@@ -10,7 +10,8 @@
     "families",
     "metadata",
     "materials",
-    "images"
+    "images",
+    "modifiers"
   ],
   "additionalProperties": false,
   "properties": {
@@ -85,6 +86,11 @@
         },
         "additionalProperties": false
       }
+    },
+    "modifiers": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {"$ref": "spatial_core.json#/$defs/modifier"}
     },
     "materials": {
       "type": "array",

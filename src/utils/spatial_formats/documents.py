@@ -287,6 +287,69 @@ class SpatialDocument:
         self._writable()
         return self._apply(operations, expected_revision)
 
+    # -- non-destructive modeling contracts (SGEO/SDRW 0.3) -----------------
+    def modifiers(self) -> list:
+        """Detached, ordered definitions; not evaluated display geometry."""
+        self._live()
+        with self._model._mutation_lock:
+            return deepcopy(self._model.modifiers)
+
+    def add_modifier(self, item_id: str, *, kind: str | None = None, operands=None,
+                     parameters=None, depends_on=None, evaluation_policy=None,
+                     enabled: bool = True, modifier_id: str | None = None) -> str:
+        """Create a versioned modifier as one atomic document revision.
+
+        Phase 0 deliberately executes only the identity kind.  All other kinds
+        require a separately implemented and verified evaluator.
+        """
+        from .common.ids import new_id, require_id
+        self._writable()
+        kind = kind or self.FORMAT_ID.split(".")[-1] + ".identity"
+        ident = new_id() if modifier_id is None else require_id(modifier_id)
+        ref = lambda item: {"document_id": self.document_id, "item_id": require_id(item)}
+        value = {"id": ident, "kind": kind, "version": 1, "target": ref(item_id),
+                 "operands": [ref(item) for item in (operands or [])],
+                 "parameters": {} if parameters is None else deepcopy(parameters),
+                 "enabled": enabled, "depends_on": list(depends_on or []),
+                 "evaluation_policy": deepcopy(evaluation_policy or {"mode": "exact"})}
+        self.apply([{"op": "add_modifier", "value": value}])
+        return ident
+
+    def update_modifier(self, modifier_id: str, **changes) -> str:
+        """Update declared modifier fields without rewriting source geometry."""
+        self.apply([{"op": "update_modifier", "id": modifier_id, "value": changes}])
+        return modifier_id
+
+    def remove_modifier(self, modifier_id: str) -> str:
+        self.apply([{"op": "remove_modifier", "id": modifier_id}])
+        return modifier_id
+
+    def reorder_modifiers(self, modifier_ids: list[str]) -> list[str]:
+        self.apply([{"op": "reorder_modifiers", "ids": modifier_ids}])
+        return list(modifier_ids)
+
+    def modifier_graph(self):
+        """Read-only validated DAG; topology/source identity is never inferred."""
+        from .common.modifiers import validate_modifiers
+        self._live()
+        with self._model._mutation_lock:
+            items = self._modifier_items()
+            return validate_modifiers(self._model.modifiers, format_id=self.FORMAT_ID,
+                                      document_id=self.document_id, revision=self.revision, items=items)
+
+    def _modifier_items(self):
+        records = (self._model.objects if self.FORMAT_ID == "slai.sgeo" else self._model.entities)
+        return {record["id"]: record for record in records
+                if self.FORMAT_ID == "slai.sdrw" or record.get("geometry") is not None}
+
+    def evaluate_modifiers(self) -> list[dict]:
+        """Read-only Phase 0 identity evaluation with dependency-aware cache reuse."""
+        from .common.modifiers import evaluate_identity_modifiers
+        self._live()
+        with self._model._mutation_lock:
+            return evaluate_identity_modifiers(self._model, format_id=self.FORMAT_ID,
+                                               items=self._modifier_items())
+
     # -- views ----------------------------------------------------------------------
     def snapshot(self):
         """A detached deep copy of the model (safe to mutate independently)."""

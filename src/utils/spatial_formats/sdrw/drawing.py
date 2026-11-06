@@ -4,6 +4,7 @@ from copy import deepcopy
 from threading import RLock
 from ..common.errors import ReferenceError
 from ..common import ValidationError, ResourceLimitError, new_id, require_id, assert_unique, require_unit, require_metadata
+from ..common.modifiers import validate_modifiers
 from ..container.versions import CURRENT_VERSION, schema_id
 from .entities import validate_entity, validate_style, make_entity, ANNOTATION_KINDS
 from .linetypes import validate_linetype, check_linetype_ref, MAX_LINETYPES
@@ -17,7 +18,7 @@ _LAYER_STYLE_KEYS = ("stroke", "stroke_width", "linetype")
 
 class Drawing:
     def __init__(self, name="Untitled", *, unit="mm", document_id=None, revision=1,
-                 layers=None, entities=None, metadata=None, linetypes=None, blocks=None):
+                 layers=None, entities=None, metadata=None, linetypes=None, blocks=None, modifiers=None):
         self._mutation_lock = RLock()
         self.name = name
         self.unit = require_unit(unit)
@@ -28,6 +29,8 @@ class Drawing:
         self.metadata = deepcopy(metadata) if metadata is not None else {}
         self.linetypes = deepcopy(linetypes) if linetypes is not None else []
         self.blocks = deepcopy(blocks) if blocks is not None else []
+        self.modifiers = deepcopy(modifiers) if modifiers is not None else []
+        self._modifier_cache = {}
         self.validate()
 
     def _detached_copy(self):
@@ -43,6 +46,8 @@ class Drawing:
         clone.metadata=deepcopy(self.metadata)
         clone.linetypes=deepcopy(self.linetypes)
         clone.blocks=deepcopy(self.blocks)
+        clone.modifiers=deepcopy(self.modifiers)
+        clone._modifier_cache=dict(getattr(self, "_modifier_cache", {}))
         return clone
 
     # -- reference sets -----------------------------------------------------------------
@@ -104,6 +109,8 @@ class Drawing:
         assert_unique(ids)
         for ent in self.entities:
             validate_entity(ent, layer_set, linetypes=lt_known, blocks=block_set)
+        validate_modifiers(self.modifiers, format_id="slai.sdrw", document_id=self.document_id,
+                           revision=self.revision, items={ent["id"]: ent for ent in self.entities})
         return self
 
     # -- incremental mutation -------------------------------------------------
@@ -212,6 +219,10 @@ class Drawing:
             found = next((i for i,e in enumerate(self.entities) if e["id"] == entity_id), None)
             if found is None:
                 raise ValidationError("drawing entity not found")
+            if any(mod["target"]["item_id"] == entity_id or
+                   any(ref["item_id"] == entity_id for ref in mod["operands"])
+                   for mod in self.modifiers):
+                raise ValidationError("cannot remove entity referenced by a modifier")
             self.entities.pop(found)
             self.revision += 1
 
@@ -225,6 +236,8 @@ class Drawing:
             features.append("blocks")
         if self.linetypes:
             features.append("linetypes")
+        if self.modifiers:
+            features.append("modifier-graph-v1")
         return features
 
     def as_dict(self):
@@ -232,7 +245,8 @@ class Drawing:
             self.validate()
             return deepcopy({"document_id":self.document_id,"revision":self.revision,
                              "name":self.name,"layers":self.layers,"entities":self.entities,
-                             "metadata":self.metadata,"linetypes":self.linetypes,"blocks":self.blocks})
+                             "metadata":self.metadata,"linetypes":self.linetypes,"blocks":self.blocks,
+                             "modifiers":self.modifiers})
 
     def manifest(self):
         with self._mutation_lock:
