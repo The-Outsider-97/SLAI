@@ -220,6 +220,78 @@ geometry, not evaluated modifier results. Loss reports now explicitly list
 modifier history and evaluated geometry as dropped. Bake-to-geometry and native
 cross-format modifier fidelity are not claimed by this release.
 
+## Phase 2 — SLDC editable technical sheets and coordinated references
+
+`src.utils.sldc` now recognizes the SLDC 1.1 `technical-sheets` required feature.
+Its native document extension, `slai.technical_sheets`, contains versioned,
+editable drawing sheets. It is not an SVG/PDF blob: each element has a stable
+native ID, physical sheet coordinates (millimetres, origin at the upper-left),
+geometry and appearance. Supported primitives are lines, rectangles, ellipses,
+arcs, open/closed polylines, text and dimensions. The extension is read and
+validated without invoking any renderer or resolving external dependencies.
+All new technical sheets are explicitly 1.1; v1.0 and the frozen 0.1 legacy
+container remain readable without an implicit migration.
+
+```python
+from src.utils import sldc
+
+pkg = sldc.new_package("A101 notes")
+sheet = {"id": "A101", "title": "Section", "page": {"size": "A3"},
+         "elements": [{"id": "wall", "kind": "rect",
+                       "geometry": {"x": 25, "y": 30, "width": 150, "height": 20},
+                       "style": {"stroke": "#000000", "fill": "#eeeeee"}}]}
+pkg = sldc.add_technical_sheet(pkg, sheet)
+pkg = sldc.edit_sheet_element(pkg, "A101", "wall",
+    geometry={"x": 25, "y": 30, "width": 160, "height": 20})
+pkg = sldc.apply_sheet_operations(pkg, "A101", [
+    {"op": "update_element", "id": "wall", "changes": {"visible": True}},
+    {"op": "set_title", "title": "Section A-A"},
+], expected_revision_id=sldc.revision_id(pkg))
+pdf = sldc.render_sheets_pdf(pkg)  # Explicit, optional reportlab backend
+svg = sldc.render_sheet_svg(sldc.sheets_of(pkg)[0])
+pages, cache, dirty = sldc.incremental_sheet_render(pkg)
+flow, cache2, dirty_pages, remeasured = sldc.plan_document_pages(pkg)
+```
+
+The native edit is a **copy-on-write revision**, uses existing SLDC revision
+lineage, clears obsolete signatures and never edits the source in place.
+An atomic edit batch can add, update, delete, unlock and reorder elements, or
+change the sheet title and page setup; whole sheets can be added or removed.
+Locked elements cannot be edited or removed before an explicit unlock.
+`expected_revision_id` prevents lost updates to an outdated document.
+Each sheet may hold 8192 elements, with a
+50,000-element document budget. Geometry, styles, source references and page
+bounds are validated before writing. The returned SVG/PDF bytes are explicitly
+*derived output*: the native elements remain independently editable.
+
+An element can optionally carry a revision-pinned, digest-checked provenance
+reference to `slai.sgeo` or `slai.sdrw` (`format`, `document_id`, `item_id`,
+`revision`, optional `sha256`). `resolve_sheet_references(pkg, sources)` uses
+**only documents the caller explicitly supplies**: status is `resolved`,
+`unavailable`, `mismatch`, `stale`, `missing` or `changed`. Neither opening a
+package nor exporting a sheet runs external geometry or downloads files. The
+native sheet acts as an independently editable snapshot, not a live BIM view.
+
+`plan_document_pages` provides a bounded, deterministic **estimated** page-flow
+plan for paragraphs, headings, tables, equations, figures and explicit page
+breaks, accounting for sections, columns, margins and page bands. It caches
+individual block measurements by content and section width, then reflows
+downstream pages while reporting dirty pages. Native technical-sheet pages
+carry exact physical dimensions; text-flow heights are *estimates*, not a
+claim of pixel-identical pagination with SLAI Writer. Large unsplittable
+objects are rejected instead of silently clipped.
+
+For supported sheet vector primitives, the PDF and SVG backends are compared
+in regression tests through **independent Poppler and Cairo rasterizers**
+(at one-pixel geometric tolerance). Text and dimensions additionally undergo
+PDF text-extraction checks. This does **not** establish visual parity for
+arbitrary rich-text SLDC documents; complete font shaping, footnotes, complex
+tables, section imposition, live SGEO/SDRW projections, editable PDF import,
+and Writer desktop integration still require separate implementation and
+end-to-end QA. Standard PDF fonts cannot encode arbitrary Unicode, so this
+backend explicitly refuses such text until a proper font-embedding pipeline
+is supplied; the SLDC native text and SVG retain Unicode.
+
 ## Format 0.2.0 (historical)
 
 `format_version` was `0.2.0` for both formats. A 0.1.0 package still opens: it is

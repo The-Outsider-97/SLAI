@@ -23,6 +23,10 @@ Versions
            Adds editable scientific equations, inline scientific/image objects and declarative
            image transforms/placement. New mandatory features are declared in ``requires``.
            Old 1.0.0 packages retain their version when read and saved unchanged.
+``1.1.0``  Explicit opt-in extensions for richer page bands and editable native
+           technical sheets. Version 1.0 remains the default for new packages;
+           add_technical_sheet() upgrades a valid editable 1.x document to
+           1.1 and records a new revision. SGEO/SDRW links are inert references.
            
 Compatibility rules (1.x)
   * Unknown keys are rejected, except inside ``extensions`` (document or block level, keys of the
@@ -81,6 +85,10 @@ Packages (1.0)   ``SLDCPackage`` ``Asset`` ``read_package`` ``write_package`` ``
                  ``dumps_package`` ``inspect_package`` ``validate_package`` ``new_package``
                  ``make_asset`` ``add_asset`` ``prune_assets`` ``make_table`` ``make_figure``
                  ``revision_id``
+Technical sheets (1.1) ``add_technical_sheet`` ``apply_sheet_operations``
+                 ``edit_sheet_element`` ``remove_technical_sheet`` ``sheets_of``
+                 ``resolve_sheet_references`` ``render_sheet_svg`` ``render_sheets_pdf``
+                 ``incremental_sheet_render`` ``plan_document_pages``
 Migration        ``migrate_package`` ``migrate_file`` ``export_legacy``
 Collaboration    ``new_block_id`` ``next_revision`` ``diff_documents`` ``merge_documents``
                  ``merge_packages`` ``add_comment`` ``reply_to_thread`` ``set_thread_status``
@@ -152,7 +160,11 @@ MEMBERS = ("mimetype", "manifest.json", "document.json")  # The fixed 0.1.0 memb
 BLOCK_TYPES = frozenset({"heading", "paragraph", "list_item", "quote", "code"})  # 0.1.0
 BLOCK_TYPES_V1 = BLOCK_TYPES | {"table", "figure", "embed", "equation"}
 REQUIRED_FEATURES = frozenset({"tables", "figures", "embeds"})
-SUPPORTED_FEATURES = REQUIRED_FEATURES | {"scientific", "inline-media", "image-layout", "font-runs", "native-toc", "paragraph-layout", "page-bands", "cover-pages"}
+SUPPORTED_FEATURES = REQUIRED_FEATURES | {
+    "scientific", "inline-media", "image-layout", "font-runs", "native-toc",
+    "paragraph-layout", "page-bands", "rich-page-bands", "cover-pages",
+    "citation-groups", "csl-sources", "table-rich-text", "technical-sheets",
+}
 
 # --- Limits, 0.1.0 (unchanged) ---------------------------------------------------------------
 MAX_ARCHIVE_BYTES = 25 * 1024 * 1024
@@ -1441,6 +1453,9 @@ def _validate_v1(document: dict[str, Any], assets: Mapping[str, Any] | None = No
         _validate_revision_record(record, f"history[{index}]", with_id=True)
     if "extensions" in document:
         _check_extensions(document["extensions"], "document")
+        if "slai.technical_sheets" in document["extensions"]:
+            from .sldc_sheets import validate_technical_sheets
+            validate_technical_sheets(document["extensions"]["slai.technical_sheets"])
 
     for block in blocks:  # Pass 1: ids, so spans can point forward.
         if isinstance(block, dict) and isinstance(block.get("id"), str):
@@ -2168,6 +2183,8 @@ def _required_features(document: Mapping[str, Any]) -> list[str]:
     """Advertise every feature an older reader would otherwise silently discard."""
     by_type = {"table": "tables", "figure": "figures", "embed": "embeds", "equation": "scientific"}
     needed = {by_type[b["type"]] for b in document["blocks"] if b["type"] in by_type}
+    if "slai.technical_sheets" in document.get("extensions", {}):
+        needed.add("technical-sheets")
     if document.get("embeds"):
         needed.add("embeds")
     if any({"source_type", "organization", "editors", "isbn", "edition", "published"}.intersection(ref)
@@ -4824,6 +4841,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+from .sldc_sheets import (add_technical_sheet, apply_sheet_operations, edit_sheet_element,
+                          incremental_sheet_render, plan_document_pages, remove_technical_sheet,
+                          render_sheet_svg, render_sheets_pdf, resolve_sheet_references,
+                          sheets_of, validate_technical_sheets)
+
 __all__ = [
     # Identity, versions, limits
     "FORMAT_ID", "FORMAT_VERSION", "LATEST_KNOWN_VERSION", "LEGACY_VERSION", "SCHEMA", "MIMETYPE", "EXTENSIONS", "MEMBERS",
@@ -4839,6 +4861,9 @@ __all__ = [
     "newest_version", "preview_package", "preview_to_package",
     "validate_package", "new_package", "make_asset", "add_asset", "prune_assets", "make_table",
     "make_figure", "revision_id", "make_equation", "make_inline_equation", "make_inline_image", "revision_id",
+    "add_technical_sheet", "apply_sheet_operations", "edit_sheet_element", "remove_technical_sheet",
+    "incremental_sheet_render", "plan_document_pages", "render_sheet_svg",
+    "render_sheets_pdf", "resolve_sheet_references", "sheets_of", "validate_technical_sheets",
     # Migration
     "migrate_package", "migrate_file", "export_legacy",
     # Collaboration
