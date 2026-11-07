@@ -155,7 +155,7 @@ performance guarantees.
 | --- | --- | --- |
 | `sgeo.boolean` (`union`, `intersect`, `subtract`) | Exact polyhedral boundary for aligned analytic boxes; Manifold3D for general closed, positive-volume triangle surfaces; transforms accounted for | General B-rep exact Booleans are not provided; analytic inputs are tessellated by the mesh backend |
 | `sgeo.split` | Select one side of a plane; exact axis-aligned box halfspace, or capped triangle mesh split | The other side is not automatically inserted as a second object; mesh split uses a numerical backend |
-| `sgeo.bend` | Subdivide and deform mesh along local X, Y or Z (X bends toward Y, Y toward Z, Z toward X) | Display-only numerical deformation; no self-intersection guarantee or persistent face naming |
+| `sgeo.bend` | Conforming shared-edge subdivision and mesh deformation along local X, Y or Z (X bends toward Y, Y toward Z, Z toward X) | Display-only numerical deformation; no self-intersection guarantee or persistent face naming |
 | `sgeo.chamfer` | Chamfer all edges of an analytic local box with `amount`, `depth`, `segments` | Convex-box backend only; curved segmented bevels are polygonal approximations, not exact B-reps |
 
 For SGEO box chamfers, `amount` and `depth` are the two adjacent-face

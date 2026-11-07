@@ -154,6 +154,73 @@ def _split(source, modifier):
                       "empty": geometry is None}
 
 
+def _subdivide_conforming(vertices, faces, *, max_edge, max_iter=7):
+    """Split long triangle edges without introducing T-junctions or open seams.
+
+    An edge midpoint has exactly one vertex index shared by every adjacent
+    triangle. Unlike version-dependent library remeshers this preserves native
+    face winding and manifold adjacency, including on mixed-size triangle
+    meshes and across the original box's face boundaries.
+    """
+    points = [tuple(map(float, p)) for p in vertices]
+    triangles = [tuple(map(int, face)) for face in faces]
+    limit_sq = max_edge * max_edge * (1 + 1e-10)
+    for _ in range(max_iter):
+        mids = {}
+        refined = []
+
+        def midpoint(a, b):
+            edge = (min(a, b), max(a, b))
+            existing = mids.get(edge)
+            if existing is not None:
+                return existing
+            index = len(points)
+            if index >= MAX_VERTICES:
+                raise ResourceLimitError("bend would exceed its vertex budget")
+            points.append(tuple((points[a][i] + points[b][i]) / 2 for i in range(3)))
+            mids[edge] = index
+            return index
+
+        changed = False
+        for a, b, c in triangles:
+            edges = ((a, b), (b, c), (c, a))
+            split = [sum((points[u][i] - points[v][i])**2 for i in range(3)) > limit_sq
+                     for u, v in edges]
+            count = sum(split)
+            if count == 0:
+                refined.append((a, b, c))
+                continue
+            changed = True
+            if count == 1:
+                if split[1]:
+                    a, b, c = b, c, a
+                elif split[2]:
+                    a, b, c = c, a, b
+                m = midpoint(a, b)
+                refined.extend(((a, m, c), (m, b, c)))
+            elif count == 2:
+                # Rotate so the two marked edges are AB and BC, sharing B.
+                if not split[0]:
+                    a, b, c = b, c, a
+                elif not split[1]:
+                    a, b, c = c, a, b
+                ab, bc = midpoint(a, b), midpoint(b, c)
+                refined.extend(((b, bc, ab), (a, ab, c), (c, ab, bc)))
+            else:
+                ab, bc, ca = midpoint(a, b), midpoint(b, c), midpoint(c, a)
+                refined.extend(((a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)))
+            if len(refined) > MAX_TRIANGLES:
+                raise ResourceLimitError("bend would exceed its triangle budget")
+        triangles = refined
+        if not changed:
+            return points, triangles
+    # A final bounded edge check prevents returning an under-resolved bend.
+    if any(sum((points[u][i] - points[v][i])**2 for i in range(3)) > limit_sq
+           for a, b, c in triangles for u, v in ((a, b), (b, c), (c, a))):
+        raise ResourceLimitError("bend cannot reach requested subdivision within its resource budget")
+    return points, triangles
+
+
 def _bend(source, modifier):
     _policy(modifier, {"display_only"})
     np, trimesh = _dependencies()
@@ -166,14 +233,7 @@ def _bend(source, modifier):
     # only the original box corner vertices. Hard limits prevent mesh explosion.
     if len(original.faces) > 100_000:
         raise ResourceLimitError("bend input is too large for adaptive subdivision")
-    iteration_budget = 0
-    while iteration_budget < 7 and len(original.faces) * 4 ** (iteration_budget + 1) <= MAX_TRIANGLES:
-        iteration_budget += 1
-    try:
-        vertices, faces = trimesh.remesh.subdivide_to_size(
-            original.vertices, original.faces, max_edge=max_edge, max_iter=iteration_budget)
-    except (ValueError, RuntimeError) as exc:
-        raise GeometryValidationError("bend subdivision could not be completed") from exc
+    vertices, faces = _subdivide_conforming(original.vertices, original.faces, max_edge=max_edge)
     if len(vertices) > MAX_VERTICES or len(faces) > MAX_TRIANGLES:
         raise ResourceLimitError("bend would exceed the mesh budget")
     if max(sqrt(sum((vertices[a][i] - vertices[b][i])**2 for i in range(3)))
@@ -183,7 +243,7 @@ def _bend(source, modifier):
     lateral = (axis + 1) % 3
     radius = span / params["angle"]
     offsets = [radius + float(v[lateral]) for v in vertices]
-    if min(offsets) <= 1e-8 <= max(offsets) or min(abs(v) for v in offsets) <= 1e-8:
+    if any(offset / radius <= 1e-8 for offset in offsets):
         raise GeometryValidationError("bend crosses its own center of curvature")
     output = np.asarray(vertices).copy()
     for v in output:

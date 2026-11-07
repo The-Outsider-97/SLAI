@@ -7,7 +7,8 @@ import pytest
 from src.utils.sgeo import SGEODocument
 from src.utils.sdrw import SDRWDocument
 from src.utils.spatial_formats.common.errors import (ConflictError, GeometryValidationError,
-                                                     UnsupportedFeatureError, ValidationError)
+                                                     ResourceLimitError, UnsupportedFeatureError,
+                                                     ValidationError)
 from src.utils.spatial_formats.common.ids import new_id
 from src.utils.spatial_formats.sgeo.geometry import validate_geometry
 from src.utils.spatial_formats.sdrw.entities import validate_entity
@@ -139,6 +140,54 @@ def test_sgeo_split_bend_chamfer_and_diagnostics():
     bent = doc.evaluate_modifiers()[0]
     assert bent["result"]["geometry"]["kind"] == "mesh"
     assert bent["diagnostics"]["segments"] == 8
+
+
+def test_bend_preserves_solid_topology_without_version_specific_remesher(monkeypatch):
+    """Windows/Trimesh variants must not change mesh connectivity or open seams."""
+    import trimesh
+
+    def fail_legacy_remesher(*args, **kwargs):
+        raise AssertionError("Bend must use its own conforming subdivision")
+
+    monkeypatch.setattr(trimesh.remesh, "subdivide_to_size", fail_legacy_remesher)
+    doc = SGEODocument.new("Cross-platform solid bend")
+    obj = doc.add_box(size=(4, 2, 2))
+    _add(doc, obj, "sgeo.bend", {"axis": "x", "start": -2, "end": 2,
+                                 "angle": 0.6, "segments": 8}, mode="display_only")
+    record = doc.evaluate_modifiers()[0]["result"]["geometry"]
+    mesh = trimesh.Trimesh(vertices=record["vertices"], faces=record["faces"], process=False)
+    assert mesh.is_watertight and mesh.is_winding_consistent and mesh.is_volume
+    assert mesh.euler_number == 2 and 0 < mesh.volume < 16.1
+    assert doc.get(obj)["geometry"]["kind"] == "box"  # Non-destructive.
+
+
+def test_conforming_bend_subdivision_has_no_interior_boundary_or_flipped_faces():
+    from collections import Counter
+    from src.utils.spatial_formats.sgeo.modifier_ops import _subdivide_conforming
+
+    vertices = [[0, 0, 0], [4, 0, 0], [4, 2, 0], [0, 2, 0]]
+    faces = [[0, 1, 2], [0, 2, 3]]
+    points, triangles = _subdivide_conforming(vertices, faces, max_edge=0.7)
+    edges = Counter(tuple(sorted(pair)) for a, b, c in triangles
+                    for pair in ((a, b), (b, c), (c, a)))
+    assert max(edges.values()) == 2
+    for (a, b), count in edges.items():
+        if count == 1:
+            x0, y0, _ = points[a]
+            x1, y1, _ = points[b]
+            assert x0 == x1 and x0 in (0, 4) or y0 == y1 and y0 in (0, 2)
+    assert all((points[b][0]-points[a][0])*(points[c][1]-points[a][1])
+               - (points[b][1]-points[a][1])*(points[c][0]-points[a][0]) > 0
+               for a, b, c in triangles)
+    reversed_vertices, reversed_faces = _subdivide_conforming(
+        vertices, [[c, b, a] for a, b, c in faces], max_edge=0.7)
+    assert all((reversed_vertices[b][0]-reversed_vertices[a][0]) *
+               (reversed_vertices[c][1]-reversed_vertices[a][1]) -
+               (reversed_vertices[b][1]-reversed_vertices[a][1]) *
+               (reversed_vertices[c][0]-reversed_vertices[a][0]) < 0
+               for a, b, c in reversed_faces)
+    with pytest.raises(ResourceLimitError, match="cannot reach requested subdivision"):
+        _subdivide_conforming(vertices, faces, max_edge=0.01, max_iter=1)
 
 
 @pytest.mark.parametrize("axis", ["x", "y", "z"])
