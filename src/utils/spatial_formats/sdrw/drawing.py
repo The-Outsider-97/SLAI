@@ -109,6 +109,9 @@ class Drawing:
         assert_unique(ids)
         for ent in self.entities:
             validate_entity(ent, layer_set, linetypes=lt_known, blocks=block_set)
+        from .constraints import CONSTRAINT_METADATA_KEY, validate_stored_constraints
+        if CONSTRAINT_METADATA_KEY in self.metadata:
+            validate_stored_constraints(self.entities, self.metadata[CONSTRAINT_METADATA_KEY])
         validate_modifiers(self.modifiers, format_id="slai.sdrw", document_id=self.document_id,
                            revision=self.revision, items={ent["id"]: ent for ent in self.entities})
         return self
@@ -223,6 +226,9 @@ class Drawing:
                    any(ref["item_id"] == entity_id for ref in mod["operands"])
                    for mod in self.modifiers):
                 raise ValidationError("cannot remove entity referenced by a modifier")
+            if any(entity_id in constraint["entities"] for constraint in
+                   self.metadata.get("slai.constraints.v1", {}).get("items", [])):
+                raise ValidationError("cannot remove entity referenced by a persistent constraint")
             self.entities.pop(found)
             self.revision += 1
 
@@ -238,6 +244,10 @@ class Drawing:
             features.append("linetypes")
         if self.modifiers:
             features.append("modifier-graph-v1")
+        if any(not m["kind"].endswith(".identity") for m in self.modifiers):
+            features.append("modifier-ops-v1")
+        if self.metadata.get("slai.constraints.v1", {}).get("items"):
+            features.append("sdrw-constraints-v1")
         return features
 
     def as_dict(self):

@@ -24,7 +24,7 @@ from pathlib import Path
 from ..common.errors import UnsupportedFeatureError
 from ..common.helpers import MAX_DOCUMENT_NODES, canonical_json, digest
 from ..verification.loss_report import ConversionReport
-from .contracts import Policy, enforce_policy
+from .contracts import enforce_policy
 from .obj import export_obj, import_obj
 from .stl import export_binary_stl, import_binary_stl
 from .svg import export_svg, import_svg
@@ -114,6 +114,10 @@ def _drawing_features(drawing) -> dict:
 def _drawing_loss(drawing, target: str):
     f = _drawing_features(drawing)
     dropped, approximations, assumptions, warnings = [], [], [], []
+    if drawing.modifiers:
+        dropped.append("non-destructive SDRW modifier definitions and evaluated shapes (only source entities are exported)")
+    if drawing.metadata.get("slai.constraints.v1", {}).get("items"):
+        dropped.append("persistent parametric constraint relations")
     if f["names"]:
         dropped.append(f"entity names on {f['names']} entities")
     if f["entity_metadata"] or f["document_metadata"]:
@@ -290,6 +294,8 @@ def _scene_digest(scene) -> str:
 
 def _flatten_losses(scene, summary, *, target):
     dropped, approximations, assumptions, warnings = [], [], [], []
+    if scene.modifiers:
+        dropped.append("non-destructive SGEO modifier definitions and evaluated shapes (only source geometry is exported)")
     if summary["families_removed"] or summary["instances_flattened"]:
         dropped.append(f"parametric families ({len(summary['families_removed'])}) and instance parameters "
                        f"({len(summary['instances_flattened'])} instances become plain objects)")
@@ -388,6 +394,8 @@ def scene_to_stl(scene, *, object_ids=None, policy="best_effort", radial_segment
     selected = None if object_ids is None else set(object_ids)
     selected_objects = [o for o in scene.objects if selected is None or o["id"] in selected]
     dropped = ["object identity, names and scene hierarchy (objects are merged into one mesh)", "units"]
+    if any(selected is None or m["target"]["item_id"] in selected for m in scene.modifiers):
+        dropped.append("non-destructive SGEO modifiers and evaluated geometry (STL contains source geometry)")
     if any("material" in o for o in selected_objects):
         dropped.append("materials and textures")
     if any(o.get("geometry") is not None and o["geometry"].get("uvs") for o in selected_objects):
@@ -453,6 +461,8 @@ def scene_to_obj(scene, *, object_ids=None, policy="best_effort", radial_segment
     selected = None if object_ids is None else set(object_ids)
     in_scope = [o for o in scene.objects if selected is None or o["id"] in selected]
     dropped = ["scene hierarchy (objects are listed flat)", "units (OBJ declares none)"]
+    if any(selected is None or m["target"]["item_id"] in selected for m in scene.modifiers):
+        dropped.append("non-destructive SGEO modifiers and evaluated geometry (OBJ contains source geometry)")
     if any("material" in o for o in in_scope):
         dropped.append("materials and textures")
     if extraction.skipped:

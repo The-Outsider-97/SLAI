@@ -139,7 +139,8 @@ class Scene:
                 raise ValidationError("parameters require a family reference")
         validate_modifiers(self.modifiers, format_id="slai.sgeo", document_id=self.document_id,
                            revision=self.revision,
-                           items={obj["id"]: obj for obj in self.objects if obj.get("geometry") is not None})
+                           items={obj["id"]: obj for obj in self.objects if obj.get("geometry") is not None},
+                           hierarchy={obj["id"]: obj.get("parent") for obj in self.objects})
         from .animation import ANIMATION_KEY, ANIMATION_V2_KEY, validate_animation, validate_animation_v2
         if ANIMATION_KEY in self.metadata and ANIMATION_V2_KEY in self.metadata:
             raise ValidationError("scene cannot contain both v1 and v2 animation")
@@ -663,6 +664,8 @@ class Scene:
             requires.append("animation-v2")
         if self.modifiers:
             requires.append("modifier-graph-v1")
+        if any(not m["kind"].endswith(".identity") for m in self.modifiers):
+            requires.append("modifier-ops-v1")
         return requires
 
     def texture_bytes(self, image_id):

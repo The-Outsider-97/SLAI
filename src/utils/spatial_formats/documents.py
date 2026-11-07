@@ -299,8 +299,8 @@ class SpatialDocument:
                      enabled: bool = True, modifier_id: str | None = None) -> str:
         """Create a versioned modifier as one atomic document revision.
 
-        Phase 0 deliberately executes only the identity kind.  All other kinds
-        require a separately implemented and verified evaluator.
+        Operations are evaluated on demand; creating a record never executes
+        embedded instructions or modifies source geometry.
         """
         from .common.ids import new_id, require_id
         self._writable()
@@ -335,7 +335,9 @@ class SpatialDocument:
         with self._model._mutation_lock:
             items = self._modifier_items()
             return validate_modifiers(self._model.modifiers, format_id=self.FORMAT_ID,
-                                      document_id=self.document_id, revision=self.revision, items=items)
+                                      document_id=self.document_id, revision=self.revision, items=items,
+                                      hierarchy=({obj["id"]: obj.get("parent") for obj in self._model.objects}
+                                                 if self.FORMAT_ID == "slai.sgeo" else None))
 
     def _modifier_items(self):
         records = (self._model.objects if self.FORMAT_ID == "slai.sgeo" else self._model.entities)
@@ -343,7 +345,7 @@ class SpatialDocument:
                 if self.FORMAT_ID == "slai.sdrw" or record.get("geometry") is not None}
 
     def evaluate_modifiers(self) -> list[dict]:
-        """Read-only Phase 0 identity evaluation with dependency-aware cache reuse."""
+        """Evaluate a validated modifier DAG, returning detached results and diagnostics."""
         from .common.modifiers import evaluate_identity_modifiers
         self._live()
         with self._model._mutation_lock:

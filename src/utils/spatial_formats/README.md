@@ -119,8 +119,8 @@ modifier record has strict `id`, `kind`, `version`, `target`, `operands`,
 identify a `document_id` and `item_id`, optionally a pinned `revision` or an
 opaque `subelement` identity. External references are never fetched implicitly.
 
-Only `sgeo.identity` and `sdrw.identity` have Phase 0 evaluators. General
-Booleans, Bend and Chamfer are **not** implemented by this release. Unknown
+Phase 0 introduced `sgeo.identity` and `sdrw.identity`. Executable Phase 1
+operations are documented below; unsupported input geometry and unknown
 required modifier kinds are rejected rather than silently approximated.
 Subelement references have a validated contract but are reported `unsupported`
 until a future evaluator provides explicit topology lineage. Do not interpret
@@ -136,6 +136,89 @@ Reproducible performance evidence can be generated with
 `python -m tests.spatial_formats.benchmark_modifier_phase0 100 500 1000`
 from the repository root. Output is JSON (environment, timings, and peak traced
 allocations); no absolute performance promise is inferred from a single host.
+
+## Phase 1 — executable modeling, scope and accuracy
+
+Install the explicitly optional numerical geometry backends with
+`pip install -e ".[spatial]"` (or install the `spatial` extra in the SLAI
+environment). This uses the established spatial format engine, existing atomic
+document transactions and the Phase 0 modifier DAG. **Opening a file never
+executes a modifier.** Call `evaluate_modifiers()` to return detached output
+records and diagnostics; the original geometry remains authoritative.
+
+Run `python -m tests.spatial_formats.benchmark_modifier_phase0 --phase1 50 250`
+for local modifier-add, cold/warm evaluation, changed-operand invalidation and
+traced-allocation baselines. These are measurements, not machine-independent
+performance guarantees.
+
+| SGEO operation | Supported evaluator | Important limitation |
+| --- | --- | --- |
+| `sgeo.boolean` (`union`, `intersect`, `subtract`) | Exact polyhedral boundary for aligned analytic boxes; Manifold3D for general closed, positive-volume triangle surfaces; transforms accounted for | General B-rep exact Booleans are not provided; analytic inputs are tessellated by the mesh backend |
+| `sgeo.split` | Select one side of a plane; exact axis-aligned box halfspace, or capped triangle mesh split | The other side is not automatically inserted as a second object; mesh split uses a numerical backend |
+| `sgeo.bend` | Subdivide and deform mesh along local X, Y or Z (X bends toward Y, Y toward Z, Z toward X) | Display-only numerical deformation; no self-intersection guarantee or persistent face naming |
+| `sgeo.chamfer` | Chamfer all edges of an analytic local box with `amount`, `depth`, `segments` | Convex-box backend only; curved segmented bevels are polygonal approximations, not exact B-reps |
+
+For SGEO box chamfers, `amount` and `depth` are the two adjacent-face
+setbacks: X-face toward Y uses `amount` and toward Z uses `depth`, with the
+corresponding cyclic convention for Y and Z faces. `segments=1` makes a flat
+cut; higher values facet the convex rounded transition. Both setbacks must fit
+inside the box. This is a documented local-frame construction, not a claim of
+compatibility with another CAD application's edge-specific chamfer settings.
+
+| SDRW operation | Supported evaluator | Important limitation |
+| --- | --- | --- |
+| `sdrw.boolean` | Union, intersection, difference of closed polylines, circles and solid hatch regions; outputs hatch boundaries with holes/multiple regions | GEOS numerical overlay; curved contours are discretized under an explicit sampling budget |
+| `sdrw.trim`, `sdrw.extend` | Intersection of two finite straight lines; select `start` or `end` | Curves and polyline boundaries are not yet supported |
+| `sdrw.offset` | Exact circle-radius change; planar GEOS offset of open lines or buffered closed regions | Multi-line offset disconnections are rejected rather than silently merged |
+| `sdrw.bend` | Subdivided open line/polyline bend on local X or Y | Display-only approximation; closed regions are not supported |
+| `sdrw.chamfer` | Trim polyline corners with separate incoming `amount` and outgoing `depth`; one segment makes a straight chamfer, more segments approximate a rounded quadratic corner | Does not yet support selecting specific topology-stable edges or chamfering pairs of independent lines |
+
+Each operation has a **strict parameter contract** and one or zero operand
+references. The evaluator refuses an `exact` policy where no exact geometric
+algorithm is available. `tolerance_controlled` requires an explicit positive
+absolute or relative tolerance, but is **not a mathematically certified global
+error bound**. `display_only` explicitly permits mesh/polygonal deformation.
+`bounded_approximation` is reserved for future algorithms with proven bounds;
+these current backends refuse it. Empty CSG results are reported as `empty`.
+
+Example (3D box intersection with non-destructive history):
+
+```python
+doc = SGEODocument.new("CSG")
+a = doc.add_box(size=(2, 2, 2))
+b = doc.add_box(size=(2, 2, 2), center=(1, 0, 0))
+mid = doc.add_modifier(a, kind="sgeo.boolean", operands=[b],
+                       parameters={"operation": "intersect"},
+                       evaluation_policy={"mode": "exact"})
+result = doc.evaluate_modifiers()[0]
+assert result["diagnostics"]["backend"] == "axis-aligned-box"
+```
+
+### SDRW parametric constraints
+
+`DrawingDocument.set_constraints([...])` stores a bounded, versioned constraint
+set under the existing `slai.constraints.v1` metadata key and declares
+`sdrw-constraints-v1` in the manifest's required features. The solver supports
+point/line `coincident`, `distance`, `horizontal`, `vertical`, `parallel`,
+`perpendicular`, `equal_length` and `angle` constraints. It returns a numerical
+least-change **proposal** by default, or applies valid solutions in one
+revision-checked transaction:
+
+```python
+doc.set_constraints([{"kind": "horizontal", "entities": [line_id]}])
+preview = doc.solve_constraints()           # no mutation
+doc.solve_constraints(commit=True)         # atomic only if all constraints pass
+```
+
+Fixed entities are selected with `fixed_ids`. Infeasible systems fail without
+partial writes. Solver proposals are not a global symbolic constraint system;
+general arc/circle constraints, expression trees and automatic re-solving after
+every unrelated edit remain future work.
+
+**Interchange note:** GLB/STL/OBJ and DXF/SVG currently export **source**
+geometry, not evaluated modifier results. Loss reports now explicitly list
+modifier history and evaluated geometry as dropped. Bake-to-geometry and native
+cross-format modifier fidelity are not claimed by this release.
 
 ## Format 0.2.0 (historical)
 

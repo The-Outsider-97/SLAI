@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from ..common.errors import (ResourceLimitError, SchemaError, SpatialFormatError, ValidationError,
                              ReferenceError, error_for_code)
@@ -330,7 +329,7 @@ def check_scene(scene, *, mode: str = "strict", max_issues: int = DEFAULT_MAX_IS
     from ..sgeo.scene import Scene, MAX_OBJECTS, MAX_FAMILIES
     from ..sgeo.families import validate_family, generate_geometry
     from ..sgeo.analysis import analyze_mesh
-    from ..common.transforms import IDENTITY, determinant, is_rigid
+    from ..common.transforms import IDENTITY, determinant
     _check_mode(mode)
     if not isinstance(scene, Scene):
         raise ValidationError("expected a Scene")
@@ -363,7 +362,9 @@ def check_scene(scene, *, mode: str = "strict", max_issues: int = DEFAULT_MAX_IS
         c.guard("/modifiers", lambda: validate_modifiers(
             scene.modifiers, format_id="slai.sgeo", document_id=scene.document_id, revision=scene.revision,
             items={o["id"]: o for o in objects if isinstance(o, dict) and isinstance(o.get("id"), str)
-                   and o.get("geometry") is not None}))
+                   and o.get("geometry") is not None},
+            hierarchy={o["id"]: o.get("parent") for o in objects if isinstance(o, dict)
+                       and isinstance(o.get("id"), str)}))
 
         c.ran("hierarchy")
         for position, obj in enumerate(objects):

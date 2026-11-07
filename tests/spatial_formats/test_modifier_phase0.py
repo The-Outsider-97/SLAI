@@ -109,8 +109,10 @@ def test_cycles_missing_references_and_unknown_operations_are_rejected(factory):
     broken = {**deepcopy(template), "depends_on": [new_id()]}
     with pytest.raises(ReferenceError):
         doc.apply([{"op": "add_modifier", "value": broken}])
-    with pytest.raises(UnsupportedFeatureError):
+    with pytest.raises(ValidationError):
         doc.add_modifier(first, kind=doc.FORMAT_ID.split(".")[-1] + ".boolean")
+    with pytest.raises(UnsupportedFeatureError):
+        doc.add_modifier(first, kind=doc.FORMAT_ID.split(".")[-1] + ".unknown")
     assert doc.dumps() == baseline
 
 

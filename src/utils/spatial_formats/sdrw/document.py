@@ -9,16 +9,17 @@ with angles in **radians** unless a method says ``degrees=``.
 from __future__ import annotations
 
 from copy import deepcopy
-from math import atan2, cos, hypot, isfinite, pi, radians, sin, tau
+from math import atan2, cos, hypot, pi, radians, sin, tau
 
-from ..common.errors import ReferenceError, ValidationError
+from ..common.errors import ConflictError, ReferenceError, ValidationError
 from ..common.helpers import finite, vector
 from ..common.ids import is_valid_id, require_id
 from ..common.units import convert_area, convert_length, require_unit
 from ..documents import SpatialDocument, _checked_metadata
 from ..verification.report import ValidationReport, check_drawing
 from . import annotations as _ann
-from .constraints import ConstraintResult, check_constraints
+from .constraints import (CONSTRAINT_METADATA_KEY, ConstraintResult, ConstraintSolution,
+                          check_constraints, solve_constraints)
 from .drawing import Drawing
 from .entities import KINDS
 from .operations import enclosed_area, entity_bounds, entity_length, expand_insert, transform_entity
@@ -721,14 +722,67 @@ class DrawingDocument(SpatialDocument):
                         if e["kind"] in ("point", "line", "polyline", "circle", "arc"))
         return value if unit is None or unit == self.unit else convert_length(value, self.unit, require_unit(unit))
 
-    def check_constraints(self, constraints: list, *, absolute_tolerance: float = 1e-8,
+    def constraints(self) -> list[dict]:
+        """Return detached, versioned constraint definitions stored in SDRW metadata."""
+        self._live()
+        with self._model._mutation_lock:
+            record = self._model.metadata.get(CONSTRAINT_METADATA_KEY, {"version": 1, "items": []})
+            return deepcopy(record["items"])
+
+    def set_constraints(self, constraints: list) -> list[dict]:
+        """Persist validated solver constraints atomically without moving entities.
+
+        Constraints may initially be unsatisfied; solving remains an explicit
+        preview or transaction. Broken entity references are never persisted.
+        """
+        with self._edit() as model:
+            candidate = model._detached_copy()
+            candidate.metadata[CONSTRAINT_METADATA_KEY] = {"version": 1, "items": deepcopy(constraints)}
+            candidate.revision += 1
+            candidate.validate()
+            model.metadata, model.revision = candidate.metadata, candidate.revision
+        return self.constraints()
+
+    def check_constraints(self, constraints: list | None = None, *, absolute_tolerance: float = 1e-8,
                           relative_tolerance: float = 1e-8) -> list[ConstraintResult]:
         """Verify geometric constraints (parallel, perpendicular, horizontal, vertical,
         equal_length, distance, coincident, angle) without modifying the drawing."""
         with self._model._mutation_lock:
-            return check_constraints(deepcopy(self._model.entities), constraints,
+            requested = (deepcopy(self._model.metadata.get(CONSTRAINT_METADATA_KEY, {}).get("items", []))
+                         if constraints is None else constraints)
+            return check_constraints(deepcopy(self._model.entities), requested,
                                      absolute_tolerance=absolute_tolerance,
                                      relative_tolerance=relative_tolerance)
+
+    def solve_constraints(self, constraints: list | None = None, *, fixed_ids=(), commit: bool = False,
+                          absolute_tolerance: float = 1e-8, relative_tolerance: float = 1e-8,
+                          max_iterations: int = 300,
+                          expected_revision: int | None = None) -> ConstraintSolution:
+        """Solve native point/line constraints; optionally atomically commit results.
+
+        Preview (default) is non-mutating. A commit verifies the snapshot's
+        revision so concurrent editing never silently overwrites new geometry.
+        Infeasible systems fail without committing partial coordinates.
+        """
+        self._live()
+        if commit:
+            self._writable()
+        with self._model._mutation_lock:
+            revision = self._model.revision
+            if expected_revision is not None and expected_revision != revision:
+                raise ConflictError("constraint solve expected a different document revision")
+            entities = deepcopy(self._model.entities)
+            requested = (deepcopy(self._model.metadata.get(CONSTRAINT_METADATA_KEY, {}).get("items", []))
+                         if constraints is None else constraints)
+        proposal = solve_constraints(entities, requested, fixed_ids=fixed_ids,
+                                     absolute_tolerance=absolute_tolerance,
+                                     relative_tolerance=relative_tolerance,
+                                     max_iterations=max_iterations)
+        if commit and proposal.geometries:
+            operations = [{"op": "update", "id": ident, "value": {"geometry": geometry}}
+                          for ident, geometry in proposal.geometries.items()]
+            self.apply(operations, expected_revision=revision)
+        return proposal
 
     # -- units --------------------------------------------------------------------------------------
     def convert_unit(self, unit: str) -> float:
