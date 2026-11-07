@@ -1,0 +1,574 @@
+"""Tests for ``src.utils.sldc`` (SLDC v0.1).
+
+Covers the container (round-trip, determinism, atomic writes), hostile or corrupted input
+(only ``SLDCError`` may ever escape the reader), validation, and the SLAI-facing helpers
+(text/Markdown conversion, Reader bridge, digests, chunking). Only temporary files are created.
+"""
+from __future__ import annotations
+
+import io
+import os
+import random
+import tempfile
+import types
+import unittest
+import zipfile
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+from src.utils import sldc as sd
+
+
+def sample_document(**overrides):
+    document = sd.new_document(
+        "Quarterly report",
+        [
+            sd.make_block("heading", "Summary", attributes={"level": 1}),
+            sd.make_block("paragraph", "Revenue grew. Café ünïcödé ✓ 日本語"),
+            sd.make_block("code", "print('hi')", attributes={"language": "python"}),
+        ],
+        language="en-GB",
+        doc_id="doc-fixed",
+        metadata={"owner": "finance", "nested": {"n": [1, 2.5, None, True]}},
+        provenance=[sd.provenance_entry("test", timestamp="2026-01-01T00:00:00Z")],
+    )
+    document.update(overrides)
+    return document
+
+
+def build_raw(members, *, comment=b"") -> bytes:
+    """Hand-build a ZIP from (name, bytes, compress_type) triples to forge hostile archives."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data, method in members:
+            info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+            info.compress_type = method
+            archive.writestr(info, data)
+        archive.comment = comment
+    return buffer.getvalue()
+
+
+def valid_members(document, *, payload=None, manifest_overrides=None):
+    payload = sd._canonical_json(document) if payload is None else payload
+    manifest = {
+        "format": sd.FORMAT_ID, "version": sd.FORMAT_VERSION,
+        "document_sha256": __import__("hashlib").sha256(payload).hexdigest(),
+        "document_size_bytes": len(payload),
+    }
+    manifest.update(manifest_overrides or {})
+    return [
+        ("mimetype", sd.MIMETYPE.encode("ascii"), zipfile.ZIP_STORED),
+        ("manifest.json", sd._canonical_json(manifest), zipfile.ZIP_DEFLATED),
+        ("document.json", payload, zipfile.ZIP_DEFLATED),
+    ]
+
+
+class _TempDirTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+
+class ContainerTests(_TempDirTestCase):
+    def test_file_round_trip_preserves_document(self) -> None:
+        document = sample_document()
+        path = sd.write_sldc(self.tmp / "a.sldc", document)
+        self.assertEqual(sd.read_sldc(path), document)
+        self.assertTrue(sd.is_sldc(path))
+        self.assertTrue(sd.sniff_sldc(path))
+        self.assertEqual(os.listdir(self.tmp), ["a.sldc"], "no temporary files may remain")
+
+    def test_bytes_round_trip_and_read_ignores_suffix(self) -> None:
+        document = sample_document()
+        data = sd.dumps_sldc(document)
+        self.assertEqual(sd.loads_sldc(data), document)
+        self.assertEqual(sd.loads_sldc(memoryview(data)), document)
+        renamed = self.tmp / "renamed.bin"
+        renamed.write_bytes(data)
+        self.assertEqual(sd.read_sldc(renamed), document)
+
+    def test_output_is_deterministic_and_matches_digest(self) -> None:
+        document = sample_document()
+        first = sd.dumps_sldc(document)
+        second = sd.dumps_sldc(dict(reversed(document.items())))  # different key order
+        self.assertEqual(first, second)
+        with zipfile.ZipFile(io.BytesIO(first)) as archive:
+            self.assertEqual(archive.namelist(), list(sd.MEMBERS))
+            manifest = __import__("json").loads(archive.read("manifest.json"))
+        self.assertEqual(manifest["document_sha256"], sd.document_digest(document))
+
+    def test_overwrite_false_never_replaces_existing_file(self) -> None:
+        path = self.tmp / "a.sldc"
+        path.write_bytes(b"precious")
+        with self.assertRaises(FileExistsError):
+            sd.write_sldc(path, sample_document())
+        self.assertEqual(path.read_bytes(), b"precious")
+        sd.write_sldc(path, sample_document(), overwrite=True)
+        self.assertTrue(sd.is_sldc(path))
+        self.assertEqual(os.listdir(self.tmp), ["a.sldc"])
+
+    def test_filesystem_without_hard_links_still_works_and_still_refuses_overwrite(self) -> None:
+        path = self.tmp / "a.sldc"
+        with mock.patch("os.link", side_effect=OSError("hard links unsupported")):
+            sd.write_sldc(path, sample_document())
+            self.assertTrue(sd.is_sldc(path))
+            before = path.read_bytes()
+            with self.assertRaises(FileExistsError):
+                sd.write_sldc(path, sample_document(title="Other"))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(os.listdir(self.tmp), ["a.sldc"])
+
+    def test_failed_write_leaves_nothing_behind(self) -> None:
+        bad = sample_document(blocks=[{"id": "x", "type": "paragraph", "text": 5}])
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.write_sldc(self.tmp / "a.sldc", bad)
+        self.assertEqual(os.listdir(self.tmp), [])
+
+    def test_wrong_suffix_and_missing_directory_are_rejected(self) -> None:
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.write_sldc(self.tmp / "a.json", sample_document())
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.write_sldc(self.tmp / "missing" / "a.sldc", sample_document())
+
+    def test_missing_file_is_an_oserror_and_is_sldc_is_false(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            sd.read_sldc(self.tmp / "nope.sldc")
+        self.assertFalse(sd.is_sldc(self.tmp / "nope.sldc"))
+        self.assertFalse(sd.sniff_sldc(self.tmp / "nope.sldc"))
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.read_sldc(self.tmp)  # a directory is not a regular file
+
+    def test_unwritable_repetitive_document_fails_on_write_not_on_read(self) -> None:
+        bomb = sd.new_document("Repetitive", [sd.make_block("paragraph", "a" * 3_000_000)])
+        with self.assertRaises(sd.SLDCValidationError) as caught:
+            sd.dumps_sldc(bomb)
+        self.assertIn("compression-ratio", str(caught.exception))
+
+
+class HostileInputTests(_TempDirTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.document = sample_document()
+        self.good = sd.dumps_sldc(self.document)
+
+    def test_non_sldc_inputs_raise_validation_error(self) -> None:
+        for blob in (b"", b"hello", b"%PDF-1.7\n" + b"x" * 100, b"PK\x03\x04" + b"\0" * 60):
+            with self.assertRaises(sd.SLDCValidationError):
+                sd.loads_sldc(blob)
+
+    def test_ordinary_zip_with_other_members_is_rejected(self) -> None:
+        blob = build_raw([("a.txt", b"hi", zipfile.ZIP_DEFLATED)])
+        with self.assertRaises(sd.SLDCError):
+            sd.loads_sldc(blob)
+
+    def test_prepended_data_trailing_comment_and_extra_entries_are_rejected(self) -> None:
+        with self.assertRaises(sd.SLDCError):
+            sd.loads_sldc(b"junk" + self.good)
+        members = valid_members(self.document)
+        with self.assertRaises(sd.SLDCError):
+            sd.loads_sldc(build_raw(members, comment=b"hidden"))
+        with self.assertRaises(sd.SLDCError):
+            sd.loads_sldc(build_raw(members + [("extra.bin", b"x", zipfile.ZIP_STORED)]))
+        with self.assertRaises(sd.SLDCError):
+            sd.loads_sldc(build_raw([members[1], members[0], members[2]]))
+
+    def test_compressed_mimetype_is_rejected(self) -> None:
+        members = valid_members(self.document)
+        members[0] = (members[0][0], members[0][1], zipfile.ZIP_DEFLATED)
+        with self.assertRaises(sd.SLDCError):
+            sd.loads_sldc(build_raw(members))
+
+    def test_tampered_document_fails_integrity(self) -> None:
+        members = valid_members(self.document)
+        tampered = sd._canonical_json(sample_document(title="Tampered"))
+        members[2] = ("document.json", tampered, zipfile.ZIP_DEFLATED)
+        with self.assertRaises(sd.SLDCIntegrityError):
+            sd.loads_sldc(build_raw(members))
+
+    def test_wrong_size_hash_and_version_in_manifest(self) -> None:
+        cases = [
+            ({"document_size_bytes": 1}, sd.SLDCIntegrityError),
+            ({"document_size_bytes": True}, sd.SLDCIntegrityError),
+            ({"document_sha256": "0" * 64}, sd.SLDCIntegrityError),
+            ({"version": "9.9.9"}, sd.SLDCValidationError),
+            ({"format": "other"}, sd.SLDCValidationError),
+        ]
+        for override, expected in cases:
+            blob = build_raw(valid_members(self.document, manifest_overrides=override))
+            with self.subTest(override=override), self.assertRaises(expected):
+                sd.loads_sldc(blob)
+
+    def test_duplicate_keys_nan_and_non_object_payloads(self) -> None:
+        for payload in (b'{"id":"a","id":"b"}', b'{"x":NaN}', b"[1,2]", b"\xff\xfe", b""):
+            members = valid_members(self.document, payload=payload)
+            with self.subTest(payload=payload), self.assertRaises(sd.SLDCValidationError):
+                sd.loads_sldc(build_raw(members))
+
+    def test_huge_integer_literal_never_leaks_a_bare_valueerror(self) -> None:
+        payload = b'{"metadata":{"n":' + b"9" * 6000 + b"}}"
+        try:
+            sd.loads_sldc(build_raw(valid_members(self.document, payload=payload)))
+        except sd.SLDCError:
+            pass  # Python >= 3.11 limits integer digits; older versions fail field validation.
+
+    def test_deeply_nested_json_is_a_validation_error(self) -> None:
+        depth = 5000
+        payload = b'{"metadata":' + b"[" * depth + b"]" * depth + b"}"
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.loads_sldc(build_raw(valid_members(self.document, payload=payload)))
+        nested: dict = {}
+        for _ in range(sd.MAX_JSON_DEPTH + 1):
+            nested = {"k": nested}
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.validate_sldc(sample_document(metadata=nested))
+
+    def test_corrupted_deflate_stream_raises_sldc_error_not_zlib_error(self) -> None:
+        with zipfile.ZipFile(io.BytesIO(self.good)) as archive:
+            info = archive.getinfo("document.json")
+        start = info.header_offset + 30 + len(info.filename)
+        damaged = bytearray(self.good)
+        for offset in range(start, start + min(info.compress_size, 24)):
+            damaged[offset] ^= 0xFF
+        with self.assertRaises(sd.SLDCError):
+            sd.loads_sldc(bytes(damaged))
+        self.assertFalse(sd.is_sldc(self._write("damaged.sldc", bytes(damaged))))
+
+    def test_truncated_archive_is_rejected_at_every_length(self) -> None:
+        for length in range(0, len(self.good), 7):
+            with self.subTest(length=length), self.assertRaises(sd.SLDCError):
+                sd.loads_sldc(self.good[:length])
+
+    def test_oversized_archive_is_rejected_before_parsing(self) -> None:
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.loads_sldc(self.good + b"\0" * (sd.MAX_ARCHIVE_BYTES + 1))
+
+    def test_fuzzed_archives_only_ever_raise_sldc_errors(self) -> None:
+        rng = random.Random(20261020)
+        for _ in range(400):
+            blob = bytearray(self.good)
+            for _ in range(rng.randint(1, 4)):
+                blob[rng.randrange(len(blob))] = rng.randrange(256)
+            if rng.random() < 0.3:
+                del blob[rng.randrange(len(blob)):]
+            try:
+                result = sd.loads_sldc(bytes(blob))
+            except sd.SLDCError:
+                continue
+            self.assertIsInstance(result, dict)  # A harmless flip (e.g. a timestamp byte).
+
+    def _write(self, name: str, data: bytes) -> Path:
+        path = self.tmp / name
+        path.write_bytes(data)
+        return path
+
+
+class ValidationTests(unittest.TestCase):
+    def check_rejects(self, **overrides) -> None:
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.validate_sldc(sample_document(**overrides))
+
+    def test_valid_document_and_read_only_mapping_pass(self) -> None:
+        sd.validate_sldc(sample_document())
+        sd.validate_sldc(types.MappingProxyType(sample_document()))
+        sd.validate_sldc(sd.new_document("Empty"))
+
+    def test_unhashable_block_type_is_a_validation_error_not_typeerror(self) -> None:
+        for bad in ([], {}, None, 3):
+            self.check_rejects(blocks=[{"id": "b1", "type": bad, "text": "x"}])
+
+    def test_structural_errors_are_rejected(self) -> None:
+        good = {"id": "b1", "type": "paragraph", "text": "x"}
+        self.check_rejects(id="has space")
+        self.check_rejects(title="   ")
+        self.check_rejects(language="English language tag")
+        self.check_rejects(blocks="nope")
+        self.check_rejects(blocks=[good, dict(good)])
+        self.check_rejects(blocks=[{**good, "surprise": 1}])
+        self.check_rejects(blocks=[{**good, "annotations": [1]}])
+        self.check_rejects(blocks=[{**good, "attributes": []}])
+        self.check_rejects(blocks=[{**good, "source_ref": "x" * 5000}])
+        self.check_rejects(blocks=[good] * 2)
+        self.check_rejects(metadata=[])
+        self.check_rejects(provenance=["x"])
+        self.check_rejects(extra_key=1)
+
+    def test_non_json_values_are_rejected_instead_of_silently_changed(self) -> None:
+        self.check_rejects(metadata={1: "int key"})
+        self.check_rejects(metadata={"nan": float("nan")})
+        self.check_rejects(metadata={"inf": float("inf")})
+        self.check_rejects(metadata={"tuple": (1, 2)})
+        self.check_rejects(metadata={"set": {1}})
+        self.check_rejects(metadata={"bytes": b"x"})
+        self.check_rejects(title="lone surrogate \ud800")
+
+    def test_too_many_blocks_and_too_much_text(self) -> None:
+        blocks = [{"id": f"b{i}", "type": "paragraph", "text": ""}
+                  for i in range(sd.MAX_BLOCKS + 1)]
+        self.check_rejects(blocks=blocks)
+        with mock.patch.object(sd, "MAX_TEXT_CHARS", 10):
+            self.check_rejects(blocks=[{"id": "b1", "type": "paragraph", "text": "x" * 11}])
+
+    def test_extract_text_joins_blocks_with_blank_lines(self) -> None:
+        document = sd.new_document("T", [sd.make_block("paragraph", "one"),
+                                         sd.make_block("quote", "two")])
+        self.assertEqual(sd.extract_text(document), "one\n\ntwo")
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.extract_text({"id": "x"})
+
+
+class TextConversionTests(unittest.TestCase):
+    def test_plain_text_paragraphs_and_line_endings(self) -> None:
+        blocks = sd.blocks_from_text("First line\r\nsecond line\r\n\r\n\r\n  Next para  \n\n\n")
+        self.assertEqual([b["text"] for b in blocks], ["First line\nsecond line", "Next para"])
+        self.assertEqual([b["id"] for b in blocks], ["b00001", "b00002"])
+        self.assertEqual(sd.blocks_from_text(""), [])
+        self.assertEqual(sd.blocks_from_text("   \n\n  "), [])
+
+    def test_markdown_blocks(self) -> None:
+        markdown = (
+            "# Title #\n\nIntro line one\nintro line two\n\n"
+            "## Lists\n- alpha\n  continued\n  - nested\n1. first\n2) second\n\n"
+            "> quoted\n> text\n\n"
+            "```python\nx = 1\n\nprint(x)\n```\n\n"
+            "~~~\nunclosed fence\n* * *\nAfter rule\n"
+        )
+        blocks = sd.blocks_from_text(markdown, markdown=True, source_ref="notes.md")
+        summary = [(b["type"], b["text"], b.get("attributes")) for b in blocks]
+        self.assertEqual(summary[0], ("heading", "Title", {"level": 1}))
+        self.assertEqual(summary[1], ("paragraph", "Intro line one\nintro line two", None))
+        self.assertEqual(summary[2], ("heading", "Lists", {"level": 2}))
+        self.assertEqual(summary[3], ("list_item", "alpha\ncontinued", {"ordered": False}))
+        self.assertEqual(summary[4], ("list_item", "nested", {"ordered": False, "depth": 1}))
+        self.assertEqual(summary[5], ("list_item", "first", {"ordered": True}))
+        self.assertEqual(summary[6], ("list_item", "second", {"ordered": True}))
+        self.assertEqual(summary[7], ("quote", "quoted\ntext", None))
+        self.assertEqual(summary[8], ("code", "x = 1\n\nprint(x)", {"language": "python"}))
+        self.assertEqual(summary[9][0:2], ("code", "unclosed fence\n* * *\nAfter rule"))
+        self.assertTrue(all(b["source_ref"] == "notes.md" for b in blocks))
+        sd.validate_sldc(sd.new_document("T", blocks))
+
+    def test_hash_in_text_is_not_a_heading_and_c_sharp_survives(self) -> None:
+        blocks = sd.blocks_from_text("#hashtag\n\n# C#\n", markdown=True)
+        self.assertEqual([(b["type"], b["text"]) for b in blocks],
+                         [("paragraph", "#hashtag"), ("heading", "C#")])
+
+    def test_markdown_round_trip_keeps_types_and_text(self) -> None:
+        source = ("# Head\n\nPara text\n\n- one\n- two\n  - deep\n\n> quote\n\n"
+                  "````\nfence ``` inside\n````\n")
+        first = sd.new_document("T", sd.blocks_from_text(source, markdown=True))
+        rendered = sd.to_markdown(first)
+        second = sd.new_document("T", sd.blocks_from_text(rendered, markdown=True))
+        project = lambda doc: [(b["type"], b["text"]) for b in doc["blocks"]]  # noqa: E731
+        self.assertEqual(project(first), project(second))
+        self.assertIn("````", rendered)
+
+    def test_id_prefix_is_validated(self) -> None:
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.blocks_from_text("x", id_prefix="bad prefix")
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.blocks_from_text(b"bytes")  # type: ignore[arg-type]
+
+    def test_new_document_assigns_ids_without_clashing(self) -> None:
+        document = sd.new_document("T", [
+            sd.make_block("paragraph", "a", block_id="b00001"),
+            sd.make_block("paragraph", "b"),
+            sd.make_block("paragraph", "c"),
+        ])
+        self.assertEqual([b["id"] for b in document["blocks"]], ["b00001", "b00002", "b00003"])
+        sd.validate_sldc(document)
+
+
+class ReaderBridgeTests(unittest.TestCase):
+    RAW, CONTENT = "a" * 64, "b" * 64
+
+    def reader_result(self, **overrides):
+        result = {
+            "status": "ok", "source": r"G:\Users\jean\secret\report.md", "filename": "report.md",
+            "stem": "report", "extension": ".md", "content_type": "text/markdown",
+            "parser": "text_parser", "content": "# Report\n\nBody text.",
+            "metadata": {"sha256": self.RAW, "raw_sha256": self.RAW, "content_sha256": self.CONTENT,
+                         "timing": object()},  # non-JSON values must not be copied
+            "warnings": ["w1", "w2"],
+        }
+        result.update(overrides)
+        return result
+
+    def test_bridge_builds_valid_document_with_provenance_and_no_local_path(self) -> None:
+        document = sd.document_from_reader_result(self.reader_result())
+        sd.validate_sldc(document)
+        self.assertEqual(document["title"], "report")
+        self.assertEqual(document["blocks"][0]["type"], "heading")  # .md auto-detected
+        self.assertEqual(document["blocks"][0]["source_ref"], "report.md")
+        entry = document["provenance"][0]
+        self.assertEqual(entry["activity"], "reader.parse")
+        self.assertEqual((entry["raw_sha256"], entry["content_sha256"]), (self.RAW, self.CONTENT))
+        self.assertEqual(entry["warning_count"], 2)
+        self.assertNotIn("secret", sd._canonical_json(document).decode("utf-8"))
+        sd.loads_sldc(sd.dumps_sldc(document))
+
+    def test_bridge_handles_windows_source_without_filename_and_plain_text(self) -> None:
+        result = self.reader_result(filename=None, stem=None, extension=None,
+                                    content_type="text/plain", content="Just text.")
+        document = sd.document_from_reader_result(result, title="Custom")
+        self.assertEqual(document["title"], "Custom")
+        self.assertEqual(document["blocks"][0]["source_ref"], "report.md")
+        self.assertEqual(document["blocks"][0]["type"], "paragraph")
+
+    def test_bridge_ignores_malformed_digests_and_rejects_bad_results(self) -> None:
+        result = self.reader_result(metadata={"sha256": "not-a-digest"})
+        entry = sd.document_from_reader_result(result)["provenance"][0]
+        self.assertNotIn("raw_sha256", entry)
+        for bad in (None, {}, {"content": 5}, "text"):
+            with self.assertRaises(sd.SLDCValidationError):
+                sd.document_from_reader_result(bad)  # type: ignore[arg-type]
+
+
+class SlaiHelperTests(unittest.TestCase):
+    def test_digests(self) -> None:
+        document = sample_document()
+        self.assertEqual(sd.document_digest(document), sd.document_digest(sample_document()))
+        self.assertNotEqual(sd.document_digest(document),
+                            sd.document_digest(sample_document(title="Other")))
+        first = {"id": "a", "type": "paragraph", "text": "same"}
+        moved = {"id": "z", "type": "paragraph", "text": "same", "source_ref": "elsewhere"}
+        self.assertEqual(sd.block_digest(first), sd.block_digest(moved))
+        self.assertNotEqual(sd.block_digest(first), sd.block_digest({**first, "type": "quote"}))
+
+    def test_block_index_resolves_citations(self) -> None:
+        document = sample_document()
+        index = sd.block_index(document)
+        self.assertEqual(index["b00002"]["type"], "paragraph")
+        self.assertEqual(list(index), [b["id"] for b in document["blocks"]])
+
+    def test_chunks_respect_limit_keep_block_ids_and_lose_no_text(self) -> None:
+        blocks = [sd.make_block("paragraph", f"Block {i} " + "word " * (i % 7)) for i in range(60)]
+        document = sd.new_document("Chunky", blocks)
+        chunks = sd.chunk_document(document, max_chars=120)
+        self.assertGreater(len(chunks), 5)
+        self.assertEqual([c["index"] for c in chunks], list(range(len(chunks))))
+        self.assertTrue(all(0 < len(c["text"]) <= 120 and not c["partial"] for c in chunks))
+        flattened = [bid for c in chunks for bid in c["block_ids"]]
+        self.assertEqual(flattened, [b["id"] for b in document["blocks"]])
+        self.assertEqual("\n\n".join(c["text"] for c in chunks).split(),
+                         sd.extract_text(document).split())
+
+    def test_oversized_block_is_split_at_whitespace_and_flagged_partial(self) -> None:
+        text = " ".join(f"w{i:03d}" for i in range(200))
+        document = sd.new_document("Long", [sd.make_block("paragraph", "intro"),
+                                             sd.make_block("paragraph", text)])
+        chunks = sd.chunk_document(document, max_chars=100)
+        self.assertEqual(chunks[0]["block_ids"], ["b00001"])
+        pieces = [c for c in chunks if c["partial"]]
+        self.assertTrue(pieces and all(c["block_ids"] == ["b00002"] for c in pieces))
+        self.assertTrue(all(len(c["text"]) <= 100 for c in chunks))
+        self.assertEqual(" ".join(c["text"] for c in pieces).split(), text.split())
+        solid = sd.new_document("Hard", [sd.make_block("paragraph", "x" * 25)])
+        hard = sd.chunk_document(solid, 10)
+        self.assertEqual([len(c["text"]) for c in hard], [10, 10, 5])
+
+    def test_chunk_arguments_are_checked(self) -> None:
+        document = sd.new_document("T", [sd.make_block("paragraph", "x")])
+        for bad in (0, -1, 1.5, True):
+            with self.assertRaises(ValueError):
+                sd.chunk_document(document, bad)  # type: ignore[arg-type]
+        self.assertEqual(sd.chunk_document(sd.new_document("Empty")), [])
+
+    def test_to_markdown_of_empty_document_and_odd_attributes(self) -> None:
+        self.assertEqual(sd.to_markdown(sd.new_document("Empty")), "")
+        document = sd.new_document("T", [
+            sd.make_block("heading", "No level"),
+            sd.make_block("heading", "Bad level", attributes={"level": 99}),
+            sd.make_block("code", "x", attributes={"language": "has space"}),
+        ])
+        self.assertEqual(sd.to_markdown(document), "# No level\n\n# Bad level\n\n```\nx\n```\n")
+
+
+class AuditRegressionTests(_TempDirTestCase):
+    """Defects found in the SLDC integration audit (2026-10-20); each failed before the fix."""
+
+    def test_small_highly_compressible_document_is_accepted(self) -> None:
+        # Space-padded fixed-width text compresses far beyond 200:1 yet is tiny and harmless.
+        padded = "\n\n".join(f"Item {i}" + " " * 4000 + "total" for i in range(60))
+        document = sd.new_document("Padded report", [sd.make_block("paragraph", padded)])
+        self.assertEqual(sd.loads_sldc(sd.dumps_sldc(document)), document)
+
+    def test_large_expansion_is_still_rejected(self) -> None:
+        bomb = sd.new_document("Bomb", [sd.make_block("paragraph", "a" * 3_000_000)])
+        with self.assertRaises(sd.SLDCValidationError):
+            sd.dumps_sldc(bomb)
+
+    def test_reading_a_small_file_does_not_allocate_the_archive_limit(self) -> None:
+        import tracemalloc
+        path = sd.write_sldc(self.tmp / "tiny.sldc", sample_document())
+        tracemalloc.start()
+        sd.read_sldc(path)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        self.assertLess(peak, 1_000_000, f"read_sldc peaked at {peak} bytes for a tiny file")
+
+    def test_reader_bridge_is_deterministic_for_identical_input(self) -> None:
+        result = {"content": "# T\n\nBody", "filename": "a.md", "stem": "a", "extension": ".md",
+                  "metadata": {"parsed_at": "2026-10-20T10:00:00+00:00"}}
+        first = sd.document_from_reader_result(result)
+        second = sd.document_from_reader_result(dict(result))
+        self.assertEqual(sd.document_digest(first), sd.document_digest(second))
+        self.assertEqual(sd.dumps_sldc(first), sd.dumps_sldc(second))
+        changed = sd.document_from_reader_result({**result, "content": "# T\n\nOther"})
+        self.assertNotEqual(first["id"], changed["id"])
+        self.assertEqual(first["provenance"][0]["timestamp"], "2026-10-20T10:00:00Z")
+
+    def test_text_builder_ids_are_content_derived_unless_given(self) -> None:
+        a = sd.document_from_text("x\n\ny", title="T")
+        self.assertEqual(a["id"], sd.document_from_text("x\n\ny", title="T")["id"])
+        self.assertNotEqual(a["id"], sd.document_from_text("x\n\nz", title="T")["id"])
+        self.assertEqual(sd.document_from_text("x", title="T", doc_id="mine")["id"], "mine")
+        self.assertTrue(sd.new_document("T")["id"].startswith("doc-"))  # generic builder unchanged
+
+
+class CommandLineTests(_TempDirTestCase):
+    def run_cli(self, *argv: str):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = sd.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_pack_check_and_text(self) -> None:
+        source = self.tmp / "notes.md"
+        source.write_text("# Notes\n\nHello wörld.\n", encoding="utf-8")
+        target = self.tmp / "notes.sldc"
+        code, out, _ = self.run_cli("pack", str(source), str(target))
+        self.assertEqual(code, 0)
+        self.assertTrue(sd.is_sldc(target))
+        document = sd.read_sldc(target)
+        self.assertEqual(document["title"], "notes")
+        self.assertEqual(document["provenance"][0]["activity"], "sldc.pack")
+        code, out, _ = self.run_cli("check", str(target))
+        self.assertEqual(code, 0)
+        self.assertIn("OK", out)
+        code, out, _ = self.run_cli("text", str(target))
+        self.assertEqual((code, out), (0, "Notes\n\nHello wörld.\n"))
+        code, out, _ = self.run_cli("text", "--markdown", str(target))
+        self.assertEqual(out, "# Notes\n\nHello wörld.\n")
+
+    def test_pack_refuses_to_overwrite_and_check_reports_failures(self) -> None:
+        source = self.tmp / "a.txt"
+        source.write_text("x", encoding="utf-8")
+        target = self.tmp / "a.sldc"
+        self.assertEqual(self.run_cli("pack", str(source), str(target))[0], 0)
+        code, _, err = self.run_cli("pack", str(source), str(target))
+        self.assertEqual(code, 1)
+        self.assertIn("error", err)
+        bogus = self.tmp / "bogus.sldc"
+        bogus.write_bytes(b"nope")
+        code, out, _ = self.run_cli("check", str(target), str(bogus), str(self.tmp / "gone"))
+        self.assertEqual(code, 1)
+        self.assertEqual(out.count("FAIL"), 2)
+        self.assertEqual(out.count("OK"), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
