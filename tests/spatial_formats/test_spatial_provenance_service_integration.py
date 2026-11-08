@@ -200,3 +200,21 @@ def test_importing_format_adapters_does_not_import_spatial_or_provenance_agent()
         "assert 'src.agents.provenance' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", statement], check=True, timeout=25)
+
+
+def test_spatial_agent_initial_upsert_and_update_accept_new_entities():
+    """A new entity has no previous frame; upsert must never assert otherwise."""
+    from src.agents.spatial_agent import SpatialAgent
+
+    agent = SpatialAgent(None, None)
+    identity = "b" * 32
+    payload = {"entity_id": identity,
+               "position": [0.5, 0.5, 0.5],
+               "bounds": {"minimum": [0, 0, 0], "maximum": [1, 1, 1]},
+               "geometry": {"type": "aabb", "minimum": [0, 0, 0], "maximum": [1, 1, 1]}}
+    new = agent.perform_task({"operation": "upsert_entity", "entity": payload})
+    assert new["created"] is True
+    assert new["entity"]["entity_id"] == identity
+    updated = agent.perform_task({"operation": "upsert_entity", "entity": {**payload, "position": [0.7, 0.5, 0.5]}})
+    assert updated["created"] is False
+    assert updated["entity"]["entity_id"] == identity

@@ -943,7 +943,8 @@ class SpatialAgent(BaseAgent):
         if not frame_id:
             raise SpatialValidationError("entity.frame_id must be non-empty")
         frame_changed = existing is not None and frame_id != existing.frame_id
-        assert existing is not None
+        # New entities have no previous frame to validate against. The two
+        # frame-change guards below already require an existing entity.
         if frame_changed and existing.geometry is not None and "geometry" not in payload:
             raise SpatialFrameError(
                 "changing the frame of a geometry-bearing entity requires geometry expressed in the new frame",
