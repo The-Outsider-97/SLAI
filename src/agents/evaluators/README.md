@@ -16,38 +16,27 @@ It includes:
 
 ## Directory Structure
 
-```text
-src/agents/evaluators/
-├── __init__.py
-├── autonomous_evaluator.py
-├── performance_evaluator.py
-├── efficiency_evaluator.py
-├── resource_utilization_evaluator.py
-├── safety_evaluator.py
-├── adaptive_risk.py
-├── statistical_evaluator.py
-├── behavioral_validator.py
-├── evaluators_memory.py
-├── base_infra.py
-├── configs/
-│   └── evaluator_config.yaml
-├── templates/
-│   ├── audit_schema.json
-│   ├── certification_templates.json
-│   └── recommendation_template.json
-└── utils/
-    ├── __init__.py
-    ├── config_loader.py
-    ├── evaluators_calculations.py
-    ├── evaluation_errors.py
-    ├── evaluation_transformer.py
-    ├── validation_protocol.py
-    ├── report.py
-    ├── documentation.py
-    ├── certification_framework.py
-    ├── plugin_loader.py
-    └── static_analyzer.py
-```
+The main implementation groups in the current repository are:
+
+- Evaluator modules: autonomous, behavioral, efficiency, performance,
+  performance-budget, resource utilization, safety, statistical, adaptive risk.
+- modules/: evaluation_transformer.py, evaluators_calculations.py,
+  static_analyzer.py, validation_protocol.py, test_generator.py.
+- configs/: evaluator_config.yaml.
+- data/: issue_db.py.
+- documentation/: report.py, documentation.py, certification_framework.py,
+  test_generator.md.
+- utils/: config_loader.py, evaluation_errors.py, evaluation_helpers.py,
+  plugin_loader.py.
+- templates/: structured audit, certification, and recommendation schemas.
+
+### Experimental TestGenerator
+
+The Evaluation Agent can optionally generate **preview-only** candidate Python
+tests using a separately trainable, versioned byte-level model. Generation
+is disabled by default; no generated test is executed or integrated into code.
+See documentation/test_generator.md for dataset contracts, PowerShell commands,
+review gates, and the outstanding production-readiness blockers.
 
 ---
 

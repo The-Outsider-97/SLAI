@@ -1,7 +1,6 @@
 from __future__ import annotations
-import uuid
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 """
 Unified Evaluation Framework
@@ -240,6 +239,8 @@ class EvaluationAgent(BaseAgent):
 
         self._shutdown_lock = threading.RLock()
         self._shutdown_complete = False
+        self._test_generator_lock = threading.RLock()
+        self._test_generator = None  # Lazily loaded; training never occurs in agent startup.
         self.initialization_issues: List[str] = []
 
         # Subsystem objects own their own evaluator-specific config and memory.
@@ -1581,8 +1582,41 @@ class EvaluationAgent(BaseAgent):
                 config=self.agent_config,
             )
 
+    def generate_tests(self, request: Mapping[str, Any]) -> Dict[str, Any]:
+        """Request candidate Python tests without executing or writing generated code.
+
+        The evaluation core stays torch-free until an enabled model is used.
+        Active mode does not grant code execution or repository-write authority.
+        """
+        if not isinstance(request, Mapping):
+            return {"status": "invalid_request", "error": "request must be a mapping", "execution": "not_executed"}
+        configured = self.agent_config.get("test_generator", {})
+        if not isinstance(configured, Mapping):
+            return {"status": "configuration_error", "execution": "not_executed"}
+        mode = configured.get("mode", "disabled")
+        if mode == "disabled":
+            return {"status": "disabled", "model": "TestGenerator", "execution": "not_executed"}
+        try:
+            with self._test_generator_lock:
+                if self._test_generator is None:
+                    from .evaluators.modules.test_generator import TestGenerator
+                    self._test_generator = TestGenerator(
+                        checkpoint_dir=configured.get("checkpoint_dir"),
+                        mode=str(mode),
+                    )
+                generator = self._test_generator
+            return generator.generate(request)
+        except Exception as exc:
+            logger.error("TestGenerator unavailable: %s", exc, exc_info=True)
+            return {
+                "status": "unavailable", "model": "TestGenerator",
+                "error_type": type(exc).__name__, "execution": "not_executed",
+            }
+
     def predict(self, state: Any = None) -> Dict[str, Any]:
         """Return evaluation-health telemetry with an optional lightweight pass."""
+        if isinstance(state, Mapping) and state.get("operation") == "generate_tests":
+            return self.generate_tests(state)
         started = time.perf_counter()
         timestamp = _utc_now_iso()
         prediction_warnings: List[str] = []

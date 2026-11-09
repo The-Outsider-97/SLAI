@@ -575,6 +575,11 @@ evaluation_agent:
     memory_warning_threshold: 0.7
     memory_critical_threshold: 0.9
     model_dir: "src/agents/evaluators/models/"
+    # TestGenerator is opt-in. Trained artifacts are never auto-promoted.
+    # Generated code is preview-only; no execution sandbox is implied.
+    test_generator:
+        mode: disabled  # disabled | shadow | advisory | active
+        checkpoint_dir: "src/agents/evaluators/models/test_generator"
     anomaly_detector: "src/agents/evaluators/models/anomaly_detector.joblib"
     deep_anomaly: "src/agents/evaluators/models/deep_anomaly.pt"
     initial_hazard_rates:

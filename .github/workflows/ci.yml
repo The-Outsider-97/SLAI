@@ -4,10 +4,12 @@ on:
   pull_request:
     branches:
       - SLAI-v.2.3
+      - SLAI-v.2.4
 
   push:
     branches:
       - SLAI-v.2.3
+      - SLAI-v.2.4
 
   workflow_dispatch:
 
