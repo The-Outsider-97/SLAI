@@ -65,3 +65,30 @@ def test_readonly_override_rejected():
 def test_no_arbitrary_functions():
     with pytest.raises(ValidationError):
         evaluate_expression("eval(10)",{})
+
+
+
+def test_graph_cache_ignores_later_mutation_of_callers_table():
+    from src.utils.spatial_formats.sgeo import parameters as P
+    table = {"a": {"type": "number", "default": 2.0}, "b": {"type": "number", "expression": "a * 3"}}
+    assert P.evaluate_parameters(table)["b"] == 6.0
+    table["b"]["expression"] = "a * 10"
+    assert P.evaluate_parameters(table)["b"] == 20.0
+    table["b"]["expression"] = "a * 3"
+    assert P.evaluate_parameters(table)["b"] == 6.0
+
+
+def test_graph_cache_does_not_cache_invalid_tables():
+    from src.utils.spatial_formats.sgeo import parameters as P
+    from src.utils.spatial_formats.common.errors import ValidationError
+    bad = {"a": {"type": "number", "expression": "b + 1"}, "b": {"type": "number", "expression": "a + 1"}}
+    for _ in range(2):
+        with pytest.raises(ValidationError):
+            P.evaluate_parameters(bad)
+
+
+def test_graph_cache_does_not_remember_overrides():
+    from src.utils.spatial_formats.sgeo import parameters as P
+    table = {"a": {"type": "number", "default": 2.0}, "b": {"type": "number", "expression": "a + 1"}}
+    assert P.evaluate_parameters(table, {"a": 10.0})["b"] == 11.0
+    assert P.evaluate_parameters(table)["b"] == 3.0
