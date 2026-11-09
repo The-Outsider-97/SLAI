@@ -138,3 +138,37 @@ def test_training_save_and_load_is_explicit_and_unapproved(tmp_path):
     (checkpoint / "weights.pt").write_bytes(b"tampered")
     tampered = TestGenerator(checkpoint_dir=checkpoint, mode="shadow")
     assert tampered.generate({"source": SOURCE, "target_symbol": "increment"})["status"] == "unavailable"
+
+
+def test_evaluator_config_isolation_and_deleted_file_fail_closed(tmp_path):
+    from src.agents.evaluators.utils import config_loader as loader
+    config_path = tmp_path / "evaluator.yml"
+    config_path.write_text("nested:\n  threshold: 5\n", encoding="utf-8")
+    try:
+        first = loader.load_global_config(config_path, force_reload=True)
+        first["nested"]["threshold"] = 999
+        second = loader.load_global_config(config_path)
+        assert second["nested"]["threshold"] == 5
+        section = loader.get_config_section("nested", config=second)
+        section["threshold"] = -99
+        assert loader.get_config_section("nested", config=second)["threshold"] == 5
+        config_path.unlink()
+        with pytest.raises(FileNotFoundError):
+            loader.load_global_config(config_path, cache_ttl=600)
+    finally:
+        loader.clear_config_cache()
+
+
+def test_evaluation_agent_generates_only_when_explicitly_enabled():
+    from src.agents.evaluation_agent import EvaluationAgent
+    # Exercise the real facade dispatch without initializing unrelated evaluators.
+    facade = EvaluationAgent.__new__(EvaluationAgent)
+    facade.agent_config = {"test_generator": {"mode": "disabled"}}
+    facade._test_generator_lock = threading.RLock()
+    facade._test_generator = None
+    response = facade.predict({
+        "operation": "generate_tests", "source": SOURCE,
+        "target_symbol": "increment", "framework": "pytest",
+    })
+    assert response["status"] == "disabled"
+    assert response["execution"] == "not_executed"
