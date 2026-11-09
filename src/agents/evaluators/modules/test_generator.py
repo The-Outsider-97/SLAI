@@ -297,6 +297,13 @@ def train_model(
     import torch.nn.functional as F
 
     source_dir = Path(prepared_dir)
+    dataset_manifest = json.loads((source_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    if dataset_manifest.get("schema") != SCHEMA:
+        raise ValueError("Incompatible prepared dataset")
+    for partition in ("train", "validation", "test"):
+        expected_digest = dataset_manifest.get("sha256", {}).get(partition)
+        if not expected_digest or expected_digest != _file_hash(source_dir / (partition + ".jsonl")):
+            raise ValueError("Prepared dataset integrity check failed: " + partition)
     records = _read_prepared(source_dir / "train.jsonl")
     validation = _read_prepared(source_dir / "validation.jsonl")
     holdout = _read_prepared(source_dir / "test.jsonl")
@@ -491,10 +498,12 @@ class TestGenerator:
                     "integration": "not_applied",
                     "review_required": True,
                 }
-        except (OSError, RuntimeError, ValueError, ImportError, KeyError, TypeError) as exc:
+        except Exception as exc:
+            # Untrusted/corrupt checkpoints must fail closed, including malformed
+            # torch payloads that may raise errors outside ValueError/OSError.
             return {
                 "schema": SCHEMA, "status": "unavailable",
-                "error_type": type(exc).__name__, "error": str(exc),
+                "error_type": type(exc).__name__,
                 "execution": "not_executed",
             }
 
