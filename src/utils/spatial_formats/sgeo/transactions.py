@@ -79,7 +79,7 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
     for op in operations:
         if not isinstance(op,dict) or not isinstance(op.get("op"),str) or op.get("op") not in {
             "add", "remove", "rename", "transform", "geometry", "reparent", "parameters", "metadata",
-            "add_family", "update_family", "remove_family", "instantiate",
+            "add_family", "update_family", "remove_family", "instantiate", "set_family_type",
             "add_material", "update_material", "remove_material", "set_material", "add_image", "remove_image",
             "add_modifier", "update_modifier", "remove_modifier", "reorder_modifiers"
         }:
@@ -89,7 +89,7 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
             results.append(apply_modifier_operation(candidate.modifiers, op))
             continue
         if kind in {"add_family","update_family","remove_family"}:
-            if set(op)-{"op","id","value"}:
+            if set(op)-{"op","id","value","type_renames"} or ("type_renames" in op and kind!="update_family"):
                 raise ValidationError("unexpected family operation arguments")
             from .families import validate_family
             if kind=="add_family":
@@ -115,11 +115,24 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
                     if not isinstance(replacement,dict) or replacement.get("id")!=fid:
                         raise ValidationError("replacement must preserve family identifier")
                     validate_family(replacement)
+                    renames=op.get("type_renames") or {}
+                    if not isinstance(renames,dict) or any(not isinstance(k,str) or not isinstance(v,str) for k,v in renames.items()):
+                        raise ValidationError("type_renames maps old type names to new names")
                     families[fid]=replacement
                     if instances.get(fid,0):
+                        users={}
+                        for obj in objects.values():
+                            if obj.get("family_id")==fid and obj.get("family_type") is not None:
+                                users.setdefault(renames.get(obj["family_type"],obj["family_type"]),[]).append(obj["id"])
+                        missing=sorted(t for t in users if t not in (replacement.get("types") or {}))
+                        if missing:
+                            raise ValidationError("cannot remove family type '%s': %d instance(s) use it"%(missing[0],len(users[missing[0]])),
+                                                  context={"type":missing[0],"instances":users[missing[0]][:20]})
                         for obj in objects.values():
                             if obj.get("family_id")==fid:
-                                obj["geometry"]=generate_geometry(replacement,obj.get("parameters",{}))
+                                if obj.get("family_type") in renames:
+                                    obj["family_type"]=renames[obj["family_type"]]
+                                obj["geometry"]=generate_geometry(replacement,obj.get("parameters",{}),obj.get("family_type"))
             results.append(fid)
             continue
         if kind in {"add_material","update_material","remove_material","add_image","remove_image"}:
@@ -144,7 +157,7 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
             results.append(oid)
             continue
         if kind=="instantiate":
-            if set(op)-{"op","id","family_id","parameters","name","parent","transform","metadata","material"}:
+            if set(op)-{"op","id","family_id","family_type","parameters","name","parent","transform","metadata","material"}:
                 raise ValidationError("unexpected instantiate arguments")
             fid=require_id(op.get("family_id"))
             family=families.get(fid)
@@ -156,7 +169,9 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
             obj={"id":_new_object_id(op,objects),"family_id":fid,"parameters":parameters,
                  "name":op.get("name",family["name"]),"parent":op.get("parent"),
                  "transform":deepcopy(op.get("transform",list(IDENTITY))),
-                 "geometry":generate_geometry(family,parameters),"metadata":deepcopy(op.get("metadata",{}))}
+                 "geometry":generate_geometry(family,parameters,op.get("family_type")),"metadata":deepcopy(op.get("metadata",{}))}
+            if op.get("family_type") is not None:
+                obj["family_type"]=op["family_type"]
             _assign_material(obj,op.get("material"),materials)
             Scene._check_object(obj)
             check_parent(obj["parent"])
@@ -216,9 +231,21 @@ def _apply_scene_operations_locked(scene, operations: list[dict], *, expected_re
             family=families.get(obj["family_id"])
             if family is None:
                 raise ValidationError("family definition missing")
-            derived=generate_geometry(family,value)
+            derived=generate_geometry(family,value,obj.get("family_type"))
             obj["parameters"]=deepcopy(value)
             obj["geometry"]=derived
+        elif kind=="set_family_type":
+            if "family_id" not in obj:
+                raise ValidationError("a family type requires an instantiated family")
+            family=families.get(obj["family_id"])
+            if family is None:
+                raise ValidationError("family definition missing")
+            derived=generate_geometry(family,obj.get("parameters",{}),value)
+            obj["geometry"]=derived
+            if value is None:
+                obj.pop("family_type",None)
+            else:
+                obj["family_type"]=value
         results.append(oid)
     # Treat a batch as one document revision, never one revision per step.
     candidate.objects=list(objects.values())

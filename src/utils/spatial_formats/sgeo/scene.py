@@ -21,6 +21,9 @@ MAX_FAMILIES = 10_000
 MAX_ANIMATION_UNDO = 16
 MAX_ANIMATION_HISTORY_BYTES = 32 * 1024 * 1024
 
+_LEGACY_PARAMETER_FIELDS={"type","default","min","max","expression","read_only","description"}
+
+
 class Scene:
     def __init__(self, name="Untitled", *, unit="m", document_id=None, revision=1,
                  objects=None, metadata=None, document_kind="model", families=None, materials=None, images=None,
@@ -50,8 +53,13 @@ class Scene:
         """Validate everything about one object record that needs no other object."""
         if not isinstance(obj,dict):
             raise ValidationError("scene object must be an object")
-        if set(obj) - {"id","name","parent","transform","geometry","metadata","family_id","parameters","material"}:
+        if set(obj) - {"id","name","parent","transform","geometry","metadata","family_id","family_type","parameters","material"}:
             raise ValidationError("unknown scene object field")
+        if "family_type" in obj:
+            from .families import validate_type_name
+            validate_type_name(obj["family_type"])
+            if "family_id" not in obj:
+                raise ValidationError("a family type requires a family reference")
         if "material" in obj:
             require_id(obj["material"])
             if obj.get("geometry") is None:
@@ -132,7 +140,7 @@ class Scene:
                 require_id(obj["family_id"])
                 if obj["family_id"] not in fam_index:
                     raise ReferenceError("unknown family reference")
-                expected=generate_geometry(fam_index[obj["family_id"]],obj.get("parameters",{}))
+                expected=generate_geometry(fam_index[obj["family_id"]],obj.get("parameters",{}),obj.get("family_type"))
                 if obj.get("geometry") != expected:
                     raise ValidationError("family instance geometry does not match its parameters")
             elif "parameters" in obj:
@@ -650,6 +658,12 @@ class Scene:
         requires=["scene-graph","analytic-primitives","triangle-mesh"]
         if self.families:
             requires.append("families")
+            from .parameters import LEGACY_PARAMETER_TYPES
+            if any(f.get("types") for f in self.families):
+                requires.append("family-types-v1")
+            if any(s.get("type") not in LEGACY_PARAMETER_TYPES or set(s)-_LEGACY_PARAMETER_FIELDS
+                   for f in self.families for s in f["parameters"].values()):
+                requires.append("parameter-types-v2")
         if kinds & {"nurbs_curve","nurbs_surface"}:
             requires.append("nurbs")
         if "brep" in kinds:

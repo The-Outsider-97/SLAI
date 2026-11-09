@@ -166,100 +166,73 @@ def solve_constraints(entities, constraints, *, fixed_ids=(), absolute_tolerance
     writable = sorted(involved - fixed)
     if not constraints:
         return ConstraintSolution({}, (), 0, 0.0, True)
-    try:
-        import numpy as np
-        from scipy.optimize import least_squares
-    except ImportError as exc:
-        raise DependencyUnavailableError("constraint solving requires numpy and scipy") from exc
+    # One solver on every machine: the neutral constraint engine (numpy only). The solver that used to be chosen when scipy happened to be installed did not
+    # converge to the tolerance on simple systems and "solved" a contradictory one by collapsing a line to a point, so results depended on what was installed.
+    return _solve_with_engine(entities, constraints, fixed, writable, source, absolute_tolerance, relative_tolerance, max_iterations)
 
-    original = []
-    intervals = {}
-    for ident in writable:
-        entity = source[ident]
-        geometry = entity["geometry"]
-        data = geometry["position"] if entity["kind"] == "point" else (
-            geometry["start"] + geometry["end"])
-        if entity["kind"] not in {"point", "line"}:
-            raise ValidationError("constraint solver supports point and line entities")
-        intervals[ident] = slice(len(original), len(original) + len(data))
-        original.extend(float(v) for v in data)
-    if not original:
-        results = tuple(check_constraints(entities, constraints, absolute_tolerance=absolute_tolerance,
-                                          relative_tolerance=relative_tolerance))
-        if not all(r.satisfied for r in results):
-            raise ConflictError("fixed constraint system is infeasible")
-        return ConstraintSolution({}, results, 0, max(r.residual for r in results), True)
 
-    x0 = np.asarray(original, dtype=float)
+# ---------------------------------------------------------------------------------------------------- engine-backed analysis (numpy only)
+def _engine_input(entities, constraints, fixed_ids):
+    """SDRW points and lines in the neutral form of ``common.constraint_engine``. Other kinds are left out and show up as unsupported references."""
+    ents = {}
+    for e in entities:
+        if e["kind"] == "point":
+            ents[e["id"]] = {"kind": "point", "coords": list(e["geometry"]["position"]), "name": e.get("name")}
+        elif e["kind"] == "line":
+            ents[e["id"]] = {"kind": "segment", "coords": list(e["geometry"]["start"]) + list(e["geometry"]["end"]), "name": e.get("name")}
+    cons = []
+    for c in constraints:
+        refs = list(c["entities"])
+        if c["kind"] in ("distance", "coincident"):                  # SDRW stores these between points; a line is its start point (the verifier's own reading)
+            refs = [r if ents.get(r, {}).get("kind") != "segment" else {"entity": r, "part": "start"} for r in refs]
+        cons.append({"kind": c["kind"], "refs": refs, **({"value": c["value"]} if "value" in c else {})})
+    return ents, cons
 
-    def values(ident, x):
-        if ident in intervals:
-            v = x[intervals[ident]]
-            return (v[:2], v[2:]) if source[ident]["kind"] == "line" else v
-        g = source[ident]["geometry"]
-        return (np.asarray(g["start"]), np.asarray(g["end"])) if source[ident]["kind"] == "line" else np.asarray(g["position"])
 
-    def residual(x):
-        terms = []
-        for item in constraints:
-            kind = item["kind"]
-            ids = item["entities"]
-            if kind in {"distance", "coincident"}:
-                p, q = values(ids[0], x), values(ids[1], x)
-                delta = p-q
-                if kind == "coincident":
-                    terms.extend(delta.tolist())
-                else:
-                    terms.append(np.linalg.norm(delta)-float(item["value"]))
-            elif kind in {"horizontal", "vertical"}:
-                a,b = values(ids[0], x)
-                terms.append(b[1]-a[1] if kind == "horizontal" else b[0]-a[0])
-            else:
-                a,b = values(ids[0], x)
-                c,d = values(ids[1], x)
-                u, v = b-a, d-c
-                lu, lv = np.linalg.norm(u), np.linalg.norm(v)
-                if lu < 1e-12 or lv < 1e-12:
-                    terms.append(1e6)
-                    continue
-                cross = u[0]*v[1]-u[1]*v[0]
-                dot = float(np.dot(u,v))
-                if kind == "parallel":
-                    terms.append(cross/(lu*lv))
-                elif kind == "perpendicular":
-                    terms.append(dot/(lu*lv))
-                elif kind == "equal_length":
-                    terms.append(lu-lv)
-                elif kind == "angle":
-                    terms.append(atan2(abs(cross),dot)-float(item["value"]))
-        # Weak regularization chooses the nearest solution in underdetermined
-        # systems without disguising unsatisfied geometric constraints.
-        terms.extend((1e-6*(x-x0)).tolist())
-        return np.asarray(terms, dtype=float)
+def analyze_constraints(entities, constraints, *, fixed_ids=(), absolute_tolerance=1e-8, max_iterations=200):
+    """Degrees of freedom, redundancy and conflicts of a point/line constraint system, with the stored references checked (see the engine's docs).
+    Read-only: nothing is solved into the document."""
+    from ..common import constraint_engine as CE
+    for c in constraints:
+        if not isinstance(c, dict) or not isinstance(c.get("entities"), list):
+            raise ValidationError("invalid constraint")
+    ents, cons = _engine_input(entities, constraints, fixed_ids)
+    fixed = [require_id(i) for i in fixed_ids]
+    return CE.analyze(ents, cons, fixed=[i for i in fixed if i in ents], tolerance=absolute_tolerance, max_iterations=max_iterations)
 
-    solution = least_squares(residual, x0, max_nfev=max_iterations,
-                             xtol=1e-12, ftol=1e-12, gtol=1e-12)
+
+def _solve_with_engine(entities, constraints, fixed, writable, source, absolute_tolerance, relative_tolerance, max_iterations):
+    from ..common import constraint_engine as CE
+    from .entities import validate_entity
+    report = analyze_constraints(entities, constraints, fixed_ids=fixed, absolute_tolerance=absolute_tolerance, max_iterations=max_iterations)
+    if report["unresolved"]:
+        raise ReferenceError("a constraint reference could not be resolved", context={"unresolved": report["unresolved"]})
+    if report["status"] == "conflicting":
+        raise ConflictError("constraint solver could not satisfy the system within tolerance",
+                            context={"max_residual": report["max_residual"], "iterations": report["iterations"], "converged": report["converged"],
+                                     "conflicting": report["conflicting"]})
     candidates = deepcopy(entities)
     proposals = {}
     for entity in candidates:
         ident = entity["id"]
-        if ident not in intervals:
+        if ident not in report["solution"]:
             continue
-        values_out = [finite(float(v), "solved coordinate") for v in solution.x[intervals[ident]]]
+        values = [finite(float(v), "solved coordinate") for v in report["solution"][ident]]
         if entity["kind"] == "point":
-            entity["geometry"]["position"] = values_out
+            entity["geometry"]["position"] = values
         else:
-            entity["geometry"]["start"] = values_out[:2]
-            entity["geometry"]["end"] = values_out[2:]
-        from .entities import validate_entity
+            entity["geometry"]["start"], entity["geometry"]["end"] = values[:2], values[2:]
         validate_entity(entity)
+        if entity["kind"] == "line":                                  # a system can be "solved" by collapsing a line to a point: that is not a drawing
+            old_g, new_g = source[ident]["geometry"], entity["geometry"]
+            was, now = hypot(old_g["end"][0] - old_g["start"][0], old_g["end"][1] - old_g["start"][1]), hypot(new_g["end"][0] - new_g["start"][0], new_g["end"][1] - new_g["start"][1])
+            if now < max(1e-9, 1e-6 * was):
+                raise ConflictError("the only solution collapses a line to a point; the constraints are contradictory for a real line",
+                                    context={"entity": ident, "constraints_conflict": True})
         if entity["geometry"] != source[ident]["geometry"]:
             proposals[ident] = deepcopy(entity["geometry"])
-    results = tuple(check_constraints(candidates, constraints, absolute_tolerance=absolute_tolerance,
-                                      relative_tolerance=relative_tolerance))
+    results = tuple(check_constraints(candidates, constraints, absolute_tolerance=absolute_tolerance, relative_tolerance=relative_tolerance))
     if not all(r.satisfied for r in results):
         raise ConflictError("constraint solver could not satisfy the system within tolerance",
-                            context={"max_residual": max(r.residual for r in results),
-                                     "iterations": solution.nfev, "converged": bool(solution.success)})
-    return ConstraintSolution(proposals, results, int(solution.nfev),
-                              max(r.residual for r in results), bool(solution.success))
+                            context={"max_residual": max(r.residual for r in results), "iterations": report["iterations"], "converged": report["converged"]})
+    return ConstraintSolution(proposals, results, int(report["iterations"]), max(r.residual for r in results), bool(report["converged"]))

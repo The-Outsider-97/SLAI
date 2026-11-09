@@ -82,6 +82,11 @@
           },
           "material": {
             "$ref": "spatial_core.json#/$defs/uuid"
+          },
+          "family_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
           }
         },
         "additionalProperties": false
@@ -90,7 +95,9 @@
     "modifiers": {
       "type": "array",
       "maxItems": 10000,
-      "items": {"$ref": "spatial_core.json#/$defs/modifier"}
+      "items": {
+        "$ref": "spatial_core.json#/$defs/modifier"
+      }
     },
     "materials": {
       "type": "array",

@@ -754,6 +754,15 @@ class DrawingDocument(SpatialDocument):
                                      absolute_tolerance=absolute_tolerance,
                                      relative_tolerance=relative_tolerance)
 
+    def analyze_constraints(self, constraints: list | None = None, *, fixed_ids=(), absolute_tolerance: float = 1e-8) -> dict:
+        """Degrees of freedom, redundant and conflicting constraints and reference states of the stored (or given) constraints. Never edits the drawing."""
+        self._live()
+        from .constraints import analyze_constraints
+        with self._model._mutation_lock:
+            entities = deepcopy(self._model.entities)
+            requested = (deepcopy(self._model.metadata.get(CONSTRAINT_METADATA_KEY, {}).get("items", [])) if constraints is None else constraints)
+        return analyze_constraints(entities, requested, fixed_ids=fixed_ids, absolute_tolerance=absolute_tolerance)
+
     def solve_constraints(self, constraints: list | None = None, *, fixed_ids=(), commit: bool = False,
                           absolute_tolerance: float = 1e-8, relative_tolerance: float = 1e-8,
                           max_iterations: int = 300,

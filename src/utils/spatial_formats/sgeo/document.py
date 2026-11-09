@@ -718,7 +718,7 @@ class SceneDocument(SpatialDocument):
             return [{**deepcopy(f), "instance_count": use.get(f["id"], 0)} for f in self._model.families]
 
     def define_family(self, name: str, parameters: dict, generator: str = "builtin.box_v1", *,
-                      family_id: str | None = None) -> str:
+                      family_id: str | None = None, types: dict | None = None) -> str:
         """Register a parametric family. ``generator``: builtin.box_v1 (width, depth, height),
         builtin.sphere_v1 (radius) or builtin.cylinder_v1 (radius, height).
 
@@ -728,6 +728,8 @@ class SceneDocument(SpatialDocument):
         """
         family = {"id": family_id or new_id(), "name": name, "parameters": deepcopy(parameters),
                   "generator": {"kind": generator}}
+        if types:
+            family["types"] = deepcopy(types)
         validate_family(family)
         return self.apply([{"op": "add_family", "value": family}])[0]
 
@@ -746,19 +748,29 @@ class SceneDocument(SpatialDocument):
                                          "height": _length_spec(height, "height")}, "builtin.cylinder_v1",
                                   family_id=family_id)
 
-    def update_family(self, family: dict) -> str:
-        """Replace a family definition (same id) and regenerate every instance atomically."""
+    def update_family(self, family: dict, *, type_renames: dict | None = None) -> str:
+        """Replace a family definition (same id) and regenerate every instance atomically.
+
+        ``type_renames`` ({old: new}) renames family types and re-points the instances that use them in the same revision; removing a type
+        that an instance still uses is refused (nothing changes)."""
         validate_family(family)
-        return self.apply([{"op": "update_family", "id": family["id"], "value": deepcopy(family)}])[0]
+        operation = {"op": "update_family", "id": family["id"], "value": deepcopy(family)}
+        if type_renames:
+            operation["type_renames"] = dict(type_renames)
+        return self.apply([operation])[0]
 
     def remove_family(self, family_id: str) -> str:
         """Remove a family that has no instances."""
         return self.apply([{"op": "remove_family", "id": require_id(family_id)}])[0]
 
-    def instantiate(self, family_id: str, parameters: dict | None = None, **options) -> str:
-        """Place a family instance; its geometry is generated from the (bounded) parameters."""
+    def instantiate(self, family_id: str, parameters: dict | None = None, *, family_type: str | None = None, **options) -> str:
+        """Place a family instance; its geometry is generated from the (bounded) parameters.
+
+        ``family_type`` names one of the family's types; ``parameters`` are the instance's own overrides on top of it."""
         args = self._object_args(options)
         operation = {"op": "instantiate", "family_id": require_id(family_id), "parameters": deepcopy(parameters or {})}
+        if family_type is not None:
+            operation["family_type"] = family_type
         if "object_id" in args:
             operation["id"] = args.pop("object_id")
         operation.update(args)
@@ -767,6 +779,10 @@ class SceneDocument(SpatialDocument):
     def set_parameters(self, object_id: str, parameters: dict) -> str:
         """Replace an instance's parameter overrides and regenerate its geometry (ids are stable)."""
         return self.apply([{"op": "parameters", "id": require_id(object_id), "value": deepcopy(parameters)}])[0]
+
+    def set_family_type(self, object_id: str, type_name: str | None) -> str:
+        """Assign an instance to a named family type (``None`` returns it to the family defaults); its overrides are kept."""
+        return self.apply([{"op": "set_family_type", "id": require_id(object_id), "value": type_name}])[0]
 
     def update_parameters(self, object_id: str, **changes) -> str:
         """Merge ``changes`` into an instance's existing overrides."""
@@ -782,7 +798,7 @@ class SceneDocument(SpatialDocument):
             raise ValidationError("object is not a family instance")
         family = next(f for f in self._model.families if f["id"] == obj["family_id"])
         return {k: (v.value if hasattr(v, "value") else v)
-                for k, v in resolve_parameters(family, obj.get("parameters", {})).items()}
+                for k, v in resolve_parameters(family, obj.get("parameters", {}), obj.get("family_type")).items()}
 
     # -- queries ------------------------------------------------------------------------------------
     def get(self, object_id: str) -> dict:
