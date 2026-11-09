@@ -1,5 +1,6 @@
 import threading
 import time
+from copy import deepcopy
 import yaml # type: ignore
 
 from pathlib import Path
@@ -62,7 +63,7 @@ def _should_reload(current_mtime: float, current_loaded_at: float,
     if force:
         return True
     # mtime changed
-    if current_mtime != 0.0 and current_mtime != _config_cache["mtime"]:
+    if current_mtime != _config_cache["mtime"]:
         return True
     # TTL expired
     if ttl > 0 and (time.time() - current_loaded_at) > ttl:
@@ -148,7 +149,7 @@ def load_global_config(config_path: Optional[Union[str, Path]] = None, *, force_
             logger.debug(f"Using cached configuration from {abs_path_str}")
 
         # Return a copy to avoid accidental mutation of the cache
-        return dict(_config_cache["data"] or {})
+        return deepcopy(_config_cache["data"] or {})
 
 
 def reload_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
@@ -202,11 +203,11 @@ def get_config_section(section_name: str, config: Optional[Dict[str, Any]] = Non
         config = load_global_config(config_path)
     section = config.get(section_name)
     if section is None:
-        return dict(default or {})
+        return deepcopy(default or {})
     if not isinstance(section, dict):
         logger.warning(f"Config section '{section_name}' is not a dictionary, returning default")
-        return dict(default or {})
-    return dict(section)
+        return deepcopy(default or {})
+    return deepcopy(section)
 
 
 __all__ = [
