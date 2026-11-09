@@ -166,6 +166,7 @@ class SpatialAgent(BaseAgent):
             "occupancy_lookup": self._handle_occupancy_lookup,
             "occupancy_update": self._handle_occupancy_update,
             "validate_constraints": self._handle_validate_constraints,
+            "analyze_constraints": self._handle_analyze_constraints,
             "validate_polygon": self._handle_validate_polygon,
             "resolve_reference": self._handle_resolve_reference,
         }
@@ -385,6 +386,29 @@ class SpatialAgent(BaseAgent):
     def _handle_validate_constraints(payload: Mapping[str, Any]) -> dict[str, Any]:
         return Topology.validate_constraints(payload.get("entities", {}), payload.get("constraints", []),
                                              tolerance=payload.get("tolerance", DEFAULT_ABS_TOL))
+
+    @staticmethod
+    def _handle_analyze_constraints(payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Solve a geometric constraint system and report status, degrees of freedom, redundant and conflicting constraints and unresolved references.
+
+        Unlike ``validate_constraints`` (which checks a given configuration), this finds coordinates that satisfy the constraints. The analysis is local
+        (first order, at the solution found) and returns one solution; the result says so. Entities and constraints use the neutral description of
+        ``src.utils.spatial_formats.common.constraint_engine``; nothing is stored and the input is not modified."""
+        try:
+            from src.utils.spatial_formats.common import constraint_engine as engine
+            from src.utils.spatial_formats.common.errors import DependencyUnavailableError, ValidationError as EngineValidationError
+        except ImportError as exc:
+            raise SpatialQueryError("analyze_constraints needs the spatial format constraint engine, which is not importable here",
+                                    context={"reason": str(exc)}) from exc
+        entities, constraints = payload.get("entities"), payload.get("constraints")
+        if not isinstance(entities, Mapping) or not isinstance(constraints, Sequence) or isinstance(constraints, (str, bytes)):
+            raise SpatialValidationError("analyze_constraints needs entities (a mapping) and constraints (a list)",
+                                         context={"entities": type(entities).__name__, "constraints": type(constraints).__name__})
+        try:
+            return engine.analyze(entities, constraints, fixed=list(payload.get("fixed") or ()), tolerance=float(payload.get("tolerance", 1e-8)),
+                                  max_iterations=int(payload.get("max_iterations", 200)))
+        except (EngineValidationError, DependencyUnavailableError, TypeError, ValueError) as exc:
+            raise SpatialValidationError(str(exc), context={"operation": "analyze_constraints"}) from exc
 
     @staticmethod
     def _handle_validate_polygon(payload: Mapping[str, Any]) -> dict[str, Any]:
