@@ -12,6 +12,8 @@ friendly reporting, and memory-backed auditability.
 
 from __future__ import annotations
 
+import os
+import tempfile
 import json
 import math
 import threading
@@ -119,7 +121,7 @@ class RiskObservation:
         normalized: Dict[str, int] = {}
         for hazard, count in self.hazard_counts.items():
             name = _normalize_non_empty_string(hazard, "hazard_counts.key")
-            if not isinstance(count, int) or count < 0:
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise ValidationFailureError(
                     f"risk_observation.hazard_counts[{name}]",
                     count,
@@ -947,20 +949,36 @@ class RiskAdaptation:
     # Persistence and reset
     # ------------------------------------------------------------------
     def export_state(self, path: Optional[str] = None) -> str:
-        """Persist the current adaptive-risk state to disk."""
-        filename = Path(path) if path else self._state_directory / f"adaptive_risk_state_{_utcnow().strftime('%Y%m%d_%H%M%S')}.json"
-        payload = {
-            "timestamp": _utcnow().isoformat(),
-            "learning_rate": self.learning_rate,
-            "uncertainty_window": self.uncertainty_window,
-            "hazard_states": {hazard: state.to_dict() for hazard, state in self.hazard_states.items()},
-            "observation_history": [item.to_dict() for item in self.observation_history],
-            "safety_case_versions": list(self.safety_case_versions.values()),
-        }
-        try:
-            filename.write_text(json.dumps(payload, indent=2, sort_keys=False, default=str), encoding="utf-8")
-        except OSError as exc:
-            raise SerializationError("adaptive_risk_state", str(exc), payload) from exc
+        """Atomically persist one consistent risk snapshot under the model lock."""
+        filename = Path(path) if path else self._state_directory / (
+            f"adaptive_risk_state_{_utcnow().strftime('%Y%m%d_%H%M%S_%f')}.json"
+        )
+        with self._lock:
+            payload = {
+                "timestamp": _utcnow().isoformat(),
+                "learning_rate": self.learning_rate,
+                "uncertainty_window": self.uncertainty_window,
+                "hazard_states": {hazard: state.to_dict() for hazard, state in self.hazard_states.items()},
+                "observation_history": [item.to_dict() for item in self.observation_history],
+                "safety_case_versions": list(self.safety_case_versions.values()),
+            }
+            temporary = None
+            try:
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".tmp",
+                    dir=filename.parent, delete=False
+                ) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(payload, handle, indent=2, allow_nan=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, filename)
+            except (OSError, TypeError, ValueError) as exc:
+                raise SerializationError("adaptive_risk_state", str(exc), {"path": str(filename)}) from exc
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
         return str(filename)
 
     def reset_model(self, retain_last_n: int = 0,

@@ -122,27 +122,15 @@ class FallbackEvaluatorAgent(BaseAgent):
         return guard_ready and threshold_channel
 
     def predict(self, state: Any = None) -> Dict[str, Any]:
-        known_smoke_input = isinstance(state, str) and state == "test_input"
-        value = "expected_output" if known_smoke_input else "fallback_output"
-        prediction = {
-            "value": value,
-            "mode": "fallback",
-            "input": state,
-            "context": {
-                "timestamp": _utc_now_iso(),
-                "state_type": type(state).__name__ if state is not None else "none",
-                "degraded_mode": True,
-            },
-        }
+        """Fail closed: never fabricate a passing SUT response."""
         return {
-            "status": "degraded_success",
-            "prediction": prediction,
-            "confidence": 0.25,
+            "status": "unavailable",
+            "prediction": None,
+            "confidence": 0.0,
+            "execution_success": False,
             "reason": "primary_test_agent_unavailable",
-            # Backward-compatible convenience fields.
-            "value": value,
             "mode": "fallback",
-            "input": state,
+            "input_type": type(state).__name__ if state is not None else "none",
         }
 
 
@@ -795,6 +783,31 @@ class EvaluationAgent(BaseAgent):
             logger.warning("Unsupported autonomous_tasks configuration type: %s", type(task_config).__name__)
         return []
 
+    def _resolve_static_analysis_root(self, params: Mapping[str, Any]) -> Path:
+        """Resolve a caller-selected repository only against trusted config roots."""
+        default = Path(__file__).resolve().parent / "evaluators"
+        requested = params.get("codebase_path")
+        if requested is None:
+            return default
+        if not isinstance(requested, str) or not requested.strip():
+            raise ValueError("codebase_path must be a nonempty directory path")
+        permitted = self.agent_config.get("static_analysis_roots", [])
+        if not isinstance(permitted, (list, tuple)):
+            raise ValueError("Configured static_analysis_roots must be a list")
+        target = Path(requested).expanduser().resolve(strict=True)
+        if not target.is_dir():
+            raise ValueError("Static analysis target is not a directory")
+        for root in permitted:
+            if not isinstance(root, str) or not root.strip():
+                continue
+            try:
+                allowed_root = Path(root).expanduser().resolve(strict=True)
+            except OSError:
+                continue
+            if allowed_root == target or allowed_root in target.parents:
+                return target
+        raise PermissionError("Requested static analysis path is not in authorized roots")
+
     def _run_stage(
         self,
         name: str,
@@ -862,10 +875,11 @@ class EvaluationAgent(BaseAgent):
             # Static analysis -- full cycles only
             # ----------------------------------------------------------
             if not lightweight and self.protocol.static_analysis.get("enable", False):
-                evaluation_root = Path(__file__).resolve().parent / "evaluators"
                 results["static_analysis"] = self._run_stage(
                     "static_analysis",
-                    lambda: StaticAnalyzer(str(evaluation_root)).full_analysis(),
+                    lambda: StaticAnalyzer(
+                        str(self._resolve_static_analysis_root(params))
+                    ).full_analysis(),
                 )
                 if "error" not in results["static_analysis"]:
                     results["static_analysis_explanation"] = self._explain_static_results(
@@ -1186,8 +1200,15 @@ class EvaluationAgent(BaseAgent):
             except Exception:
                 shared_stats = {}
 
-            memory_fraction = float(shared_stats.get("memory_usage_percentage", 0.0) or 0.0) / 100.0
-            if memory_fraction >= self.memory_critical_threshold:
+            raw_memory_usage = shared_stats.get("memory_usage_percentage")
+            memory_fraction = (
+                float(raw_memory_usage) / 100.0
+                if _is_finite_number(raw_memory_usage) and 0.0 <= float(raw_memory_usage) <= 100.0
+                else None
+            )
+            if memory_fraction is None:
+                memory_status = "Unknown"
+            elif memory_fraction >= self.memory_critical_threshold:
                 memory_status = "Critical"
             elif memory_fraction >= self.memory_warning_threshold:
                 memory_status = "Warning"
@@ -1206,7 +1227,7 @@ class EvaluationAgent(BaseAgent):
                 overall = "Critical"
             elif warnings or "warning" in normalized_statuses or memory_status == "Warning":
                 overall = "Warning"
-            elif latest:
+            elif latest and memory_status != "Unknown":
                 overall = "Normal"
             else:
                 overall = "Unknown"
@@ -1300,7 +1321,7 @@ class EvaluationAgent(BaseAgent):
             add_warning("initialization", issue)
 
         failing_statuses = {"block", "blocked", "critical", "error", "fail", "failed", "failure"}
-        warning_statuses = {"degraded", "incomplete", "partial", "warn", "warning"}
+        warning_statuses = {"degraded", "incomplete", "partial", "warn", "warning", "no_contracts", "unknown"}
         successful_statuses = {"allow", "complete", "completed", "normal", "ok", "pass", "passed", "success", "succeeded"}
 
         for component, payload in results.items():
@@ -1330,6 +1351,10 @@ class EvaluationAgent(BaseAgent):
             static_config = as_dict(getattr(self.protocol, "static_analysis", {}))
             security_config = as_dict(static_config.get("security"))
             max_critical = numeric(security_config.get("max_critical"))
+            parse_failures = static_result.get("parse_failures", [])
+            if isinstance(parse_failures, (list, tuple)) and parse_failures:
+                add_critical("static_analysis",
+                             f"{len(parse_failures)} source file(s) were not analyzed due to parse errors")
             if critical_count > max_critical:
                 add_critical(
                     "static_analysis",
@@ -1419,7 +1444,7 @@ class EvaluationAgent(BaseAgent):
             warning_count = numeric(summary.get("warnings"))
             if status == "fail" or violation_count > 0:
                 add_critical("performance_budget", f"{int(violation_count)} budget violation(s)")
-            elif status in {"warn", "warning"} or warning_count > 0:
+            elif status in {"warn", "warning", "incomplete", "no_contracts"} or warning_count > 0:
                 add_warning("performance_budget", f"{int(warning_count)} budget warning(s)")
             elif status == "skipped":
                 mark("performance_budget", "skipped")
@@ -1683,6 +1708,8 @@ class EvaluationAgent(BaseAgent):
                     },
                 },
                 "confidence": confidence,
+                "confidence_calibrated": False,
+                "confidence_meaning": "heuristic_health_readiness_not_probability",
             }
         except Exception as exc:
             logger.error("Evaluation prediction failed: %s", exc, exc_info=True)
@@ -1737,23 +1764,16 @@ class EvaluationAgent(BaseAgent):
         self._update_risk_model(sanitized)
 
     def _sanitize_results(self, results: Dict[str, Any]) -> Dict[str, Any]:
-        protected_keys = {"notes", "feedback"}
-
-        def sanitize(value: Any, key: Optional[str] = None) -> Any:
-            if key and key.casefold() in protected_keys:
-                try:
-                    return SafetyGuard.scrub(value)
-                except Exception:
-                    return "[REDACTED]"
-            if isinstance(value, Mapping):
-                return {str(k): sanitize(v, str(k)) for k, v in value.items()}
-            if isinstance(value, list):
-                return [sanitize(item) for item in value]
-            if isinstance(value, tuple):
-                return [sanitize(item) for item in value]
-            return value
-
-        return sanitize(results)
+        """Reuse existing Safety redaction to prevent leaking sensitive telemetry."""
+        from .safety.utils.safety_helpers import redact_value
+        payload = redact_value(results, mask_identifiers=True)
+        if not isinstance(payload, dict):
+            return {"status": "redaction_failed", "critical_issues": ["Unable to sanitize evaluation results"]}
+        # Free-form notes and feedback must not be persisted.
+        for key in ("notes", "feedback"):
+            if key in payload:
+                payload[key] = "[REDACTED]"
+        return payload
 
     def _store_metrics(self, metrics: Dict[str, Any]) -> None:
         try:
@@ -2261,6 +2281,8 @@ class AIValidationSuite:
         security = report.get("security_metrics", {}) if isinstance(report, Mapping) else {}
         critical_count = int(security.get("critical_count", 0) or 0) if isinstance(security, Mapping) else 0
         max_critical = int(self.protocol.static_analysis["security"]["max_critical"])
+        if report.get("parse_failures") or int(report.get("summary", {}).get("files_analyzed", 0)) == 0:
+            raise CertificationError("Static analysis is incomplete; no certification gate can pass.")
         if critical_count > max_critical:
             raise CertificationError(
                 f"Critical static-analysis findings exceed the configured threshold: {critical_count} > {max_critical}."
@@ -2283,7 +2305,7 @@ class AIValidationSuite:
             sut=agent.perform_task,
             certification_requirements=certification_requirements,
         )
-        if str(results.get("overall_status", "")).upper() == "FAILED":
+        if str(results.get("overall_status", "")).upper() != "PASSED":
             failed = [
                 str(item.get("requirement_id", "UNKNOWN"))
                 for item in results.get("traceability_matrix", [])
@@ -2332,9 +2354,21 @@ class AIValidationSuite:
         security = static_report.get("security_metrics", {}) if isinstance(static_report, Mapping) else {}
         max_critical = int(self.protocol.static_analysis["security"]["max_critical"])
         behavioral = self.artifacts.get("behavioral_results") or {}
+        static_summary = static_report.get("summary", {}) if isinstance(static_report, Mapping) else {}
         return {
-            "static_analysis_internal_gate": int(security.get("critical_count", 0) or 0) <= max_critical,
-            "behavioral_internal_gate": str(behavioral.get("overall_status", "")).upper() != "FAILED",
+            "static_analysis_internal_gate": (
+                isinstance(static_report, Mapping)
+                and bool(static_report)
+                and not static_report.get("parse_failures")
+                and int(static_summary.get("files_analyzed", 0) or 0) > 0
+                and isinstance(security, Mapping)
+                and "critical_count" in security
+                and int(security["critical_count"] or 0) <= max_critical
+            ),
+            "behavioral_internal_gate": (
+                str(behavioral.get("overall_status", "")).upper() == "PASSED"
+                and bool(behavioral.get("traceability_matrix"))
+            ),
             "safety_case_present": bool(self.artifacts.get("safety_case")),
         }
 
