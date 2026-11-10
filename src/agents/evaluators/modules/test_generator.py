@@ -227,8 +227,11 @@ def prepare_dataset(source_file: str | Path, output_dir: str | Path) -> dict[str
     hashes = {}
     for name, rows in partitions.items():
         payload = "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows)
-        (dest / (name + ".jsonl")).write_text(payload, encoding="utf-8")
-        hashes[name] = _digest(payload.encode("utf-8"))
+        encoded = payload.encode("utf-8")
+        # Write bytes, not text: text mode turns "\n" into "\r\n" on Windows,
+        # so the file on disk would no longer match the recorded digest.
+        (dest / (name + ".jsonl")).write_bytes(encoded)
+        hashes[name] = _digest(encoded)
     summary = {
         "schema": SCHEMA, "counts": {k: len(v) for k, v in partitions.items()},
         "groups": {k: len({r["group"] for r in v}) for k, v in partitions.items()},

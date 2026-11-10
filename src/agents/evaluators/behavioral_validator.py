@@ -129,6 +129,10 @@ class BehavioralValidator:
         "monitoring": 2,
     }
 
+    # Default cap on reported failure modes; __init__ overrides it from config.
+    # Declared at class level so partially-constructed validators stay usable.
+    max_failure_modes: int = 10
+
     def __init__(
         self,
         test_cases: Optional[Sequence[Mapping[str, Any]]] = None,
