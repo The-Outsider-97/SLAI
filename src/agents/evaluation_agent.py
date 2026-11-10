@@ -795,6 +795,31 @@ class EvaluationAgent(BaseAgent):
             logger.warning("Unsupported autonomous_tasks configuration type: %s", type(task_config).__name__)
         return []
 
+    def _resolve_static_analysis_root(self, params: Mapping[str, Any]) -> Path:
+        """Resolve a caller-selected repository only against trusted config roots."""
+        default = Path(__file__).resolve().parent / "evaluators"
+        requested = params.get("codebase_path")
+        if requested is None:
+            return default
+        if not isinstance(requested, str) or not requested.strip():
+            raise ValueError("codebase_path must be a nonempty directory path")
+        permitted = self.agent_config.get("static_analysis_roots", [])
+        if not isinstance(permitted, (list, tuple)):
+            raise ValueError("Configured static_analysis_roots must be a list")
+        target = Path(requested).expanduser().resolve(strict=True)
+        if not target.is_dir():
+            raise ValueError("Static analysis target is not a directory")
+        for root in permitted:
+            if not isinstance(root, str) or not root.strip():
+                continue
+            try:
+                allowed_root = Path(root).expanduser().resolve(strict=True)
+            except OSError:
+                continue
+            if allowed_root == target or allowed_root in target.parents:
+                return target
+        raise PermissionError("Requested static analysis path is not in authorized roots")
+
     def _run_stage(
         self,
         name: str,
@@ -862,10 +887,11 @@ class EvaluationAgent(BaseAgent):
             # Static analysis -- full cycles only
             # ----------------------------------------------------------
             if not lightweight and self.protocol.static_analysis.get("enable", False):
-                evaluation_root = Path(__file__).resolve().parent / "evaluators"
                 results["static_analysis"] = self._run_stage(
                     "static_analysis",
-                    lambda: StaticAnalyzer(str(evaluation_root)).full_analysis(),
+                    lambda: StaticAnalyzer(
+                        str(self._resolve_static_analysis_root(params))
+                    ).full_analysis(),
                 )
                 if "error" not in results["static_analysis"]:
                     results["static_analysis_explanation"] = self._explain_static_results(
@@ -1337,6 +1363,10 @@ class EvaluationAgent(BaseAgent):
             static_config = as_dict(getattr(self.protocol, "static_analysis", {}))
             security_config = as_dict(static_config.get("security"))
             max_critical = numeric(security_config.get("max_critical"))
+            parse_failures = static_result.get("parse_failures", [])
+            if isinstance(parse_failures, (list, tuple)) and parse_failures:
+                add_critical("static_analysis",
+                             f"{len(parse_failures)} source file(s) were not analyzed due to parse errors")
             if critical_count > max_critical:
                 add_critical(
                     "static_analysis",
