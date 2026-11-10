@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import tempfile
+from copy import deepcopy
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -65,7 +67,7 @@ class MemoryEntry:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "data": self.data,
+            "data": deepcopy(self.data),
             "metadata": self.metadata.to_dict(),
         }
 
@@ -231,7 +233,7 @@ class EvaluatorsMemory:
                 custom_metadata=custom_metadata,
             )
 
-            self.store[target_id] = MemoryEntry(data=entry, metadata=entry_metadata)
+            self.store[target_id] = MemoryEntry(data=deepcopy(entry), metadata=entry_metadata)
             if self.eviction_policy == "LRU":
                 self.store.move_to_end(target_id)
 
@@ -369,10 +371,26 @@ class EvaluatorsMemory:
             if record is None:
                 raise MemoryAccessError("update", entry_id, "entry not found")
 
+            # Validate all user-supplied updates before touching indexes.
+            if entry is not None:
+                self._safe_serialize(entry)
+            if tags is not None:
+                self._normalize_tags(tags)
+            if priority is not None:
+                self._normalize_priority(priority)
+            if metadata is not None:
+                self._normalize_metadata_mapping(metadata)
+            if source is not None:
+                self._normalize_optional_string(source, "source")
+            if category is not None:
+                self._normalize_non_empty_string(category, "category")
+            if ttl_seconds is not None and ttl_seconds > 0:
+                self._require_positive_integer(ttl_seconds, "ttl_seconds")
+
             self._deindex_entry(entry_id, record)
 
             if entry is not None:
-                record.data = entry
+                record.data = deepcopy(entry)
                 serialized_entry = self._safe_serialize(entry)
                 record.metadata.size_bytes = len(serialized_entry.encode("utf-8"))
                 record.metadata.checksum = hashlib.sha256(serialized_entry.encode("utf-8")).hexdigest()
@@ -970,7 +988,17 @@ class EvaluatorsMemory:
                 version=self._require_positive_integer(metadata_payload.get("version", 1), "version"),
                 custom_metadata=self._normalize_metadata_mapping(metadata_payload.get("custom_metadata", {})),
             )
-            records.append(MemoryEntry(data=item.get("data"), metadata=metadata))
+            serialized = self._safe_serialize(item.get("data"))
+            actual_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+            if actual_hash != metadata.checksum or len(serialized.encode("utf-8")) != metadata.size_bytes:
+                raise ValidationFailureError(
+                    "checkpoint_entry_integrity", metadata.entry_id,
+                    "checksum and serialized size must match stored entry",
+                )
+            records.append(MemoryEntry(data=deepcopy(item.get("data")), metadata=metadata))
+        ids = [record.metadata.entry_id for record in records]
+        if len(set(ids)) != len(ids):
+            raise ValidationFailureError("checkpoint_entry_ids", ids, "unique entry identifiers")
         return records
 
     def _rebuild_indexes(self) -> None:
@@ -985,6 +1013,8 @@ class EvaluatorsMemory:
             return f"eval_memory_{_utcnow().strftime('%Y%m%d_%H%M%S')}.json"
 
         normalized = self._normalize_non_empty_string(name, "checkpoint_name")
+        if normalized in (".", "..") or "/" in normalized or chr(92) in normalized or ".." in normalized:
+            raise ValidationFailureError("checkpoint_name", normalized, "simple filename without traversal")
         if not normalized.endswith(".json"):
             normalized = f"{normalized}.json"
         return normalized
