@@ -542,31 +542,41 @@ class EvaluatorsMemory:
     # ------------------------------------------------------------------
 
     def create_checkpoint(self, name: Optional[str] = None, *, include_config: bool = False) -> str:
-        """Persist the full memory state to a checkpoint file."""
+        """Atomically save one consistent snapshot under the existing lock."""
         checkpoint_name = self._normalize_checkpoint_name(name)
         checkpoint_path = self.checkpoint_dir / checkpoint_name
+        with self.lock:
+            payload = {
+                "format_version": 1,
+                "created_at": _utcnow().isoformat(),
+                "store": [record.to_dict() for record in self.store.values()],
+                "stats": dict(self.stats),
+                "counters": {
+                    "access_counter": self.access_counter,
+                    "operation_counter": self.operation_counter,
+                },
+            }
+            if include_config:
+                payload["config"] = {"evaluators_memory": deepcopy(self.memory_config)}
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", suffix=".tmp",
+                    dir=self.checkpoint_dir, delete=False
+                ) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(payload, handle, indent=2, default=str, allow_nan=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, checkpoint_path)
+            except (OSError, TypeError, ValueError) as exc:
+                raise MemoryAccessError("checkpoint_write", str(checkpoint_path), str(exc)) from exc
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
 
-        payload = {
-            "format_version": 1,
-            "created_at": _utcnow().isoformat(),
-            "store": [record.to_dict() for record in self.store.values()],
-            "stats": dict(self.stats),
-            "counters": {
-                "access_counter": self.access_counter,
-                "operation_counter": self.operation_counter,
-            },
-        }
-        if include_config:
-            payload["config"] = {"evaluators_memory": dict(self.memory_config)}
-
-        try:
-            with open(checkpoint_path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, default=str)
-        except (OSError, TypeError, ValueError) as exc:
-            raise MemoryAccessError("checkpoint_write", str(checkpoint_path), str(exc)) from exc
-
-        self.last_checkpoint = str(checkpoint_path)
-        self.stats["checkpoints_created"] += 1
+            self.last_checkpoint = str(checkpoint_path)
+            self.stats["checkpoints_created"] += 1
         logger.info("Checkpoint created: %s", checkpoint_path)
         return str(checkpoint_path)
 
@@ -584,9 +594,26 @@ class EvaluatorsMemory:
         if "store" not in payload:
             raise ValidationFailureError("checkpoint_store_field", list(payload.keys()), "store")
 
+        if payload.get("format_version") != 1:
+            raise ValidationFailureError("checkpoint_version", payload.get("format_version"), "version 1")
         loaded_entries = self._deserialize_checkpoint_entries(payload["store"])
+        counters = payload.get("counters", {})
+        if not isinstance(counters, Mapping):
+            raise ValidationFailureError("checkpoint_counters", counters, "mapping")
+        try:
+            incoming_access = int(counters.get("access_counter", self.access_counter))
+            incoming_ops = int(counters.get("operation_counter", self.operation_counter))
+        except (ValueError, TypeError) as exc:
+            raise ValidationFailureError("checkpoint_counters", counters, "nonnegative integers") from exc
+        if incoming_access < 0 or incoming_ops < 0:
+            raise ValidationFailureError("checkpoint_counters", counters, "nonnegative integers")
 
         with self.lock:
+            target_size = len({*([r.metadata.entry_id for r in loaded_entries]),
+                               *(self.store.keys() if merge else ())})
+            if target_size > self.max_size:
+                raise ValidationFailureError("checkpoint_capacity", target_size,
+                                             f"at most {self.max_size} entries")
             if not merge:
                 self.clear()
 
@@ -594,10 +621,8 @@ class EvaluatorsMemory:
                 self.store[record.metadata.entry_id] = record
 
             self._rebuild_indexes()
-            counters = payload.get("counters", {})
-            if isinstance(counters, Mapping):
-                self.access_counter = int(counters.get("access_counter", self.access_counter))
-                self.operation_counter = int(counters.get("operation_counter", self.operation_counter))
+            self.access_counter = incoming_access
+            self.operation_counter = incoming_ops
 
             self.last_checkpoint = str(checkpoint_path)
             self.stats["checkpoints_loaded"] += 1
@@ -873,7 +898,7 @@ class EvaluatorsMemory:
 
     def _safe_serialize(self, value: Any) -> str:
         try:
-            return json.dumps(value, sort_keys=True, default=str)
+            return json.dumps(value, sort_keys=True, default=str, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise ValidationFailureError("entry_serialization", type(value).__name__, f"JSON-serializable payload: {exc}") from exc
 
@@ -1010,7 +1035,7 @@ class EvaluatorsMemory:
 
     def _normalize_checkpoint_name(self, name: Optional[str]) -> str:
         if name is None:
-            return f"eval_memory_{_utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+            return f"eval_memory_{_utcnow().strftime('%Y%m%d_%H%M%S_%f')}.json"
 
         normalized = self._normalize_non_empty_string(name, "checkpoint_name")
         if normalized in (".", "..") or "/" in normalized or chr(92) in normalized or ".." in normalized:
