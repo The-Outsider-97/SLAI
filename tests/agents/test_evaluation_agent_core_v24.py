@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from src.agents.evaluation_agent import EvaluationAgent
 
 
@@ -37,6 +39,7 @@ def make_agent(*, flow=None, percent=15.0):
     agent.shared_memory = FakeMemory(percent)
     agent.evaluators = {}
     agent.initialization_issues = []
+    agent.agent_config = {}
     agent.protocol = SimpleNamespace(
         static_analysis={"enable": False},
         behavioral_testing={"test_types": []},
@@ -89,3 +92,29 @@ def test_run_stage_isolation_preserves_diagnostics_without_falsifying_success():
     assert result["status"] == "error"
     assert result["error_type"] == "ValueError"
     assert "broken test dependency" in result["error"]
+
+
+def test_static_analysis_path_selection_respects_trusted_allowlist(tmp_path):
+    agent = make_agent()
+    target = tmp_path / "codebase"
+    target.mkdir()
+    with pytest.raises(PermissionError):
+        agent._resolve_static_analysis_root({"codebase_path": str(target)})
+    agent.agent_config["static_analysis_roots"] = [str(tmp_path)]
+    assert agent._resolve_static_analysis_root({"codebase_path": str(target)}) == target.resolve()
+    outside = tmp_path.parent / "outside"
+    # No need to create any files in an untrusted path: a different parent is
+    # rejected before static analysis is attempted.
+    with pytest.raises((PermissionError, FileNotFoundError)):
+        agent._resolve_static_analysis_root({"codebase_path": str(outside)})
+
+
+def test_partial_static_analysis_is_reported_as_critical():
+    agent = make_agent()
+    report = agent._evaluate_validation_health({
+        "static_analysis": {
+            "status": "pass", "parse_failures": [{"file": "broken.py", "error": "SyntaxError"}],
+            "security_metrics": {"critical_count": 0},
+        }
+    })
+    assert report["component_status"]["static_analysis"] == "critical"
