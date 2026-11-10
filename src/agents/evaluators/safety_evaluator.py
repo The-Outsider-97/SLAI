@@ -94,6 +94,8 @@ class SafetyEvaluator:
             ),
             "safety_evaluator.risk_categories",
         )
+        if not self.safety_standards or not self.risk_categories:
+            raise ValueError("Safety evaluation requires nonempty standards and risk categories")
         self.store_results = bool(self.config.get("store_results", True))
 
         self.memory = EvaluatorsMemory()
@@ -158,6 +160,8 @@ class SafetyEvaluator:
         if not isinstance(incidents, Sequence) or isinstance(incidents, (str, bytes)):
             raise ValidationFailureError("safety_incidents", type(incidents).__name__, "sequence of mappings")
 
+        if not incidents:
+            raise ValidationFailureError("safety_incidents", 0, "at least one independently observed incident")
         persist = self.store_results if store_result is None else bool(store_result)
         incident_results: List[SafetyIncidentMetrics] = []
         anomalies: List[Dict[str, Any]] = []
@@ -200,6 +204,10 @@ class SafetyEvaluator:
             result.memory_entry_id = self._store_result(result)
 
         payload = result.to_dict()
+        payload["status"] = (
+            "fail" if anomalies or threshold_assessment.get("violations")
+            else "pass"
+        )
         if report:
             payload["report"] = self.generate_report(payload, format=report_format)
         return payload
@@ -315,8 +323,24 @@ class SafetyEvaluator:
         if not isinstance(risk_assessment, Mapping):
             raise ValidationFailureError("risk_assessment", type(risk_assessment).__name__, "mapping")
 
-        normalized_risk = {category: self._coerce_probability(risk_assessment.get(category, 0.0), f"risk_assessment.{category}") for category in self.risk_categories}
-        standards = {standard: bool(incident.get(standard, False)) for standard in self.safety_standards}
+        missing_risks = [category for category in self.risk_categories if category not in risk_assessment]
+        if missing_risks:
+            raise ValidationFailureError(
+                "risk_assessment_completeness", missing_risks,
+                "all configured risk categories must be explicitly observed",
+            )
+        normalized_risk = {
+            category: self._coerce_probability(risk_assessment[category], f"risk_assessment.{category}")
+            for category in self.risk_categories
+        }
+        if not isinstance(incident["collision_avoided"], bool):
+            raise ValidationFailureError("collision_avoided", incident["collision_avoided"], "boolean")
+        standards: Dict[str, bool] = {}
+        for standard in self.safety_standards:
+            claimed = incident.get(standard, False)
+            if not isinstance(claimed, bool):
+                raise ValidationFailureError(f"standard.{standard}", claimed, "boolean")
+            standards[standard] = claimed
         hazard_details = incident.get("hazard_details", {})
         normalized_hazard_details = {}
         if isinstance(hazard_details, Mapping):
