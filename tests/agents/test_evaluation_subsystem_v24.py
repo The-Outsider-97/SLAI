@@ -386,3 +386,26 @@ def test_lazy_evaluator_module_exports_preserved():
     assert exports.ValidationProtocol is ValidationProtocol
     assert "EvaluationTransformer" in exports.__all__
     assert callable(exports.__getattr__)
+
+
+def test_autonomous_undefined_path_deviation_remains_json_serializable():
+    from src.agents.evaluators.autonomous_evaluator import TaskMetrics
+    evaluator = AutonomousEvaluator.__new__(AutonomousEvaluator)
+    evaluator.thresholds = {
+        "max_path_deviation": 1.2, "max_energy_per_task": 100.0,
+        "max_collisions": 0,
+    }
+    metric = TaskMetrics(
+        task_id="case", task_type="navigation",
+        completion_time=1.0, path_length=5.0,
+        optimal_path_length=0.0, energy_consumed=10.0,
+        success=False, collisions=0, deviation_from_optimal=float("inf"),
+        path_efficiency=0.0, energy_efficiency=0.5,
+        waypoint_count=2, graph_available=False,
+    )
+    serialized = metric.to_dict()
+    assert serialized["deviation_from_optimal"] is None
+    json.dumps(serialized, allow_nan=False)
+    violations = evaluator._evaluate_task_thresholds(metric)
+    assert violations[0]["value"] is None
+    json.dumps(violations, allow_nan=False)
