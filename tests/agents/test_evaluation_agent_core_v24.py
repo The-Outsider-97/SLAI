@@ -1,0 +1,91 @@
+"""Evaluation Agent orchestration regressions (domain-neutral and dependency-light)."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from src.agents.evaluation_agent import EvaluationAgent
+
+
+class FakeMemory:
+    def __init__(self, percent=15.0):
+        self.percent = percent
+        self.data = {}
+        self.history = []
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    def metrics(self):
+        return {"access_count": 0}
+
+    def get_usage_stats(self):
+        return {
+            "memory_usage_percentage": self.percent,
+            "available_memory_mb": 500,
+            "item_count": len(self.data),
+        }
+
+    def set(self, key, val):
+        self.data[key] = val
+
+    def append(self, key, val):
+        self.history.append((key, val))
+
+
+def make_agent(*, flow=None, percent=15.0):
+    agent = EvaluationAgent.__new__(EvaluationAgent)
+    agent.shared_memory = FakeMemory(percent)
+    agent.evaluators = {}
+    agent.initialization_issues = []
+    agent.protocol = SimpleNamespace(
+        static_analysis={"enable": False},
+        behavioral_testing={"test_types": []},
+        get_enabled_evaluation_flow=lambda: flow or {
+            "enable_performance": False, "enable_efficiency": False,
+            "enable_resource": False, "enable_statistical": False,
+        },
+    )
+    agent.memory_warning_threshold = 0.7
+    agent.memory_critical_threshold = 0.9
+    return agent
+
+
+def test_failing_optional_stage_does_not_hide_evaluation_error():
+    agent = make_agent()
+    result = agent.execute_validation_cycle({
+        "lightweight": True, "persist_results": False,
+        "resource_result": {"status": "error", "error": "unavailable sensor"},
+    })
+    assert result["status"] == "critical"
+    assert any("resource" in str(issue) for issue in result["critical_issues"])
+    assert result["completed_at"]
+    assert result["duration_ms"] >= 0
+
+
+def test_incomplete_budget_and_no_contracts_are_never_reported_as_healthy():
+    agent = make_agent()
+    for value in ({"status": "incomplete", "summary": {"missing_evidence": 2}},
+                  {"status": "no_contracts", "summary": {"missing_evidence": 0}}):
+        warnings = agent._evaluate_validation_health(
+            {"performance_budget": value}, {}
+        )
+        assert warnings["component_status"]["performance_budget"] == "warning"
+        assert warnings["warnings"]
+
+
+def test_unknown_resource_utilization_does_not_masquerade_as_normal():
+    agent = make_agent(percent=float("nan"))
+    agent.shared_memory.data["latest_metrics"] = {"accuracy": 0.5}
+    status = agent.get_overall_system_health()
+    assert status["status"] == "Unknown"
+    assert status["shared_memory"]["status"] == "Unknown"
+
+
+def test_run_stage_isolation_preserves_diagnostics_without_falsifying_success():
+    agent = make_agent()
+    def explode():
+        raise ValueError("broken test dependency")
+    result = agent._run_stage("behavioral", explode)
+    assert result["status"] == "error"
+    assert result["error_type"] == "ValueError"
+    assert "broken test dependency" in result["error"]
