@@ -121,7 +121,10 @@ class StatisticalEvaluator:
         )
         pairwise_summary = self._build_pairwise_summary(analysis)
         advanced_analysis = {
-            "demsar_protocol": self._build_demsar_protocol(normalized_datasets),
+            "demsar_protocol": self._build_demsar_protocol(
+                normalized_datasets,
+                paired_design=metadata.get("paired_design") is True if isinstance(metadata, Mapping) else False,
+            ),
             "dataset_cardinality": {name: len(values) for name, values in normalized_datasets.items()},
         }
         diagnostics = self._build_diagnostics(normalized_datasets, analysis)
@@ -364,7 +367,8 @@ class StatisticalEvaluator:
 
     def _build_pairwise_summary(self, analysis: Mapping[str, Any]) -> Dict[str, Any]:
         pairwise = analysis.get("pairwise_tests", {})
-        significant = [name for name, value in pairwise.items() if value.get("t_test", {}).get("significant")]
+        significant = [name for name, value in pairwise.items()
+                       if value.get("t_test", {}).get("significant_bh") is True]
         strongest = None
         strongest_value = -1.0
         for name, value in analysis.get("effect_sizes", {}).items():
@@ -375,23 +379,30 @@ class StatisticalEvaluator:
         return {
             "significant_comparisons": significant,
             "significant_count": len(significant),
+            "significance_correction": "Benjamini-Hochberg FDR",
             "strongest_effect": strongest,
         }
 
-    def _build_demsar_protocol(self, datasets: Mapping[str, Sequence[float]]) -> Dict[str, Any]:
+    def _build_demsar_protocol(
+        self, datasets: Mapping[str, Sequence[float]], *, paired_design: bool = False
+    ) -> Dict[str, Any]:
         names = list(datasets.keys())
-        if len(names) != 2:
-            return {"status": "skipped", "reason": "Requires exactly two paired datasets."}
+        if len(names) != 2 or not paired_design:
+            return {"status": "skipped", "reason": "Requires two explicitly paired datasets."}
+        if len(datasets[names[0]]) != len(datasets[names[1]]):
+            return {"status": "skipped", "reason": "Unequal paired sample lengths."}
         return self.statistical_analysis(datasets[names[0]], datasets[names[1]])
 
     def _build_diagnostics(self, datasets: Mapping[str, Sequence[float]], analysis: Mapping[str, Any]) -> Dict[str, Any]:
         normality = analysis.get("normality", {})
         non_normal = [name for name, result in normality.items() if result.get("is_normal") is False]
-        low_power = [name for name, power in analysis.get("power_analysis", {}).items() if float(power) < 0.8]
+        low_power = [name for name, power in analysis.get("power_analysis", {}).items()
+                     if isinstance(power, (int, float)) and math.isfinite(float(power)) and float(power) < 0.8]
         return {
             "dataset_count": len(datasets),
             "non_normal_datasets": non_normal,
             "low_power_datasets": low_power,
+            "power_analysis_status": analysis.get("power_analysis_status", "not_estimated"),
             "significant_pairwise_tests": self._build_pairwise_summary(analysis).get("significant_count", 0),
         }
 
@@ -401,8 +412,10 @@ class StatisticalEvaluator:
             recommendations.append("Consider non-parametric alternatives for datasets that fail normality assumptions.")
         if diagnostics.get("low_power_datasets"):
             recommendations.append("Increase sample size for low-power datasets before drawing strong conclusions.")
+        if diagnostics.get("power_analysis_status") != "ok":
+            recommendations.append("Power was not estimated: provide a prespecified effect size and sample design.")
         if not recommendations:
-            recommendations.append("Statistical assumptions and power look acceptable for the evaluated datasets.")
+            recommendations.append("No diagnostic issue was identified in the available evidence; this is not proof that all assumptions hold.")
         if self._build_pairwise_summary(analysis).get("significant_count", 0) == 0:
             recommendations.append("No statistically significant pairwise differences were detected at the configured alpha level.")
         return recommendations
