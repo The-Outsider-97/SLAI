@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -403,9 +404,9 @@ class CertificationManager:
             timestamp=str(evidence["timestamp"]),
             evidence_types=normalized_types,
             content_hash=content_hash,
-            content=evidence["content"],
+            content=deepcopy(evidence["content"]),
             source=evidence.get("source"),
-            metadata=dict(evidence.get("metadata", {})),
+            metadata=deepcopy(dict(evidence.get("metadata", {}))),
         )
         self.evidence_registry.append(record)
         logger.info(
@@ -454,6 +455,8 @@ class CertificationManager:
             "requirements": [req.description for req in self.get_requirements_for_level()],
             "unmet_requirements": list(report.unmet_requirements),
             "evidence_count": report.evidence_count,
+            "assessment_only": True,
+            "independent_certification_granted": False,
         }
         return certificate
 
@@ -479,7 +482,10 @@ class CertificationManager:
         unmet_requirements: List[str] = []
 
         for requirement in level_requirements:
-            matched_records = self._find_matching_evidence(requirement)
+            matched_records = [
+                record for record in self._find_matching_evidence(requirement)
+                if self._evidence_confirms_requirement(record, requirement)
+            ]
             covered_types = {
                 evidence_type.casefold()
                 for record in matched_records
@@ -524,6 +530,22 @@ class CertificationManager:
             len(unmet_requirements),
         )
         return report
+
+    def _evidence_confirms_requirement(
+        self, record: EvidenceRecord, requirement: CertificationRequirement
+    ) -> bool:
+        """A submitted artifact is not proof that a requirement passed."""
+        metadata = record.metadata
+        ids = metadata.get("requirement_ids")
+        if not isinstance(ids, (list, tuple)) or requirement.requirement_id not in ids:
+            return False
+        if metadata.get("verification_status") != "verified" or metadata.get("passed") is not True:
+            return False
+        # Detect in-memory alterations to evidence after it was registered.
+        current_hash = hashlib.sha256(
+            self._canonical_json(record.content).encode("utf-8")
+        ).hexdigest()
+        return current_hash == record.content_hash
 
     def _find_matching_evidence(self, requirement: CertificationRequirement) -> List[EvidenceRecord]:
         """
