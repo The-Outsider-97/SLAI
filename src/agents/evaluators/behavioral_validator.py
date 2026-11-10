@@ -1130,6 +1130,7 @@ class BehavioralValidator:
     def _empty_results(self, *, suite_name: str) -> Dict[str, Any]:
         now = _utcnow()
         return {
+            "status": "skipped",
             "metadata": {
                 "timestamp": now.isoformat(),
                 "started_at": now.isoformat(),
@@ -1157,7 +1158,7 @@ class BehavioralValidator:
             "thresholds": {
                 "configured": dict(self.thresholds),
                 "events": [],
-                "passed": True,
+                "passed": None,
             },
             "records": [],
             "failure_modes": [],
