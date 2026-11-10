@@ -63,6 +63,34 @@ validation, safety, lifecycle and compatibility. Not all files in scope require
 edits; for example the existing ValidationProtocol, visualizer architecture,
 and evaluator calculations were retained rather than rewritten.
 
+## Additional subsystem-wide corrections
+
+- AdaptiveRisk: boolean hazard counts are rejected (Python's bool is a subtype
+  of int); risk snapshots are now serialized as atomic files from a locked
+  model state, avoiding torn updates.
+- EfficiencyEvaluator: PyTorch and Qt are no longer imported merely to run
+  ordinary evaluation. A producer's energy usage is not estimated from
+  EvaluationAgent's own runtime: an independently supplied measurement or
+  complete generation-time evidence is required for a modeled estimate.
+  Without evidence, the legacy numeric field remains zero for compatibility,
+  but the report explicitly warns that zero is **unknown, not zero energy**.
+- AutonomousEvaluator: optional NetworkX/Matplotlib dependencies are imported
+  only for requested plan-graph analysis/visualization. Undefined infinite
+  path deviations are serialized as null with an explicit invalidity indicator
+  and a failure, not emitted as non-standard JSON infinity.
+- BehavioralValidator: Qt bindings are deferred until chart generation; normal
+  validation no longer requires a PyQt installation at import time.
+- Evaluation transformer: modules/__init__.py uses lazy public exports,
+  preserving exported names while preventing optional PyTorch from loading
+  during basic evaluator calculations and validation protocol import.
+- ValidationProtocol rejects NaN and infinity in configuration thresholds.
+- Resource utilization selects a native drive root on Windows rather than
+  always sampling the POSIX root "/" for disk usage.
+
+These changes preserve the core evaluation path where optional visualization
+and neural model dependencies are absent. They still require runtime
+verification on Windows and supported Linux environments.
+
 ## Data, schema and compatibility considerations
 
 Some changes are deliberately fail-closed and change *incorrect previous*
