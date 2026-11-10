@@ -1186,8 +1186,15 @@ class EvaluationAgent(BaseAgent):
             except Exception:
                 shared_stats = {}
 
-            memory_fraction = float(shared_stats.get("memory_usage_percentage", 0.0) or 0.0) / 100.0
-            if memory_fraction >= self.memory_critical_threshold:
+            raw_memory_usage = shared_stats.get("memory_usage_percentage")
+            memory_fraction = (
+                float(raw_memory_usage) / 100.0
+                if _is_finite_number(raw_memory_usage) and 0.0 <= float(raw_memory_usage) <= 100.0
+                else None
+            )
+            if memory_fraction is None:
+                memory_status = "Unknown"
+            elif memory_fraction >= self.memory_critical_threshold:
                 memory_status = "Critical"
             elif memory_fraction >= self.memory_warning_threshold:
                 memory_status = "Warning"
@@ -1206,7 +1213,7 @@ class EvaluationAgent(BaseAgent):
                 overall = "Critical"
             elif warnings or "warning" in normalized_statuses or memory_status == "Warning":
                 overall = "Warning"
-            elif latest:
+            elif latest and memory_status != "Unknown":
                 overall = "Normal"
             else:
                 overall = "Unknown"
@@ -1300,7 +1307,7 @@ class EvaluationAgent(BaseAgent):
             add_warning("initialization", issue)
 
         failing_statuses = {"block", "blocked", "critical", "error", "fail", "failed", "failure"}
-        warning_statuses = {"degraded", "incomplete", "partial", "warn", "warning"}
+        warning_statuses = {"degraded", "incomplete", "partial", "warn", "warning", "no_contracts", "unknown"}
         successful_statuses = {"allow", "complete", "completed", "normal", "ok", "pass", "passed", "success", "succeeded"}
 
         for component, payload in results.items():
@@ -1419,7 +1426,7 @@ class EvaluationAgent(BaseAgent):
             warning_count = numeric(summary.get("warnings"))
             if status == "fail" or violation_count > 0:
                 add_critical("performance_budget", f"{int(violation_count)} budget violation(s)")
-            elif status in {"warn", "warning"} or warning_count > 0:
+            elif status in {"warn", "warning", "incomplete", "no_contracts"} or warning_count > 0:
                 add_warning("performance_budget", f"{int(warning_count)} budget warning(s)")
             elif status == "skipped":
                 mark("performance_budget", "skipped")
@@ -1683,6 +1690,8 @@ class EvaluationAgent(BaseAgent):
                     },
                 },
                 "confidence": confidence,
+                "confidence_calibrated": False,
+                "confidence_meaning": "heuristic_health_readiness_not_probability",
             }
         except Exception as exc:
             logger.error("Evaluation prediction failed: %s", exc, exc_info=True)
@@ -1737,23 +1746,16 @@ class EvaluationAgent(BaseAgent):
         self._update_risk_model(sanitized)
 
     def _sanitize_results(self, results: Dict[str, Any]) -> Dict[str, Any]:
-        protected_keys = {"notes", "feedback"}
-
-        def sanitize(value: Any, key: Optional[str] = None) -> Any:
-            if key and key.casefold() in protected_keys:
-                try:
-                    return SafetyGuard.scrub(value)
-                except Exception:
-                    return "[REDACTED]"
-            if isinstance(value, Mapping):
-                return {str(k): sanitize(v, str(k)) for k, v in value.items()}
-            if isinstance(value, list):
-                return [sanitize(item) for item in value]
-            if isinstance(value, tuple):
-                return [sanitize(item) for item in value]
-            return value
-
-        return sanitize(results)
+        """Reuse existing Safety redaction to prevent leaking sensitive telemetry."""
+        from .safety.utils.safety_helpers import redact_value
+        payload = redact_value(results, mask_identifiers=True)
+        if not isinstance(payload, dict):
+            return {"status": "redaction_failed", "critical_issues": ["Unable to sanitize evaluation results"]}
+        # Free-form notes and feedback must not be persisted.
+        for key in ("notes", "feedback"):
+            if key in payload:
+                payload[key] = "[REDACTED]"
+        return payload
 
     def _store_metrics(self, metrics: Dict[str, Any]) -> None:
         try:
