@@ -282,3 +282,39 @@ def test_evaluation_memory_integrity_and_atomic_checkpoint(tmp_path, monkeypatch
     with pytest.raises(Exception):
         store.load_checkpoint(path)
     assert store.get(key)["data"]["nested"]["value"] == 1
+
+
+def test_performance_prediction_mapping_alignment_and_nonfinite_inputs():
+    from src.agents.evaluators.performance_evaluator import PerformanceEvaluator
+    evaluator = PerformanceEvaluator.__new__(PerformanceEvaluator)
+    evaluator.threshold = 0.5
+    evaluator.classes = [0, 1]
+    labels, scores = evaluator._extract_predictions_from_mappings([
+        {"label": 1, "probabilities": [0.2, 0.8]},
+        {"probabilities": [0.9, 0.1]},
+    ], expected_len=2)
+    assert labels == [1, 0]
+    assert scores == [[0.2, 0.8], [0.9, 0.1]]
+    with pytest.raises(Exception):
+        evaluator._extract_predictions_from_mappings([
+            {"probabilities": [0.2, 0.8]},
+            {"label": 1},
+        ], expected_len=2)
+    for invalid in ([0.2, float("nan")], [[0.1, 0.9], [float("inf"), 0.2]], [[0.9], [0.5, 0.5]]):
+        with pytest.raises(Exception):
+            evaluator._coerce_probabilities(invalid, expected_len=2)
+
+
+def test_infrastructure_refuses_fake_tuning_or_implicit_hazard_updates():
+    from src.agents.evaluators.base_infra import InfrastructureManager
+    manager = InfrastructureManager.__new__(InfrastructureManager)
+    manager._evaluation_function = None
+    manager.tuner = None
+    manager.config = {"initial_hazard_rates": {"system_failure": 0.000001}}
+    with pytest.raises(RuntimeError):
+        manager._agent_evaluator({"param": 42})
+    assert manager.automated_tuning_cycle()["status"] == "disabled"
+    manager._evaluation_function = lambda params: 0.73
+    assert manager._agent_evaluator({}) == pytest.approx(0.73)
+    assert manager._update_risk_profile({"best_score": 0.82}) == pytest.approx(0.82)
+    assert manager.config["initial_hazard_rates"] == {"system_failure": 0.000001}
