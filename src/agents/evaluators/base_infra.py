@@ -5,10 +5,11 @@ Implements version control, rollback, and hyperparameter tuning foundations
 
 import subprocess
 import hashlib
+import math
 import numpy as np # type: ignore
 
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 
 from deployment.rollback.code_rollback import reset_to_commit, rollforward_to_next_tag, get_sorted_tags # type: ignore
@@ -29,7 +30,9 @@ MODULE_VERSION = "2.3.0"
 class InfrastructureManager:
     """Orchestrates core infrastructure operations"""
     
-    def __init__(self):
+    def __init__(self, evaluation_function: Optional[Callable[[Any], float]] = None):
+        self._evaluation_function = evaluation_function
+        self.last_tuning_score: Optional[float] = None
         self.config = load_global_config()
         self.manager_config = get_config_section('infrastructure_manager')
         self.hazard_config = get_config_section('initial_hazard_rates')
@@ -40,7 +43,7 @@ class InfrastructureManager:
         # Initialize components with proper configuration
         self.memory = EvaluatorsMemory()
         self.rollback = RollbackSystem(self.config.get("rollback", {}))
-        self.tuner = self._init_tuner()
+        self.tuner = self._init_tuner() if evaluation_function is not None else None
 
         logger.info("Infrastructure Manager initialized with %s strategy",
                    self.config.get('tuning_strategy', 'bayesian'))
@@ -51,13 +54,18 @@ class InfrastructureManager:
             evaluation_function=self._agent_evaluator)
 
     def _agent_evaluator(self, params):
-        """Integrated evaluation function using agent's metrics"""
-        # Actual implementation would use agent's performance metrics
-        risk_score = self.config.get('initial_hazard_rates', 0.2)
-        return risk_score * np.random.rand()  # Placeholder
+        """Only evaluate tuning against an explicitly supplied real objective."""
+        if self._evaluation_function is None:
+            raise RuntimeError("No validated evaluation objective configured for tuning.")
+        value = self._evaluation_function(params)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError("Tuning objective must produce a finite numeric score.")
+        return float(value)
 
     def full_tuning_cycle(self):
-        """Complete tuning cycle with integrated risk management"""
+        """Complete tuning cycle only with a supplied objective."""
+        if self.tuner is None:
+            raise RuntimeError("Tuning is disabled until a validated evaluation objective is provided.")
         try:
             result = self.tuner.run_safe_tuning()
             self._update_risk_profile(result)
@@ -69,6 +77,8 @@ class InfrastructureManager:
 
     def automated_tuning_cycle(self):
         """Complete tuning cycle with safety mechanisms"""
+        if self.tuner is None:
+            return {"status": "disabled", "reason": "missing_validated_tuning_objective"}
         try:
             return self.tuner.run_safe_tuning()
         except Exception as e:
@@ -81,10 +91,16 @@ class InfrastructureManager:
             score = tuning_result.best_score
         else:
             score = tuning_result.get("best_score", tuning_result.get("score", 0.2))
-        new_rate = float(0.2 if score is None else score) * 0.95
-        self.config['initial_hazard_rates'] = new_rate
-        logger.info("Updated risk profile to %.2f", new_rate)
-        return new_rate
+        if score is None or isinstance(score, bool):
+            raise ValueError("Tuning result lacks an independently measured score")
+        numeric = float(score)
+        if not math.isfinite(numeric):
+            raise ValueError("Tuning result score must be finite")
+        # Initial hazard priors are a mapping. Never overwrite them with a
+        # scalar derived from optimizer output.
+        self.last_tuning_score = numeric
+        logger.info("Recorded validated tuning score %.4f; hazard priors unchanged", numeric)
+        return numeric
 
     def emergency_rollback(self):
         """Safe rollback entry point"""
@@ -116,7 +132,7 @@ class InfrastructureManager:
             if not validate_backup_integrity(latest_backup, latest_backup):
                 raise ValueError("Latest model backup integrity check failed.")
 
-            return {'commit': result, 'model': result.lstrip('v')}
+            return {'commit': prev_commit, 'model': latest_backup.stem}
 
         except Exception as e:
             logger.error(f"Failed to retrieve last stable version: {str(e)}")
@@ -218,7 +234,7 @@ class RollbackSystem:
             reverse=True
         )
         return [
-            (b.name, datetime.strptime(b.name.split("_")[1], "%Y%m%d_%H%M%S")) 
+            (b.name, datetime.strptime(b.name.removeprefix("rollback_"), "%Y%m%d_%H%M%S")) 
             for b in backups
         ]
 
@@ -327,8 +343,11 @@ class EvalTuner(BaseTuner):
                 raise ValueError("Tuning resulted in suboptimal model")
             return result
         except Exception as e:
-            logger.error(f"Tuning failed, initiating rollback: {str(e)}")
-            self._execute_rollback(initial_state)
+            # An evaluator must not hard-reset code or restore model binaries
+            # automatically on a tuning exception. Record the snapshot for
+            # explicit, separately authorized recovery instead.
+            logger.error("Tuning failed; no automatic destructive rollback: %s", e)
+            self.best_state = initial_state
             raise
 
     def _execute_rollback(self, snapshot: Dict[str, Any]):
