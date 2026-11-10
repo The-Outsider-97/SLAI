@@ -118,3 +118,37 @@ def test_partial_static_analysis_is_reported_as_critical():
         }
     })
     assert report["component_status"]["static_analysis"] == "critical"
+
+
+def test_fallback_sut_cannot_fabricate_a_passing_behavioral_result():
+    from src.agents.evaluation_agent import FallbackEvaluatorAgent
+    sut = FallbackEvaluatorAgent.__new__(FallbackEvaluatorAgent)
+    result = sut.predict("test_input")
+    assert result["status"] == "unavailable"
+    assert result["execution_success"] is False
+    assert result["confidence"] == 0.0
+    assert result["prediction"] is None
+
+
+def test_internal_certification_gates_require_real_evidence():
+    from src.agents.evaluation_agent import AIValidationSuite
+    protocol = SimpleNamespace(static_analysis={"security": {"max_critical": 0}})
+    suite = AIValidationSuite(protocol)
+    assert suite._generate_compliance_matrix() == {
+        "static_analysis_internal_gate": False,
+        "behavioral_internal_gate": False,
+        "safety_case_present": False,
+    }
+    suite.artifacts["static_report"] = {
+        "summary": {"files_analyzed": 2}, "security_metrics": {"critical_count": 0},
+        "parse_failures": [],
+    }
+    suite.artifacts["behavioral_results"] = {
+        "overall_status": "PASSED",
+        "traceability_matrix": [{"requirement_id": "REQ1", "status": "PASSED"}],
+    }
+    gates = suite._generate_compliance_matrix()
+    assert gates["static_analysis_internal_gate"] is True
+    assert gates["behavioral_internal_gate"] is True
+    suite.artifacts["static_report"]["parse_failures"] = [{"file": "x.py"}]
+    assert suite._generate_compliance_matrix()["static_analysis_internal_gate"] is False
