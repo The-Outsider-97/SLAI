@@ -122,27 +122,15 @@ class FallbackEvaluatorAgent(BaseAgent):
         return guard_ready and threshold_channel
 
     def predict(self, state: Any = None) -> Dict[str, Any]:
-        known_smoke_input = isinstance(state, str) and state == "test_input"
-        value = "expected_output" if known_smoke_input else "fallback_output"
-        prediction = {
-            "value": value,
-            "mode": "fallback",
-            "input": state,
-            "context": {
-                "timestamp": _utc_now_iso(),
-                "state_type": type(state).__name__ if state is not None else "none",
-                "degraded_mode": True,
-            },
-        }
+        """Fail closed: never fabricate a passing SUT response."""
         return {
-            "status": "degraded_success",
-            "prediction": prediction,
-            "confidence": 0.25,
+            "status": "unavailable",
+            "prediction": None,
+            "confidence": 0.0,
+            "execution_success": False,
             "reason": "primary_test_agent_unavailable",
-            # Backward-compatible convenience fields.
-            "value": value,
             "mode": "fallback",
-            "input": state,
+            "input_type": type(state).__name__ if state is not None else "none",
         }
 
 
@@ -2293,6 +2281,8 @@ class AIValidationSuite:
         security = report.get("security_metrics", {}) if isinstance(report, Mapping) else {}
         critical_count = int(security.get("critical_count", 0) or 0) if isinstance(security, Mapping) else 0
         max_critical = int(self.protocol.static_analysis["security"]["max_critical"])
+        if report.get("parse_failures") or int(report.get("summary", {}).get("files_analyzed", 0)) == 0:
+            raise CertificationError("Static analysis is incomplete; no certification gate can pass.")
         if critical_count > max_critical:
             raise CertificationError(
                 f"Critical static-analysis findings exceed the configured threshold: {critical_count} > {max_critical}."
@@ -2315,7 +2305,7 @@ class AIValidationSuite:
             sut=agent.perform_task,
             certification_requirements=certification_requirements,
         )
-        if str(results.get("overall_status", "")).upper() == "FAILED":
+        if str(results.get("overall_status", "")).upper() != "PASSED":
             failed = [
                 str(item.get("requirement_id", "UNKNOWN"))
                 for item in results.get("traceability_matrix", [])
@@ -2364,9 +2354,21 @@ class AIValidationSuite:
         security = static_report.get("security_metrics", {}) if isinstance(static_report, Mapping) else {}
         max_critical = int(self.protocol.static_analysis["security"]["max_critical"])
         behavioral = self.artifacts.get("behavioral_results") or {}
+        static_summary = static_report.get("summary", {}) if isinstance(static_report, Mapping) else {}
         return {
-            "static_analysis_internal_gate": int(security.get("critical_count", 0) or 0) <= max_critical,
-            "behavioral_internal_gate": str(behavioral.get("overall_status", "")).upper() != "FAILED",
+            "static_analysis_internal_gate": (
+                isinstance(static_report, Mapping)
+                and bool(static_report)
+                and not static_report.get("parse_failures")
+                and int(static_summary.get("files_analyzed", 0) or 0) > 0
+                and isinstance(security, Mapping)
+                and "critical_count" in security
+                and int(security["critical_count"] or 0) <= max_critical
+            ),
+            "behavioral_internal_gate": (
+                str(behavioral.get("overall_status", "")).upper() == "PASSED"
+                and bool(behavioral.get("traceability_matrix"))
+            ),
             "safety_case_present": bool(self.artifacts.get("safety_case")),
         }
 
