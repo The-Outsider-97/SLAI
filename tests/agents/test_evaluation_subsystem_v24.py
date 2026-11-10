@@ -318,3 +318,71 @@ def test_infrastructure_refuses_fake_tuning_or_implicit_hazard_updates():
     assert manager._agent_evaluator({}) == pytest.approx(0.73)
     assert manager._update_risk_profile({"best_score": 0.82}) == pytest.approx(0.82)
     assert manager.config["initial_hazard_rates"] == {"system_failure": 0.000001}
+
+
+def test_adaptive_risk_rejects_boolean_hazard_counts_and_exports_atomic(tmp_path):
+    from src.agents.evaluators.adaptive_risk import RiskObservation, RiskAdaptation, HazardBayesianState
+    with pytest.raises(Exception):
+        RiskObservation(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            hazard_counts={"collision": True}, operational_time=10.0,
+        )
+    state = RiskAdaptation.__new__(RiskAdaptation)
+    import threading
+    from collections import OrderedDict
+    state._lock = threading.RLock()
+    state._state_directory = tmp_path
+    state.learning_rate = 0.05
+    state.uncertainty_window = 1000.0
+    state.hazard_states = {
+        "collision": HazardBayesianState(
+            hazard_id="collision", prior_rate=0.01,
+            base_alpha=1.0, base_beta=100.0,
+            alpha=2.0, beta=120.0,
+        )
+    }
+    state.observation_history = []
+    state.safety_case_versions = OrderedDict()
+    target = tmp_path / "risk.json"
+    assert state.export_state(str(target)) == str(target)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["hazard_states"]["collision"]["alpha"] == 2.0
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_efficiency_does_not_treat_evaluator_overhead_as_generation_energy():
+    from src.agents.evaluators.efficiency_evaluator import EfficiencyEvaluator
+    evaluator = EfficiencyEvaluator.__new__(EfficiencyEvaluator)
+    evaluator.baselines = {"energy_usage": 120.0}
+    # Five seconds spent evaluating output is NOT five seconds of production.
+    assert evaluator._estimate_energy_usage([{"text": "output"}], runtime_seconds=5.0) == 0.0
+    # Measured generation duration supports a transparently modeled estimate.
+    assert evaluator._estimate_energy_usage(
+        [{"text": "output", "generation_time": 2.0}], runtime_seconds=5.0
+    ) == pytest.approx(240.0)
+    # Direct observed energy takes precedence.
+    assert evaluator._estimate_energy_usage(
+        [{"energy_joules": 7.5}], runtime_seconds=10.0
+    ) == pytest.approx(7.5)
+    with pytest.raises(Exception):
+        evaluator._estimate_energy_usage(
+            [{"generation_time": float("nan")}], runtime_seconds=2.0
+        )
+
+
+def test_validation_protocol_rejects_nonfinite_and_boolean_thresholds():
+    from src.agents.evaluators.modules.validation_protocol import ValidationProtocol
+    protocol = ValidationProtocol.__new__(ValidationProtocol)
+    for bad in (float("nan"), float("inf"), -float("inf"), True, False):
+        assert protocol._is_number(bad) is False
+    assert protocol._is_number(0.75) is True
+
+
+def test_lazy_evaluator_module_exports_preserved():
+    import src.agents.evaluators.modules as exports
+    from src.agents.evaluators.modules.evaluators_calculations import EvaluatorsCalculations
+    from src.agents.evaluators.modules.validation_protocol import ValidationProtocol
+    assert exports.EvaluatorsCalculations is EvaluatorsCalculations
+    assert exports.ValidationProtocol is ValidationProtocol
+    assert "EvaluationTransformer" in exports.__all__
+    assert callable(exports.__getattr__)
