@@ -496,7 +496,7 @@ class AutonomousEvaluator:
             completion_time_mean=completion_time_mean,
             deviation_mean=deviation_mean,
             composite_score=composite_score,
-            threshold_status="PASS" if not threshold_violations else "ATTENTION",
+            threshold_status="PASS" if not threshold_violations and not task_failures else "ATTENTION",
             threshold_violations=threshold_violations,
             graph_summary=graph_summary,
             statistics=statistics,
@@ -1189,7 +1189,9 @@ class AutonomousEvaluator:
     def _resolve_success(self, task: Mapping[str, Any], deviation: float) -> bool:
         explicit = task.get("success")
         if explicit is not None:
-            return bool(explicit)
+            if not isinstance(explicit, bool):
+                raise ValidationFailureError("task.success", explicit, "explicit boolean")
+            return explicit
         return bool(
             task["collisions"] <= self.thresholds["max_collisions"]
             and deviation <= self.thresholds["max_path_deviation"]
