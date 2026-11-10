@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from statistics import mean, median
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
-from PyQt5.QtCore import QSize, QBuffer # type: ignore
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.evaluation_errors import *
@@ -1032,7 +1031,7 @@ class BehavioralValidator:
             pass_rates = [*pass_rates, results["summary"].get("pass_rate", 0.0)]
 
         if pass_rates:
-            pixmap = visualizer.render_temporal_chart(QSize(600, 400), "pass_rate", data=pass_rates)
+            pixmap = visualizer.render_temporal_chart((600, 400), "pass_rate", data=pass_rates)
             assets["pass_rate_trend"] = self._pixmap_to_asset(pixmap, "pass_rate_trend")
 
         failure_counts = [
@@ -1043,7 +1042,7 @@ class BehavioralValidator:
         if results.get("summary"):
             failure_counts = [*failure_counts, results["summary"].get("failed", 0) + results["summary"].get("errored", 0)]
         if failure_counts:
-            pixmap = visualizer.render_temporal_chart(QSize(600, 400), "risks", data=failure_counts)
+            pixmap = visualizer.render_temporal_chart((600, 400), "risks", data=failure_counts)
             assets["failure_trend"] = self._pixmap_to_asset(pixmap, "failure_trend")
 
         return assets
@@ -1197,6 +1196,7 @@ class BehavioralValidator:
     def _pixmap_to_asset(self, pixmap: Any, chart_type: str) -> Dict[str, Any]:
         if pixmap is None:
             raise SerializationError(chart_type, "Cannot serialize a null pixmap.")
+        from PyQt5.QtCore import QBuffer  # optional; only needed to encode an explicitly requested chart
         buffer = QBuffer()
         buffer.open(QBuffer.ReadWrite)
         if not pixmap.save(buffer, "PNG"):
