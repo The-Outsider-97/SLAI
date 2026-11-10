@@ -509,14 +509,15 @@ class BehavioralValidator:
                 if record.failure_mode is not None:
                     self.failure_modes.append(record.failure_mode)
 
-                if not record.passed and record.severity == "critical":
+                if not record.passed:
                     overall_status = "FAILED"
-                    logger.critical(
-                        "Critical certification requirement failed: test=%s requirement=%s",
-                        record.test_id,
-                        record.requirement_id,
-                    )
-                    break
+                    if record.severity == "critical":
+                        logger.critical(
+                            "Critical certification requirement failed: test=%s requirement=%s",
+                            record.test_id,
+                            record.requirement_id,
+                        )
+                        break
             except Exception as exc:
                 anomaly = {
                     "test_id": case.test_id,
