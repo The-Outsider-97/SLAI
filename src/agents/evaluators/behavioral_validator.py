@@ -398,7 +398,9 @@ class BehavioralValidator:
         - ``sut`` may be provided explicitly
         """
         active_sut = self._coerce_sut(sut or agent or self.sut)
-        selected_cases = self._prepare_execution_cases(test_cases or self.test_cases)
+        selected_cases = self._prepare_execution_cases(
+            self.test_cases if test_cases is None else test_cases
+        )
         if not selected_cases:
             return self._empty_results(suite_name=suite_name)
 
@@ -718,21 +720,23 @@ class BehavioralValidator:
         source: str,
     ) -> Dict[str, Any]:
         executed = len(execution_records)
+        attempted = executed + len(anomalies)
         passed = sum(1 for record in execution_records if record.passed)
         failed = sum(1 for record in execution_records if record.status == "FAILED")
-        errored = sum(1 for record in execution_records if record.status == "ERROR")
+        errored = sum(1 for record in execution_records if record.status == "ERROR") + len(anomalies)
         requirements_encountered = {
             record.requirement_id for record in execution_records if record.requirement_id is not None
         }
 
-        pass_rate = (passed / executed) if executed > 0 else 0.0
-        failure_rate = ((failed + errored) / executed) if executed > 0 else 0.0
+        pass_rate = (passed / attempted) if attempted > 0 else 0.0
+        failure_rate = ((failed + errored) / attempted) if attempted > 0 else 0.0
         requirement_coverage_rate = (
             len(self.requirement_coverage) / len(requirements_encountered)
             if requirements_encountered
             else 0.0
         )
-        test_coverage = 1.0 if executed > 0 else 0.0
+        # Test collection/execution coverage is not source-code coverage.
+        test_coverage = executed / attempted if attempted else 0.0
         composite_score = self._calculate_composite_score(
             pass_rate=pass_rate,
             test_coverage=test_coverage,
@@ -744,6 +748,7 @@ class BehavioralValidator:
         threshold_events = self._evaluate_thresholds(pass_rate=pass_rate, failure_rate=failure_rate)
 
         payload = {
+            "status": "fail" if (failed or errored or threshold_events or not attempted) else "pass",
             "metadata": {
                 "timestamp": completed_at.isoformat(),
                 "started_at": started_at.isoformat(),
@@ -753,7 +758,8 @@ class BehavioralValidator:
                 "source": source,
             },
             "summary": {
-                "total_cases": executed,
+                "total_cases": attempted,
+                "completed_case_records": executed,
                 "passed": passed,
                 "failed": failed,
                 "errored": errored,
@@ -761,6 +767,7 @@ class BehavioralValidator:
                 "pass_rate": pass_rate,
                 "failure_rate": failure_rate,
                 "test_coverage": test_coverage,
+                "coverage_semantics": "attempted_cases_with_execution_records_not_code_coverage",
                 "test_coverage_count": executed,
                 "requirement_coverage": len(self.requirement_coverage),
                 "requirement_coverage_rate": requirement_coverage_rate,
@@ -771,7 +778,7 @@ class BehavioralValidator:
             "thresholds": {
                 "configured": dict(self.thresholds),
                 "events": threshold_events,
-                "passed": len(threshold_events) == 0,
+                "passed": len(threshold_events) == 0 and errored == 0 and failed == 0 and attempted > 0,
             },
             "records": [record.to_dict() for record in execution_records],
             "failure_modes": [failure.to_dict() for failure in self.failure_modes[: self.max_failure_modes]],
