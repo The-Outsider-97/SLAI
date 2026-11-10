@@ -6,6 +6,7 @@ import time
 import psutil
 import yaml
 
+from pathlib import Path
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -340,7 +341,7 @@ class ResourceUtilizationEvaluator:
         end_network = psutil.net_io_counters()
 
         memory_percent = float(psutil.virtual_memory().percent)
-        disk_percent = float(psutil.disk_usage("/").percent)
+        disk_percent = float(psutil.disk_usage(Path.home().anchor or "/").percent)
         network_mbps = self._calculate_network_mbps(start_network, end_network, actual_duration)
         for name, value in (("cpu", cpu_percent), ("memory", memory_percent), ("disk", disk_percent)):
             if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 100.0:
