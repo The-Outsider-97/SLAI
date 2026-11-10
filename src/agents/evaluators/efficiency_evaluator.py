@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 import numpy as np # type: ignore
-import torch # type: ignore
 import yaml # type: ignore
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
-from PyQt5.QtCore import QSize # type: ignore
 
 if sys.platform != "win32":
     import resource
@@ -550,6 +549,8 @@ class EfficiencyEvaluator:
             recommendations.append(
                 "Linguistic efficiency is weak. Review verbosity, entity density, and syntactic complexity relative to the task requirements."
             )
+        if metrics.get("estimated_energy_joules", 0.0) == 0.0:
+            recommendations.append("No independently measured energy usage or complete generation-time evidence is available; do not interpret zero as zero energy consumption.")
         if not diagnostics.get("uses_tokenizer"):
             recommendations.append(
                 "Attach a tokenizer for more accurate token-efficiency estimates instead of relying on fallback token counts."
@@ -740,8 +741,20 @@ class EfficiencyEvaluator:
 
         if observed:
             return float(total_energy)
-        if baseline_power > 0 and runtime_seconds > 0:
-            return float(baseline_power * runtime_seconds)
+        # runtime_seconds measures the evaluator itself, not necessarily the
+        # operation that generated the outputs. Never fabricate the output
+        # energy by multiplying evaluator overhead by a power baseline.
+        generation_seconds = 0.0
+        complete_timing = bool(outputs)
+        for output in outputs:
+            if not isinstance(output, Mapping) or "generation_time" not in output:
+                complete_timing = False
+                break
+            generation_seconds += self._coerce_non_negative_number(
+                output["generation_time"], "output.generation_time"
+            )
+        if complete_timing and baseline_power > 0:
+            return float(baseline_power * generation_seconds)
         return 0.0
 
     def _estimate_token_count(self, output: Any) -> int:
@@ -965,7 +978,7 @@ class EfficiencyEvaluator:
 
             if scores:
                 score_chart = visualizer.render_temporal_chart(
-                    QSize(700, 400),
+                    (700, 400),
                     "pass_rate",
                     data=scores,
                 )
@@ -977,7 +990,7 @@ class EfficiencyEvaluator:
 
             if runtimes:
                 runtime_chart = visualizer.render_temporal_chart(
-                    QSize(700, 400),
+                    (700, 400),
                     "operational_times",
                     data=runtimes,
                 )
@@ -1058,6 +1071,7 @@ class EfficiencyEvaluator:
             if attention_mask is not None and hasattr(attention_mask, "dim") and attention_mask.dim() == 1:
                 attention_mask = attention_mask.unsqueeze(0)
 
+            import torch  # optional; required only for explicitly attached text-generation model
             device = next(self.text_encoder.parameters()).device if hasattr(self.text_encoder, "parameters") else torch.device("cpu")
             if hasattr(input_ids, "to"):
                 input_ids = input_ids.to(device)
@@ -1171,7 +1185,10 @@ class EfficiencyEvaluator:
             if isinstance(value, (list, dict, tuple, set)):
                 continue
             try:
-                normalized[str(key)] = float(value)
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError("baseline must be finite")
+                normalized[str(key)] = number
             except (TypeError, ValueError) as exc:
                 raise ConfigLoadError(self.config_path, f"{field_name}.{key}", f"baseline must be numeric: {exc}") from exc
         return normalized
@@ -1191,8 +1208,8 @@ class EfficiencyEvaluator:
             number = float(value)
         except (TypeError, ValueError) as exc:
             raise ConfigLoadError(self.config_path, field_name, f"value must be numeric: {exc}") from exc
-        if number <= 0:
-            raise ConfigLoadError(self.config_path, field_name, "value must be greater than zero")
+        if not math.isfinite(number) or number <= 0:
+            raise ConfigLoadError(self.config_path, field_name, "value must be a positive finite number")
         return number
 
     @staticmethod
@@ -1201,8 +1218,8 @@ class EfficiencyEvaluator:
             number = float(value)
         except (TypeError, ValueError) as exc:
             raise MetricCalculationError(field_name, value, f"value must be numeric: {exc}") from exc
-        if number < 0:
-            raise ValidationFailureError(field_name, number, "non-negative number")
+        if not math.isfinite(number) or number < 0:
+            raise ValidationFailureError(field_name, number, "non-negative finite number")
         return number
 
     def _coerce_non_negative_number(self, value: Any, field_name: str) -> float:
