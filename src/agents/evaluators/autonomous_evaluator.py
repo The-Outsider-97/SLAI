@@ -18,8 +18,6 @@ import json
 import math
 import os
 import uuid
-import matplotlib.pyplot as plt # type: ignore
-import networkx as nx # type: ignore
 import numpy as np # type: ignore
 import yaml # type: ignore
 
@@ -787,6 +785,8 @@ class AutonomousEvaluator:
 
     def _render_plan_graph(self, graph_data: Mapping[str, Any]) -> str:
         try:
+            import networkx as nx  # optional, only for graph visualization
+            import matplotlib.pyplot as plt  # optional, only for graph visualization
             normalized = self._normalize_plan_graph(graph_data)
             graph = nx.DiGraph()
             for node in normalized["nodes"]:
@@ -850,6 +850,7 @@ class AutonomousEvaluator:
         if not graph_data:
             return {}
 
+        import networkx as nx  # optional dependency only for nonempty task graphs
         normalized = self._normalize_plan_graph(graph_data)
         graph = nx.DiGraph()
         for node in normalized["nodes"]:
