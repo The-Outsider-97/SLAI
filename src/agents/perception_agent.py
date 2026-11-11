@@ -988,7 +988,11 @@ class PerceptionAgent(BaseAgent, nn.Module):
         with torch.inference_mode():
             if modality_name == "multimodal":
                 representations = self._encode_multimodal(input_data)
-                fused = self._fuse(representations)
+                fused = (
+                    self._model_views["MultimodalPerception"](representations)
+                    if task_data.get("model_name") == "MultimodalPerception"
+                    else self._fuse(representations)
+                )
                 canonical_output: torch.Tensor = fused.pooled
                 representation_summary: dict[str, Any] = fused.summary()
                 single_representation: Optional[ModalityRepresentation] = None
@@ -1038,7 +1042,8 @@ class PerceptionAgent(BaseAgent, nn.Module):
                         "MultimodalPerception has no fused-data decoder.",
                         component="perception_agent",
                     )
-                fused = self._model_views[model_name](representations)
+                if fused is None:
+                    fused = self._model_views[model_name](representations)
                 canonical_output = fused.pooled
                 representation_summary = fused.summary()
 
