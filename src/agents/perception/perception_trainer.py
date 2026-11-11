@@ -208,6 +208,14 @@ class PerceptionTrainer:
 
         grad_norm: Optional[float] = None
         parameters = self._all_trainable_parameters()
+        # Even without clipping, non-finite gradients must not reach AdamW.
+        if any(parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all())
+               for parameter in parameters):
+            self.zero_grad(set_to_none=True)
+            raise NonFiniteLossError(
+                "Gradient contained NaN or infinity; optimizer step was skipped.",
+                details={"objective": objective.name},
+            )
         if self.grad_clip_norm is not None:
             norm = torch.nn.utils.clip_grad_norm_(parameters, self.grad_clip_norm)
             grad_norm = float(norm.detach().item() if isinstance(norm, torch.Tensor) else norm)
@@ -269,6 +277,7 @@ class PerceptionTrainer:
         second_payload: Any,
         *,
         symmetric: Optional[bool] = None,
+        group_ids: Optional[Tuple[str, ...]] = None,
         first_kwargs: Optional[Mapping[str, Any]] = None,
         second_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> TrainingStepResult:
@@ -285,7 +294,7 @@ class PerceptionTrainer:
         self.set_training_mode(True)
         first = first_pipeline.encode(first_payload, **dict(first_kwargs or {}))
         second = second_pipeline.encode(second_payload, **dict(second_kwargs or {}))
-        objective = self.objectives.contrastive(first, second, symmetric=symmetric)
+        objective = self.objectives.contrastive(first, second, symmetric=symmetric, group_ids=group_ids)
         return self._optimize(objective)
 
     def temporal_step(
@@ -358,6 +367,54 @@ class PerceptionTrainer:
             components={"task_loss": loss},
         )
         return self._optimize(objective)
+
+    def joint_step(
+        self,
+        head_name: str,
+        representations: Mapping[Union[str, Modality], ModalityRepresentation],
+        targets: torch.Tensor,
+        loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        first_modality: Union[str, Modality],
+        second_modality: Union[str, Modality],
+        *,
+        contrastive_weight: float,
+        group_ids: Optional[Tuple[str, ...]] = None,
+    ) -> TrainingStepResult:
+        """One optimizer update for task learning and cross-modal alignment.
+
+        Uses the same canonical fusion, task head, projection heads and loss
+        mathematics as the independent training paths. No duplicate backbone
+        or second optimizer is constructed.
+        """
+        weight = float(contrastive_weight)
+        if not 0 < weight <= 10.0 or not torch.isfinite(torch.tensor(weight)):
+            raise PerceptionTrainingError("contrastive_weight must be finite and in (0, 10].")
+        if head_name not in self.task_heads:
+            raise PerceptionTrainingError("Joint training requires a registered task head.")
+        first = Modality.parse(first_modality)
+        second = Modality.parse(second_modality)
+        if first == second or first not in representations or second not in representations:
+            raise PerceptionTrainingError("Joint training requires two distinct encoded modalities.")
+        self.set_training_mode(True)
+        fused = self.fusion(representations)
+        predictions = self.task_heads[head_name](fused.pooled)
+        target = targets.to(device=predictions.device)
+        classification_loss = loss_fn(predictions, target)
+        alignment = self.objectives.contrastive(
+            representations[first], representations[second],
+            symmetric=True, group_ids=group_ids,
+        )
+        total = classification_loss + weight * alignment.value
+        loss = ObjectiveLoss(
+            name=f"joint_{head_name}_{first.value}_{second.value}",
+            value=total,
+            components={
+                "supervised": classification_loss,
+                "contrastive": alignment.value,
+                "weighted_contrastive": weight * alignment.value,
+            },
+        )
+        return self._optimize(loss)
 
     def optimizer_parameter_count(self) -> int:
         return len(optimizer_parameter_ids(self.optimizer))

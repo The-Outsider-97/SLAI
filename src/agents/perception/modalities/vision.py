@@ -114,6 +114,17 @@ class VisionPerception(BasePerceptionModality):
             )
         if not torch.is_floating_point(pixels):
             pixels = pixels.float()
+        if (
+            pixels.size(0) < 1 or pixels.size(0) > 64
+            or pixels.size(-2) < 1 or pixels.size(-1) < 1
+            or pixels.size(-2) * pixels.size(-1) > 24_000_000
+            or not bool(torch.isfinite(pixels).all())
+        ):
+            raise ModalityInputError(
+                "Vision batch, image resolution or finite-value validation failed.",
+                component="vision_perception",
+                details={"shape": list(pixels.shape)},
+            )
         prepared["pixel_values"] = pixels.to(self.device)
         return prepared
 
