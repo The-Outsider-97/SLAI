@@ -199,3 +199,95 @@ For channel-specific human-oversight integration details, see:
 - Keep config-backed defaults in sync with `configs/alignment_config.yaml`.
 - Prefer adding reusable primitives here rather than embedding governance logic directly into role-specific agents.
 - When adding new auditors or templates, update both this README and `__init__.py` exports (where applicable) to preserve discoverability.
+
+---
+
+## SLAI v2.4 optional learned alignment models
+
+The v2.4 optional model path builds on the existing ValueEmbeddingModel
+text feature extraction, text projection, and alignment scoring head. It does
+not introduce a separate memory store, policy engine, or model registry.
+
+- **RepresentationEncoder** learns normalized embeddings from reviewed
+  value/action pairs using contrastive loss.
+- **ValueAlignmentScorer** learns a supervised compatibility head using the
+  encoder's representations. Its score is **not calibrated** and grants no
+  authority to act.
+- **AlignmentModelBundle** verifies tensor-only checkpoint SHA-256 digests,
+  model schema, feature configuration, and explicit operator approval for active
+  mode. Checkpoints are loaded with torch's weights-only deserialization.
+- **AlignmentSubsystem** consumes an explicit task payload field named
+  learned_alignment; no implicit interpretation of arbitrary strings or
+  automatic authorization is performed.
+
+Agent-level configuration is in src/agents/base/configs/agents_config.yaml:
+runtime.learned_model_mode = disabled | shadow | advisory | active and
+runtime.learned_model_artifact_dir = path/to/a/versioned/artifact/directory.
+The default is **disabled**.
+
+Shadow and advisory modes produce component diagnostics but do not add scored
+alignment evidence. Active mode requires an operator-approved manifest and
+produces soft *preference* evidence only. Existing mandatory alignment
+constraint violations remain non-overridable by model evidence.
+
+Example explicit assessment input:
+
+    {
+      "enable_ethics_check": false,
+      "learned_alignment": {
+        "value_text": "Respect the user's informed preference",
+        "action_text": "Ask for permission before sharing their information"
+      }
+    }
+
+The example disables the legacy alignment-specific dynamic constraint check
+only for demonstrating the model input. Do not disable required policy,
+authorization, Safety, or Privacy enforcement in production.
+
+### Offline training
+
+Training requires a **reviewed** JSONL dataset whose rows contain:
+group_id, source_id, value_text, action_text and label (0 or 1).
+group_id identifies independent examples so no group crosses
+training/validation/test partitions. A separate JSON metadata file must
+provide license, annotation_guidelines and source_description.
+
+    python -m src.agents.alignment.train_models \
+        --data path/to/reviewed_pairs.jsonl \
+        --metadata path/to/dataset_metadata.json \
+        --out data/models/alignment/reviewed_v1
+
+The trainer uses deterministic seeds, grouped holdouts, a contrastive encoder
+objective, and independently trained supervised scorer weights. It writes
+representation_encoder.pt, value_alignment_scorer.pt, and manifest.json.
+The manifest records dataset fingerprints, held-out results, architecture and
+feature schema. Training always writes approved=false; results are **not**
+production authorization.
+
+The unapproved checkpoint may be evaluated in shadow/advisory mode. Promotion
+to active is a separate authorized release operation requiring independent
+data review and evaluation. Setting approved=true is a configuration trust
+decision by the operator, not an automated proof of alignment quality.
+
+### Reproducibility / legacy checkpoints
+
+ValueEmbeddingModel previously used Python's process-randomized hash() for
+token features. New models default to text_hash_strategy=blake2b_v1.
+Old checkpoints require explicitly setting
+text_hash_strategy=legacy_python_hash_v0 and retaining the original
+PYTHONHASHSEED, when known. They are NOT assumed compatible with new models;
+retraining with the stable schema is preferable.
+
+### Known limitations and release gates
+
+- No independently reviewed alignment dataset or approved checkpoint ships
+  in this code change. The test-suite synthetic pairs only validate plumbing.
+- The scorer's outputs are uncalibrated; no probabilistic confidence claims.
+- This model path does not replace existing constitutional constraints,
+  Safety/Privacy enforcement, human oversight, or formal evaluation.
+- Production promotion requires independent labeled evaluation (including
+  harmful disagreement cases), successful CI, secure artifact storage,
+  operational latency/memory profiling, and a documented approval process.
+- The underlying existing alignment subsystem is much larger than these
+  changes; this contribution does not claim a completed whole-subsystem
+  security and performance certification.
