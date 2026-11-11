@@ -984,6 +984,34 @@ class PerceptionAgent(BaseAgent, nn.Module):
             self._require_field(task_data, "modality", context="inference")
         ).strip().lower()
         input_data = self._require_field(task_data, "input_data", context="inference")
+        model_name = task_data.get("model_name")
+        if model_name is not None:
+            artifact = self._trained_model_artifacts.get(model_name)
+            if artifact is None:
+                raise UnsupportedPerceptionOptionError(
+                    "Named perception model has no explicitly loaded trained artifact.",
+                    component="perception_agent",
+                    remediation="Train the requested model and call load_training_artifact() first.",
+                )
+            trained_pair = set(artifact.get("pair", ()))
+            if modality_name == "multimodal":
+                if not isinstance(input_data, Mapping):
+                    raise ModalityInputError("Named multimodal inputs must be a modality mapping.")
+                supplied = {k for k in ("text", "vision", "audio") if input_data.get(k) is not None}
+            else:
+                supplied = {Modality.parse(modality_name).value}
+            if model_name == "MultimodalPerception" and supplied != trained_pair:
+                raise UnsupportedPerceptionOptionError(
+                    "This task-oriented model was not trained for the supplied modality combination.",
+                    component="perception_agent",
+                    details={"trained_pair": sorted(trained_pair), "supplied": sorted(supplied)},
+                )
+            if model_name == "MultimodalContrastiveEncoder" and not supplied.issubset(trained_pair):
+                raise UnsupportedPerceptionOptionError(
+                    "Contrastive embeddings are not trained for an unrecognized modality.",
+                    component="perception_agent",
+                    details={"trained_pair": sorted(trained_pair), "supplied": sorted(supplied)},
+                )
 
         with torch.inference_mode():
             if modality_name == "multimodal":
