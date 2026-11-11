@@ -13,6 +13,9 @@ import os
 from pathlib import Path
 import random
 from typing import Any
+import shutil
+import tarfile
+from urllib.request import Request, urlopen
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -369,9 +372,171 @@ def _infer(args: argparse.Namespace) -> None:
                       "checkpoint_sha256": info["model_sha256"]}, indent=2))
 
 
+
+OXFORD_PETS_URL = "https://www.robots.ox.ac.uk/~vgg/data/pets/data/"
+
+
+def _download(url: str, destination: Path, max_bytes: int) -> dict:
+    """Explicit HTTPS download with bounded size, resumable if server supports Range."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_suffix(destination.suffix + ".part")
+    offset = partial.stat().st_size if partial.exists() else 0
+    if offset > max_bytes:
+        raise ValueError("Partial download already exceeds size limit.")
+    headers = {"Range": f"bytes={offset}-"} if offset else {}
+    with urlopen(Request(url, headers=headers), timeout=60) as stream:
+        resumed = offset > 0 and getattr(stream, "status", 200) == 206
+        if resumed and not str(stream.headers.get("Content-Range", "")).startswith(f"bytes {offset}-"):
+            raise ValueError("Server Range response does not match requested offset.")
+        mode = "ab" if resumed else "wb"
+        total = offset if resumed else 0
+        with partial.open(mode) as output:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError("Download exceeds configured safety limit.")
+                output.write(chunk)
+    partial.replace(destination)
+    return {"name": destination.name, "bytes": destination.stat().st_size,
+            "sha256": _sha256(destination), "url": url, "upstream_checksum_verified": False}
+
+
+def _safe_extract_tar(archive: Path, destination: Path, *, max_total_bytes: int) -> None:
+    """Extract regular files only, rejecting links, traversal and decompression bombs."""
+    destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    total = 0
+    with tarfile.open(archive, "r:gz") as source:
+        for member in source:
+            if member.isdir():
+                continue
+            if not member.isfile() or member.size < 0 or member.size > 32 * 1024 * 1024:
+                raise ValueError("Archive contains unsafe member type or excessive file size.")
+            total += member.size
+            if total > max_total_bytes:
+                raise ValueError("Decompressed dataset exceeds the size limit.")
+            relative = Path(member.name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("Unsafe archive path.")
+            target = (destination / relative).resolve()
+            if not target.is_relative_to(destination):
+                raise ValueError("Archive path escapes destination.")
+            if target.exists():
+                raise ValueError("Archive would overwrite existing files.")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            reader = source.extractfile(member)
+            if reader is None:
+                raise ValueError("Unreadable archive member.")
+            with reader, target.open("xb") as output:
+                shutil.copyfileobj(reader, output, length=1024 * 1024)
+
+
+def _acquire_oxford_pets(args: argparse.Namespace) -> None:
+    if not args.confirm_rights:
+        raise ValueError("Review source terms and explicitly supply --confirm-rights.")
+    root = Path(args.dataset_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    reports = []
+    # Official source provides annotations under CC BY-SA 4.0; individual
+    # photographs retain original authors' copyright and use constraints.
+    for name, maximum in (("images.tar.gz", 1_200_000_000), ("annotations.tar.gz", 120_000_000)):
+        destination = root / name
+        report = _download(OXFORD_PETS_URL + name, destination, maximum)
+        reports.append(report)
+        if args.extract:
+            _safe_extract_tar(destination, root, max_total_bytes=1_500_000_000)
+    (root / "acquisition.json").write_text(
+        json.dumps({"dataset": "Oxford-IIIT Pet", "source": OXFORD_PETS_URL,
+                    "license_claim": "CC BY-SA 4.0, original image owner rights retained",
+                    "operator_confirmed_rights": True, "archives": reports}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps({"archives": reports, "extracted": bool(args.extract)}, indent=2))
+
+
+def _oxford_manifest(args: argparse.Namespace) -> None:
+    root = Path(args.dataset_root).resolve()
+    trainval = root / "annotations" / "trainval.txt"
+    test = root / "annotations" / "test.txt"
+    if not trainval.is_file() or not test.is_file():
+        raise ValueError("Extract official Oxford-IIIT Pet annotations before creating the manifest.")
+
+    def parse(path: Path) -> list[tuple[str, int]]:
+        entries = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            columns = line.split()
+            if len(columns) != 4:
+                raise ValueError("Unexpected official Oxford annotations format.")
+            name, class_id, _, _ = columns
+            if not class_id.isdecimal() or not 1 <= int(class_id) <= 37:
+                raise ValueError("Out-of-range Oxford breed label.")
+            if not name.replace("_", "").isalnum():
+                raise ValueError("Invalid Oxford image identifier.")
+            entries.append((name, int(class_id) - 1))
+        return entries
+
+    trainval_rows, test_rows = parse(trainval), parse(test)
+    rng = random.Random(args.seed)
+    by_breed: dict[int, list[tuple[str, int]]] = {}
+    for row in trainval_rows:
+        by_breed.setdefault(row[1], []).append(row)
+    split_map: dict[str, str] = {}
+    for breed_rows in by_breed.values():
+        rng.shuffle(breed_rows)
+        n_val = max(1, round(len(breed_rows) * args.validation_fraction))
+        for name, _ in breed_rows[:n_val]:
+            split_map[name] = "validation"
+        for name, _ in breed_rows[n_val:]:
+            split_map[name] = "train"
+    for name, _ in test_rows:
+        if name in split_map:
+            raise ValueError("Oxford official split contains duplicate image identifiers.")
+        split_map[name] = "test"
+
+    output = Path(args.output).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    seen = set()
+    with output.open("w", encoding="utf-8") as stream:
+        for name, breed in trainval_rows + test_rows:
+            if name in seen:
+                raise ValueError("Duplicate Oxford image identifier.")
+            seen.add(name)
+            image = root / "images" / (name + ".jpg")
+            if not image.is_file():
+                raise ValueError("Missing official Oxford image in extracted dataset.")
+            # Weak label-derived text, NOT a human-written caption.
+            breed_name = name.rsplit("_", 1)[0].replace("_", " ").lower()
+            row = {"id": name, "group_id": name,
+                   "positive_id": f"breed:{breed}",
+                   "split": split_map[name], "vision": f"images/{name}.jpg",
+                   "text": breed_name, "label": breed}
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    print(json.dumps({"manifest": str(output), "samples": len(seen),
+                      "alignment": "weak_supervision_from_breed_label",
+                      "human_captions": False}, indent=2))
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="command", required=True)
+    acquire = subs.add_parser("acquire-oxford-pets")
+    acquire.add_argument("--dataset-root", required=True)
+    acquire.add_argument("--confirm-rights", action="store_true")
+    acquire.add_argument("--extract", action="store_true")
+    acquire.set_defaults(fn=_acquire_oxford_pets)
+
+    oxford = subs.add_parser("oxford-pets-manifest")
+    oxford.add_argument("--dataset-root", required=True)
+    oxford.add_argument("--output", required=True)
+    oxford.add_argument("--seed", type=int, default=42)
+    oxford.add_argument("--validation-fraction", type=float, default=0.2)
+    oxford.set_defaults(fn=_oxford_manifest)
+
     prepare = subs.add_parser("prepare")
     prepare.add_argument("--manifest", required=True)
     prepare.add_argument("--dataset-root", required=True)
@@ -409,6 +574,8 @@ def main(argv: list[str] | None = None) -> None:
     infer.add_argument("--path")
     infer.set_defaults(fn=_infer)
     args = parser.parse_args(argv)
+    if hasattr(args, "validation_fraction") and not 0.0 < args.validation_fraction < 0.5:
+        parser.error("--validation-fraction must be in (0, 0.5).")
     if hasattr(args, "batch_size") and args.batch_size < 2:
         parser.error("batch-size must be at least 2 for contrastive learning.")
     if hasattr(args, "epochs") and args.epochs <= 0:
