@@ -957,6 +957,18 @@ class AlignmentMemory:
                 state = pickle.load(handle)
             ensure_mapping(state, "checkpoint_state", allow_empty=False, error_cls=PersistenceError)
 
+            # Verify both binary dependencies before modifying live memory.
+            model_path = state.get("model_path")
+            if model_path:
+                expected_path = checkpoint_path.with_name(
+                    checkpoint_path.stem + self.checkpoint_model_suffix
+                ).resolve()
+                if Path(str(model_path)).resolve() != expected_path:
+                    raise PersistenceError(
+                        "Legacy checkpoint referenced an unexpected causal model path"
+                    )
+                _verify_binary_digest(expected_path, trusted_model_sha256)
+
             self.regressor_type = str(state.get("regressor_type", self.regressor_type)).lower()
             self.alignment_logs = pd.DataFrame(state.get("alignment_logs", []), columns=self.ALIGNMENT_LOG_COLUMNS)
             self.outcome_history = pd.DataFrame(state.get("outcome_history", []), columns=self.OUTCOME_HISTORY_COLUMNS)
@@ -969,15 +981,7 @@ class AlignmentMemory:
             self.intervention_data = list(state.get("intervention_data", []))
             self.causal_model = self._create_regressor(self.regressor_type)
 
-            model_path = state.get("model_path")
             if model_path:
-                expected_path = checkpoint_path.with_name(
-                    checkpoint_path.stem + self.checkpoint_model_suffix
-                ).resolve()
-                if Path(str(model_path)).resolve() != expected_path:
-                    raise PersistenceError(
-                        "Legacy checkpoint referenced an unexpected causal model path"
-                    )
                 self.load_model(str(expected_path), trusted_sha256=trusted_model_sha256)
             logger.info("Loaded AlignmentMemory checkpoint from %s", checkpoint_path)
             return checkpoint_path
