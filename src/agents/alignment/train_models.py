@@ -45,7 +45,7 @@ def read_reviewed_pairs(path: Path) -> List[Dict[str, Any]]:
                 value = item.get(key)
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError(f"Line {number} is missing nonempty {key}")
-            if item.get("label") not in (0, 1) or isinstance(item["label"], bool):
+            if type(item.get("label")) is not int or item["label"] not in (0, 1):
                 raise ValueError(f"Line {number} label must be integer 0 or 1")
             if any(len(item[key]) > 8192 for key in ("value_text", "action_text")):
                 raise ValueError(f"Line {number} has oversized model text")
