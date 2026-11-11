@@ -295,3 +295,25 @@ retraining with the stable schema is preferable.
 - The underlying existing alignment subsystem is much larger than these
   changes; this contribution does not claim a completed whole-subsystem
   security and performance certification.
+
+
+### Legacy AlignmentMemory checkpoint security
+
+AlignmentMemory previously loaded pickle checkpoints and joblib causal models
+without authentication. These formats permit arbitrary Python code execution
+during deserialization. Loading now requires **trusted SHA-256 digests provided
+independently of the binary**:
+
+    memory.load_model(path, trusted_sha256=independently_verified_model_digest)
+    memory.load_checkpoint(
+        path,
+        trusted_sha256=independently_verified_checkpoint_digest,
+        trusted_model_sha256=independently_verified_model_digest,
+    )
+
+Do not derive these trust decisions solely from a hash stored beside an
+untrusted file. Existing save methods continue writing legacy files to
+preserve on-disk compatibility; unpinned loads now fail closed. Only load
+legacy files from a trusted source in a trusted Python environment. A
+future migration to a fully non-executable checkpoint format is still
+required before accepting arbitrary imported checkpoints.
