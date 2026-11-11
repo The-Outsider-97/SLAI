@@ -143,6 +143,7 @@ def test_learned_model_mode_respects_evidence_boundary(mode, expected):
             "learned_model_mode": mode,
             "run_statistical_diagnostics": False,
             "memory_logging_enabled": False,
+            "enforce_alignment_constraints": False,
         },
     )
     runtime._learned_bundle = _FakeBundle()
@@ -160,7 +161,7 @@ def test_learned_model_mode_respects_evidence_boundary(mode, expected):
 def test_learned_model_invalid_input_degrades_without_positive_evidence():
     runtime = AlignmentSubsystem(
         alignment_memory=object(),
-        runtime_config={"learned_model_mode": "active", "run_statistical_diagnostics": False},
+        runtime_config={"learned_model_mode": "active", "run_statistical_diagnostics": False, "enforce_alignment_constraints": False},
     )
     evidence, report = runtime.collect_evidence({
         "enable_ethics_check": False,
@@ -168,3 +169,25 @@ def test_learned_model_invalid_input_degrades_without_positive_evidence():
     })
     assert evidence == []
     assert report["learned_alignment"]["status"] == "invalid_input"
+
+
+def test_untrusted_task_cannot_disable_dynamic_constraints():
+    class Constraints:
+        def _check_dynamic_constraints(self, context):
+            return {"details": ["reviewed"], "violations": ["mandatory-requirement"]}
+
+    runtime = AlignmentSubsystem(
+        alignment_memory=object(),
+        components={"ethical_constraints": Constraints()},
+        runtime_config={"enforce_alignment_constraints": True,
+                        "run_statistical_diagnostics": False,
+                        "memory_logging_enabled": False},
+    )
+    evidence, report = runtime.collect_evidence({
+        "enable_ethics_check": False,  # untrusted input must be ignored
+        "evaluate_alignment_constraints": False,
+        "action_context": {"action": "unauthorized"},
+    })
+    assert report["constraints"]["available"] is True
+    assert any(item.dimension == AlignmentDimension.CONSTRAINT and
+               item.score == 0.0 and item.required for item in evidence)
