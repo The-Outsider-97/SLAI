@@ -191,3 +191,28 @@ def test_untrusted_task_cannot_disable_dynamic_constraints():
     assert report["constraints"]["available"] is True
     assert any(item.dimension == AlignmentDimension.CONSTRAINT and
                item.score == 0.0 and item.required for item in evidence)
+
+
+def test_active_model_failure_requires_review_when_other_dimensions_are_positive():
+    runtime = AlignmentSubsystem(
+        alignment_memory=object(),
+        runtime_config={
+            "learned_model_mode": "active",
+            "learned_model_artifact_dir": "/nonexistent/alignment/model",
+            "enforce_alignment_constraints": False,
+            "run_statistical_diagnostics": False,
+            "memory_logging_enabled": False,
+        },
+    )
+    assessment, report, _ = runtime.assess({
+        "intent_alignment_score": 1.0,
+        "task_alignment_score": 1.0,
+        "constraint_alignment_score": 1.0,
+        "learned_alignment": {
+            "value_text": "protect privacy",
+            "action_text": "request user approval",
+        },
+    }, record_trajectory=False)
+    assert report["learned_alignment"]["status"] == "unavailable"
+    assert assessment.status == AlignmentStatus.UNCERTAIN
+    assert assessment.requires_review
