@@ -9,6 +9,8 @@ Implements:
 
 from __future__ import annotations
 
+import hashlib
+
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
@@ -133,6 +135,13 @@ class ValueEmbeddingModel(nn.Module):
         self.margin = coerce_float(self.embed_config.get("margin", 0.2), field_name="margin", minimum=0.0)
         self.max_seq_length = coerce_positive_int(self.embed_config.get("max_seq_length", 128), field_name="max_seq_length")
         self.text_feature_dim = coerce_positive_int(self.embed_config.get("text_feature_dim", 128), field_name="text_feature_dim")
+        if self.text_feature_dim < 8:
+            raise ConfigurationError("text_feature_dim must be at least eight")
+        # Python's built-in hash is randomized across processes. New checkpoints
+        # use the stable feature schema; legacy checkpoints require explicit opt-in.
+        self.text_hash_strategy = str(self.embed_config.get("text_hash_strategy", "blake2b_v1"))
+        if self.text_hash_strategy not in {"blake2b_v1", "legacy_python_hash_v0"}:
+            raise ConfigurationError("Unsupported value text hash strategy")
         self.policy_hidden_dims = list(self.embed_config.get("policy_hidden_dims", [1024, 512]))
         self.preference_hidden_dim = coerce_positive_int(
             self.embed_config.get("preference_hidden_dim", 256), field_name="preference_hidden_dim"
@@ -252,7 +261,13 @@ class ValueEmbeddingModel(nn.Module):
             ], dtype=np.float32)
             feature_vector[: len(dense_prefix)] = dense_prefix
             for token in tokens:
-                bucket = len(dense_prefix) + (hash(token) % max(1, self.text_feature_dim - len(dense_prefix)))
+                token_hash = (
+                    hash(token) if self.text_hash_strategy == "legacy_python_hash_v0"
+                    else int.from_bytes(
+                        hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest(), "big"
+                    )
+                )
+                bucket = len(dense_prefix) + (token_hash % max(1, self.text_feature_dim - len(dense_prefix)))
                 feature_vector[bucket] += 1.0 / token_count
             vectors.append(feature_vector)
         return torch.tensor(np.vstack(vectors), dtype=torch.float32)
@@ -366,14 +381,20 @@ class ValueEmbeddingModel(nn.Module):
 
     def predict(self, data: pd.DataFrame) -> np.ndarray:
         ensure_columns_present(data, ["policy_features", "ethical_guidelines", "cultural_features"], field_name="data", error_cls=DataValidationError)
-        outputs = self.forward(
-            {
-                "value_text": data["ethical_guidelines"].tolist(),
-                "cultural_context": data["cultural_features"].tolist(),
-                "policy_params": data["policy_features"].tolist(),
-            }
-        )
-        scores = outputs["alignment_score"].detach().cpu().numpy().reshape(-1)
+        was_training = self.training
+        try:
+            self.eval()
+            with torch.inference_mode():
+                outputs = self.forward(
+                    {
+                        "value_text": data["ethical_guidelines"].tolist(),
+                        "cultural_context": data["cultural_features"].tolist(),
+                        "policy_params": data["policy_features"].tolist(),
+                    }
+                )
+                scores = outputs["alignment_score"].cpu().numpy().reshape(-1)
+        finally:
+            self.train(was_training)
         if self.memory_logging_enabled and self.log_predictions:
             self._log_memory_event("value_embedding_prediction", {"rows": len(data), "mean_score": float(np.mean(scores))})
         return scores

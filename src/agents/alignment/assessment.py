@@ -551,8 +551,21 @@ class AlignmentAssessor:
         confidence = confidence_numerator / represented_weight if represented_weight > 0 else 0.0
 
         uncertainty = max(0.0, min(1.0, 1.0 - (coverage * confidence)))
+        # An established mandatory alignment constraint cannot be averaged away
+        # by many positive, optional preference/model scores. Conflicting
+        # authoritative evidence still requires review instead of auto-approval.
+        mandatory_violation = any(
+            item.dimension == AlignmentDimension.CONSTRAINT
+            and (item.required or item.dimension.value in self.required_dimensions)
+            and item.score is not None
+            and item.score <= self.misaligned_threshold
+            and item.confidence >= self.conflict_confidence
+            for item in normalized
+        )
         if conflicts:
             status = AlignmentStatus.CONFLICTING
+        elif mandatory_violation:
+            status = AlignmentStatus.MISALIGNED
         elif required_missing or coverage < self.min_coverage or aggregate_score is None:
             status = AlignmentStatus.UNCERTAIN
         elif confidence < self.min_confidence:
@@ -571,6 +584,8 @@ class AlignmentAssessor:
             status = AlignmentStatus.PARTIALLY_ALIGNED
 
         explanation: List[str] = []
+        if mandatory_violation:
+            explanation.append("mandatory alignment constraint is opposed by high-confidence evidence")
         if required_missing:
             explanation.append("required alignment evidence is missing: " + ", ".join(required_missing))
         if conflicts:
