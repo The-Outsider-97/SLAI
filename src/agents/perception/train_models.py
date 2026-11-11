@@ -16,6 +16,7 @@ from typing import Any
 import shutil
 import tarfile
 from urllib.request import Request, urlopen
+from PIL import Image, UnidentifiedImageError
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -74,6 +75,8 @@ def validate_manifest(manifest: Path, root: Path, modalities: tuple[str, str]) -
     ids: set[str] = set()
     groups: dict[str, str] = {}
     file_splits: dict[str, str] = {}
+    hash_splits: dict[str, str] = {}
+    exact_duplicate_count = 0
     labels = set()
     for row in rows:
         split = row.get("split")
@@ -106,6 +109,21 @@ def validate_manifest(manifest: Path, root: Path, modalities: tuple[str, str]) -
                 if key in file_splits and file_splits[key] != split:
                     raise ValueError("File reused across train/validation/test partitions.")
                 file_splits[key] = split
+                if modality == "vision":
+                    try:
+                        with Image.open(path) as decoded:
+                            if decoded.width * decoded.height > 24_000_000:
+                                raise ValueError("Image exceeds 24 megapixel input limit.")
+                            decoded.verify()
+                    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+                        raise ValueError(f"Invalid or corrupted image: {path.name!r}.") from exc
+                digest = _sha256(path)
+                if digest in hash_splits:
+                    if hash_splits[digest] != split:
+                        raise ValueError("Byte-identical media duplicated across dataset splits.")
+                    exact_duplicate_count += 1
+                else:
+                    hash_splits[digest] = split
         label = row.get("label")
         if label is not None:
             if isinstance(label, bool) or not isinstance(label, int) or label < 0:
@@ -114,6 +132,8 @@ def validate_manifest(manifest: Path, root: Path, modalities: tuple[str, str]) -
     if not counts["train"] or not counts["validation"] or not counts["test"]:
         raise ValueError("Independent train, validation and test splits are required.")
     return rows, {"counts": counts, "num_groups": len(groups),
+                  "exact_duplicate_media_records": exact_duplicate_count,
+                  "content_integrity": "sha256_plus_image_decode_verification",
                   "labels": sorted(labels), "modalities": list(modalities),
                   "manifest_sha256": _sha256(manifest)}
 
