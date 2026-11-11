@@ -129,6 +129,16 @@ class AudioPerception(BasePerceptionModality):
             )
         if not torch.is_floating_point(audio):
             audio = audio.float()
+        if (
+            audio.size(0) < 1 or audio.size(0) > 64
+            or audio.size(-1) < 1 or audio.size(-1) > 1_920_000
+            or not bool(torch.isfinite(audio).all())
+        ):
+            raise ModalityInputError(
+                "Audio batch, sample count or finite-value validation failed.",
+                component="audio_perception",
+                details={"shape": list(audio.shape)},
+            )
         prepared["audio_values"] = audio.to(self.device)
         return prepared
 
