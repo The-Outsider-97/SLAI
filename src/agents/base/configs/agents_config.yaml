@@ -519,6 +519,7 @@ alignment_agent:
     # checkpoint is selected explicitly by the operator after review.
     learned_model_mode: disabled  # disabled | shadow | advisory | active
     learned_model_artifact_dir: null
+    learned_model_manifest_sha256: null  # trusted SHA-256 pin, required for active
 
   # SLAI SharedMemory is the cross-agent/runtime coordination layer.
   # alignment_memory.py remains private evidence/history memory for the
