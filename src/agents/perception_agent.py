@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from torch import random
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 """SLAI Perception Agent.
 
@@ -54,6 +54,7 @@ from .perception.perception_contracts import *
 from .perception.perception_fusion import PerceptionFusion
 from .perception.perception_objectives import PerceptionObjectives
 from .perception.perception_trainer import PerceptionTrainer
+from .perception.perception_models import MultimodalPerception, MultimodalContrastiveEncoder
 from .perception.utils.perception_errors import *
 from .perception.utils.perception_helpers import *
 from .perception.utils.taskheads import *
@@ -326,6 +327,14 @@ class PerceptionAgent(BaseAgent, nn.Module):
             device=self.device,
         )
 
+        # Views share the existing registered modules and optimizer; keeping
+        # them in a plain dict avoids duplicate checkpoint state keys.
+        pipelines = self._modality_pipelines()
+        self._model_views = {
+            "MultimodalPerception": MultimodalPerception(pipelines, self.fusion, self.task_heads),
+            "MultimodalContrastiveEncoder": MultimodalContrastiveEncoder(pipelines, self.objectives),
+        }
+
         # PerceptionTrainer moves every registered trainable subsystem module to
         # the resolved device before it constructs the optimizer. Do not call
         # ``self.to(...)`` after optimizer construction, because a post-build
@@ -338,26 +347,10 @@ class PerceptionAgent(BaseAgent, nn.Module):
             "vision": int(self.vision_perception.embed_dim),
             "audio": int(self.audio_perception.embed_dim),
         }
-        mismatched = {
-            name: value
-            for name, value in dimensions.items()
-            if value != self.embed_dim
-        }
-        if mismatched:
-            raise PerceptionDimensionError(
-                "Agent embed_dim does not match one or more modality contracts.",
-                component="perception_agent",
-                details={
-                    "agent_embed_dim": self.embed_dim,
-                    "modality_embed_dims": dimensions,
-                    "mismatched": mismatched,
-                },
-                remediation=(
-                    "Align base/configs/agents_config.yaml/perception_agent.embed_dim "
-                    "with the subsystem encoder dimensions. The agent does not read "
-                    "perception_config.yaml to resolve this mismatch."
-                ),
-            )
+        # PerceptionFusion projects heterogeneous encoder widths into the
+        # configured fused width; equal encoder widths are not required.
+        if any(width <= 0 for width in dimensions.values()):
+            raise PerceptionDimensionError("Modality embedding dimensions must be positive.")
 
         if self.fusion.output_dim != self.embed_dim:
             raise PerceptionDimensionError(
@@ -1005,6 +998,41 @@ class PerceptionAgent(BaseAgent, nn.Module):
                     canonical_output = single_representation.pooled
                 representation_summary = single_representation.summary()
 
+            model_name = task_data.get("model_name")
+            if model_name == "MultimodalContrastiveEncoder":
+                if task_data.get("downstream_task") or task_data.get("generate", False):
+                    raise UnsupportedPerceptionOptionError(
+                        "Contrastive embeddings cannot generate or invoke a downstream head.",
+                        component="perception_agent",
+                    )
+                model = self._model_views[model_name]
+                embeddings = model(representations)
+                output = {key.value: value for key, value in embeddings.items()}
+                pair = task_data.get("similarity_pair")
+                if pair is not None:
+                    if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                        raise ModalityInputError("similarity_pair must contain exactly two modalities.")
+                    a, b = (Modality.parse(item) for item in pair)
+                    if a not in embeddings or b not in embeddings:
+                        raise ModalityInputError("similarity_pair references a missing modality.")
+                    output["similarity"] = model.similarity(embeddings[a], embeddings[b])
+                return {
+                    "status": "success",
+                    "model_name": model_name,
+                    "output": detach_tree(output, cpu=True),
+                    "representation": {k.value: v.summary() for k, v in representations.items()},
+                    "model_validation": "not_established_by_inference",
+                }
+            if model_name == "MultimodalPerception":
+                if bool(task_data.get("generate", False)):
+                    raise UnsupportedPerceptionOptionError(
+                        "MultimodalPerception has no fused-data decoder.",
+                        component="perception_agent",
+                    )
+                fused = self._model_views[model_name](representations)
+                canonical_output = fused.pooled
+                representation_summary = fused.summary()
+
             downstream_task = task_data.get("downstream_task")
             if downstream_task:
                 # Downstream heads always consume the fixed-width fusion contract,
@@ -1074,6 +1102,27 @@ class PerceptionAgent(BaseAgent, nn.Module):
                 details={"supported": sorted(_SUPPORTED_TASK_TYPES)},
             )
 
+        selected_model = task_data.get("model_name")
+        if selected_model is not None:
+            if selected_model not in self._model_views:
+                raise UnsupportedPerceptionOptionError(
+                    "Unknown perception model.",
+                    component="perception_agent",
+                    details={"model_name": str(selected_model), "available": list(self._model_views)},
+                )
+            if task_type == "pretrain" and (
+                selected_model != "MultimodalContrastiveEncoder"
+                or not str(task_data.get("objective", "")).startswith("contrastive_")
+            ):
+                raise UnsupportedPerceptionOptionError(
+                    "Named contrastive training requires MultimodalContrastiveEncoder and contrastive objective.",
+                    component="perception_agent",
+                )
+            if task_type == "finetune" and selected_model != "MultimodalPerception":
+                raise UnsupportedPerceptionOptionError(
+                    "Named supervised training requires MultimodalPerception.",
+                    component="perception_agent",
+                )
         if task_type == "pretrain":
             result = self._pretraining_step(task_data)
         elif task_type == "finetune":
