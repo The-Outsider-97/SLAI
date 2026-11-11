@@ -222,9 +222,13 @@ class AlignmentAgent(BaseAgent):
             "value_embedding_model": self.value_embedding_model,
             "counterfactual_auditor": self.counterfactual_auditor,
         }
+        # Configuration, not untrusted task data, determines whether the
+        # Alignment-owned dynamic constraint registry is enforced.
+        subsystem_runtime_config = dict(self.runtime_config)
+        subsystem_runtime_config["enforce_alignment_constraints"] = self.enable_ethics_check
         self.subsystem = AlignmentSubsystem(
             assessment_config=self.assessment_config,
-            runtime_config=self.runtime_config,
+            runtime_config=subsystem_runtime_config,
             components=components,
         )
         if assessor is not None:
