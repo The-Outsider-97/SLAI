@@ -28,6 +28,10 @@ alignment/
 ├── __init__.py
 ├── README.md
 ├── alignment_memory.py
+├── assessment.py
+├── runtime.py
+├── learned_models.py
+├── train_models.py
 ├── bias_detection.py
 ├── counterfactual_auditor.py
 ├── ethical_constraints.py
