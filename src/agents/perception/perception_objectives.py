@@ -177,12 +177,19 @@ class PerceptionObjectives(nn.Module):
             )
         return self.contrastive_projectors[modality.value](representation.pooled)
 
+    def embed(self, representation: ModalityRepresentation) -> torch.Tensor:
+        """Return L2-normalized trained contrastive embeddings for retrieval."""
+        projected = self._project(representation)
+        ensure_finite_tensor(projected, "contrastive_embedding", component="perception_objectives")
+        return F.normalize(projected, p=2, dim=-1)
+
     def contrastive(
         self,
         first: ModalityRepresentation,
         second: ModalityRepresentation,
         *,
         symmetric: Optional[bool] = None,
+        group_ids: Optional[Tuple[str, ...]] = None,
     ) -> ObjectiveLoss:
         """Compute paired cross-modal InfoNCE over batch-aligned examples."""
 
@@ -203,21 +210,34 @@ class PerceptionObjectives(nn.Module):
                 details={"batch_size": first.batch_size},
             )
 
-        first_projected = F.normalize(self._project(first), p=2, dim=-1)
-        second_projected = F.normalize(self._project(second), p=2, dim=-1)
-        logits = torch.matmul(first_projected, second_projected.transpose(0, 1))
-        logits = logits / self.contrastive_temperature
+        first_projected = self.embed(first)
+        second_projected = self.embed(second)
+        logits = (first_projected @ second_projected.transpose(0, 1)) / self.contrastive_temperature
         labels = torch.arange(first.batch_size, device=logits.device)
-
-        forward_loss = F.cross_entropy(logits, labels)
         use_symmetric = self.symmetric_contrastive if symmetric is None else bool(symmetric)
-        if use_symmetric:
-            reverse_loss = F.cross_entropy(logits.transpose(0, 1), labels)
+
+        if group_ids is None:
+            # Backwards-compatible one-to-one InfoNCE.
+            forward_loss = F.cross_entropy(logits, labels)
+            reverse_loss = F.cross_entropy(logits.transpose(0, 1), labels) if use_symmetric else None
+        else:
+            # Multiple records of the same source/semantic group are all
+            # positives: never accidentally train them as false negatives.
+            if len(group_ids) != first.batch_size or any(not isinstance(g, str) or not g for g in group_ids):
+                raise PerceptionObjectiveError("group_ids must be non-empty strings of batch length.")
+            positive = torch.tensor(
+                [[a == b for b in group_ids] for a in group_ids],
+                device=logits.device, dtype=torch.bool,
+            )
+            def multi_positive_nce(scores: torch.Tensor) -> torch.Tensor:
+                positive_scores = scores.masked_fill(~positive, float("-inf"))
+                return (torch.logsumexp(scores, dim=1) - torch.logsumexp(positive_scores, dim=1)).mean()
+            forward_loss = multi_positive_nce(logits)
+            reverse_loss = multi_positive_nce(logits.transpose(0, 1)) if use_symmetric else None
+
+        if reverse_loss is not None:
             loss = 0.5 * (forward_loss + reverse_loss)
-            components = {
-                "forward_contrastive": forward_loss,
-                "reverse_contrastive": reverse_loss,
-            }
+            components = {"forward_contrastive": forward_loss, "reverse_contrastive": reverse_loss}
         else:
             loss = forward_loss
             components = {"forward_contrastive": forward_loss}
