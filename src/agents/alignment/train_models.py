@@ -198,7 +198,7 @@ def train(
             ) / len(validation)
         if validation_loss < best_loss:
             best_loss = validation_loss
-            best_weights = scorer.export_weights()
+            best_weights = {key: value.clone() for key, value in scorer.export_weights().items()}
     if best_weights is None:
         raise RuntimeError("No valid scorer validation checkpoint was produced")
     scorer.import_weights(best_weights)
