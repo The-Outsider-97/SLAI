@@ -269,6 +269,7 @@ class PerceptionTrainer:
         second_payload: Any,
         *,
         symmetric: Optional[bool] = None,
+        group_ids: Optional[Tuple[str, ...]] = None,
         first_kwargs: Optional[Mapping[str, Any]] = None,
         second_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> TrainingStepResult:
@@ -285,7 +286,7 @@ class PerceptionTrainer:
         self.set_training_mode(True)
         first = first_pipeline.encode(first_payload, **dict(first_kwargs or {}))
         second = second_pipeline.encode(second_payload, **dict(second_kwargs or {}))
-        objective = self.objectives.contrastive(first, second, symmetric=symmetric)
+        objective = self.objectives.contrastive(first, second, symmetric=symmetric, group_ids=group_ids)
         return self._optimize(objective)
 
     def temporal_step(
