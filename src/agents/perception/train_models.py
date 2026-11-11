@@ -222,6 +222,11 @@ def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
              "manifest_sha256": summary["manifest_sha256"],
              "training_config": training_config,
              "preprocessing_identity": _preprocessing_identity(agent),
+             "trained_model_names": (
+                 list(MODELS) if model == "MultimodalPerception"
+                 and training_config.get("joint_contrastive_weight", 0) > 0
+                 else [model]
+             ),
              "model_state_dict": agent.state_dict(),
              "trainer_state_dict": agent.trainer.state_dict(),
              "task_head_specs": agent._task_head_specs}
@@ -234,6 +239,11 @@ def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
                 "training_config": training_config,
                 "optimizer_config": agent.trainer.state_dict().get("optimizer_config"),
                 "preprocessing_identity": _preprocessing_identity(agent),
+                "trained_model_names": (
+                    list(MODELS) if model == "MultimodalPerception"
+                    and training_config.get("joint_contrastive_weight", 0) > 0
+                    else [model]
+                ),
                 "model_sha256": _sha256(folder / "model.pt"), "metrics": metrics,
                 "validated_real_world_performance": False}
     temp_json = folder / "manifest.json.tmp"
@@ -259,8 +269,11 @@ def load_into_agent(agent: PerceptionAgent, folder: Path, *,
     state = torch.load(folder / "model.pt", map_location="cpu", weights_only=True)
     if (state.get("schema") != SCHEMA or state.get("model_name") != metadata["model_name"]
             or state.get("pair") != metadata["pair"] or state.get("epoch") != metadata["epoch"]
-            or state.get("preprocessing_identity") != metadata["preprocessing_identity"]):
+            or state.get("preprocessing_identity") != metadata["preprocessing_identity"]
+            or state.get("trained_model_names") != metadata["trained_model_names"]):
         raise ValueError("Training artifact metadata disagrees with the checkpoint.")
+    if any(name not in MODELS for name in metadata["trained_model_names"]):
+        raise ValueError("Training artifact declares an unsupported trained model.")
     # Preflight the complete parameter schema before mutation.
     agent._restore_task_head_structure(state.get("task_head_specs", []))
     target = agent.state_dict()
@@ -269,11 +282,15 @@ def load_into_agent(agent: PerceptionAgent, folder: Path, *,
         raise ValueError("Checkpoint is incompatible with the PerceptionAgent architecture.")
     agent.load_state_dict(candidate, strict=True)
     agent.trainer.load_state_dict(state.get("trainer_state_dict", {}), load_optimizer=restore_optimizer)
-    agent._trained_model_artifacts[metadata["model_name"]] = {
-        "model_sha256": metadata["model_sha256"],
-        "pair": list(metadata["pair"]),
-        "validated_real_world_performance": metadata.get("validated_real_world_performance", False),
-    }
+    # An artifact replaces *all* shared encoder/fusion/projector weights.
+    # Older loaded model statuses must never outlive those weights.
+    agent._trained_model_artifacts.clear()
+    for model_name in metadata["trained_model_names"]:
+        agent._trained_model_artifacts[model_name] = {
+            "model_sha256": metadata["model_sha256"],
+            "pair": list(metadata["pair"]),
+            "validated_real_world_performance": metadata.get("validated_real_world_performance", False),
+        }
     return metadata
 
 
@@ -322,6 +339,10 @@ def _train(args: argparse.Namespace) -> None:
         labels = sorted({r.get("label") for r in records if r.get("label") is not None})
         if len(labels) < 2 or labels != list(range(len(labels))) or any(r.get("label") is None for r in records):
             raise ValueError("Supervised training requires complete contiguous integer labels starting at 0.")
+    if not 0.0 <= args.joint_contrastive_weight <= 10.0 or not torch.isfinite(torch.tensor(args.joint_contrastive_weight)):
+        raise ValueError("--joint-contrastive-weight must be finite in [0,10].")
+    if args.model != "MultimodalPerception" and args.joint_contrastive_weight > 0:
+        raise ValueError("Joint contrastive loss applies only to MultimodalPerception training.")
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     agent = _agent(args.device)
@@ -351,16 +372,29 @@ def _train(args: argparse.Namespace) -> None:
                 fused = agent.fusion(representations)
                 head, _ = agent._get_existing_task_head("dataset_classification",
                                                           agent.embed_dim, len(labels))
-                step = agent.trainer.supervised_step(
-                    head, fused, batch["labels"].to(agent.device),
-                    torch.nn.functional.cross_entropy,
-                )
+                if args.joint_contrastive_weight > 0:
+                    step = agent.trainer.joint_step(
+                        head, representations, batch["labels"].to(agent.device),
+                        torch.nn.functional.cross_entropy,
+                        args.pair[0], args.pair[1],
+                        contrastive_weight=args.joint_contrastive_weight,
+                        group_ids=batch["group_ids"],
+                    )
+                else:
+                    step = agent.trainer.supervised_step(
+                        head, fused, batch["labels"].to(agent.device),
+                        torch.nn.functional.cross_entropy,
+                    )
             losses.append(step.loss)
         if not losses:
             raise ValueError("No usable training batches were available.")
-        agent._trained_model_artifacts[args.model] = {
-            "pair": list(args.pair), "validated_real_world_performance": False,
-            "training_stage": "in_process",
+        trained = (
+            MODELS if args.model == "MultimodalPerception"
+            and args.joint_contrastive_weight > 0 else (args.model,)
+        )
+        agent._trained_model_artifacts = {
+            name: {"pair": list(args.pair), "validated_real_world_performance": False,
+                   "training_stage": "in_process"} for name in trained
         }
         metrics = _evaluate(agent, records, root, tuple(args.pair), args.model, "validation", args.batch_size)
         metrics["mean_train_loss"] = sum(losses) / len(losses)
@@ -368,6 +402,7 @@ def _train(args: argparse.Namespace) -> None:
               pair=tuple(args.pair), metrics=metrics,
               training_config={"seed": args.seed, "batch_size": args.batch_size,
                                "device": args.device, "planned_epochs": args.epochs,
+                               "joint_contrastive_weight": args.joint_contrastive_weight,
                                "torch_version": str(torch.__version__)})
         print(json.dumps({"epoch": epoch + 1, **metrics}, sort_keys=True))
 
@@ -462,6 +497,7 @@ def main(argv: list[str] | None = None) -> None:
         if command == "train":
             sub.add_argument("--epochs", type=int, default=1)
             sub.add_argument("--seed", type=int, default=42)
+            sub.add_argument("--joint-contrastive-weight", type=float, default=0.0)
             sub.add_argument("--resume", action="store_true")
             sub.add_argument("--output", required=True)
             sub.set_defaults(fn=_train)
