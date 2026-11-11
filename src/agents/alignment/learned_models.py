@@ -144,11 +144,21 @@ class AlignmentModelBundle:
         self.artifact_dir = artifact_dir
 
     @classmethod
-    def load(cls, artifact_dir: str | Path, *, require_approved: bool = False) -> "AlignmentModelBundle":
+    def load(
+        cls, artifact_dir: str | Path, *, require_approved: bool = False,
+        expected_manifest_sha256: Optional[str] = None
+    ) -> "AlignmentModelBundle":
         root = Path(artifact_dir).expanduser().resolve(strict=True)
         if not root.is_dir():
             raise ValueError("Alignment model artifact path must be a directory")
         manifest_path = root / "manifest.json"
+        if require_approved and not expected_manifest_sha256:
+            raise ValueError("Active inference requires a trusted manifest SHA-256 pin")
+        if expected_manifest_sha256 is not None:
+            if not isinstance(expected_manifest_sha256, str) or len(expected_manifest_sha256) != 64:
+                raise ValueError("Expected manifest SHA-256 must be a 64-character hex digest")
+            if _sha256(manifest_path) != expected_manifest_sha256.lower():
+                raise ValueError("Alignment manifest integrity failure")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
             raise ValueError("Unsupported alignment model manifest schema")
