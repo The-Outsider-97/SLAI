@@ -225,6 +225,10 @@ class PerceptionObjectives(nn.Module):
             # positives: never accidentally train them as false negatives.
             if len(group_ids) != first.batch_size or any(not isinstance(g, str) or not g for g in group_ids):
                 raise PerceptionObjectiveError("group_ids must be non-empty strings of batch length.")
+            if len(set(group_ids)) < 2:
+                raise PerceptionObjectiveError(
+                    "Contrastive batch has no semantic negatives: at least two positive_id groups are required."
+                )
             positive = torch.tensor(
                 [[a == b for b in group_ids] for a in group_ids],
                 device=logits.device, dtype=torch.bool,
