@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import hashlib
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .assessment import (
@@ -20,6 +20,7 @@ from .assessment import (
     AlignmentAssessor,
     AlignmentDimension,
     AlignmentEvidence,
+    AlignmentStatus,
 )
 from .alignment_memory import AlignmentMemory
 from logs.logger import get_logger  # pyright: ignore[reportMissingImports]
@@ -573,6 +574,23 @@ class AlignmentSubsystem:
             record_trajectory=record_trajectory,
             metadata={"task_id": payload.get("task_id"), "audit_id": payload.get("audit_id")},
         )
+        learned_report = component_report.get("learned_alignment", {})
+        if (
+            self._learned_mode == "active"
+            and payload.get("learned_alignment") is not None
+            and learned_report.get("status") != "evaluated"
+            and assessment.status in {AlignmentStatus.ALIGNED, AlignmentStatus.PARTIALLY_ALIGNED}
+        ):
+            # A specifically requested, active alignment assessment must not
+            # silently proceed as aligned if its required trained component
+            # failed to load, validate input, or execute.
+            assessment = replace(
+                assessment,
+                status=AlignmentStatus.UNCERTAIN,
+                explanation=assessment.explanation + (
+                    "active learned alignment assessment unavailable; manual review required",
+                ),
+            )
         if record_trajectory and self.memory_logging_enabled:
             self._record_assessment(payload, assessment)
         return assessment, component_report, evidence
