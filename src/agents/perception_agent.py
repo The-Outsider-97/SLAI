@@ -724,6 +724,10 @@ class PerceptionAgent(BaseAgent, nn.Module):
         # optimizer being replaced by checkpoint/shared-state restoration.
         self.task_heads = nn.ModuleDict()
         self.trainer.task_heads = self.task_heads
+        if hasattr(self, "_model_views"):
+            # Restore replaces the canonical ModuleDict; keep the model view
+            # pointing at the same registered heads, never stale copies.
+            self._model_views["MultimodalPerception"].task_heads = self.task_heads
         self._task_head_specs = []
         self.trainer.rebuild_optimizer()
 
