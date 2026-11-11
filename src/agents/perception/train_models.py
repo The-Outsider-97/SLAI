@@ -75,6 +75,7 @@ def validate_manifest(manifest: Path, root: Path, modalities: tuple[str, str]) -
     ids: set[str] = set()
     groups: dict[str, str] = {}
     file_splits: dict[str, str] = {}
+    file_hashes: dict[str, str] = {}
     hash_splits: dict[str, str] = {}
     exact_duplicate_count = 0
     labels = set()
@@ -117,7 +118,7 @@ def validate_manifest(manifest: Path, root: Path, modalities: tuple[str, str]) -
                             decoded.verify()
                     except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
                         raise ValueError(f"Invalid or corrupted image: {path.name!r}.") from exc
-                digest = _sha256(path)
+                digest = file_hashes.setdefault(key, _sha256(path))
                 if digest in hash_splits:
                     if hash_splits[digest] != split:
                         raise ValueError("Byte-identical media duplicated across dataset splits.")
@@ -131,11 +132,22 @@ def validate_manifest(manifest: Path, root: Path, modalities: tuple[str, str]) -
             labels.add(label)
     if not counts["train"] or not counts["validation"] or not counts["test"]:
         raise ValueError("Independent train, validation and test splits are required.")
+    manifest_digest = _sha256(manifest)
+    media_manifest = "\n".join(
+        f"{Path(file).relative_to(root.resolve()).as_posix()}:{digest}"
+        for file, digest in sorted(file_hashes.items())
+    )
+    media_digest = hashlib.sha256(media_manifest.encode("utf-8")).hexdigest()
+    combined_digest = hashlib.sha256(
+        f"{manifest_digest}:{media_digest}".encode("ascii")
+    ).hexdigest()
     return rows, {"counts": counts, "num_groups": len(groups),
                   "exact_duplicate_media_records": exact_duplicate_count,
                   "content_integrity": "sha256_plus_image_decode_verification",
                   "labels": sorted(labels), "modalities": list(modalities),
-                  "manifest_sha256": _sha256(manifest)}
+                  "manifest_sha256": manifest_digest,
+                  "media_content_sha256": media_digest,
+                  "dataset_fingerprint_sha256": combined_digest}
 
 
 class ManifestPerceptionDataset(MultiModalDataset):
@@ -211,6 +223,7 @@ def _validated_data(args: argparse.Namespace):
         raise ValueError("Run prepare and supply its dataset declaration first.")
     metadata = json.loads(declaration.read_text(encoding="utf-8"))
     if (metadata.get("manifest_sha256") != summary["manifest_sha256"]
+            or metadata.get("dataset_fingerprint_sha256") != summary["dataset_fingerprint_sha256"]
             or metadata.get("modalities") != list(pair)
             or metadata.get("rights_confirmed_by_operator") is not True):
         raise ValueError("Dataset declaration or manifest fingerprint mismatch.")
@@ -240,6 +253,7 @@ def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
     folder.mkdir(parents=True, exist_ok=True)
     state = {"schema": SCHEMA, "model_name": model, "epoch": epoch, "pair": list(pair),
              "manifest_sha256": summary["manifest_sha256"],
+             "dataset_fingerprint_sha256": summary["dataset_fingerprint_sha256"],
              "training_config": training_config,
              "preprocessing_identity": _preprocessing_identity(agent),
              "trained_model_names": (
@@ -255,6 +269,7 @@ def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
     temporary.replace(folder / "model.pt")
     metadata = {"schema": SCHEMA, "model_name": model, "epoch": epoch,
                 "pair": list(pair), "manifest_sha256": summary["manifest_sha256"],
+                "dataset_fingerprint_sha256": summary["dataset_fingerprint_sha256"],
                 "dataset_provenance": summary.get("dataset_provenance"),
                 "training_config": training_config,
                 "optimizer_config": agent.trainer.state_dict().get("optimizer_config"),
@@ -279,8 +294,8 @@ def load_into_agent(agent: PerceptionAgent, folder: Path, *,
         raise ValueError("Unsupported perception training artifact.")
     if expected_model and expected_model not in metadata.get("trained_model_names", []):
         raise ValueError("Checkpoint does not contain the requested trained model.")
-    if expected_dataset and metadata.get("manifest_sha256") != expected_dataset:
-        raise ValueError("Checkpoint training data fingerprint mismatch.")
+    if expected_dataset and metadata.get("dataset_fingerprint_sha256") != expected_dataset:
+        raise ValueError("Checkpoint training data content fingerprint mismatch.")
     if metadata.get("preprocessing_identity") != _preprocessing_identity(agent):
         raise ValueError("Tokenizer or subsystem architecture configuration changed since training.")
     if _sha256(folder / "model.pt") != metadata.get("model_sha256"):
@@ -289,6 +304,7 @@ def load_into_agent(agent: PerceptionAgent, folder: Path, *,
     state = torch.load(folder / "model.pt", map_location="cpu", weights_only=True)
     if (state.get("schema") != SCHEMA or state.get("model_name") != metadata["model_name"]
             or state.get("pair") != metadata["pair"] or state.get("epoch") != metadata["epoch"]
+            or state.get("dataset_fingerprint_sha256") != metadata["dataset_fingerprint_sha256"]
             or state.get("preprocessing_identity") != metadata["preprocessing_identity"]
             or state.get("trained_model_names") != metadata["trained_model_names"]):
         raise ValueError("Training artifact metadata disagrees with the checkpoint.")
@@ -373,7 +389,7 @@ def _train(args: argparse.Namespace) -> None:
     folder = Path(args.output).resolve()
     if args.resume:
         metadata = load_into_agent(agent, folder, expected_model=args.model,
-                                   expected_dataset=summary["manifest_sha256"], restore_optimizer=True)
+                                   expected_dataset=summary["dataset_fingerprint_sha256"], restore_optimizer=True)
         previous_weight = metadata.get("training_config", {}).get("joint_contrastive_weight", 0.0)
         if float(previous_weight) != args.joint_contrastive_weight or metadata["model_name"] != args.model:
             raise ValueError("Resume model identity and joint objective weight must match the checkpoint.")
@@ -446,13 +462,14 @@ def _evaluate_saved(args: argparse.Namespace) -> None:
     records, summary, root = _validated_data(args)
     agent = _agent(args.device)
     info = load_into_agent(agent, Path(args.checkpoint), expected_model=args.model,
-                           expected_dataset=summary["manifest_sha256"])
+                           expected_dataset=summary["dataset_fingerprint_sha256"])
     if tuple(info["pair"]) != tuple(args.pair):
         raise ValueError("Evaluation pair does not match the checkpoint.")
     metrics = _evaluate(agent, records, root, tuple(args.pair),
                         args.model, args.split, args.batch_size)
     report = {"model_name": args.model, "checkpoint_sha256": info["model_sha256"],
-              "dataset_manifest_sha256": summary["manifest_sha256"], **metrics}
+              "dataset_manifest_sha256": summary["manifest_sha256"],
+              "dataset_fingerprint_sha256": summary["dataset_fingerprint_sha256"], **metrics}
     if args.output_json:
         output = Path(args.output_json)
         output.parent.mkdir(parents=True, exist_ok=True)
