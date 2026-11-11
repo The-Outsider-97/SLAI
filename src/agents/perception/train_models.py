@@ -254,6 +254,7 @@ def load_into_agent(agent: PerceptionAgent, folder: Path, *,
     agent.trainer.load_state_dict(state.get("trainer_state_dict", {}), load_optimizer=restore_optimizer)
     agent._trained_model_artifacts[metadata["model_name"]] = {
         "model_sha256": metadata["model_sha256"],
+        "pair": list(metadata["pair"]),
         "validated_real_world_performance": metadata.get("validated_real_world_performance", False),
     }
     return metadata
@@ -340,6 +341,10 @@ def _train(args: argparse.Namespace) -> None:
             losses.append(step.loss)
         if not losses:
             raise ValueError("No usable training batches were available.")
+        agent._trained_model_artifacts[args.model] = {
+            "pair": list(args.pair), "validated_real_world_performance": False,
+            "training_stage": "in_process",
+        }
         metrics = _evaluate(agent, records, root, tuple(args.pair), args.model, "validation", args.batch_size)
         metrics["mean_train_loss"] = sum(losses) / len(losses)
         _save(agent, folder, model=args.model, epoch=epoch + 1, summary=summary,
@@ -371,18 +376,29 @@ def _evaluate_saved(args: argparse.Namespace) -> None:
 def _infer(args: argparse.Namespace) -> None:
     agent = _agent(args.device)
     info = load_into_agent(agent, Path(args.checkpoint), expected_model=args.model)
-    if args.modality == "text":
-        if not args.text:
-            raise ValueError("--text is required.")
-        payload = args.text
-    elif args.modality == "vision":
+
+    def payload_for(modality: str):
+        if modality == "text":
+            if not args.text:
+                raise ValueError("--text is required for text input.")
+            return args.text
+        if not args.path:
+            raise ValueError("--path is required for image/audio input.")
         base = MultiModalDataset(mode="inference")
-        payload = base._process_vision(Path(args.path))
+        return (base._process_vision(Path(args.path)) if modality == "vision"
+                else base._process_audio(Path(args.path)))
+
+    if args.modality == "multimodal":
+        pair = info["pair"]
+        if len(pair) != 2:
+            raise ValueError("Saved artifact does not specify a supported modality pair.")
+        data = {modality: payload_for(modality) for modality in pair}
+        request = {"task_type": "inference", "model_name": args.model,
+                   "modality": "multimodal", "input_data": data}
     else:
-        base = MultiModalDataset(mode="inference")
-        payload = base._process_audio(Path(args.path))
-    result = agent.perform_task({"task_type": "inference", "model_name": args.model,
-                                 "modality": args.modality, "input_data": payload})
+        request = {"task_type": "inference", "model_name": args.model,
+                   "modality": args.modality, "input_data": payload_for(args.modality)}
+    result = agent.perform_task(request)
     output = result["output"]
     if isinstance(output, dict):
         shape = {k: list(v.shape) for k, v in output.items()}
@@ -390,160 +406,6 @@ def _infer(args: argparse.Namespace) -> None:
         shape = list(output.shape)
     print(json.dumps({"model_name": info["model_name"], "output_shape": shape,
                       "checkpoint_sha256": info["model_sha256"]}, indent=2))
-
-
-
-OXFORD_PETS_URL = "https://www.robots.ox.ac.uk/~vgg/data/pets/data/"
-
-
-def _download(url: str, destination: Path, max_bytes: int) -> dict:
-    """Explicit HTTPS download with bounded size, resumable if server supports Range."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_suffix(destination.suffix + ".part")
-    offset = partial.stat().st_size if partial.exists() else 0
-    if offset > max_bytes:
-        raise ValueError("Partial download already exceeds size limit.")
-    headers = {"Range": f"bytes={offset}-"} if offset else {}
-    with urlopen(Request(url, headers=headers), timeout=60) as stream:
-        if not stream.geturl().startswith("https://"):
-            raise ValueError("HTTPS dataset acquisition must not redirect to plaintext HTTP.")
-        length = stream.headers.get("Content-Length")
-        if length is not None and int(length) + offset > max_bytes:
-            raise ValueError("Server-declared archive size exceeds safety limit.")
-        resumed = offset > 0 and getattr(stream, "status", 200) == 206
-        if resumed and not str(stream.headers.get("Content-Range", "")).startswith(f"bytes {offset}-"):
-            raise ValueError("Server Range response does not match requested offset.")
-        mode = "ab" if resumed else "wb"
-        total = offset if resumed else 0
-        with partial.open(mode) as output:
-            while True:
-                chunk = stream.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError("Download exceeds configured safety limit.")
-                output.write(chunk)
-    partial.replace(destination)
-    return {"name": destination.name, "bytes": destination.stat().st_size,
-            "sha256": _sha256(destination), "url": url, "upstream_checksum_verified": False}
-
-
-def _safe_extract_tar(archive: Path, destination: Path, *, max_total_bytes: int) -> None:
-    """Extract regular files only, rejecting links, traversal and decompression bombs."""
-    destination = destination.resolve()
-    destination.mkdir(parents=True, exist_ok=True)
-    total = 0
-    with tarfile.open(archive, "r:gz") as source:
-        for member in source:
-            if member.isdir():
-                continue
-            if not member.isfile() or member.size < 0 or member.size > 32 * 1024 * 1024:
-                raise ValueError("Archive contains unsafe member type or excessive file size.")
-            total += member.size
-            if total > max_total_bytes:
-                raise ValueError("Decompressed dataset exceeds the size limit.")
-            relative = Path(member.name)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise ValueError("Unsafe archive path.")
-            target = (destination / relative).resolve()
-            if not target.is_relative_to(destination):
-                raise ValueError("Archive path escapes destination.")
-            if target.exists():
-                raise ValueError("Archive would overwrite existing files.")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            reader = source.extractfile(member)
-            if reader is None:
-                raise ValueError("Unreadable archive member.")
-            with reader, target.open("xb") as output:
-                shutil.copyfileobj(reader, output, length=1024 * 1024)
-
-
-def _acquire_oxford_pets(args: argparse.Namespace) -> None:
-    if not args.confirm_rights:
-        raise ValueError("Review source terms and explicitly supply --confirm-rights.")
-    root = Path(args.dataset_root).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    reports = []
-    # Official source provides annotations under CC BY-SA 4.0; individual
-    # photographs retain original authors' copyright and use constraints.
-    for name, maximum in (("images.tar.gz", 1_200_000_000), ("annotations.tar.gz", 120_000_000)):
-        destination = root / name
-        report = _download(OXFORD_PETS_URL + name, destination, maximum)
-        reports.append(report)
-        if args.extract:
-            _safe_extract_tar(destination, root, max_total_bytes=1_500_000_000)
-    (root / "acquisition.json").write_text(
-        json.dumps({"dataset": "Oxford-IIIT Pet", "source": OXFORD_PETS_URL,
-                    "license_claim": "CC BY-SA 4.0, original image owner rights retained",
-                    "operator_confirmed_rights": True, "archives": reports}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    print(json.dumps({"archives": reports, "extracted": bool(args.extract)}, indent=2))
-
-
-def _oxford_manifest(args: argparse.Namespace) -> None:
-    root = Path(args.dataset_root).resolve()
-    trainval = root / "annotations" / "trainval.txt"
-    test = root / "annotations" / "test.txt"
-    if not trainval.is_file() or not test.is_file():
-        raise ValueError("Extract official Oxford-IIIT Pet annotations before creating the manifest.")
-
-    def parse(path: Path) -> list[tuple[str, int]]:
-        entries = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip() or line.startswith("#"):
-                continue
-            columns = line.split()
-            if len(columns) != 4:
-                raise ValueError("Unexpected official Oxford annotations format.")
-            name, class_id, _, _ = columns
-            if not class_id.isdecimal() or not 1 <= int(class_id) <= 37:
-                raise ValueError("Out-of-range Oxford breed label.")
-            if not name.replace("_", "").isalnum():
-                raise ValueError("Invalid Oxford image identifier.")
-            entries.append((name, int(class_id) - 1))
-        return entries
-
-    trainval_rows, test_rows = parse(trainval), parse(test)
-    rng = random.Random(args.seed)
-    by_breed: dict[int, list[tuple[str, int]]] = {}
-    for row in trainval_rows:
-        by_breed.setdefault(row[1], []).append(row)
-    split_map: dict[str, str] = {}
-    for breed_rows in by_breed.values():
-        rng.shuffle(breed_rows)
-        n_val = max(1, round(len(breed_rows) * args.validation_fraction))
-        for name, _ in breed_rows[:n_val]:
-            split_map[name] = "validation"
-        for name, _ in breed_rows[n_val:]:
-            split_map[name] = "train"
-    for name, _ in test_rows:
-        if name in split_map:
-            raise ValueError("Oxford official split contains duplicate image identifiers.")
-        split_map[name] = "test"
-
-    output = Path(args.output).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    seen = set()
-    with output.open("w", encoding="utf-8") as stream:
-        for name, breed in trainval_rows + test_rows:
-            if name in seen:
-                raise ValueError("Duplicate Oxford image identifier.")
-            seen.add(name)
-            image = root / "images" / (name + ".jpg")
-            if not image.is_file():
-                raise ValueError("Missing official Oxford image in extracted dataset.")
-            # Weak label-derived text, NOT a human-written caption.
-            breed_name = name.rsplit("_", 1)[0].replace("_", " ").lower()
-            row = {"id": name, "group_id": name,
-                   "positive_id": f"breed:{breed}",
-                   "split": split_map[name], "vision": f"images/{name}.jpg",
-                   "text": breed_name, "label": breed}
-            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-    print(json.dumps({"manifest": str(output), "samples": len(seen),
-                      "alignment": "weak_supervision_from_breed_label",
-                      "human_captions": False}, indent=2))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -595,7 +457,7 @@ def main(argv: list[str] | None = None) -> None:
     infer.add_argument("--checkpoint", required=True)
     infer.add_argument("--model", choices=MODELS, required=True)
     infer.add_argument("--device", default="cpu")
-    infer.add_argument("--modality", choices=MODALITIES, required=True)
+    infer.add_argument("--modality", choices=(*MODALITIES, "multimodal"), required=True)
     infer.add_argument("--text")
     infer.add_argument("--path")
     infer.set_defaults(fn=_infer)
