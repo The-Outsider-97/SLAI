@@ -128,6 +128,7 @@ class AlignmentSubsystem:
         if self._learned_mode not in {"disabled", "shadow", "advisory", "active"}:
             raise ValueError("Unsupported learned_model_mode")
         self._learned_path = self._runtime_config.get("learned_model_artifact_dir")
+        self._learned_manifest_digest = self._runtime_config.get("learned_model_manifest_sha256")
         self._learned_bundle = None
         self._learned_error: Optional[str] = None
         self._learned_lock = threading.RLock()
@@ -503,6 +504,7 @@ class AlignmentSubsystem:
                     self._learned_bundle = AlignmentModelBundle.load(
                         self._learned_path,
                         require_approved=self._learned_mode == "active",
+                        expected_manifest_sha256=self._learned_manifest_digest,
                     )
                 result = self._learned_bundle.score(value_text=value_text, action_text=action_text)
                 self._learned_error = None
