@@ -77,7 +77,7 @@ but is **not** a substitute for image-caption retrieval benchmarking.
 From the SLAI root with the project virtual environment active:
 
 ```powershell
-cd G:\GAIA\AI\SLAI
+Set-Location "<PATH_TO_SLAI>"
 python -m src.agents.perception.train_models acquire-oxford-pets `
     --dataset-root data\training\perception\oxford_pets `
     --confirm-rights --extract
@@ -151,19 +151,38 @@ python -m src.agents.perception.train_models train `
     --manifest $manifest --dataset-root $root `
     --dataset-declaration $declaration --pair text vision `
     --device cpu --batch-size 8 --epochs 3 `
-    --output "$root\perception_model"
+    --joint-contrastive-weight 0.3 `
+    --output "$root\joint_model"
 
 python -m src.agents.perception.train_models evaluate `
     --model MultimodalPerception `
     --manifest $manifest --dataset-root $root `
     --dataset-declaration $declaration --pair text vision `
-    --checkpoint "$root\perception_model" --split test
+    --checkpoint "$root\joint_model" --split test
+
+# Independently validate the cross-modal objective in the same joint artifact.
+python -m src.agents.perception.train_models evaluate `
+    --model MultimodalContrastiveEncoder `
+    --manifest $manifest --dataset-root $root `
+    --dataset-declaration $declaration --pair text vision `
+    --checkpoint "$root\joint_model" --split test
 
 python -m src.agents.perception.train_models infer `
     --model MultimodalContrastiveEncoder `
-    --checkpoint "$root\contrastive_model" `
+    --checkpoint "$root\joint_model" `
     --modality text --text "a siamese cat"
 ```
+
+The `--joint-contrastive-weight` option trains both named models through
+one shared encoder/checkpoint, applying supervised classification and
+contrastive alignment losses in a single optimizer step. Both objectives must
+be evaluated independently; performance of one does not guarantee the other.
+Loading another unrelated checkpoint replaces all shared weights and
+invalidates previously loaded model status. Independent single-objective
+training remains available by omitting the joint option. For downstream
+consumers, `perform_task({"task_type":"capabilities"})` reports supported
+models, trained-artifact status, trained modality pairs, and whether validation
+is established.
 
 For an interrupted job, rerun `train` with `--resume` and `--epochs`
 set to the intended **total** epoch count. The implementation checks model
@@ -176,7 +195,8 @@ before resuming. Checkpoint files live outside source control.
 from src.agents.perception_agent import PerceptionAgent
 
 agent = PerceptionAgent(shared_memory=None, agent_factory=None)
-agent.load_training_artifact("data/training/perception/oxford_pets/contrastive_model")
+agent.load_training_artifact("data/training/perception/oxford_pets/joint_model")
+capabilities = agent.perform_task({"task_type": "capabilities"})
 result = agent.perform_task({
     "task_type": "inference",
     "model_name": "MultimodalContrastiveEncoder",
@@ -200,6 +220,7 @@ establish calibrated alignment for other pairs.
 python -m compileall -q src\agents\perception src\agents\perception_agent.py
 python -m pytest -q tests\agents\test_perception_models_v24.py
 python -m pytest -q tests\agents\test_perception_training_manifest_v24.py
+python -m pytest -q tests\agents\test_perception_data_pipeline_v24.py
 python -m pytest -q
 ```
 
@@ -212,7 +233,28 @@ routing evidence before making production claims.
 
 **Remaining blockers:** no actual dataset has been acquired or trained in
 this repository change; no measured real-data checkpoint evaluation or
-hardware-specific performance claim is supplied. Audio–text and image–audio
+hardware-specific performance claim is supplied. As of the PR creation,
+GitHub Actions Foundation CI failed without allocating a runner or executing
+test steps; thus it supplies **no code-verification evidence**. Run the
+commands above in an available v2.4 environment and attach actual results. Audio–text and image–audio
 training require genuine paired corpora and separate evaluation. Optional
 cross-agent consumption remains through established agent envelopes rather
 than new direct dependencies.
+
+
+## Input safety and architectural limitations
+
+The Perception Agent now guards raw modality tensor sizes and rejects NaN/Inf
+image/audio tensors. Batch sizes above 64, images over 24 megapixels, audio
+segments above 1,920,000 samples, and text lengths exceeding configured
+encoder positions are refused. These are conservative service protections,
+not claims about all possible scientific use cases. For longer streams use
+explicit chunking and alignment upstream with independent tests.
+
+The Oxford source's archive endpoints are hosted at
+`https://thor.robots.ox.ac.uk/~vgg/data/pets/`, as linked by the
+official Oxford dataset page. The weak text labels make Oxford useful
+for an initial small classification/alignment exercise, but a broader
+caption-aligned corpus is required to establish general text-image retrieval
+or text-audio alignment. Other modality pairs are explicitly unsupported
+unless trained and validated.
