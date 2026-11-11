@@ -202,6 +202,18 @@ def _validated_data(args: argparse.Namespace):
     return records, summary, root
 
 
+def _preprocessing_identity(agent: PerceptionAgent) -> dict:
+    """Pin the token vocabulary and lower-level preprocessing/encoder config."""
+    tokenizer = agent.text_perception.tokenizer
+    vocab = getattr(tokenizer, "vocab", {})
+    serialized = json.dumps(vocab, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    config_path = Path(__file__).resolve().parent / "configs" / "perception_config.yaml"
+    return {
+        "tokenizer_vocab_sha256": hashlib.sha256(serialized).hexdigest(),
+        "subsystem_config_sha256": _sha256(config_path),
+    }
+
+
 def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
           summary: dict, pair: tuple[str, str], metrics: dict,
           training_config: dict) -> None:
@@ -209,6 +221,7 @@ def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
     state = {"schema": SCHEMA, "model_name": model, "epoch": epoch, "pair": list(pair),
              "manifest_sha256": summary["manifest_sha256"],
              "training_config": training_config,
+             "preprocessing_identity": _preprocessing_identity(agent),
              "model_state_dict": agent.state_dict(),
              "trainer_state_dict": agent.trainer.state_dict(),
              "task_head_specs": agent._task_head_specs}
@@ -220,6 +233,7 @@ def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
                 "dataset_provenance": summary.get("dataset_provenance"),
                 "training_config": training_config,
                 "optimizer_config": agent.trainer.state_dict().get("optimizer_config"),
+                "preprocessing_identity": _preprocessing_identity(agent),
                 "model_sha256": _sha256(folder / "model.pt"), "metrics": metrics,
                 "validated_real_world_performance": False}
     temp_json = folder / "manifest.json.tmp"
@@ -237,12 +251,15 @@ def load_into_agent(agent: PerceptionAgent, folder: Path, *,
         raise ValueError("Checkpoint model identity mismatch.")
     if expected_dataset and metadata.get("manifest_sha256") != expected_dataset:
         raise ValueError("Checkpoint training data fingerprint mismatch.")
+    if metadata.get("preprocessing_identity") != _preprocessing_identity(agent):
+        raise ValueError("Tokenizer or subsystem architecture configuration changed since training.")
     if _sha256(folder / "model.pt") != metadata.get("model_sha256"):
         raise ValueError("Training artifact SHA-256 integrity check failed.")
     # weights_only refuses arbitrary pickle object graphs from untrusted data.
     state = torch.load(folder / "model.pt", map_location="cpu", weights_only=True)
     if (state.get("schema") != SCHEMA or state.get("model_name") != metadata["model_name"]
-            or state.get("pair") != metadata["pair"] or state.get("epoch") != metadata["epoch"]):
+            or state.get("pair") != metadata["pair"] or state.get("epoch") != metadata["epoch"]
+            or state.get("preprocessing_identity") != metadata["preprocessing_identity"]):
         raise ValueError("Training artifact metadata disagrees with the checkpoint.")
     # Preflight the complete parameter schema before mutation.
     agent._restore_task_head_structure(state.get("task_head_specs", []))
