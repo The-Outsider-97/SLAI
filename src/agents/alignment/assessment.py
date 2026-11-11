@@ -556,7 +556,7 @@ class AlignmentAssessor:
         # authoritative evidence still requires review instead of auto-approval.
         mandatory_violation = any(
             item.dimension == AlignmentDimension.CONSTRAINT
-            and item.required
+            and (item.required or item.dimension.value in self.required_dimensions)
             and item.score is not None
             and item.score <= self.misaligned_threshold
             and item.confidence >= self.conflict_confidence
