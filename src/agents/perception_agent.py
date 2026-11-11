@@ -334,6 +334,7 @@ class PerceptionAgent(BaseAgent, nn.Module):
             "MultimodalPerception": MultimodalPerception(pipelines, self.fusion, self.task_heads),
             "MultimodalContrastiveEncoder": MultimodalContrastiveEncoder(pipelines, self.objectives),
         }
+        self._trained_model_artifacts: dict[str, dict[str, Any]] = {}
 
         # PerceptionTrainer moves every registered trainable subsystem module to
         # the resolved device before it constructs the optimizer. Do not call
@@ -1025,6 +1026,10 @@ class PerceptionAgent(BaseAgent, nn.Module):
                     "model_name": model_name,
                     "output": detach_tree(output, cpu=True),
                     "representation": {k.value: v.summary() for k, v in representations.items()},
+                    "weights_source": (
+                        "training_artifact" if model_name in self._trained_model_artifacts
+                        else "untrained_initialization"
+                    ),
                     "model_validation": "not_established_by_inference",
                 }
             if model_name == "MultimodalPerception":
@@ -1074,11 +1079,19 @@ class PerceptionAgent(BaseAgent, nn.Module):
             else:
                 output = canonical_output
 
-            return {
+            result = {
                 "status": "success",
                 "output": detach_tree(output, cpu=True),
                 "representation": representation_summary,
             }
+            if model_name == "MultimodalPerception":
+                result["model_name"] = model_name
+                result["weights_source"] = (
+                    "training_artifact" if model_name in self._trained_model_artifacts
+                    else "untrained_initialization"
+                )
+                result["model_validation"] = "not_established_by_inference"
+            return result
 
     # ------------------------------------------------------------------
     # Public task boundary
@@ -1522,6 +1535,21 @@ class PerceptionAgent(BaseAgent, nn.Module):
             "restored_rng": bool(load_result.restored_rng),
             "global_step": int(self.trainer.global_step),
         }
+
+    def load_training_artifact(self, folder: str | Path) -> dict[str, Any]:
+        """Explicit import of the validated SLAI v2.4 local training format.
+
+        Uses the subsystem's single SHA-256 + weights_only loader, preserving
+        this agent's registered modules and dynamic task-head architecture.
+        No checkpoint is ever loaded implicitly from request input_data.
+        """
+        from .perception.train_models import load_into_agent
+        return load_into_agent(self, Path(folder))
+
+    @property
+    def available_perception_models(self) -> tuple[str, ...]:
+        """Discover model capabilities without implying trained availability."""
+        return tuple(self._model_views)
 
     # ------------------------------------------------------------------
     # Explicitly retired legacy mutation/import paths
