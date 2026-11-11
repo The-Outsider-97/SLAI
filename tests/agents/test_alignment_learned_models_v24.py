@@ -6,6 +6,7 @@ model alignment quality or suitable production training material.
 from __future__ import annotations
 
 import json
+import hashlib
 
 import pytest
 
@@ -76,8 +77,10 @@ def test_train_checkpoint_integrity_and_active_approval(tmp_path):
     assert set(result) >= {"validation", "test", "representation_test"}
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["approved"] is False
+    manifest_pin = hashlib.sha256((out / "manifest.json").read_bytes()).hexdigest()
     with pytest.raises(ValueError, match="approved"):
-        AlignmentModelBundle.load(out, require_approved=True)
+        AlignmentModelBundle.load(out, require_approved=True,
+                                  expected_manifest_sha256=manifest_pin)
     bundle = AlignmentModelBundle.load(out)
     answer = bundle.score(value_text="respect privacy", action_text="ask consent")
     assert 0.0 <= answer["score"] <= 1.0
@@ -87,12 +90,15 @@ def test_train_checkpoint_integrity_and_active_approval(tmp_path):
     # without matching its digest must never be silently accepted.
     manifest["approved"] = True
     (out / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    approved = AlignmentModelBundle.load(out, require_approved=True)
+    manifest_pin = hashlib.sha256((out / "manifest.json").read_bytes()).hexdigest()
+    approved = AlignmentModelBundle.load(out, require_approved=True,
+                                         expected_manifest_sha256=manifest_pin)
     assert approved.score(value_text="respect privacy", action_text="ask consent")["approved"] is True
     manifest["artifacts"]["representation_encoder.pt"] = "0" * 64
     (out / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="integrity"):
-        AlignmentModelBundle.load(out)
+        AlignmentModelBundle.load(out, require_approved=True,
+                                  expected_manifest_sha256=manifest_pin)
 
 
 def test_duplicate_pairs_across_groups_rejected(tmp_path):
