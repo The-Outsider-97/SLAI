@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from src.agents.perception.train_models import validate_manifest, _safe_path
 
@@ -15,8 +16,8 @@ def _write(path: Path, rows: list[dict]) -> Path:
 
 
 def test_manifest_requires_real_data_and_three_splits(tmp_path):
-    for item in ("train.jpg", "val.jpg", "test.jpg"):
-        (tmp_path / item).write_bytes(b"fixture")
+    for index, item in enumerate(("train.jpg", "val.jpg", "test.jpg")):
+        Image.new("RGB", (8, 8), color=(index * 80, 10, 50)).save(tmp_path / item)
     records = [
         {"id": "i1", "split": "train", "group_id": "src1", "positive_id": "cat",
          "text": "a cat", "vision": "train.jpg", "label": 0},
@@ -37,7 +38,7 @@ def test_manifest_requires_real_data_and_three_splits(tmp_path):
 
 
 def test_rejects_outside_root_and_duplicate_ids(tmp_path):
-    (tmp_path / "img.jpg").write_bytes(b"fixture")
+    Image.new("RGB", (8, 8), color=(10, 20, 30)).save(tmp_path / "img.jpg")
     with pytest.raises(ValueError):
         _safe_path(tmp_path, "../another-place")
     with pytest.raises(ValueError):
@@ -54,3 +55,21 @@ def test_rejects_outside_root_and_duplicate_ids(tmp_path):
 def test_missing_dataset_is_not_silently_generated(tmp_path):
     with pytest.raises(ValueError, match="real local"):
         validate_manifest(tmp_path / "missing.jsonl", tmp_path, ("audio", "text"))
+
+def test_same_bytes_cross_split_rejected_even_with_different_paths(tmp_path):
+    original = tmp_path / "original.jpg"
+    Image.new("RGB", (8, 8), color=(100, 40, 30)).save(original)
+    (tmp_path / "copy.jpg").write_bytes(original.read_bytes())
+    other = tmp_path / "unique.jpg"
+    Image.new("RGB", (8, 8), color=(200, 40, 30)).save(other)
+    rows = [
+        {"id": "t1", "group_id": "src1", "split": "train",
+         "text": "cat", "vision": "original.jpg"},
+        {"id": "v1", "group_id": "src2", "split": "validation",
+         "text": "cat", "vision": "copy.jpg"},
+        {"id": "e1", "group_id": "src3", "split": "test",
+         "text": "dog", "vision": "unique.jpg"},
+    ]
+    with pytest.raises(ValueError, match="Byte-identical"):
+        validate_manifest(_write(tmp_path / "manifest.jsonl", rows),
+                          tmp_path, ("text", "vision"))
