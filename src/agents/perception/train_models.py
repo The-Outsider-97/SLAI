@@ -257,8 +257,8 @@ def load_into_agent(agent: PerceptionAgent, folder: Path, *,
     metadata = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
     if metadata.get("schema") != SCHEMA or metadata.get("model_name") not in MODELS:
         raise ValueError("Unsupported perception training artifact.")
-    if expected_model and metadata["model_name"] != expected_model:
-        raise ValueError("Checkpoint model identity mismatch.")
+    if expected_model and expected_model not in metadata.get("trained_model_names", []):
+        raise ValueError("Checkpoint does not contain the requested trained model.")
     if expected_dataset and metadata.get("manifest_sha256") != expected_dataset:
         raise ValueError("Checkpoint training data fingerprint mismatch.")
     if metadata.get("preprocessing_identity") != _preprocessing_identity(agent):
@@ -354,6 +354,9 @@ def _train(args: argparse.Namespace) -> None:
     if args.resume:
         metadata = load_into_agent(agent, folder, expected_model=args.model,
                                    expected_dataset=summary["manifest_sha256"], restore_optimizer=True)
+        previous_weight = metadata.get("training_config", {}).get("joint_contrastive_weight", 0.0)
+        if float(previous_weight) != args.joint_contrastive_weight or metadata["model_name"] != args.model:
+            raise ValueError("Resume model identity and joint objective weight must match the checkpoint.")
         start = int(metadata["epoch"])
     for epoch in range(start, args.epochs):
         agent.train()
@@ -369,7 +372,6 @@ def _train(args: argparse.Namespace) -> None:
                 )
             else:
                 representations = agent._model_views[args.model].encode(batch["payload"])
-                fused = agent.fusion(representations)
                 head, _ = agent._get_existing_task_head("dataset_classification",
                                                           agent.embed_dim, len(labels))
                 if args.joint_contrastive_weight > 0:
@@ -381,6 +383,7 @@ def _train(args: argparse.Namespace) -> None:
                         group_ids=batch["group_ids"],
                     )
                 else:
+                    fused = agent.fusion(representations)
                     step = agent.trainer.supervised_step(
                         head, fused, batch["labels"].to(agent.device),
                         torch.nn.functional.cross_entropy,
@@ -398,6 +401,15 @@ def _train(args: argparse.Namespace) -> None:
         }
         metrics = _evaluate(agent, records, root, tuple(args.pair), args.model, "validation", args.batch_size)
         metrics["mean_train_loss"] = sum(losses) / len(losses)
+        if args.model == "MultimodalPerception" and args.joint_contrastive_weight > 0:
+            alignment_metrics = _evaluate(
+                agent, records, root, tuple(args.pair),
+                "MultimodalContrastiveEncoder", "validation", args.batch_size
+            )
+            metrics.update({
+                "contrastive_" + k: v for k, v in alignment_metrics.items()
+                if k not in {"split", "evaluated_samples"}
+            })
         _save(agent, folder, model=args.model, epoch=epoch + 1, summary=summary,
               pair=tuple(args.pair), metrics=metrics,
               training_config={"seed": args.seed, "batch_size": args.batch_size,
@@ -456,7 +468,7 @@ def _infer(args: argparse.Namespace) -> None:
         shape = {k: list(v.shape) for k, v in output.items()}
     else:
         shape = list(output.shape)
-    print(json.dumps({"model_name": info["model_name"], "output_shape": shape,
+    print(json.dumps({"model_name": args.model, "output_shape": shape,
                       "checkpoint_sha256": info["model_sha256"]}, indent=2))
 
 
