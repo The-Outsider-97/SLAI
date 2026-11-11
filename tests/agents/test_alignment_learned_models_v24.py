@@ -222,3 +222,18 @@ def test_active_model_failure_requires_review_when_other_dimensions_are_positive
     assert report["learned_alignment"]["status"] == "unavailable"
     assert assessment.status == AlignmentStatus.UNCERTAIN
     assert assessment.requires_review
+
+
+def test_legacy_pickle_and_joblib_loads_require_independent_digests(tmp_path):
+    from src.agents.alignment.alignment_memory import AlignmentMemory
+    from src.agents.alignment.utils.alignment_errors import PersistenceError
+
+    payload = tmp_path / "untrusted.pkl"
+    payload.write_bytes(b"never deserialize arbitrary bytes")
+    memory = AlignmentMemory()
+    with pytest.raises(PersistenceError):
+        memory.load_checkpoint(str(payload))
+    with pytest.raises(PersistenceError):
+        memory.load_model(str(payload))
+    with pytest.raises(PersistenceError):
+        memory.load_checkpoint(str(payload), trusted_sha256="0" * 64)
