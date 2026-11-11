@@ -147,6 +147,8 @@ class MultiModalDataset(Dataset):
                 transforms.Resize(vision_cfg["img_size"]),
                 transforms.CenterCrop(vision_cfg["img_size"]),
                 transforms.ToTensor(),
+                # Inference must use the same normalization as training.
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ])
         if "audio" in self.modalities:
             self._configure_audio()
@@ -158,9 +160,15 @@ class MultiModalDataset(Dataset):
             path.exists(), f"Vision file not found: {path}",
             exc_type=ModalityInputError, component=_COMPONENT, details={"path": str(path)},
         )
+        # Bound disk and decoded pixel resources before decoder allocation.
+        if path.stat().st_size > 32 * 1024 * 1024:
+            raise ModalityInputError("Image exceeds 32 MiB input limit.", component=_COMPONENT)
         try:
-            image = Image.open(path).convert("RGB")
-        except (OSError, UnidentifiedImageError) as exc:
+            with Image.open(path) as source:
+                if source.width * source.height > 24_000_000:
+                    raise ModalityInputError("Image exceeds 24 megapixel limit.", component=_COMPONENT)
+                image = source.convert("RGB")
+        except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
             raise wrap_exception(
                 exc, ModalityDecodingError, f"Failed to decode image: {path}",
                 component=_COMPONENT, details={"path": str(path)},
@@ -179,6 +187,8 @@ class MultiModalDataset(Dataset):
             path.exists(), f"Audio file not found: {path}",
             exc_type=ModalityInputError, component=_COMPONENT, details={"path": str(path)},
         )
+        if path.stat().st_size > 64 * 1024 * 1024:
+            raise ModalityInputError("Audio exceeds 64 MiB input limit.", component=_COMPONENT)
         try:
             waveform, _ = librosa.load(
                 str(path), sr=self.sample_rate, duration=self.audio_length / self.sample_rate,
