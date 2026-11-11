@@ -700,7 +700,9 @@ class AlignmentAgent(BaseAgent):
         payload.setdefault("enable_individual_fairness", self.enable_individual_fairness)
         payload.setdefault("enable_counterfactual_audit", self.enable_counterfactual_audit)
         payload.setdefault("enable_value_alignment", self.enable_value_alignment)
-        payload.setdefault("enable_ethics_check", self.enable_ethics_check)
+        # Task input must not disable checks enabled by the trusted agent config.
+        payload["enable_ethics_check"] = self.enable_ethics_check
+        payload["evaluate_alignment_constraints"] = self.enable_ethics_check
 
         if "input_data" not in payload:
             for key in ("data", "features", "records"):
