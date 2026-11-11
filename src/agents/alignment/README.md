@@ -223,6 +223,8 @@ not introduce a separate memory store, policy engine, or model registry.
 Agent-level configuration is in src/agents/base/configs/agents_config.yaml:
 runtime.learned_model_mode = disabled | shadow | advisory | active and
 runtime.learned_model_artifact_dir = path/to/a/versioned/artifact/directory.
+For active inference, runtime.learned_model_manifest_sha256 must pin the
+approved manifest.json byte-for-byte; unpinned active models are rejected.
 The default is **disabled**.
 
 Shadow and advisory modes produce component diagnostics but do not add scored
@@ -265,8 +267,11 @@ production authorization.
 
 The unapproved checkpoint may be evaluated in shadow/advisory mode. Promotion
 to active is a separate authorized release operation requiring independent
-data review and evaluation. Setting approved=true is a configuration trust
-decision by the operator, not an automated proof of alignment quality.
+data review and evaluation. Setting approved=true is a configuration trust decision by the operator, not
+an automated proof of alignment quality. After independent approval, compute
+the exact SHA-256 of manifest.json and configure the trusted digest in
+agents_config.yaml (or its authorized deployment override). Any later
+manifest/checkpoint change must require a new reviewed digest.
 
 ### Reproducibility / legacy checkpoints
 
