@@ -8,7 +8,7 @@ Implements:
 """
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 import threading
 import time as _time
@@ -117,7 +117,7 @@ class RiskAssessment:
 
 
 class AlignmentAgent(BaseAgent):
-    """Application-facing alignment orchestration boundary for SLAI v2.3."""
+    """Application-facing alignment orchestration boundary for SLAI v2.4."""
 
     AGENT_KEY = "alignment_agent"
 
