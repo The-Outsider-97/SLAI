@@ -362,8 +362,11 @@ def _train(args: argparse.Namespace) -> None:
         agent.train()
         losses = []
         for batch in _loader(records, root, "train", tuple(args.pair), args.batch_size):
-            if len(batch["group_ids"]) < 2 and args.model == "MultimodalContrastiveEncoder":
-                continue  # InfoNCE requires at least two examples.
+            if (
+                args.model == "MultimodalContrastiveEncoder"
+                or args.joint_contrastive_weight > 0
+            ) and (len(batch["group_ids"]) < 2 or len(set(batch["group_ids"])) < 2):
+                continue  # InfoNCE needs a real negative semantic group.
             if args.model == "MultimodalContrastiveEncoder":
                 # Canonical model view shares exactly these parameters with the trainer.
                 step = agent.trainer.contrastive_step(
