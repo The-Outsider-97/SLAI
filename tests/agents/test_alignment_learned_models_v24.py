@@ -102,7 +102,7 @@ def test_duplicate_pairs_across_groups_rejected(tmp_path):
     rows[1]["value_text"] = rows[0]["value_text"]
     rows[1]["action_text"] = rows[0]["action_text"]
     with pytest.raises(ValueError, match="Duplicate"):
-        grouped_splits(read_reviewed_pairs(data), 1) if False else _write_bad_rows(tmp_path, rows)
+        _write_bad_rows(tmp_path, rows)
 
 
 def _write_bad_rows(tmp_path, rows):
