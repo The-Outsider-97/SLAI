@@ -259,34 +259,58 @@ class MultiModalDataLoader:
  
     @staticmethod
     def collate_fn(batch: List[Dict]) -> Dict:
+        """Collate optional modalities without dropping data or silently misaligning pairs."""
         ensure_non_empty(batch, "batch", component=_COMPONENT)
-        collated: Dict = {"metadata": []}
- 
+        if any(not isinstance(record, Mapping) for record in batch):
+            raise ModalityInputError("Every batch item must be a mapping.", component=_COMPONENT)
+
+        present = {m for m in VALID_MODALITIES if m in batch[0] and batch[0][m] is not None}
+        if not present:
+            raise ModalityInputError("Batch contains no supported modalities.", component=_COMPONENT)
+        for index, record in enumerate(batch):
+            item_present = {m for m in VALID_MODALITIES if m in record and record[m] is not None}
+            if item_present != present:
+                raise PerceptionShapeError(
+                    "All records in a dense training batch must contain the same modalities.",
+                    component=_COMPONENT,
+                    details={"record_index": index, "expected": sorted(present), "actual": sorted(item_present)},
+                )
+
+        collated: Dict = {"metadata": [item.get("metadata", {}) for item in batch]}
         for modality in VALID_MODALITIES:
-            if modality in batch[0]:
-                items = [item[modality] for item in batch]
-                try:
-                    if modality == "vision":
-                        collated["vision"] = torch.stack(items)
-                    elif modality == "audio":
-                        collated["audio"] = torch.nn.utils.rnn.pad_sequence(items, batch_first=True)
-                    elif modality == "text":
-                        collated["text"] = {
-                            "input_ids": torch.stack([x["input_ids"] for x in items]),
-                            "attention_mask": torch.stack([x["attention_mask"] for x in items]),
-                        }
-                except RuntimeError as exc:
-                    raise wrap_exception(
-                        exc, PerceptionShapeError,
-                        f"Failed to collate modality '{modality}': shapes are inconsistent across the batch.",
-                        component=_COMPONENT, details={"modality": modality},
-                    )
- 
-        if "metadata" in batch[0]:
-            collated["metadata"] = [item.get("metadata", {}) for item in batch]
- 
+            if modality not in present:
+                continue
+            items = [record[modality] for record in batch]
+            try:
+                if modality == "vision":
+                    collated["vision"] = torch.stack(items)
+                elif modality == "audio":
+                    # Raw waveform examples are 1D and may have different lengths.
+                    if any(item.ndim != 1 for item in items):
+                        raise PerceptionShapeError("Audio waveform records must be one-dimensional.")
+                    collated["audio"] = torch.nn.utils.rnn.pad_sequence(items, batch_first=True)
+                elif modality == "text":
+                    if any(not isinstance(item, Mapping) for item in items):
+                        raise ModalityInputError("Text items must contain token IDs and attention masks.")
+                    ids = [torch.as_tensor(item["input_ids"], dtype=torch.long).flatten() for item in items]
+                    masks = [
+                        torch.as_tensor(item["attention_mask"], dtype=torch.bool).flatten()
+                        for item in items
+                    ]
+                    if any(a.numel() != b.numel() for a, b in zip(ids, masks)):
+                        raise PerceptionShapeError("Text attention mask and token IDs differ in length.")
+                    collated["text"] = {
+                        "input_ids": torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=0),
+                        "attention_mask": torch.nn.utils.rnn.pad_sequence(masks, batch_first=True, padding_value=False),
+                    }
+            except (RuntimeError, TypeError, KeyError) as exc:
+                raise wrap_exception(
+                    exc, PerceptionShapeError,
+                    f"Failed to collate modality '{modality}': invalid or inconsistent shape.",
+                    component=_COMPONENT, details={"modality": modality},
+                ) from exc
         return collated
- 
+
     def __iter__(self):
         return iter(self.dataloader)
  
