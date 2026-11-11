@@ -10,6 +10,8 @@ perform generic reasoning, or learn a reward/policy model.
 from __future__ import annotations
 
 import math
+import hashlib
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -31,6 +33,7 @@ class AlignmentRuntimeHealth:
     memory_available: bool
     value_model_ready: bool
     initialized_components: Tuple[str, ...]
+    learned_model_status: str = "disabled"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -38,6 +41,7 @@ class AlignmentRuntimeHealth:
             "memory_available": self.memory_available,
             "value_model_ready": self.value_model_ready,
             "initialized_components": list(self.initialized_components),
+            "learned_model_status": self.learned_model_status,
         }
 
 
@@ -112,6 +116,16 @@ class AlignmentSubsystem:
         )
         self._explicit_value_model_ready = bool(self._runtime_config.get("value_model_ready", False))
         self._value_model_provenance = self._runtime_config.get("value_model_provenance")
+
+        # Reuse the existing value embedding stack, loaded only when requested.
+        # No model score may mutate the policy/authorization control planes.
+        self._learned_mode = str(self._runtime_config.get("learned_model_mode", "disabled")).lower()
+        if self._learned_mode not in {"disabled", "shadow", "advisory", "active"}:
+            raise ValueError("Unsupported learned_model_mode")
+        self._learned_path = self._runtime_config.get("learned_model_artifact_dir")
+        self._learned_bundle = None
+        self._learned_error: Optional[str] = None
+        self._learned_lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Private component wiring / lazy specialist components
@@ -458,6 +472,71 @@ class AlignmentSubsystem:
             ))
         return output
 
+    def _learned_evidence(self, payload: Mapping[str, Any]) -> Tuple[List[AlignmentEvidence], Dict[str, Any]]:
+        """Optional model evidence; explicit behavior/value text is required.
+
+        Shadow and advisory modes never add scored evidence. In active mode an
+        integrity-checked and operator-approved checkpoint contributes only a
+        soft preference dimension. Mandatory controls remain deterministic.
+        """
+        if self._learned_mode == "disabled":
+            return [], {"status": "disabled"}
+        proposed = payload.get("learned_alignment")
+        if proposed is None:
+            return [], {"status": "not_applicable", "reason": "no_explicit_value_action_pair"}
+        if not isinstance(proposed, Mapping):
+            return [], {"status": "invalid_input", "reason": "learned_alignment_not_mapping"}
+        value_text, action_text = proposed.get("value_text"), proposed.get("action_text")
+        if not isinstance(value_text, str) or not isinstance(action_text, str):
+            return [], {"status": "invalid_input", "reason": "missing_text_fields"}
+        try:
+            with self._learned_lock:
+                if self._learned_bundle is None:
+                    if not isinstance(self._learned_path, str) or not self._learned_path.strip():
+                        raise ValueError("learned_model_artifact_dir is not configured")
+                    from .learned_models import AlignmentModelBundle
+                    self._learned_bundle = AlignmentModelBundle.load(
+                        self._learned_path,
+                        require_approved=self._learned_mode == "active",
+                    )
+                result = self._learned_bundle.score(value_text=value_text, action_text=action_text)
+                self._learned_error = None
+        except Exception as exc:
+            self._learned_error = type(exc).__name__
+            logger.warning("Optional alignment model unavailable (%s)", type(exc).__name__)
+            # Never treat a failed inference as positive alignment evidence.
+            return [], {"status": "unavailable", "reason": type(exc).__name__, "mode": self._learned_mode}
+        report: Dict[str, Any] = {
+            "status": "evaluated", "mode": self._learned_mode,
+            "model_version": result["model_version"],
+            "feature_schema": result["feature_schema"],
+            "calibrated": result["calibrated"],
+            "approved": result["approved"],
+            "score": result["score"],
+            "representation_similarity": result["representation_similarity"],
+            "value_text_sha256": hashlib.sha256(value_text.encode("utf-8")).hexdigest(),
+            "action_text_sha256": hashlib.sha256(action_text.encode("utf-8")).hexdigest(),
+        }
+        if self._learned_mode != "active":
+            return [], report
+        score = _finite_probability(result["score"])
+        if score is None:
+            return [], {"status": "unavailable", "reason": "invalid_model_output", "mode": self._learned_mode}
+        evidence = AlignmentEvidence(
+            dimension=AlignmentDimension.PREFERENCE,
+            source="value_alignment_scorer",
+            score=score,
+            confidence=0.5,  # fixed evidence weight; NOT probabilistic calibration
+            required=False,
+            kind="learned_preference_advisory",
+            details={
+                "model_version": result["model_version"], "feature_schema": result["feature_schema"],
+                "calibrated": result["calibrated"],
+            },
+            evidence_id="learned_preference_score",
+        )
+        return [evidence], report
+
     def collect_evidence(self, payload: Mapping[str, Any]) -> Tuple[List[AlignmentEvidence], Dict[str, Any]]:
         evidence = self._explicit_evidence(payload)
         evidence.extend(self._delegated_evidence(payload))
@@ -465,11 +544,14 @@ class AlignmentSubsystem:
         evidence.extend(constraint_evidence)
         value_evidence, value_report = self._value_evidence(payload)
         evidence.extend(value_evidence)
+        learned_evidence, learned_report = self._learned_evidence(payload)
+        evidence.extend(learned_evidence)
         diagnostics = self.run_diagnostics(payload)
         evidence.extend(self._diagnostic_evidence(diagnostics))
         return evidence, {
             "constraints": constraint_report,
             "value_alignment": value_report,
+            "learned_alignment": learned_report,
             "diagnostics": diagnostics,
         }
 
@@ -566,6 +648,9 @@ class AlignmentSubsystem:
             memory_available=self._memory is not None,
             value_model_ready=self.value_model_ready,
             initialized_components=tuple(sorted(self._components.keys())),
+            learned_model_status=("disabled" if self._learned_mode == "disabled" else
+                                  "unavailable" if self._learned_error else
+                                  "ready" if self._learned_bundle is not None else "not_loaded"),
         )
 
     def export_state(self) -> Dict[str, Any]:
