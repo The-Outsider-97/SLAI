@@ -82,6 +82,9 @@ def test_contrastive_embeddings_and_multi_positive_loss():
     assert contrastive.objectives.contrastive_projectors["text"].weight.grad is not None
     with pytest.raises(Exception):
         contrastive.contrastive_loss(reps[Modality.TEXT], reps[Modality.VISION], group_ids=["bad"])
+    with pytest.raises(Exception, match="no semantic negatives"):
+        contrastive.contrastive_loss(reps[Modality.TEXT], reps[Modality.VISION],
+                                     group_ids=["same"] * 4)
 
 
 def test_positive_pairs_can_be_learned_without_dummy_checkpoints():
