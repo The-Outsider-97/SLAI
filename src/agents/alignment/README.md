@@ -233,16 +233,15 @@ constraint violations remain non-overridable by model evidence.
 Example explicit assessment input:
 
     {
-      "enable_ethics_check": false,
       "learned_alignment": {
         "value_text": "Respect the user's informed preference",
         "action_text": "Ask for permission before sharing their information"
       }
     }
 
-The example disables the legacy alignment-specific dynamic constraint check
-only for demonstrating the model input. Do not disable required policy,
-authorization, Safety, or Privacy enforcement in production.
+This example does not modify constraint enforcement. Untrusted task payloads
+cannot disable the Alignment-owned dynamic constraint check; this control is
+configured by AlignmentAgent, alongside independent Safety and Privacy gates.
 
 ### Offline training
 
