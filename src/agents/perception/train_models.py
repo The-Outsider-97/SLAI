@@ -194,14 +194,21 @@ def _validated_data(args: argparse.Namespace):
             or metadata.get("modalities") != list(pair)
             or metadata.get("rights_confirmed_by_operator") is not True):
         raise ValueError("Dataset declaration or manifest fingerprint mismatch.")
+    summary["dataset_provenance"] = {
+        "source_url": metadata.get("source_url"),
+        "declared_license": metadata.get("declared_license"),
+        "license_independently_verified": False,
+    }
     return records, summary, root
 
 
 def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
-          summary: dict, pair: tuple[str, str], metrics: dict) -> None:
+          summary: dict, pair: tuple[str, str], metrics: dict,
+          training_config: dict) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     state = {"schema": SCHEMA, "model_name": model, "epoch": epoch, "pair": list(pair),
              "manifest_sha256": summary["manifest_sha256"],
+             "training_config": training_config,
              "model_state_dict": agent.state_dict(),
              "trainer_state_dict": agent.trainer.state_dict(),
              "task_head_specs": agent._task_head_specs}
@@ -210,6 +217,9 @@ def _save(agent: PerceptionAgent, folder: Path, *, model: str, epoch: int,
     temporary.replace(folder / "model.pt")
     metadata = {"schema": SCHEMA, "model_name": model, "epoch": epoch,
                 "pair": list(pair), "manifest_sha256": summary["manifest_sha256"],
+                "dataset_provenance": summary.get("dataset_provenance"),
+                "training_config": training_config,
+                "optimizer_config": agent.trainer.state_dict().get("optimizer_config"),
                 "model_sha256": _sha256(folder / "model.pt"), "metrics": metrics,
                 "validated_real_world_performance": False}
     temp_json = folder / "manifest.json.tmp"
@@ -333,7 +343,10 @@ def _train(args: argparse.Namespace) -> None:
         metrics = _evaluate(agent, records, root, tuple(args.pair), args.model, "validation", args.batch_size)
         metrics["mean_train_loss"] = sum(losses) / len(losses)
         _save(agent, folder, model=args.model, epoch=epoch + 1, summary=summary,
-              pair=tuple(args.pair), metrics=metrics)
+              pair=tuple(args.pair), metrics=metrics,
+              training_config={"seed": args.seed, "batch_size": args.batch_size,
+                               "device": args.device, "planned_epochs": args.epochs,
+                               "torch_version": str(torch.__version__)})
         print(json.dumps({"epoch": epoch + 1, **metrics}, sort_keys=True))
 
 
@@ -344,8 +357,15 @@ def _evaluate_saved(args: argparse.Namespace) -> None:
                            expected_dataset=summary["manifest_sha256"])
     if tuple(info["pair"]) != tuple(args.pair):
         raise ValueError("Evaluation pair does not match the checkpoint.")
-    print(json.dumps(_evaluate(agent, records, root, tuple(args.pair),
-                               args.model, args.split, args.batch_size), indent=2))
+    metrics = _evaluate(agent, records, root, tuple(args.pair),
+                        args.model, args.split, args.batch_size)
+    report = {"model_name": args.model, "checkpoint_sha256": info["model_sha256"],
+              "dataset_manifest_sha256": summary["manifest_sha256"], **metrics}
+    if args.output_json:
+        output = Path(args.output_json)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=2))
 
 
 def _infer(args: argparse.Namespace) -> None:
@@ -385,6 +405,11 @@ def _download(url: str, destination: Path, max_bytes: int) -> dict:
         raise ValueError("Partial download already exceeds size limit.")
     headers = {"Range": f"bytes={offset}-"} if offset else {}
     with urlopen(Request(url, headers=headers), timeout=60) as stream:
+        if not stream.geturl().startswith("https://"):
+            raise ValueError("HTTPS dataset acquisition must not redirect to plaintext HTTP.")
+        length = stream.headers.get("Content-Length")
+        if length is not None and int(length) + offset > max_bytes:
+            raise ValueError("Server-declared archive size exceeds safety limit.")
         resumed = offset > 0 and getattr(stream, "status", 200) == 206
         if resumed and not str(stream.headers.get("Content-Range", "")).startswith(f"bytes {offset}-"):
             raise ValueError("Server Range response does not match requested offset.")
@@ -564,6 +589,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             sub.add_argument("--checkpoint", required=True)
             sub.add_argument("--split", choices=("validation", "test"), default="test")
+            sub.add_argument("--output-json")
             sub.set_defaults(fn=_evaluate_saved)
     infer = subs.add_parser("infer")
     infer.add_argument("--checkpoint", required=True)
