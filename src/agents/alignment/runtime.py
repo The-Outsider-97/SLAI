@@ -108,6 +108,10 @@ class AlignmentSubsystem:
         self.memory_logging_enabled = bool(self._runtime_config.get("memory_logging_enabled", True))
         self.strict_memory_integration = bool(self._runtime_config.get("strict_memory_integration", False))
         self.run_statistical_diagnostics = bool(self._runtime_config.get("run_statistical_diagnostics", True))
+        # Only trusted agent configuration may disable alignment-owned checks.
+        self.enforce_alignment_constraints = bool(
+            self._runtime_config.get("enforce_alignment_constraints", True)
+        )
         self.use_statistical_diagnostics_as_alignment_evidence = bool(
             self._runtime_config.get("use_statistical_diagnostics_as_alignment_evidence", False)
         )
@@ -274,10 +278,10 @@ class AlignmentSubsystem:
         fairness policy concerns that are owned elsewhere. We therefore use only
         its dynamic runtime constraint registry when available.
         """
-        if not bool(payload.get("enable_ethics_check", True)):
-            return [], {"available": False, "reason": "ethics_check_disabled"}
-        if not bool(payload.get("evaluate_alignment_constraints", True)):
-            return [], {"available": False, "reason": "disabled"}
+        if not self.enforce_alignment_constraints:
+            return [], {"available": False, "reason": "disabled_by_agent_configuration"}
+        # Do not honor untrusted task-supplied flags that request skipping
+        # constraint checks: they are controlled by agent configuration.
         try:
             evaluator = self._component("ethical_constraints")
             dynamic_fn = getattr(evaluator, "_check_dynamic_constraints", None)
