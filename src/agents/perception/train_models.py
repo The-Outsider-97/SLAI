@@ -76,6 +76,9 @@ def validate_manifest(manifest: Path, root: Path, modalities: tuple[str, str]) -
         split = row.get("split")
         rid = row.get("id")
         group = row.get("group_id", rid)
+        positive_id = row.get("positive_id", rid)
+        if not isinstance(positive_id, str) or not positive_id:
+            raise ValueError("positive_id must be a non-empty string.")
         if split not in counts:
             raise ValueError("Every record needs split=train, validation, or test.")
         if not isinstance(rid, str) or not rid or rid in ids:
@@ -134,7 +137,9 @@ class ManifestPerceptionDataset(MultiModalDataset):
                 payload["vision"] = self._process_vision(_safe_path(self.root, row["vision"]))
             else:
                 payload["audio"] = self._process_audio(_safe_path(self.root, row["audio"]))
-        return {"payload": payload, "id": row["id"], "group_id": row.get("group_id", row["id"]),
+        return {"payload": payload, "id": row["id"],
+                "group_id": row.get("group_id", row["id"]),
+                "positive_id": row.get("positive_id", row["id"]),
                 "label": row.get("label")}
 
 
@@ -145,7 +150,7 @@ def _collate(samples: list[dict]) -> dict[str, Any]:
         values = [record["payload"][modality] for record in samples]
         payload[modality] = values if modality == "text" else torch.stack(values)
     labels = [sample["label"] for sample in samples]
-    return {"payload": payload, "group_ids": tuple(str(r["group_id"]) for r in samples),
+    return {"payload": payload, "group_ids": tuple(str(r["positive_id"]) for r in samples),
             "labels": torch.tensor(labels, dtype=torch.long) if all(isinstance(x, int) for x in labels) else None}
 
 
@@ -234,6 +239,10 @@ def load_into_agent(agent: PerceptionAgent, folder: Path, *,
         raise ValueError("Checkpoint is incompatible with the PerceptionAgent architecture.")
     agent.load_state_dict(candidate, strict=True)
     agent.trainer.load_state_dict(state.get("trainer_state_dict", {}), load_optimizer=restore_optimizer)
+    agent._trained_model_artifacts[metadata["model_name"]] = {
+        "model_sha256": metadata["model_sha256"],
+        "validated_real_world_performance": metadata.get("validated_real_world_performance", False),
+    }
     return metadata
 
 
@@ -301,7 +310,6 @@ def _train(args: argparse.Namespace) -> None:
             if len(batch["group_ids"]) < 2 and args.model == "MultimodalContrastiveEncoder":
                 continue  # InfoNCE requires at least two examples.
             if args.model == "MultimodalContrastiveEncoder":
-                objective = "contrastive_" + "_".join("image" if m == "vision" else m for m in args.pair)
                 # Canonical model view shares exactly these parameters with the trainer.
                 step = agent.trainer.contrastive_step(
                     *[v for m in args.pair for v in (m, batch["payload"][m])],
