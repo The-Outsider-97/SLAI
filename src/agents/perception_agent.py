@@ -67,7 +67,7 @@ printer = PrettyPrinter()
 _SHARED_STATE_SCHEMA = "slai.perception-agent.state.v1"
 _CHECKPOINT_STATE_SCHEMA = "slai.perception-agent.checkpoint.v1"
 
-_SUPPORTED_TASK_TYPES = frozenset({"pretrain", "finetune", "inference"})
+_SUPPORTED_TASK_TYPES = frozenset({"pretrain", "finetune", "inference", "capabilities"})
 _SUPPORTED_PRETRAIN_OBJECTIVES = frozenset(
     {
         "mlm",
@@ -1173,7 +1173,28 @@ class PerceptionAgent(BaseAgent, nn.Module):
                     "Named supervised training requires MultimodalPerception.",
                     component="perception_agent",
                 )
-        if task_type == "pretrain":
+        if task_type == "capabilities":
+            result = {
+                "status": "success",
+                "agent": self.name,
+                "models": {
+                    name: {
+                        "supported": True,
+                        "trained_artifact_loaded": name in self._trained_model_artifacts,
+                        "trained_modality_pair": self._trained_model_artifacts.get(name, {}).get("pair"),
+                        "validated_real_world_performance": bool(
+                            self._trained_model_artifacts.get(name, {}).get(
+                                "validated_real_world_performance", False
+                            )
+                        ),
+                        "task": (
+                            "task_oriented_multimodal_fusion" if name == "MultimodalPerception"
+                            else "cross_modal_embedding_retrieval"
+                        ),
+                    } for name in self._model_views
+                },
+            }
+        elif task_type == "pretrain":
             result = self._pretraining_step(task_data)
         elif task_type == "finetune":
             result = self._finetune_step(task_data)
