@@ -13,6 +13,7 @@ import json
 import pickle
 import joblib
 import hashlib
+import hmac
 import numpy as np
 import pandas as pd
 
@@ -28,6 +29,25 @@ from .utils.config_loader import load_global_config, get_config_section
 from .utils.alignment_errors import *
 from .utils.alignment_helpers  import *
 from logs.logger import get_logger, PrettyPrinter # type: ignore
+
+
+def _verify_binary_digest(path: Path, expected_sha256: Optional[str]) -> None:
+    """Require an out-of-band trusted checksum before pickle/joblib loading."""
+    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+        raise PersistenceError(
+            "Unsafe legacy binary loading requires an independently trusted SHA-256 digest."
+        )
+    try:
+        expected = bytes.fromhex(expected_sha256)
+    except ValueError as exc:
+        raise PersistenceError("Invalid trusted SHA-256 digest") from exc
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if not hmac.compare_digest(digest.digest(), expected):
+        raise PersistenceError("Legacy alignment binary failed trusted digest validation")
+
 
 logger = get_logger("Alignment Memory")
 printer = PrettyPrinter()
@@ -855,8 +875,8 @@ class AlignmentMemory:
                 context={"path": path},
             )
 
-    def load_model(self, path: str) -> Path:
-        """Load the persisted causal model and training history from disk."""
+    def load_model(self, path: str, *, trusted_sha256: Optional[str] = None) -> Path:
+        """Load a trusted legacy joblib model, refusing unpinned deserialization."""
         try:
             model_path = Path(path)
             if not model_path.exists():
@@ -864,6 +884,7 @@ class AlignmentMemory:
                     "Causal model file does not exist.",
                     context={"path": str(model_path)},
                 )
+            _verify_binary_digest(model_path, trusted_sha256)
             model_data = joblib.load(model_path)
             ensure_mapping(model_data, "model_data", allow_empty=False, error_cls=PersistenceError)
             self.causal_model = model_data["model"]
@@ -915,8 +936,15 @@ class AlignmentMemory:
                 context={"path": path},
             )
 
-    def load_checkpoint(self, path: str) -> Path:
-        """Restore the full memory state and associated causal model from a checkpoint."""
+    def load_checkpoint(
+        self, path: str, *, trusted_sha256: Optional[str] = None,
+        trusted_model_sha256: Optional[str] = None,
+    ) -> Path:
+        """Load a checksum-pinned legacy pickle checkpoint and causal model.
+
+        Pickle/joblib can execute code. Existing binary files remain usable
+        with operator-supplied trusted digests; untrusted loads fail closed.
+        """
         try:
             checkpoint_path = Path(path)
             if not checkpoint_path.exists():
@@ -924,6 +952,7 @@ class AlignmentMemory:
                     "AlignmentMemory checkpoint file does not exist.",
                     context={"path": str(checkpoint_path)},
                 )
+            _verify_binary_digest(checkpoint_path, trusted_sha256)
             with checkpoint_path.open("rb") as handle:
                 state = pickle.load(handle)
             ensure_mapping(state, "checkpoint_state", allow_empty=False, error_cls=PersistenceError)
@@ -942,7 +971,14 @@ class AlignmentMemory:
 
             model_path = state.get("model_path")
             if model_path:
-                self.load_model(model_path)
+                expected_path = checkpoint_path.with_name(
+                    checkpoint_path.stem + self.checkpoint_model_suffix
+                ).resolve()
+                if Path(str(model_path)).resolve() != expected_path:
+                    raise PersistenceError(
+                        "Legacy checkpoint referenced an unexpected causal model path"
+                    )
+                self.load_model(str(expected_path), trusted_sha256=trusted_model_sha256)
             logger.info("Loaded AlignmentMemory checkpoint from %s", checkpoint_path)
             return checkpoint_path
         except Exception as exc:
