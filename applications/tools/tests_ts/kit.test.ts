@@ -56,6 +56,23 @@ describe("api client", () => {
     await assert.rejects(() => client.get("/x"), (error: unknown) => error instanceof ApiError && error.code === "http_error" && error.status === 502);
   });
 
+  it("downloads with a POST when it has a body, and uploads raw bytes with the marker header", async () => {
+    const seen = fakeFetch((url) => url.endsWith("/import")
+      ? jsonResponse({ ok: true, data: { format: "x" } })
+      : new Response("file", { status: 200, headers: { "Content-Disposition": 'attachment; filename="out.bin"' } }));
+    const client = createClient({ slug: "stringlab" });
+    const file = await client.download("/export", undefined, { configuration: { a: 1 } });
+    assert.equal(file.filename, "out.bin");
+    assert.equal(seen[0]?.init.method, "POST");
+    assert.equal(seen[0]?.init.body, JSON.stringify({ configuration: { a: 1 } }));
+    assert.equal((seen[0]?.init.headers as Record<string, string>)["X-SLAI-Stringlab"], "1");
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+    assert.deepEqual(await client.upload("/import", bytes), { format: "x" });
+    assert.equal(seen[1]?.init.body, bytes);
+    assert.equal((seen[1]?.init.headers as Record<string, string>)["Content-Type"], "application/octet-stream");
+    assert.equal(seen[1]?.init.method, "POST");
+  });
+
   it("downloads a file with the server's filename", async () => {
     fakeFetch(() => new Response("hello", { status: 200, headers: { "Content-Disposition": 'attachment; filename="splanner-backup.json"' } }));
     const client = createClient({ slug: "splanner" });

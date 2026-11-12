@@ -34,8 +34,11 @@ export interface Client {
   put<T>(path: string, body?: unknown): Promise<T>;
   patch<T>(path: string, body?: unknown): Promise<T>;
   del<T>(path: string): Promise<T>;
-  /** Fetch a file response (export, backup) as a Blob with the server's suggested name. */
-  download(path: string, query?: Query): Promise<{ blob: Blob; filename: string }>;
+  /** Fetch a file response (export, backup) as a Blob with the server's suggested name. With a ``body`` the request is a POST carrying
+   *  it as JSON (an export that needs the document it is exporting); without one it is a GET. */
+  download(path: string, query?: Query, body?: unknown): Promise<{ blob: Blob; filename: string }>;
+  /** POST raw bytes (importing a file) and return the envelope's data. */
+  upload<T>(path: string, body: BodyInit, contentType?: string): Promise<T>;
 }
 
 export type Query = Record<string, string | number | boolean | null | undefined>;
@@ -64,10 +67,11 @@ export function createClient(options: ClientOptions): Client {
 
   const fail = (error: ApiError): never => { options.onError?.(error); throw error; };
 
-  async function request(method: string, path: string, body?: unknown, query?: Query): Promise<Response> {
+  async function request(method: string, path: string, body?: unknown, query?: Query, raw?: { body: BodyInit; type: string }): Promise<Response> {
     const headers: Record<string, string> = { Accept: "application/json", [marker]: "1" };
     const init: RequestInit = { method, headers, credentials: "same-origin", cache: "no-store" };
-    if (body !== undefined) { headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
+    if (raw) { headers["Content-Type"] = raw.type; init.body = raw.body; }
+    else if (body !== undefined) { headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
     try {
       return await fetch(`${base}${path}${queryString(query)}`, init);
     } catch (cause) {
@@ -75,8 +79,8 @@ export function createClient(options: ClientOptions): Client {
     }
   }
 
-  async function json<T>(method: string, path: string, body?: unknown, query?: Query): Promise<T> {
-    const response = await request(method, path, body, query);
+  async function json<T>(method: string, path: string, body?: unknown, query?: Query, raw?: { body: BodyInit; type: string }): Promise<T> {
+    const response = await request(method, path, body, query, raw);
     let parsed: Envelope<T> | null = null;
     try { parsed = (await response.json()) as Envelope<T>; } catch { parsed = null; }
     if (parsed && parsed.ok) return parsed.data as T;
@@ -90,8 +94,9 @@ export function createClient(options: ClientOptions): Client {
     put: (path, body) => json("PUT", path, body ?? {}),
     patch: (path, body) => json("PATCH", path, body ?? {}),
     del: (path) => json("DELETE", path),
-    async download(path, query) {
-      const response = await request("GET", path, undefined, query);
+    upload: (path, body, contentType = "application/octet-stream") => json("POST", path, undefined, undefined, { body, type: contentType }),
+    async download(path, query, body) {
+      const response = await request(body === undefined ? "GET" : "POST", path, body, query);
       if (!response.ok) {
         let parsed: Envelope<unknown> | null = null;
         try { parsed = (await response.json()) as Envelope<unknown>; } catch { parsed = null; }

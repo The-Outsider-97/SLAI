@@ -27,6 +27,11 @@ dialog.slai-startup[open] {
 .slai-startup-orb::after { inset: 12px; animation-duration: 2s; animation-direction: reverse; }
 @keyframes slai-startup-orbit { to { transform: rotate(1turn); } }
 .slai-startup.failed .slai-startup-orb::before, .slai-startup.failed .slai-startup-orb::after { animation: none; }
+/* Reduced motion keeps the loader alive without spinning: the rings breathe slowly instead of standing still, so a person who has system animations
+   turned off can still tell the application is working and not frozen. */
+@keyframes slai-startup-breathe { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) {
-  .slai-startup-orb::before, .slai-startup-orb::after { animation: none; }
+  .slai-startup-orb::before, .slai-startup-orb::after { animation: slai-startup-breathe 2.4s ease-in-out infinite; transform: none; }
+  .slai-startup.failed .slai-startup-orb::before, .slai-startup.failed .slai-startup-orb::after { animation: none; }
 }
+.slai-startup progress { width: min(16em, 70vw); height: 4px; accent-color: #ebcd48; }

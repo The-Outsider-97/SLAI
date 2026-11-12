@@ -9,6 +9,7 @@
 // The shared UI kit (applications/tools/web) is compiled together with the app, because the app imports it by relative path
 // (tsconfig.build.json sets rootDir to applications/), and its stylesheet is served by the server at /tools/slai-ui.css.
 import { publishStartup } from './publish-startup.mjs';
+import { recordBuild } from './record-build.mjs';
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -37,4 +38,5 @@ for (const name of readdirSync(client)) {
   if (name === 'index.html' || name.endsWith('.css')) { cpSync(join(client, name), join(dist, name)); copied.push(name); }
 }
 publishStartup(dist);
+recordBuild(root, dist);                                          // dist/build.json: what this build was made from (read by --check)
 console.log(`Built dist/ (${copied.join(', ')}, js/)`);

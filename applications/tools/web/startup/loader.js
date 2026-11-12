@@ -72,8 +72,21 @@
     if (!panel.classList.contains('failed')) dismiss();
   }, options);
   window.addEventListener('slai:startup-error', event => fail(event.detail), options);
+  // Only the application's own code can fail its start-up. Browser extensions (wallets, translators, ad blockers) throw on the same page, and so do
+  // other sites' frames; none of that is ours, and it must neither stop the animation nor block the ready signal.
+  const ours = address => {
+    try {
+      const url = new URL(address, window.location.href);
+      return url.origin === window.location.origin && /^\/(js|startup|tools)\//.test(url.pathname);
+    } catch { return false; }
+  };
   window.addEventListener('error', event => {
-    if (event instanceof ErrorEvent || event.target instanceof HTMLScriptElement) fail(event.message);
+    if (event.target instanceof HTMLScriptElement) {
+      if (ours(event.target.src)) fail();
+    } else if (event instanceof ErrorEvent && ours(event.filename)) fail(event.message);
   }, { ...options, capture: true });
-  window.addEventListener('unhandledrejection', event => fail(event.reason?.message), options);
+  window.addEventListener('unhandledrejection', event => {
+    const reason = event.reason;
+    if (typeof reason?.stack === 'string' && reason.stack.includes(window.location.origin + '/js/')) fail(reason.message);
+  }, options);
 })();
