@@ -220,6 +220,7 @@ class AgentFactory:
         "browser": {"module_path": "src.agents.browser_agent", "class_name": "BrowserAgent"},
         "collaborative": {"module_path": "src.agents.collaborative_agent", "class_name": "CollaborativeAgent"},
         "evaluation": {"module_path": "src.agents.evaluation_agent", "class_name": "EvaluationAgent"},
+        "financial": {"module_path": "src.agents.financial_agent", "class_name": "FinancialAgent"},
         "execution": {"module_path": "src.agents.execution_agent", "class_name": "ExecutionAgent"},
         "handler": {"module_path": "src.agents.handler_agent", "class_name": "HandlerAgent"},
         "knowledge": {"module_path": "src.agents.knowledge_agent", "class_name": "KnowledgeAgent"},
@@ -254,6 +255,7 @@ class AgentFactory:
         "reader_agent": "reader",
         "language_agent": "language",
         "evaluation_agent": "evaluation",
+        "financial_agent": "financial",
         "knowledge_agent": "knowledge",
         "privacy_agent": "privacy",
         "quality_agent": "quality",
@@ -272,6 +274,10 @@ class AgentFactory:
         "reasoning": {"torch_required": False, "notes": "Rule/probabilistic reasoning core does not require torch."},
         "language": {"torch_required": False, "notes": "Lightweight language mode available without torch."},
         "evaluation": {"torch_required": False, "notes": "Core evaluation works without deep anomaly torch module."},
+        "financial": {"torch_required": False, "notes": (
+            "Financial analysis is Decimal-based and torch-free; mean-variance optimization is delegated "
+            "to the optimization agent (NumPy/SciPy) only when portfolio.optimize_allocation is used."
+        )},
         "observability": {"torch_required": False, "notes": "Observability orchestration is telemetry-first and torch-free."},
         "network": {"torch_required": False, "notes": "Network transport/routing/reliability stack is torch-free."},
         "safety": {"torch_required": False, "notes": "Safety policy checks run without torch."},
@@ -497,6 +503,7 @@ class AgentFactory:
             "browser",
             "evaluation",
             "execution",
+            "financial",
             "handler",
             "knowledge",
             "language",

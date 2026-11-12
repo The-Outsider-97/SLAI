@@ -26,6 +26,7 @@ _EXPORTS = {
     "BrowserAgent": (".browser_agent", "BrowserAgent"),
     "CollaborativeAgent": (".collaborative_agent", "CollaborativeAgent"),
     "EvaluationAgent": (".evaluation_agent", "EvaluationAgent"),
+    "FinancialAgent": (".financial_agent", "FinancialAgent"),
     "ExecutionAgent": (".execution_agent", "ExecutionAgent"),
     "HandlerAgent": (".handler_agent", "HandlerAgent"), # done for 2.1.0 needs to be updated and expanded for 2.4.0
     "KnowledgeAgent": (".knowledge_agent", "KnowledgeAgent"),
