@@ -609,6 +609,56 @@ evaluation_agent:
           success: true
 
 
+financial_agent:
+  # Agent-level orchestration only. Calculation precision, data freshness, limits and memory sizing belong to
+  # the Financial subsystem and are NOT configured here (the agent never reads the subsystem configuration).
+  # Omit allowed_operations to enable every supported operation; if set, every name must be a supported
+  # "domain.operation" or startup raises BaseConfigurationError.
+  enabled: true
+
+  # State-changing operations (data.ingest_*) are approved by the SafetyAgent.
+  #   disabled     - never ask
+  #   if_available - ask when the safety agent can be obtained; otherwise proceed and record that in the result
+  #   required     - refuse when approval cannot be obtained
+  # A reachable safety agent that errors or declines always blocks the mutation.
+  authorization_mode: if_available
+
+  # portfolio.optimize_allocation is solved by the OptimizationAgent (mean-variance). Disable to remove the operation.
+  optimization_enabled: true
+
+  max_batch_size: 100
+  max_parameter_items: 10000
+  metrics_enabled: true
+
+  # Local financial memory (analysis history). Failures are kept only when remember_failures is true.
+  remember_results: true
+  remember_failures: false
+  checkpoint_local_memory: true
+  checkpoint_market_data: true
+  restore_local_memory: true
+
+  # SharedMemory coordination: summaries, bounded result envelopes, errors and events.
+  publish_shared_memory: true
+  fail_on_shared_memory_error: false
+  shared_memory_ttl_seconds: 604800
+  max_shared_list_items: 128
+  max_shared_string_chars: 8192
+
+  request_key_prefix: "financial_agent.request"
+  result_key_prefix: "financial_agent.result"
+  summary_key_prefix: "financial_agent.summary"
+  error_key_prefix: "financial_agent.error"
+  latest_result_key: "financial_agent.latest"
+  # Other agents publish {"observations": [...], "exchange_rates": [...]} under "<input_key_prefix>:<name>"
+  # and request data.ingest_shared with that name.
+  input_key_prefix: "financial_agent.input"
+  event_channel: "financial_agent.events"
+
+  # allowed_operations:
+  #   - calculation.present_value
+  #   - portfolio.return_moments
+  #   (see FinancialAgent.available_operations() for the full list)
+
 handler_agent:
   enabled: true
   enable_recovery: true
