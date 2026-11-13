@@ -8,11 +8,11 @@ times and never purport to be continuous collision detection.
 """
 from __future__ import annotations
 
+import numpy as np # type: ignore
+
 from dataclasses import dataclass
 from math import isfinite
 from typing import Protocol
-
-import numpy as np
 
 from .world.collision import CollisionEngine, aabb_separation
 from .world.geometry import AABB, Sphere
@@ -26,7 +26,7 @@ class EvaluatedSceneProtocol(Protocol):
     def ids(self, *, include_hidden: bool = False) -> tuple[str, ...]: ...
     def geometric_ids(self) -> tuple[str, ...]: ...
     def get_object_state(self, object_id: str) -> dict: ...
-    def world_bounds(self, object_id: str, *, include_hidden: bool = False): ...
+    def world_bounds(self, object_id: str, *, include_hidden: bool = False) -> tuple[np.ndarray, np.ndarray] | None: ...
 
 
 class SceneEvaluatorProtocol(Protocol):
@@ -91,7 +91,10 @@ class TemporalSpatialQueries:
 
     @staticmethod
     def _box(state: EvaluatedSceneProtocol, oid: str) -> AABB:
-        lo, hi = state.world_bounds(oid)
+        bounds = state.world_bounds(oid)
+        if bounds is None:
+            raise SpatialValidationError(f"world bounds unavailable for object {oid!r}")
+        lo, hi = bounds
         return AABB(np.asarray(lo, dtype=float), np.asarray(hi, dtype=float))
 
     def get_object_state(self, object_id: str, time: float) -> dict:
@@ -146,8 +149,7 @@ class TemporalSpatialQueries:
         first = self._supported_primitive(state, a)
         second = self._supported_primitive(state, b)
         if first is None or second is None:
-            return TemporalCollision(a, b, state.time, state.revision,
-                                     "broad_phase_potential", "world_aabb", 0.0)
+            return TemporalCollision(a, b, state.time, state.revision, "broad_phase_potential", "world_aabb", 0.0)
         result = self.collision.test(first, second)
         if result.broad_phase_only:
             return TemporalCollision(a, b, state.time, state.revision,
@@ -169,8 +171,7 @@ class TemporalSpatialQueries:
         for i, a in enumerate(ids):
             for b in ids[i+1:]:
                 if aabb_separation(boxes[a], boxes[b]) == 0.0:
-                    result.append(TemporalProximity(a, b, state.time, state.revision, 0.0,
-                                                    "potential_overlap"))
+                    result.append(TemporalProximity(a, b, state.time, state.revision, 0.0, "potential_overlap"))
         return tuple(result)
 
     def query_collision_interval(self, a: str, b: str, start: float, end: float,

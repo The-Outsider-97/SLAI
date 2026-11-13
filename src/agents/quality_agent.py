@@ -44,6 +44,7 @@ from .quality import (
     EvidenceCalibrator,
     FitnessPolicyDecision,
     FitnessPolicyResolver,
+    QualityPredictor,
     RelationshipQuality,
 )
 from .quality.utils.quality_error import *
@@ -211,9 +212,12 @@ class QualityAgent(BaseAgent):
         # One coherent quality-memory instance per QualityAgent. Existing
         # subsystem constructors require the small optional memory= integration
         # patch documented with this file.
-        self._owns_quality_memory = True
+        # A caller-supplied memory stays caller-owned; otherwise the agent
+        # creates (and later closes) its own. Leaving this as ``None`` made every
+        # subsystem assert ``self.memory is not None`` on the first batch.
+        self._owns_quality_memory = local_memory is None
         self._quality_agent_closed = False
-        self.quality_memory = local_memory
+        self.quality_memory = local_memory if local_memory is not None else QualityMemory()
 
         self.structural_quality = StructuralQuality(memory = self.quality_memory)
         self.statistical_quality = StatisticalQuality(memory = self.quality_memory)
@@ -229,6 +233,7 @@ class QualityAgent(BaseAgent):
         self.baseline_governor: Optional[BaselineGovernor] = None
         self.relationship_quality: Optional[RelationshipQuality] = None
         self.evidence_calibrator: Optional[EvidenceCalibrator] = None
+        self.quality_predictor: Optional[QualityPredictor] = None
         self._initialize_intelligence_modules()
 
         self.attach_runtime(
@@ -469,6 +474,15 @@ class QualityAgent(BaseAgent):
         self.evidence_calibrator = EvidenceCalibrator(
             config=evidence_cfg,
         )
+        # Optional and advisory: absent or disabled means the gate behaves exactly as before.
+        self.quality_predictor = QualityPredictor(
+            memory=self.quality_memory,
+            config=self._mapping_section(
+                self.intelligence_config,
+                "quality_predictor",
+                required=False,
+            ),
+        )
 
     @staticmethod
     def _mapping_section(
@@ -651,6 +665,24 @@ class QualityAgent(BaseAgent):
                 active_policy.warn_threshold
                 if active_policy is not None and self.use_fitness_policy
                 else self.warn_threshold
+            )
+
+            # Advisory learned risk estimate from pre-check inputs only. It never changes a verdict,
+            # policy or check order, and it is empty whenever the predictor is disabled.
+            quality_prediction = self._predict_quality(
+                records=normalized_records,
+                source_id=source_key,
+                use_case=(
+                    active_policy.use_case
+                    if active_policy is not None
+                    else self._effective_use_case(use_case, normalized_context)
+                ),
+                policy=active_policy,
+                schema=schema,
+                label_field=label_field,
+                provenance=provenance,
+                source_metadata=source_metadata,
+                baseline_provided=baseline is not None,
             )
 
             subsystem_results: Dict[str, Dict[str, Any]] = {}
@@ -942,6 +974,7 @@ class QualityAgent(BaseAgent):
                     if active_policy is not None
                     else None
                 ),
+                **self._workflow_prediction_context(quality_prediction),
                 **normalized_context,
                 **normalized_workflow_context,
             }
@@ -1084,6 +1117,12 @@ class QualityAgent(BaseAgent):
             decision_dict["subsystem_findings"] = deepcopy(
                 combined_findings
             )
+            if quality_prediction:
+                # Prediction next to the real outcome: shadow-mode monitoring and retraining data.
+                decision_dict["quality_prediction"] = {
+                    **quality_prediction,
+                    **self.quality_predictor.observe(quality_prediction, decision_dict),
+                }
 
             decision_dict["shared_memory_keys"] = (
                 self._publish_result_to_shared_memory(
@@ -1185,6 +1224,11 @@ class QualityAgent(BaseAgent):
                 "baseline_governance": self.baseline_governor is not None,
                 "relationship_quality": self.relationship_quality is not None,
                 "evidence_calibration": self.evidence_calibrator is not None,
+                "quality_predictor": (
+                    self.quality_predictor.status()
+                    if self.quality_predictor is not None
+                    else None
+                ),
             },
         }
 
@@ -1325,20 +1369,68 @@ class QualityAgent(BaseAgent):
         ):
             return None
 
-        effective_use_case = (
+        return self.fitness_policy.resolve(
+            use_case=self._effective_use_case(use_case, context),
+            source_id=source_id,
+            policy_id=policy_id,
+            context=context,
+            overrides=overrides,
+        )
+
+    @staticmethod
+    def _effective_use_case(use_case: Optional[str], context: Mapping[str, Any]) -> str:
+        return str(
             use_case
             or context.get("intended_use")
             or context.get("use_case")
             or context.get("task_type")
             or "general"
         )
-        return self.fitness_policy.resolve(
-            use_case=str(effective_use_case),
+
+    def _predict_quality(
+        self,
+        *,
+        records: Sequence[Mapping[str, Any]],
+        source_id: str,
+        use_case: str,
+        policy: Any,
+        schema: Optional[Mapping[str, Any]],
+        label_field: Optional[str],
+        provenance: Optional[Mapping[str, Any]],
+        source_metadata: Optional[Mapping[str, Any]],
+        baseline_provided: bool,
+    ) -> Dict[str, Any]:
+        """Advisory pre-check risk estimate; empty when the predictor is off, unavailable or failing."""
+        if self.quality_predictor is None or not self.quality_predictor.enabled:
+            return {}
+        return self.quality_predictor.predict_batch(
+            records,
             source_id=source_id,
-            policy_id=policy_id,
-            context=context,
-            overrides=overrides,
+            use_case=use_case,
+            policy=policy,
+            schema=schema,
+            label_field=label_field,
+            provenance=provenance,
+            source_metadata=source_metadata,
+            baseline_provided=baseline_provided,
         )
+
+    @staticmethod
+    def _workflow_prediction_context(prediction: Mapping[str, Any]) -> Dict[str, Any]:
+        """Compact risk hint for WorkflowControl; only in advisory mode and never a verdict."""
+        if prediction.get("mode") != "advisory" or "risk_tier" not in prediction:
+            return {}
+        return {
+            "quality_prediction": {
+                "risk_tier": prediction["risk_tier"],
+                "block_probability": prediction.get("block_probability"),
+                "attention_probability": prediction.get("attention_probability"),
+                "reliable": prediction.get("reliable"),
+                "focus": [item["defect"] for item in prediction.get("advice", {}).get("focus", [])],
+                "model_version": prediction.get("model_version"),
+                "authority": "advisory_only",
+            }
+        }
 
     def _execute_relationship_intelligence(
         self,
