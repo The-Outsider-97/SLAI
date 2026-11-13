@@ -157,6 +157,9 @@ class LantraRuntime:
         self.generation_strategy = ensure_text(inference.get("generation_strategy", "greedy")).strip().lower()
         self.temperature = coerce_float(inference.get("temperature", 1.0), default=1.0, minimum=1e-6)
         self.top_k = coerce_int(inference.get("top_k", 0), default=0, minimum=0)
+        self.repetition_penalty = coerce_float(inference.get("repetition_penalty", 1.15), default=1.15, minimum=1.0)
+        self.no_repeat_ngram_size = coerce_int(inference.get("no_repeat_ngram_size", 3), default=3, minimum=0)
+        self.min_generation_length = coerce_int(inference.get("min_length", 2), default=2, minimum=0)
         self.embedding_pooling = ensure_text(inference.get("embedding_pooling", "mean")).strip().lower()
         self.normalize_embeddings = coerce_bool(inference.get("normalize_embeddings", True), default=True)
         self.default_rerank_top_k = coerce_int(inference.get("rerank_top_k", 10), default=10, minimum=1)
@@ -210,7 +213,12 @@ class LantraRuntime:
         return device
 
     def _load_runtime(self) -> None:
-        checkpoint = resolve_model_file(self.checkpoint_path, "language/lantra/lantra_20260929T103932Z.pt")
+        configured = Path(self.checkpoint_path).expanduser()
+        if coerce_bool(self.config.get("prefer_local_checkpoint", True), default=True) and configured.is_file():
+            checkpoint = configured
+        else:
+            # The hub name follows the configured file name; a fixed name would load a different model.
+            checkpoint = resolve_model_file(self.checkpoint_path, f"language/lantra/{configured.name}")
         self.checkpoint_path = str(checkpoint)
         if not checkpoint.exists():
             self._raise_model(
@@ -427,13 +435,23 @@ class LantraRuntime:
         )
         with self._lock, torch.inference_mode():
             src, _ = self._encode_source(source_text, max_length=self.source_max_length)
+            constraints: Dict[str, Any] = {}
+            if effective_strategy in {"greedy", "sample", "sampling"}:
+                constraints = {
+                    "repetition_penalty": self.repetition_penalty,
+                    "no_repeat_ngram_size": self.no_repeat_ngram_size,
+                    "min_length": self.min_generation_length,
+                }
+            # top_k filters sampling; beam_width controls beam search.
+            if effective_strategy not in {"beam", "beam_search"}:
+                constraints["top_k"] = self.top_k
             generated = self.model.generate(
                 src,
                 strategy=effective_strategy,
                 max_len=effective_max_length,
                 temperature=self.temperature,
-                top_k=self.top_k,
                 return_dict=False,
+                **constraints,
             )
             sequence_tensor: Optional[torch.Tensor]
             if isinstance(generated, torch.Tensor):

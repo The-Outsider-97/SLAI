@@ -47,6 +47,7 @@ from .utils.linguistic_frame import LinguisticFrame, SpeechActType
 from .utils.language_error import *
 from .utils.language_helpers import *
 from .language_memory import LanguageMemory
+from src.utils.helpers.response_quality import degenerate_reasons, restore_sentence_case
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("NLG Engine")
@@ -1047,7 +1048,11 @@ class NLGEngine:
         if precomputed_response is None:
             return None
 
-        response = self._adapt_style(_clean_space(precomputed_response), frame=frame, context=context)
+        # LANTRA's tokenizer lower-cases its input, so decoded text is lower case; restore capitalisation
+        # for presentation only (wording is never changed).
+        response = restore_sentence_case(
+            self._adapt_style(_clean_space(precomputed_response), frame=frame, context=context)
+        )
         reasons: List[str] = []
         valid, base_reasons = self._validate_response(response)
         reasons.extend(base_reasons)
@@ -1101,6 +1106,26 @@ class NLGEngine:
                 ):
                     reasons.append("repeated_assistant_response")
                 break
+
+        # --------------------------------------------------------------
+        # Reject degenerate output: loops ("meta meta meta"), echoing the user, near-copies of an
+        # earlier assistant reply. A rejected candidate falls back to templates instead of being shown.
+        # --------------------------------------------------------------
+        if response:
+            previous_replies = [
+                _clean_space(_text(item.get("content", item.get("text", ""))))
+                for item in context.history
+                if isinstance(item, Mapping)
+                and _text(item.get("role", "")).strip().lower() in {"assistant", "agent"}
+            ][-3:]
+            for reason in degenerate_reasons(
+                response,
+                user_text=_text(getattr(frame, "propositional_content", "")),
+                previous_assistant=previous_replies if self.reject_repeated_neural_response else (),
+            ):
+                if reason == "repeats_previous_assistant" and "repeated_assistant_response" in reasons:
+                    continue
+                reasons.append(f"degenerate_response:{reason}")
 
         # --------------------------------------------------------------
         # Reject pathological decoder fragments.
