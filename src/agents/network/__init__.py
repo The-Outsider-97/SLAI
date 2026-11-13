@@ -5,6 +5,7 @@ from .network_metrics import NetworkMetrics, TelemetryEvent, RollingLatencyWindo
 from .network_policy import NetworkPolicy, PolicyCheckResult, RateLimitBucket
 from .network_reliability import ReliabilityDecision, NetworkReliability
 from .network_stream import StreamSessionRecord, NetworkStream
+from .delivery_predictor import DeliveryContext, DeliveryDecision, DeliveryModel, DeliveryPredictor
 
 __all__ = [
     # Memory
@@ -31,4 +32,9 @@ __all__ = [
     # Stream
     "StreamSessionRecord",
     "NetworkStream",
+    # Predictive delivery control
+    "DeliveryContext",
+    "DeliveryDecision",
+    "DeliveryModel",
+    "DeliveryPredictor",
 ]

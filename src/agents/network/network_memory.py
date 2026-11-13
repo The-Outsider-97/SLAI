@@ -144,6 +144,9 @@ class NetworkMemory:
         self.delivery_state_ttl_seconds = self._get_non_negative_int_config("delivery_state_ttl_seconds", 7200)
         self.endpoint_health_ttl_seconds = self._get_non_negative_int_config("endpoint_health_ttl_seconds", 600)
         self.session_snapshot_ttl_seconds = self._get_non_negative_int_config("session_snapshot_ttl_seconds", 1800)
+        # The aggregate session map grows with every session id; per-session entries are stored under their
+        # own keys, so the aggregate keeps only the newest N (0 = unbounded).
+        self.max_session_snapshots = self._get_non_negative_int_config("max_session_snapshots", 200)
         self.policy_decision_ttl_seconds = self._get_non_negative_int_config("policy_decision_ttl_seconds", 1800)
         self.channel_metrics_ttl_seconds = self._get_non_negative_int_config("channel_metrics_ttl_seconds", 600)
         self.error_snapshot_ttl_seconds = self._get_non_negative_int_config("error_snapshot_ttl_seconds", 7200)
@@ -185,32 +188,49 @@ class NetworkMemory:
         normalized_value = json_safe(value)
 
         with self._lock:
-            self._maybe_prune_locked()
-            self._ensure_capacity_locked(incoming_key=normalized_key)
-
-            now = _utcnow()
-            existing = self._entries.get(normalized_key)
-            expires_at = self._resolve_expiry_locked(ttl_seconds)
-            entry = MemoryEntry(
-                key=normalized_key,
-                value=normalized_value,
-                created_at=existing.created_at if existing is not None else now,
-                updated_at=now,
-                expires_at=expires_at,
-                version=(existing.version + 1) if existing is not None else 1,
-                source=normalized_source or (existing.source if existing is not None else None),
-                tags=normalized_tags or (existing.tags if existing is not None else ()),
-                metadata=merge_mappings(existing.metadata if existing is not None else {}, normalized_metadata),
-            )
-            self._entries[normalized_key] = entry
-            self._stats["writes"] += 1
-            self._append_event_locked(
-                "set",
-                key=normalized_key,
-                value={"version": entry.version, "ttl_seconds": entry.ttl_seconds},
-                metadata={"source": entry.source, "tags": list(entry.tags)},
+            entry = self._store_locked(
+                normalized_key,
+                normalized_value,
+                ttl_seconds=ttl_seconds,
+                source=normalized_source,
+                tags=normalized_tags,
+                metadata=normalized_metadata,
             )
             return entry.to_dict(include_value=True)
+
+    def _store_locked(self, normalized_key: str, normalized_value: Any, *,
+        ttl_seconds: Optional[int],
+        source: Optional[str],
+        tags: Tuple[str, ...],
+        metadata: Mapping[str, Any],
+    ) -> MemoryEntry:
+        """Store an already-normalized value. Caller must hold ``self._lock``."""
+        self._maybe_prune_locked()
+        self._ensure_capacity_locked(incoming_key=normalized_key)
+
+        now = _utcnow()
+        existing = self._entries.get(normalized_key)
+        expires_at = self._resolve_expiry_locked(ttl_seconds)
+        entry = MemoryEntry(
+            key=normalized_key,
+            value=normalized_value,
+            created_at=existing.created_at if existing is not None else now,
+            updated_at=now,
+            expires_at=expires_at,
+            version=(existing.version + 1) if existing is not None else 1,
+            source=source or (existing.source if existing is not None else None),
+            tags=tags or (existing.tags if existing is not None else ()),
+            metadata=merge_mappings(existing.metadata if existing is not None else {}, metadata),
+        )
+        self._entries[normalized_key] = entry
+        self._stats["writes"] += 1
+        self._append_event_locked(
+            "set",
+            key=normalized_key,
+            value={"version": entry.version, "ttl_seconds": entry.ttl_seconds},
+            metadata={"source": entry.source, "tags": list(entry.tags)},
+        )
+        return entry
 
     def set_many(self, values: Mapping[str, Any], *,
         ttl_seconds: Optional[int] = None,
@@ -367,8 +387,17 @@ class NetworkMemory:
         """Append an item to a list-valued entry and return the resulting list."""
         normalized_key = self._validate_key(key)
         resolved_max_items = None if max_items is None else max(1, int(max_items))
+        normalized_item = json_safe(item)
+        normalized_source = str(source).strip() if source is not None and str(source).strip() else None
+        normalized_metadata = normalize_metadata(metadata)
         with self._lock:
-            current = self.get(normalized_key, default=[], include_metadata=False)
+            # Stored list values are already JSON-safe, so only the new item is normalized.
+            # Re-serializing the whole history on every append made each write O(history size)
+            # with a large constant (several full passes), so relay latency grew with traffic.
+            self._prune_key_if_expired_locked(normalized_key)
+            existing = self._entries.get(normalized_key)
+            self._stats["reads"] += 1
+            current = existing.value if existing is not None else []
             if current is None:
                 current = []
             if not isinstance(current, list):
@@ -377,18 +406,19 @@ class NetworkMemory:
                     context={"operation": "memory_append"},
                     details={"key": normalized_key, "existing_type": type(current).__name__},
                 )
-            current.append(json_safe(item))
-            if resolved_max_items is not None and len(current) > resolved_max_items:
-                current = current[-resolved_max_items:]
-            self.set(
+            updated = [*current, normalized_item]
+            if resolved_max_items is not None and len(updated) > resolved_max_items:
+                updated = updated[-resolved_max_items:]
+            self._store_locked(
                 normalized_key,
-                current,
+                updated,
                 ttl_seconds=ttl_seconds,
-                source=source,
-                metadata=metadata,
+                source=normalized_source,
+                tags=(),
+                metadata=normalized_metadata,
             )
             self._stats["appends"] += 1
-            return current
+            return list(updated)
 
     def pop(self, key: str, *, default: Any = None, include_metadata: bool = False) -> Any:
         """Remove and return a key's value or entry payload."""
@@ -807,7 +837,11 @@ class NetworkMemory:
                 merged_snapshot = merge_mappings(incoming_snapshot, {"updated_at": utc_timestamp(), "metadata": normalize_metadata(metadata)})
             merged_snapshot["session_id"] = normalized_session_id
             merged_sessions = dict(current_sessions)
+            merged_sessions.pop(normalized_session_id, None)  # re-insert so the entry counts as newest
             merged_sessions[normalized_session_id] = merged_snapshot
+            if self.max_session_snapshots and len(merged_sessions) > self.max_session_snapshots:
+                for stale_id in list(merged_sessions)[: len(merged_sessions) - self.max_session_snapshots]:
+                    merged_sessions.pop(stale_id, None)
             self.set(_SESSION_SNAPSHOT_KEY, merged_sessions, ttl_seconds=resolved_ttl, source="session")
             self.set(session_key, merged_snapshot, ttl_seconds=resolved_ttl, source="session")
             self._append_event_locked("session_snapshot", key=session_key, value=merged_snapshot)

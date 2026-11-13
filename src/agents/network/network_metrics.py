@@ -354,6 +354,9 @@ class NetworkMetrics:
             1,
             int(self.metrics_config.get("unhealthy_consecutive_failures_threshold", 5) or 5),
         )
+        # Rate-based health needs a minimum sample size: with 1 event a single failure is a 100% error
+        # rate and would mark an endpoint unhealthy. Consecutive failures stay the fast-path signal.
+        self.min_events_for_rate_status = self._get_non_negative_int_config("min_events_for_rate_status", 10)
 
         self._started_at = utcnow()
         self._global = MetricAggregate("global", "network", self.max_latency_samples_per_scope)
@@ -1007,6 +1010,12 @@ class NetworkMetrics:
         consecutive_failures = int(snapshot.get("consecutive_failures", 0) or 0)
         latency = snapshot.get("latency_ms") if isinstance(snapshot.get("latency_ms"), Mapping) else {}
         p95_latency = latency.get("p95")
+
+        total_events = int(snapshot.get("total_events", 0) or 0)
+        if total_events < self.min_events_for_rate_status:
+            # Too little evidence for rate-based verdicts; only the consecutive-failure rule applies.
+            success_rate = None
+            error_rate = None
 
         if consecutive_failures >= self.unhealthy_consecutive_failures_threshold:
             return "unhealthy"

@@ -226,6 +226,11 @@ class ChannelSelector:
         self.use_memory_metrics = self._get_bool_config("use_memory_metrics", True)
         self.use_policy_memory = self._get_bool_config("use_policy_memory", True)
         self.fail_on_no_candidates = self._get_bool_config("fail_on_no_candidates", True)
+        # When every candidate is rejected *only* for health-status reasons, the least-bad one is still
+        # tried instead of failing closed (load-balancer "panic mode"). A rejected sole endpoint otherwise
+        # gets no traffic, so nothing can ever show that it recovered. Policy/security/capability/circuit
+        # rejections are never overridden.
+        self.panic_route_when_all_unhealthy = self._get_bool_config("panic_route_when_all_unhealthy", True)
         self.allow_degraded_channels = self._get_bool_config("allow_degraded_channels", True)
         self.allow_unhealthy_channels = self._get_bool_config("allow_unhealthy_channels", False)
         self.disallow_open_circuits = self._get_bool_config("disallow_open_circuits", True)
@@ -376,6 +381,14 @@ class ChannelSelector:
             )
 
             viable = [item for item in ranked if not item["score"].get("disqualified", False)]
+            panic_fallback = False
+            if not viable and self.panic_route_when_all_unhealthy:
+                soft = [item for item in ranked if self._only_health_disqualifications(item["score"])]
+                if soft:
+                    viable = soft[:1]
+                    panic_fallback = True
+                    self._stats["panic_fallbacks"] = self._stats.get("panic_fallbacks", 0) + 1
+                    normalized_metadata = {**normalized_metadata, "panic_fallback": True}
             if not viable:
                 self._stats["failures"] += 1
                 if self.fail_on_no_candidates:
@@ -413,6 +426,13 @@ class ChannelSelector:
             self._selection_counts[selected_candidate.adapter_name] = self._selection_counts.get(selected_candidate.adapter_name, 0) + 1
             self._record_selection(decision)
             return decision.to_dict()
+
+    @staticmethod
+    def _only_health_disqualifications(score: Mapping[str, Any]) -> bool:
+        reasons = list(score.get("disqualification_reasons") or [])
+        return bool(reasons) and all(
+            str(reason).startswith(("unhealthy endpoint status", "degraded endpoint status")) for reason in reasons
+        )
 
     def select_and_create_adapter(
         self,

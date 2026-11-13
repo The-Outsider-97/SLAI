@@ -39,6 +39,12 @@ settings = VerificationSettings.from_mapping(raw)
 
 Z3 is optional and is not imported when the package is imported. If `z3-solver` is absent, the subsystem remains importable; selecting Z3 raises `SolverUnavailableError`. Other solvers can be integrated by implementing the narrow `SolverBackend` protocol and registering a factory in a `BackendRegistry`. No mutable global backend registry or solver context is created.
 
+## Software proposal hand-off
+
+`VerificationAgent` operation `proposal_evidence` consumes patch proposals published by `SoftwareAgent` under `software_agent.proposal:<patch_id>` (or an evidence mapping passed inline). `formal/proposal_evidence.py` evaluates seven named obligations on that record: not applied, downstream gates declared, syntax valid, no introduced correctness findings, bounded unresolved edit sites, confidence floor, and a consistent proposal identity. Thresholds come from `verification_agent.proposal_policy` in `agents_config.yaml`, per-request `options`, or a `ProposalPolicy` passed as `formal_property`.
+
+The result is `REFUTED` if any obligation is violated, `UNKNOWN` if evidence is missing, and `VERIFIED` only when every obligation holds. Its provenance is `contract` / `recorded-evidence`, and its `limitations` state that **it concerns the recorded evidence only, not the patch's behaviour**. The per-patch verdict is published at `verification_agent.proposal_verdict:<patch_id>` for the Safety gate to read.
+
 ## Academic design basis
 
 The implementation uses the supplied sources conservatively:

@@ -972,15 +972,23 @@ def _serialize_exception(exc: BaseException, *, include_traceback: bool = False)
     return payload
 
 
+_MAX_DEPTH_REPR_CHARS = 512
+
+
 def _json_safe(value: Any, *, max_depth: int = 5, _depth: int = 0) -> Any:
-    if _depth >= max_depth:
-        return repr(value)
+    # Scalars first: re-applying ``repr`` to an already-serialized string at the depth limit
+    # re-escapes it on every pass and grows it geometrically (see network_helpers.json_safe).
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):
         return value.isoformat()
+    if _depth >= max_depth:
+        text = repr(value)
+        if len(text) <= _MAX_DEPTH_REPR_CHARS:
+            return text
+        return f"{text[:_MAX_DEPTH_REPR_CHARS]}...[truncated {len(text) - _MAX_DEPTH_REPR_CHARS} chars]"
     if isinstance(value, Mapping):
         return {str(k): _json_safe(v, max_depth=max_depth, _depth=_depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):

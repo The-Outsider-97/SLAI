@@ -222,21 +222,43 @@ def utc_timestamp() -> str:
     return utcnow().isoformat()
 
 
+_MAX_DEPTH_REPR_CHARS = 512
+
+
+def _depth_limited_repr(value: Any) -> str:
+    """
+    Bounded textual stand-in for a value nested beyond ``max_depth``.
+
+    The result is a plain ``str`` and ``json_safe`` returns strings unchanged, so
+    re-serializing already-serialized data (which the network memory layer does on
+    every read and write) is idempotent. Re-applying ``repr`` to a string instead
+    re-escapes it on every pass and grows it geometrically.
+    """
+    text = repr(value)
+    if len(text) <= _MAX_DEPTH_REPR_CHARS:
+        return text
+    return f"{text[:_MAX_DEPTH_REPR_CHARS]}...[truncated {len(text) - _MAX_DEPTH_REPR_CHARS} chars]"
+
+
 def json_safe(value: Any, *, max_depth: int = 5, _depth: int = 0) -> Any:
     """
     Convert arbitrary values into a JSON-safe representation.
 
     This is deliberately conservative because the result is intended for
     telemetry, logs, shared-memory persistence, and error contexts.
-    """
-    if _depth >= max_depth:
-        return repr(value)
 
+    The function is idempotent: ``json_safe(json_safe(x)) == json_safe(x)``.
+    Scalars are returned as-is at any depth; only containers and arbitrary
+    objects nested beyond ``max_depth`` are replaced by a bounded string.
+    """
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
 
     if isinstance(value, datetime):
         return value.isoformat()
+
+    if _depth >= max_depth and not isinstance(value, bytes):
+        return _depth_limited_repr(value)
 
     if isinstance(value, bytes):
         try:
@@ -1133,9 +1155,21 @@ def sanitize_for_logging(
     Produce a log-safe representation of arbitrary values.
 
     This combines JSON-safe normalization with recursive secret redaction.
+
+    Containers nested beyond ``max_depth`` are replaced by a structure-only
+    placeholder. They must never be rendered with ``repr``: that would emit nested
+    values without passing them through redaction (secrets below the depth limit
+    leaked into logs and memory) and is not idempotent.
     """
     if _depth >= max_depth:
-        return repr(value)
+        if isinstance(value, Mapping):
+            return f"<mapping with {len(value)} keys: max depth reached>"
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return f"<sequence with {len(value)} items: max depth reached>"
+        if isinstance(value, NetworkError):
+            return f"<{type(value).__name__}: max depth reached>"
+        if not isinstance(value, bytes):
+            return json_safe(value, max_depth=max_depth, _depth=_depth)
 
     if isinstance(value, Mapping):
         return redact_sensitive_mapping(
