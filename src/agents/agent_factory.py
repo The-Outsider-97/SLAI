@@ -214,11 +214,13 @@ class AgentFactory:
     """
 
     DEFAULT_AGENT_SPECS: Dict[str, Dict[str, Any]] = {
+        "animation": {"module_path": "src.agents.animation_agent", "class_name": "AnimationAgent"},
         "adaptive": {"module_path": "src.agents.adaptive_agent", "class_name": "AdaptiveAgent"},
         "alignment": {"module_path": "src.agents.alignment_agent", "class_name": "AlignmentAgent"},
         "browser": {"module_path": "src.agents.browser_agent", "class_name": "BrowserAgent"},
         "collaborative": {"module_path": "src.agents.collaborative_agent", "class_name": "CollaborativeAgent"},
         "evaluation": {"module_path": "src.agents.evaluation_agent", "class_name": "EvaluationAgent"},
+        "financial": {"module_path": "src.agents.financial_agent", "class_name": "FinancialAgent"},
         "execution": {"module_path": "src.agents.execution_agent", "class_name": "ExecutionAgent"},
         "handler": {"module_path": "src.agents.handler_agent", "class_name": "HandlerAgent"},
         "knowledge": {"module_path": "src.agents.knowledge_agent", "class_name": "KnowledgeAgent"},
@@ -238,12 +240,14 @@ class AgentFactory:
         "reasoning": {"module_path": "src.agents.reasoning_agent", "class_name": "ReasoningAgent"},
         "safety": {"module_path": "src.agents.safety_agent", "class_name": "SafetyAgent"},
         "simulation": {"module_path": "src.agents.simulation_agent", "class_name": "SimulationAgent"},
+        "software": {"module_path": "src.agents.software_agent", "class_name": "SoftwareAgent"},
         "spatial": {"module_path": "src.agents.spatial_agent", "class_name": "SpatialAgent"},
         "stem": {"module_path": "src.agents.stem_agent", "class_name": "STEMAgent"},
         "verification": {"module_path": "src.agents.verification_agent", "class_name": "VerificationAgent"},
     }
 
     DEFAULT_ALIASES: Dict[str, str] = {
+        "animation_agent": "animation",
         "web": "browser",
         "obs": "observability",
         "net": "network",
@@ -251,6 +255,7 @@ class AgentFactory:
         "reader_agent": "reader",
         "language_agent": "language",
         "evaluation_agent": "evaluation",
+        "financial_agent": "financial",
         "knowledge_agent": "knowledge",
         "privacy_agent": "privacy",
         "quality_agent": "quality",
@@ -258,6 +263,7 @@ class AgentFactory:
         "reasoning_agent": "reasoning",
         "safety_agent": "safety",
         "simulation_agent": "simulation",
+        "software_agent": "software",
         "verification_agent": "verification"
     }
 
@@ -268,6 +274,10 @@ class AgentFactory:
         "reasoning": {"torch_required": False, "notes": "Rule/probabilistic reasoning core does not require torch."},
         "language": {"torch_required": False, "notes": "Lightweight language mode available without torch."},
         "evaluation": {"torch_required": False, "notes": "Core evaluation works without deep anomaly torch module."},
+        "financial": {"torch_required": False, "notes": (
+            "Financial analysis is Decimal-based and torch-free; mean-variance optimization is delegated "
+            "to the optimization agent (NumPy/SciPy) only when portfolio.optimize_allocation is used."
+        )},
         "observability": {"torch_required": False, "notes": "Observability orchestration is telemetry-first and torch-free."},
         "network": {"torch_required": False, "notes": "Network transport/routing/reliability stack is torch-free."},
         "safety": {"torch_required": False, "notes": "Safety policy checks run without torch."},
@@ -283,6 +293,10 @@ class AgentFactory:
         "simulation": {"torch_required": False, "notes": (
                        "Simulation orchestration and numerical execution are torch-free by default;"
                        "externally supplied learned world models may carry their own optional dependencies.")},
+        "software": {"torch_required": False, "notes": (
+            "Software analysis and patch synthesis are torch-free and use only the Python standard library; "
+            "additional language parsers may be registered by the Software subsystem."
+        )},
         "spatial": {"torch_required": False, "notes": "Spatial tracking is torch-free; optional learned models may require torch."},
         "stem": {"torch_required": False, "notes": "STEM tracking is torch-free; optional learned models may require torch."},
         "verification": {"torch_required": False, "notes": (
@@ -489,6 +503,7 @@ class AgentFactory:
             "browser",
             "evaluation",
             "execution",
+            "financial",
             "handler",
             "knowledge",
             "language",
@@ -507,6 +522,7 @@ class AgentFactory:
             "reasoning",
             "safety",
             "simulation",
+            "software",
             "spatial",
             "stem",
             "verification",

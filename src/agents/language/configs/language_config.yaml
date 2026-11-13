@@ -339,6 +339,10 @@ spell_checker:
   structured_wordlist_path: src/agents/language/library/structured_wordlist_en.json
   main_wordlist_path: src/agents/language/library/structured_wordlist_en.json
   wordlist_path: src/agents/language/library/wordlist_en.txt
+  # Optional lexical overlays and personal vocabulary. A configured personal
+  # path is written atomically when users accept new dictionary words.
+  domain_dictionary_paths: []
+  user_dictionary_path: null
   typo_patterns_path: null
   strict_loading: false
   case_sensitive: false
@@ -355,12 +359,12 @@ spell_checker:
   - ^\d+(?:[.,:/-]\d+)*$
   - ^\[[A-Z_]+\]$
   max_suggestions: 5
-  max_candidates: 2500
+  max_candidates: 200
   max_typo_variants: 2500
   max_edit_distance: 2.0
   candidate_length_window: 3
-  candidate_prefix_length: 1
-  min_candidate_score: 0.0
+  candidate_prefix_length: 2
+  min_candidate_score: 0.55
   auto_correct_threshold: 0.86
   suggestion_strategies:
   - typo_patterns
@@ -378,12 +382,13 @@ spell_checker:
   insertion_cost: 1.0
   deletion_cost: 1.0
   default_substitution_cost: 1.5
+  transposition_cost: 0.75
   enable_phonetic: true
   phonetic_algorithm: soundex
   enable_keyboard: true
   enable_frequency: true
   enable_typo_patterns: true
-  insertion_characters: aeiourstln
+  insertion_characters: abcdefghijklmnopqrstuvwxyz
   enable_compound_check: true
   enable_hyphenated_check: true
   include_related_terms: false
@@ -395,6 +400,33 @@ spell_checker:
   - nlu
   - nlg
   - SLAI
+  # Valid vocabulary absent from the legacy wordlist; retain these as a
+  # separate lexical overlay rather than modifying the source dictionaries.
+  - metadata
+  - lifecycle
+  - workflow
+  - workflows
+  - interoperability
+  - synchronization
+  - parametric
+  - infrastructure
+  - computational
+  - configuration
+  - initialization
+  - BaseAgent
+  - SharedMemory
+  - LANTRA
+  - SGEO
+  - SDRW
+  - SLDC
+  - SPADRA
+  - SciCal
+  - SReader
+  - SPlanner
+  # Some legacy wordlist entries are common misspellings, not acceptable
+  # modern spellings. The orthography resource pack supplies corrections.
+  rejected_words:
+  - enviroment
 
 
 orthography_processor:

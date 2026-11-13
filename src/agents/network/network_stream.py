@@ -294,6 +294,11 @@ class NetworkStream:
         self.history_ttl_seconds = self._get_non_negative_int_config("history_ttl_seconds", 3600)
         self.max_history_size = max(1, self._get_non_negative_int_config("max_history_size", 500))
         self.max_candidate_routes = max(1, self._get_non_negative_int_config("max_candidate_routes", 32))
+        # relay() opens a session record per call and nothing closes it unless auto_close_ephemeral_adapters
+        # is on, so records are capped (oldest evicted; adapters are untouched) and memory mirrors only
+        # carry the newest ``snapshot_max_sessions`` rows. 0 disables the respective bound.
+        self.max_session_records = self._get_non_negative_int_config("max_session_records", 256)
+        self.snapshot_max_sessions = self._get_non_negative_int_config("snapshot_max_sessions", 25)
         self.default_primary_count = max(1, self._get_non_negative_int_config("default_primary_count", 1))
         self.default_secondary_count = self._get_non_negative_int_config("default_secondary_count", 1)
 
@@ -743,7 +748,7 @@ class NetworkStream:
                 "default_protocol": self.default_protocol,
                 "default_channel": self.default_channel,
                 "stats": dict(self._stats),
-                "active_sessions": {key: session.to_dict() for key, session in self._sessions.items()},
+                "active_sessions": self._session_rows(),
                 "channel_selector": self.channel_selector.get_selector_snapshot(),
                 "endpoint_registry": self.endpoint_registry.get_health_summary(),
                 "route_policy": self.route_policy.get_policy_snapshot(),
@@ -759,7 +764,7 @@ class NetworkStream:
                 "started_at": self._started_at,
                 "stats": dict(self._stats),
                 "session_count": len(self._sessions),
-                "sessions": {key: value.to_dict() for key, value in self._sessions.items()},
+                "sessions": self._session_rows(),
                 "history_size": len(self._history),
                 "last_route": self.memory.get(_STREAM_LAST_KEY, default=None),
             }
@@ -1042,9 +1047,27 @@ class NetworkStream:
         session.touch(state=session.state)
         with self._lock:
             self._sessions[session.stream_id] = session
+            self._evict_session_records_locked()
             self._sync_session_memory(session)
             self._sync_stream_memory()
         return session
+
+    def _evict_session_records_locked(self) -> None:
+        """Drop the oldest session records beyond ``max_session_records`` (record-keeping only)."""
+        limit = self.max_session_records
+        if not limit:
+            return
+        while len(self._sessions) > limit:
+            oldest = next(iter(self._sessions))
+            self._sessions.pop(oldest, None)
+            self._stats["session_records_evicted"] = self._stats.get("session_records_evicted", 0) + 1
+
+    def _session_rows(self) -> Dict[str, Any]:
+        """Newest ``snapshot_max_sessions`` session rows for snapshots (counts are reported separately)."""
+        items = list(self._sessions.items())
+        if self.snapshot_max_sessions:
+            items = items[-self.snapshot_max_sessions :]
+        return {key: value.to_dict() for key, value in items}
 
     def _require_session(self, stream_id: str) -> StreamSessionRecord:
         normalized = ensure_non_empty_string(stream_id, field_name="stream_id")
@@ -1081,7 +1104,7 @@ class NetworkStream:
             {
                 "generated_at": utc_timestamp(),
                 "session_count": len(self._sessions),
-                "sessions": {key: value.to_dict() for key, value in self._sessions.items()},
+                "sessions": self._session_rows(),
                 "stats": dict(self._stats),
             },
             ttl_seconds=self.session_ttl_seconds,

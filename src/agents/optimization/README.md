@@ -189,9 +189,59 @@ Backend fallback is handled by `OptimizationSolver`. `OptimizationAgent.alternat
 
 Historical memory influences selection and initial values but is not a trained ranking model. Full multiobjective coverage, general mixed-integer nonlinear optimization, arbitrary tensor variables and global guarantees must not be inferred from the general problem representation.
 
+## Numerical Contract Corrections (2026-10-31)
+
+The canonical optimization arithmetic now treats open/strict variable bounds as
+**excluded endpoints**, even when a caller supplies a positive numerical
+feasibility tolerance. The numeric feasibility tolerance is still applied to
+non-strict constraints and ordinary residuals. Strict-bound endpoints cannot
+be made feasible by increasing tolerance; backends that do not represent
+strict inequalities must explicitly reject such inputs or use an authorized
+reformulation.
+
+The distance diagnostic for semi-continuous and semi-integer domains measures
+distance to the union of the isolated zero point and the permitted interval
+(or permitted integer lattice), instead of treating the lower bound as if it
+also constrained zero-adjacent values. These are domain diagnostics, not proofs
+that a full nonconvex problem is feasible.
+
+Unspecified initial values for bounded intervals now avoid overflow from
+adding large finite endpoints, and initial points for open half-lines use an
+interior representable candidate when one exists. An empty set of
+machine-representable interior values still raises a validation error.
+
+Weighted multi-objective scalarization now scales finite non-negative weights
+before summing them to avoid overflow. This correction does **not**
+automatically normalize objective magnitudes or physical units: callers remain
+responsible for supplying meaningful objective scales and preferences.
+
+Relevant regression tests:
+`tests/agents/test_optimization_numerical_contracts.py`.
+Full factory, agent and solver integration validation remains a separate gate.
+
+## Advanced v2.4 Extensions (Experimental)
+
+The general-purpose finite-scenario expectation/CVaR, sampled time-dependent
+constraints, trajectory derivative helpers, Spatial-backed SO(3) metrics,
+STEM-backed gradient diagnostics, and candidate checkpoint/cancel/resume
+options are described in
+[ADVANCED_OPTIMIZATION_V24.md](ADVANCED_OPTIMIZATION_V24.md).
+
+These additions extend the existing canonical mathematical contracts and
+solver adapters. They do not introduce application-specific optimizers.
+Native pattern search supports persisted algorithm progress. The existing
+SciPy differential-evolution backend also supports version-gated,
+full-generation state replay (currently verified against SciPy 1.17.0).
+Exact rational-polynomial motion bounds and moving-sphere separation can
+receive independently checkable continuous-time certificates, but generic
+sampled trajectories, nonpolynomial motion and arbitrary geometry do **not**
+receive continuous-time guarantees. See the advanced documentation for
+backend restrictions, mathematics and tests.
+The additions require full integration and benchmark validation.
+
 ## Testing and Verification
 
-There is no dedicated Optimization test suite under `tests/` in this checkout. The low-level example checks one installed HiGHS path; it does not establish availability or correctness of every solver. Use `OptimizationRegistries.summary(problem)` and `registry_summary()` to inspect compatibility/coverage without claiming that uncovered problem classes are supported.
+Targeted Optimization regression suites now exist under `tests/agents/`, including domain-problem formulation and numerical-contract tests. Passing these targeted suites alone does not establish availability or correctness of every solver. Use `OptimizationRegistries.summary(problem)` and `registry_summary()` to inspect compatibility/coverage without claiming that uncovered problem classes are supported.
 
 A non-importing syntax check from the repository root is:
 

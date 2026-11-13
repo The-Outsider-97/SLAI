@@ -6,6 +6,7 @@ component, identifies interactions, and synthesises a system-level view.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
 import math
@@ -138,6 +139,9 @@ class ReasoningDecompositional(BaseReasoning):
                 default_ttl_seconds=self.cache_ttl_seconds,
             )
 
+        self.max_input_depth: int = bounded_iterations(
+            self.decompositional_config.get("max_input_depth", 64), minimum=1, maximum=10_000
+        )
         self._component_budget_used = 0
         logger.info("ReasoningDecompositional initialized | max_depth=%s | max_components=%s", self.max_depth, self.max_components)
 
@@ -151,10 +155,10 @@ class ReasoningDecompositional(BaseReasoning):
         self._validate_input(system, context)
         cache_key = self._cache_key(system, context)
 
-        if self.cache is not None:
+        if self.cache is not None and cache_key is not None:
             cached = self.cache.get(cache_key)
             if cached is not None:
-                return cached
+                return copy.deepcopy(cached)  # callers must not be able to mutate the cached report
 
         self._component_budget_used = 0
         decomposition_tree = self.decompose_system(system, context)
@@ -179,8 +183,8 @@ class ReasoningDecompositional(BaseReasoning):
         if self.include_context:
             result["context_used"] = json_safe_reasoning_state(context)
 
-        if self.cache is not None:
-            self.cache.set(cache_key, result, metadata={"reasoning_type": "decompositional"})
+        if self.cache is not None and cache_key is not None:
+            self.cache.set(cache_key, copy.deepcopy(result), metadata={"reasoning_type": "decompositional"})
         return result
 
     def decompose_system(self, system: Any, context: Dict[str, Any], depth: int = 0,
@@ -279,7 +283,19 @@ class ReasoningDecompositional(BaseReasoning):
         }
         insights = self._generate_insights(decomposition_tree, component_analysis, interaction_analysis, context)
         vulnerabilities = self._identify_vulnerabilities(component_analysis, interaction_analysis, context)
+        cycles = self._find_dependency_cycles(interaction_analysis.get("dependency", []))
+        for cycle in cycles:
+            vulnerabilities.append({
+                "components": cycle,
+                "type": "circular_dependency",
+                "severity": "medium",
+                "score": 0.8,
+                "description": "Circular dependency: " + " -> ".join(cycle + [cycle[0]]),
+            })
+        if cycles:
+            insights.append(f"Circular dependencies detected: {len(cycles)} cycle group(s).")
         return {
+            "circular_dependencies": cycles,
             "system_properties": system_properties,
             "key_components": key_components,
             "system_metrics": {
@@ -597,6 +613,62 @@ class ReasoningDecompositional(BaseReasoning):
                     })
         return vulnerabilities[: self.max_interactions]
 
+    @staticmethod
+    def _find_dependency_cycles(dependencies: List[Dict[str, Any]]) -> List[List[str]]:
+        """Strongly connected groups (size > 1) of the dependency graph (iterative Tarjan)."""
+        graph: Dict[str, List[str]] = defaultdict(list)
+        nodes: Set[str] = set()
+        for item in dependencies:
+            source, target = item.get("source"), item.get("target")
+            if source is None or target is None:
+                continue
+            graph[str(source)].append(str(target))
+            nodes.update((str(source), str(target)))
+        index_of: Dict[str, int] = {}
+        low: Dict[str, int] = {}
+        on_stack: Set[str] = set()
+        stack: List[str] = []
+        components: List[List[str]] = []
+        counter = 0
+        for root in sorted(nodes):
+            if root in index_of:
+                continue
+            work: List[Tuple[str, int]] = [(root, 0)]
+            while work:
+                node, child_index = work.pop()
+                if child_index == 0:
+                    index_of[node] = low[node] = counter
+                    counter += 1
+                    stack.append(node)
+                    on_stack.add(node)
+                recurse = False
+                children = graph.get(node, [])
+                for position in range(child_index, len(children)):
+                    child = children[position]
+                    if child not in index_of:
+                        work.append((node, position + 1))
+                        work.append((child, 0))
+                        recurse = True
+                        break
+                    if child in on_stack:
+                        low[node] = min(low[node], index_of[child])
+                if recurse:
+                    continue
+                if low[node] == index_of[node]:
+                    group: List[str] = []
+                    while True:
+                        member = stack.pop()
+                        on_stack.discard(member)
+                        group.append(member)
+                        if member == node:
+                            break
+                    if len(group) > 1:
+                        components.append(sorted(group))
+                if work:
+                    parent = work[-1][0]
+                    low[parent] = min(low[parent], low[node])
+        return sorted(components)
+
     def _has_redundancy(self, comp_id: str, interactions: Dict[str, List[Dict[str, Any]]]) -> bool:
         for interaction in interactions.get("structural", []):
             if comp_id in interaction.get("components", []) and interaction.get("structural_score", 0.0) >= 0.8:
@@ -628,6 +700,9 @@ class ReasoningDecompositional(BaseReasoning):
             "interaction_count": sum(len(v) for v in interaction_analysis.values() if isinstance(v, list)),
             "critical_components": len(system_understanding.get("key_components", [])),
             "vulnerabilities": len(system_understanding.get("vulnerabilities", [])),
+            # The root node always exists, so "success" only says the pass completed;
+            # "decomposed" says the input was actually broken into parts.
+            "decomposed": len(all_components) > 1,
             "success": bool(all_components),
         }
         return {
@@ -649,6 +724,12 @@ class ReasoningDecompositional(BaseReasoning):
             raise ReasoningValidationError("context must be a dictionary", context={"type": type(context).__name__})
         if self.strict_inputs and isinstance(system, (str, bytes)) and not str(system).strip():
             raise ReasoningValidationError("system string cannot be empty")
+        depth = nesting_depth(system, limit=self.max_input_depth)
+        if depth > self.max_input_depth:
+            raise ReasoningValidationError(
+                "system is nested too deeply to analyse safely",
+                context={"depth": depth, "max_input_depth": self.max_input_depth},
+            )
 
     def _validate_tree(self, tree: Dict[str, Any]) -> None:
         required = {"id", "name", "type", "depth", "children"}
@@ -830,8 +911,12 @@ class ReasoningDecompositional(BaseReasoning):
     def _empty_interactions(self) -> Dict[str, List[Dict[str, Any]]]:
         return {"structural": [], "functional": [], "data_flow": [], "control_flow": [], "hierarchical": [], "dependency": [], "metadata": []}
 
-    def _cache_key(self, system: Any, context: Dict[str, Any]) -> Dict[str, Any]:
-        return {"system": self._preview(system, limit=2000), "context": json_safe_reasoning_state(context), "version": self.MODULE_VERSION}
+    def _cache_key(self, system: Any, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        system_digest = stable_digest(system)
+        context_digest = stable_digest(context)
+        if system_digest is None or context_digest is None:
+            return None  # too large/deep to key safely: skip the cache rather than risk a collision
+        return {"system": system_digest, "context": context_digest, "version": self.MODULE_VERSION}
 
     def _weighted_score(self, values: Sequence[float], weights: Sequence[float]) -> float:
         safe_values = [clamp_confidence(v) for v in values]
@@ -866,15 +951,41 @@ class ReasoningDecompositional(BaseReasoning):
         return bounded_iterations(self.decompositional_config.get("max_property_tokens", 256), minimum=8, maximum=100_000)
 
     @staticmethod
-    def _string_blob(value: Any) -> str:
-        if isinstance(value, Mapping):
-            return " ".join([str(k) + " " + ReasoningDecompositional._string_blob(v) for k, v in value.items()])
-        if isinstance(value, (list, tuple, set)):
-            return " ".join(ReasoningDecompositional._string_blob(v) for v in value)
-        return str(value)
+    def _string_blob(value: Any, *, max_nodes: int = 5000, max_depth: int = 32) -> str:
+        """Flatten nested content into text -- iterative, depth/size bounded, cycle safe.
+
+        The recursive version raised RecursionError on deeply nested content and looped
+        forever on self-referencing structures.
+        """
+        parts: List[str] = []
+        seen: Set[int] = set()
+        stack: List[Tuple[Any, int]] = [(value, 0)]
+        visited = 0
+        while stack and visited < max_nodes:
+            current, depth = stack.pop()
+            visited += 1
+            if isinstance(current, Mapping):
+                if id(current) in seen or depth >= max_depth:
+                    continue
+                seen.add(id(current))
+                for key, item in reversed(list(current.items())):
+                    stack.append((item, depth + 1))
+                    stack.append((str(key), depth + 1))
+            elif isinstance(current, (list, tuple, set)):
+                if id(current) in seen or depth >= max_depth:
+                    continue
+                seen.add(id(current))
+                for item in reversed(list(current)):
+                    stack.append((item, depth + 1))
+            else:
+                parts.append(str(current))
+        return " ".join(parts)
 
     def _preview(self, value: Any, *, limit: Optional[int] = None) -> str:
-        text = str(value)
+        try:
+            text = str(value)
+        except RecursionError:
+            text = f"<{type(value).__name__}: too deeply nested to preview>"
         max_len = limit or self.content_preview_chars
         return text if len(text) <= max_len else f"{text[:max_len - 15]}...<truncated>"
 

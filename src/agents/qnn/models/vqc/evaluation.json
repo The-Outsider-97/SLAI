@@ -1,0 +1,194 @@
+{
+  "artifact_id": "81797607ac00d10f",
+  "artifact_schema": "slai.qnn.vqc.v1",
+  "candidate_only": true,
+  "dataset_fingerprint": "1ace47008139edee31b267d543e53cc7d63e5d1623d1b0f3b45000274686d04e",
+  "decision_threshold": 0.5,
+  "evaluated_at_utc": "2026-10-20T07:57:23+00:00",
+  "features": [
+    "alcohol",
+    "density",
+    "volatile acidity",
+    "chlorides"
+  ],
+  "gate": {
+    "checks": {
+      "beats_prior_balanced_accuracy_ci95_lower_bound_above_zero": true,
+      "beats_prior_log_loss": true,
+      "outside_fitted_bounds_rate_acceptable": true
+    },
+    "meaning": "Candidate beats the constant (prior) predictor on held-out data. This is NOT evidence of quantum advantage or of performance outside the training distribution.",
+    "passed": true
+  },
+  "metrics": {
+    "test": {
+      "baselines": {
+        "logistic_regression_all_candidates": {
+          "accuracy": 0.7453007518796992,
+          "balanced_accuracy": 0.7439713582929663,
+          "brier": 0.1790382684348557,
+          "f1": 0.7864460204885737,
+          "log_loss": 0.5365143915863865,
+          "roc_auc": 0.8042690932138169
+        },
+        "logistic_regression_selected": {
+          "accuracy": 0.7208646616541353,
+          "balanced_accuracy": 0.7193965322106026,
+          "brier": 0.1840079585737985,
+          "f1": 0.7648456057007126,
+          "log_loss": 0.5471961482220824,
+          "roc_auc": 0.793777445787496
+        },
+        "prior_predictor": {
+          "accuracy": 0.6259398496240601,
+          "balanced_accuracy": 0.5,
+          "brier": 0.23413930828486296,
+          "f1": 0.7699421965317919,
+          "log_loss": 0.6610815828204996,
+          "roc_auc": 0.5
+        },
+        "rbf_svc_selected": {
+          "accuracy": 0.7377819548872181,
+          "balanced_accuracy": 0.7152164727541612,
+          "brier": 0.17880199630960544,
+          "f1": 0.7934863064396743,
+          "log_loss": 0.537621091433085,
+          "roc_auc": 0.7814824875126383
+        }
+      },
+      "bootstrap": {
+        "draws": 2000,
+        "paired_difference_ci95": {
+          "logistic_regression_all_candidates": [
+            -0.03900439582943778,
+            0.0008678387459536048
+          ],
+          "logistic_regression_selected": [
+            -0.008214082652766252,
+            0.018907440602424965
+          ],
+          "prior_predictor": [
+            0.19651176501414944,
+            0.2511416138002611
+          ],
+          "rbf_svc_selected": [
+            -0.011513416866317322,
+            0.029473409642552132
+          ]
+        },
+        "seed": 42,
+        "vqc_balanced_accuracy_ci95": [
+          0.6965117650141495,
+          0.7511416138002611
+        ]
+      },
+      "rows": 1064,
+      "vqc": {
+        "accuracy": 0.7189849624060151,
+        "balanced_accuracy": 0.7244669292407986,
+        "brier": 0.18699297965195041,
+        "f1": 0.7578947368421053,
+        "log_loss": 0.5537554316708628,
+        "outside_fitted_bounds_rate": 0.07518796992481203,
+        "roc_auc": 0.7889862224033078
+      }
+    },
+    "validation": {
+      "baselines": {
+        "logistic_regression_all_candidates": {
+          "accuracy": 0.7283834586466166,
+          "balanced_accuracy": 0.7369646411051402,
+          "brier": 0.17941106882432437,
+          "f1": 0.7644661776691116,
+          "log_loss": 0.5393233891113837,
+          "roc_auc": 0.8158943198425976
+        },
+        "logistic_regression_selected": {
+          "accuracy": 0.724624060150376,
+          "balanced_accuracy": 0.7288679337912908,
+          "brier": 0.1833545962653088,
+          "f1": 0.7642799678197908,
+          "log_loss": 0.5473345665942001,
+          "roc_auc": 0.8064154320824474
+        },
+        "prior_predictor": {
+          "accuracy": 0.6268796992481203,
+          "balanced_accuracy": 0.5,
+          "brier": 0.2339018415773418,
+          "f1": 0.7706528018486424,
+          "log_loss": 0.6605961372269065,
+          "roc_auc": 0.5
+        },
+        "rbf_svc_selected": {
+          "accuracy": 0.7368421052631579,
+          "balanced_accuracy": 0.7192398762835207,
+          "brier": 0.17629156978842558,
+          "f1": 0.7897897897897898,
+          "log_loss": 0.5298111958334434,
+          "roc_auc": 0.7922310884859838
+        }
+      },
+      "rows": 1064,
+      "vqc": {
+        "accuracy": 0.7124060150375939,
+        "balanced_accuracy": 0.7211620889806986,
+        "brier": 0.18621017913675816,
+        "f1": 0.7495908346972177,
+        "log_loss": 0.551783929597299,
+        "outside_fitted_bounds_rate": 0.06484962406015038,
+        "roc_auc": 0.7995800588370802
+      }
+    }
+  },
+  "model": "src\\agents\\qnn\\models\\vqc\\vqc_classifier.npz",
+  "model_sha256": "81797607ac00d10fd941d88b0047a0abf75703f8ca2d216f44742d6ce9f75ba7",
+  "production_approved": false,
+  "restarts": [
+    {
+      "best_epoch": 100,
+      "best_monitor_loss": 0.5442689252759749,
+      "epochs_run": 100,
+      "initial_monitor_loss": 1.1195154728791608,
+      "initial_train_loss": 1.1326476545366593,
+      "monitor_split": "validation",
+      "optimizer": "adam",
+      "readout_qubit": 3,
+      "restart": 0,
+      "seed": 42,
+      "steps": 100,
+      "stopped_early": false,
+      "train_loss": 0.5578820972506091
+    },
+    {
+      "best_epoch": 77,
+      "best_monitor_loss": 0.5513521139366564,
+      "epochs_run": 92,
+      "initial_monitor_loss": 0.9208695917520917,
+      "initial_train_loss": 0.9297251963722529,
+      "monitor_split": "validation",
+      "optimizer": "adam",
+      "readout_qubit": 3,
+      "restart": 1,
+      "seed": 43,
+      "steps": 92,
+      "stopped_early": true,
+      "train_loss": 0.5637068647488744
+    }
+  ],
+  "schema": "slai.qnn.vqc.evaluation.v1",
+  "source_kind": "registry",
+  "train": {
+    "best_epoch": 100,
+    "best_monitor_loss": 0.5442689252759749,
+    "epochs_run": 100,
+    "initial_monitor_loss": 1.1195154728791608,
+    "initial_train_loss": 1.1326476545366593,
+    "monitor_split": "validation",
+    "optimizer": "adam",
+    "readout_qubit": 3,
+    "steps": 100,
+    "stopped_early": false,
+    "train_loss": 0.5578820972506091
+  },
+  "train_seconds": 117.9
+}

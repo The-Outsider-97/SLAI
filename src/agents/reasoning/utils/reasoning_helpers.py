@@ -13,6 +13,7 @@ reuse common operations with consistent semantics:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -374,19 +375,109 @@ def filter_knowledge_by_confidence(knowledge: Mapping[Fact, float], *, min_confi
 # ---------------------------------------------------------------------------
 # Serialization/state helpers
 # ---------------------------------------------------------------------------
-def json_safe_reasoning_state(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """Convert state payload into JSON-safe structure for persistence/logging."""
-    safe: Dict[str, Any] = {}
-    for key, value in payload.items():
-        if isinstance(value, dict):
-            safe[key] = json_safe_reasoning_state(value)
-        elif isinstance(value, (list, tuple)):
-            safe[key] = [json_safe_reasoning_state(v) if isinstance(v, dict) else str(v) if isinstance(v, set) else v for v in value]
-        elif isinstance(value, set):
-            safe[key] = sorted(list(value))
+def json_safe_reasoning_state(payload: Mapping[str, Any], _active: Optional[Set[int]] = None) -> Dict[str, Any]:
+    """Convert state payload into JSON-safe structure for persistence/logging.
+
+    Self-referencing payloads used to recurse until ``RecursionError``; a container that is
+    already being converted higher up the current path is now replaced by a marker string.
+    ``_active`` is internal bookkeeping for that detection.
+    """
+    active = set() if _active is None else _active
+    if id(payload) in active:
+        return {"__cycle__": True}  # type: ignore[return-value]
+    active.add(id(payload))
+    try:
+        safe: Dict[str, Any] = {}
+        for key, value in payload.items():
+            if isinstance(value, dict):
+                safe[key] = json_safe_reasoning_state(value, active)
+            elif isinstance(value, (list, tuple)):
+                safe[key] = [
+                    json_safe_reasoning_state(v, active) if isinstance(v, dict)
+                    else str(v) if isinstance(v, set)
+                    else "<cycle>" if v is value
+                    else v
+                    for v in value
+                ]
+            elif isinstance(value, set):
+                safe[key] = sorted(list(value))
+            else:
+                safe[key] = value
+        return safe
+    finally:
+        active.discard(id(payload))
+
+
+def nesting_depth(value: Any, *, limit: int = 1_000) -> int:
+    """Container nesting depth of ``value`` (iterative; cycle-safe; stops counting past ``limit``).
+
+    Recursive traversal of untrusted input raises ``RecursionError`` long before memory runs
+    out; strategies call this first and reject excessively deep input with a typed error.
+    A reference cycle is not "deep": each container is expanded once.
+    """
+    deepest = 0
+    seen: Set[int] = set()
+    stack: List[Tuple[Any, int]] = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if isinstance(current, Mapping):
+            children = list(current.values())
+        elif isinstance(current, (list, tuple, set, frozenset)):
+            children = list(current)
         else:
-            safe[key] = value
-    return safe
+            continue
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        depth += 1
+        deepest = max(deepest, depth)
+        if deepest > limit:
+            return deepest
+        stack.extend((child, depth) for child in children)
+    return deepest
+
+
+def stable_digest(value: Any, *, max_nodes: int = 200_000, max_depth: int = 200) -> Optional[str]:
+    """SHA-256 hex digest of the full structure of ``value`` -- or ``None`` if it is too big/deep.
+
+    Used to build cache keys. Unlike ``repr()[:N]`` it never truncates silently (distinct
+    large inputs sharing a prefix used to collide) and, being iterative, never raises
+    ``RecursionError``. ``None`` tells the caller to skip the cache for this input.
+    """
+    digest = hashlib.sha256()
+    seen: Set[int] = set()
+    stack: List[Tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > max_nodes or depth > max_depth:
+            return None
+        if isinstance(current, Mapping):
+            if id(current) in seen:
+                digest.update(b"<cycle>")
+                continue
+            seen.add(id(current))
+            digest.update(b"{%d" % len(current))
+            for key in sorted(current, key=lambda k: repr(k)):
+                stack.append((current[key], depth + 1))
+                stack.append((key, depth + 1))
+        elif isinstance(current, (list, tuple)):
+            if id(current) in seen:
+                digest.update(b"<cycle>")
+                continue
+            seen.add(id(current))
+            digest.update(b"[%d" % len(current))
+            stack.extend((item, depth + 1) for item in reversed(current))
+        elif isinstance(current, (set, frozenset)):
+            digest.update(b"S%d" % len(current))
+            stack.extend((item, depth + 1) for item in sorted(current, key=lambda i: repr(i)))
+        else:
+            digest.update(type(current).__name__.encode("utf-8"))
+            digest.update(b":")
+            digest.update(repr(current).encode("utf-8", "replace"))
+            digest.update(b";")
+    return digest.hexdigest()
 
 
 def dump_knowledge_json(path: Union[str, Path], knowledge: Mapping[Fact, float]) -> None:
@@ -699,6 +790,8 @@ __all__ = [
     "filter_knowledge_by_confidence",
     # Serialization / persistence
     "json_safe_reasoning_state",
+    "nesting_depth",
+    "stable_digest",
     "dump_knowledge_json",
     "load_knowledge_json",
     # Deterministic utilities

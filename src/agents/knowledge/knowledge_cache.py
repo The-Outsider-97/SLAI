@@ -152,10 +152,10 @@ class KnowledgeCache:
         self._expiration.pop(key, None)
 
     def hash_query(self, query: str) -> str:
-        """Semantic hashing using SimHash or MD5 with configurable methods."""
-        if self.hashing_method == "simhash":
-            return self._simhash(query)
-        return hashlib.md5(query.encode("utf-8")).hexdigest()
+        """P0: collision-resistant key, not fuzzy SimHash, for identity-sensitive cache."""
+        if not isinstance(query, str):
+            raise TypeError("query must be str")
+        return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
     def _simhash(self, query: str) -> str:
         """Compute a configurable SimHash fingerprint for the query."""

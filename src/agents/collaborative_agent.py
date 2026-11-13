@@ -1,28 +1,23 @@
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 """
 Production-grade Collaborative Agent built on the shared BaseAgent architecture.
 
-The CollaborativeAgent is the agent-facing orchestration layer for SLAI's
-collaborative runtime. It coordinates safety assessment, multi-agent assignment,
-manager-backed delegation, shared-memory coordination, and operator-facing
-state publication while keeping low-level subsystem ownership in the dedicated
-collaborative modules.
+The CollaborativeAgent is the agent-facing orchestration layer for SLAI's collaborative runtime.
+It coordinates safety assessment, multi-agent assignment, manager-backed delegation, shared-memory coordination, and operator-facing
+state publication while keeping low-level subsystem ownership in the dedicated collaborative modules.
 
 Responsibilities
 ----------------
 - Provide a stable BaseAgent-compatible interface for collaborative operations.
 - Assess task and agent risk through an adaptive Bayesian risk model.
 - Coordinate task-to-agent assignments when the caller supplies explicit agents.
-- Delegate executable tasks through CollaborationManager without importing or
-  owning TaskRouter internals.
-- Publish bounded assessments, coordination decisions, metrics, snapshots, and
-  audit events into shared memory.
+- Delegate executable tasks through CollaborationManager without importing or owning TaskRouter internals.
+- Publish bounded assessments, coordination decisions, metrics, snapshots, and audit events into shared memory.
 - Serialize and restore agent-local coordination state for warm starts.
-- Use collaboration errors and collaborative helpers consistently at runtime
-  boundaries.
+- Use collaboration errors and collaborative helpers consistently at runtime boundaries.
 
 Design principles
 -----------------
@@ -36,8 +31,7 @@ Design principles
 4. Config-backed behavior: CollaborativeAgent tuning belongs in
    agents_config.yaml under ``collaborative_agent``.
 5. Operational transparency: all diagnostics are JSON-safe, redacted by default,
-   bounded, and suitable for logs, shared memory, test assertions, and incident
-   reports.
+   bounded, and suitable for logs, shared memory, test assertions, and incident reports.
 """
 
 import inspect
@@ -55,8 +49,10 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base_agent import BaseAgent
 from .collaborative.collaboration_manager import CollaborationManager
+from .collaborative.project_coordination import ProjectCoordinationStore
 from .collaborative.policy_engine import PolicyDecision, PolicyEngine
 from .collaborative.task_contracts import TaskContractRegistry
+from .planning.workflow_runtime import AuthorizationContext
 from .collaborative.utils.collaboration_error import *
 from .collaborative.utils.collaborative_helpers import *
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
@@ -508,10 +504,14 @@ class CollaborativeAgent(BaseAgent):
         "collaboration_management",
     ]
 
-    def __init__(self, shared_memory=None, agent_factory=None, config: Optional[Mapping[str, Any]] = None, **kwargs: Any):
+    def __init__(self, shared_memory=None, agent_factory=None, config: Optional[Mapping[str, Any]] = None,
+                 *, project_store: Optional[ProjectCoordinationStore] = None, **kwargs: Any):
         super().__init__(shared_memory=shared_memory, agent_factory=agent_factory, config=config)
         self.name = "CollaborativeAgent"
         self._lock = threading.RLock()
+        # The host owns this durable store and its lifecycle. Never create a
+        # second implicit revision authority or derive privileges from tasks.
+        self.project_store = project_store
 
         self.config = load_global_config()
         self.global_config = self.config
@@ -613,6 +613,92 @@ class CollaborativeAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Shared memory wrappers
     # ------------------------------------------------------------------
+    def join_project(self, *, auth: AuthorizationContext, kind: str) -> Dict[str, Any]:
+        """Join with host-verified identity; not exposed to untrusted task modes."""
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.join(auth=auth, kind=kind)
+
+    def acquire_resource_lease(self, resource_id: str, *, auth: AuthorizationContext, ttl: float = 30.0) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.acquire(resource_id, auth=auth, ttl=ttl)
+
+    def release_resource_lease(self, resource_id: str, lease_id: str, fencing_token: int, *, auth: AuthorizationContext) -> None:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        self.project_store.release(resource_id, lease_id, fencing_token, auth=auth)
+
+    def project_events(self, *, auth: AuthorizationContext, after: int = 0) -> list[Dict[str, Any]]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.events(auth=auth, after=after)
+
+    def project_snapshot(self, *, auth: AuthorizationContext) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.snapshot(auth=auth)
+
+    def _inter_agent_hint(self, project_id: str, recipient_id: str, kind: str, record_id: str) -> None:
+        """Best-effort notification; authoritative content stays in the store."""
+        if not self.runtime_config.shared_memory_enabled:
+            return
+        publisher = getattr(self.shared_memory, "publish", None)
+        if callable(publisher):
+            try:
+                publisher(f"inter_agent:{project_id}:{recipient_id}",
+                          {"kind": kind, "record_id": record_id})
+            except Exception as exc:
+                # Transient pub/sub is not an acknowledgment or a durability boundary.
+                self.logger.debug("Inter-agent notification unavailable: %s", type(exc).__name__)
+
+    def send_agent_message(self, recipient_id: str, message_type: str, payload: Dict[str, Any], *,
+                           auth: AuthorizationContext, **kwargs: Any) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        message = self.project_store.send_message(recipient_id, message_type, payload, auth=auth, **kwargs)
+        self._inter_agent_hint(auth.project_id, recipient_id, "message", message["message_id"])
+        return message
+
+    def agent_message_inbox(self, *, auth: AuthorizationContext, **kwargs: Any) -> list[Dict[str, Any]]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.inbox(auth=auth, **kwargs)
+
+    def acknowledge_agent_message(self, message_id: str, *, auth: AuthorizationContext) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.acknowledge_message(message_id, auth=auth)
+
+    def prepare_agent_handoff(self, recipient_id: str, task_id: str, capability: str, objective: str, *,
+                              auth: AuthorizationContext, **kwargs: Any) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        handoff = self.project_store.prepare_handoff(
+            recipient_id, task_id, capability, objective, auth=auth, **kwargs)
+        self._inter_agent_hint(auth.project_id, recipient_id, "handoff", handoff["handoff_id"])
+        return handoff
+
+    def get_agent_handoff(self, handoff_id: str, *, auth: AuthorizationContext) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.get_handoff(handoff_id, auth=auth)
+
+    def agent_handoff_inbox(self, *, auth: AuthorizationContext, status: str = "pending",
+                            limit: int = 100) -> list[Dict[str, Any]]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        return self.project_store.handoff_inbox(auth=auth, status=status, limit=limit)
+
+    def transition_agent_handoff(self, handoff_id: str, action: str, *,
+                                 auth: AuthorizationContext, **kwargs: Any) -> Dict[str, Any]:
+        if self.project_store is None:
+            raise RuntimeError("project collaboration store is not configured")
+        handoff = self.project_store.transition_handoff(handoff_id, action, auth=auth, **kwargs)
+        other = handoff["sender_id"] if auth.actor_id == handoff["recipient_id"] else handoff["recipient_id"]
+        self._inter_agent_hint(auth.project_id, other, "handoff", handoff_id)
+        return handoff
+
     def shared_get(self, key: str, default: Any = None) -> Any:
         return memory_get(self.shared_memory, key, default=default)
 

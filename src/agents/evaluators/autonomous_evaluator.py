@@ -18,8 +18,6 @@ import json
 import math
 import os
 import uuid
-import matplotlib.pyplot as plt # type: ignore
-import networkx as nx # type: ignore
 import numpy as np # type: ignore
 import yaml # type: ignore
 
@@ -63,7 +61,11 @@ class TaskMetrics:
     graph_available: bool
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if not math.isfinite(self.deviation_from_optimal):
+            result["deviation_from_optimal"] = None
+            result["deviation_status"] = "undefined_zero_optimal_path_length"
+        return result
 
 
 @dataclass(slots=True)
@@ -120,7 +122,11 @@ class AutonomousEvaluationSummary:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if not math.isfinite(self.deviation_mean):
+            result["deviation_mean"] = None
+            result["deviation_status"] = "unavailable_no_finite_observations"
+        return result
 
 
 class AutonomousEvaluator:
@@ -496,7 +502,7 @@ class AutonomousEvaluator:
             completion_time_mean=completion_time_mean,
             deviation_mean=deviation_mean,
             composite_score=composite_score,
-            threshold_status="PASS" if not threshold_violations else "ATTENTION",
+            threshold_status="PASS" if not threshold_violations and not task_failures else "ATTENTION",
             threshold_violations=threshold_violations,
             graph_summary=graph_summary,
             statistics=statistics,
@@ -533,7 +539,13 @@ class AutonomousEvaluator:
     def _evaluate_task_thresholds(self, metrics: TaskMetrics) -> List[Dict[str, Any]]:
         violations: List[Dict[str, Any]] = []
 
-        if metrics.deviation_from_optimal > self.thresholds["max_path_deviation"]:
+        if not math.isfinite(metrics.deviation_from_optimal):
+            violations.append({
+                "metric": "max_path_deviation", "value": None,
+                "status": "undefined", "severity": "error",
+                "reason": "Optimal path length is zero but measured path is nonzero",
+            })
+        elif metrics.deviation_from_optimal > self.thresholds["max_path_deviation"]:
             violations.append(
                 ThresholdViolationError(
                     metric="max_path_deviation",
@@ -580,7 +592,13 @@ class AutonomousEvaluator:
                     comparator=">=",
                 ).to_audit_dict()
             )
-        if deviation_mean > self.thresholds["max_path_deviation"]:
+        if not math.isfinite(deviation_mean):
+            violations.append({
+                "metric": "max_path_deviation_mean", "value": None,
+                "status": "undefined", "severity": "error",
+                "reason": "No finite task path-deviation observations",
+            })
+        elif deviation_mean > self.thresholds["max_path_deviation"]:
             violations.append(
                 ThresholdViolationError(
                     metric="max_path_deviation_mean",
@@ -787,6 +805,8 @@ class AutonomousEvaluator:
 
     def _render_plan_graph(self, graph_data: Mapping[str, Any]) -> str:
         try:
+            import networkx as nx  # optional, only for graph visualization
+            import matplotlib.pyplot as plt  # optional, only for graph visualization
             normalized = self._normalize_plan_graph(graph_data)
             graph = nx.DiGraph()
             for node in normalized["nodes"]:
@@ -850,6 +870,7 @@ class AutonomousEvaluator:
         if not graph_data:
             return {}
 
+        import networkx as nx  # optional dependency only for nonempty task graphs
         normalized = self._normalize_plan_graph(graph_data)
         graph = nx.DiGraph()
         for node in normalized["nodes"]:
@@ -1189,7 +1210,9 @@ class AutonomousEvaluator:
     def _resolve_success(self, task: Mapping[str, Any], deviation: float) -> bool:
         explicit = task.get("success")
         if explicit is not None:
-            return bool(explicit)
+            if not isinstance(explicit, bool):
+                raise ValidationFailureError("task.success", explicit, "explicit boolean")
+            return explicit
         return bool(
             task["collisions"] <= self.thresholds["max_collisions"]
             and deviation <= self.thresholds["max_path_deviation"]

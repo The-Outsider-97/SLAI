@@ -467,63 +467,83 @@ class PerformanceEvaluator:
         *,
         expected_len: int,
     ) -> Tuple[List[Any], Optional[List[Any]]]:
+        if not all(isinstance(item, Mapping) for item in outputs):
+            raise ValidationFailureError(
+                "prediction_mapping_shape", "mixed types",
+                "all prediction entries must be mappings",
+            )
+        has_scores = [("probabilities" in item or "scores" in item) for item in outputs]
+        if any(has_scores) and not all(has_scores):
+            raise ValidationFailureError(
+                "prediction_probability_alignment", has_scores,
+                "all entries must provide scores/probabilities, or none may do so",
+            )
+        probability_matrix = None
+        inferred: List[Any] = []
+        if all(has_scores):
+            probability_matrix = self._coerce_probabilities(
+                [item.get("probabilities", item.get("scores")) for item in outputs],
+                expected_len=expected_len,
+            )
+            inferred = self._labels_from_probabilities(probability_matrix)
         labels: List[Any] = []
-        probability_rows: List[Any] = []
-        saw_probabilities = False
-
-        for item in outputs:
-            if not isinstance(item, Mapping):
-                raise ValidationFailureError(
-                    rule_name="prediction_mapping_shape",
-                    data=type(item).__name__,
-                    expected="Mapping with prediction fields",
-                )
-            if "probabilities" in item:
-                probability_rows.append(item["probabilities"])
-                saw_probabilities = True
-            elif "scores" in item:
-                probability_rows.append(item["scores"])
-                saw_probabilities = True
-
+        for index, item in enumerate(outputs):
             if "label" in item:
                 labels.append(item["label"])
             elif "prediction" in item:
                 labels.append(item["prediction"])
-            elif "value" in item and not saw_probabilities:
+            elif "value" in item:
                 labels.append(item["value"])
-            elif not saw_probabilities:
+            elif probability_matrix is not None:
+                labels.append(inferred[index])
+            else:
                 raise ValidationFailureError(
-                    rule_name="prediction_mapping_fields",
-                    data=dict(item),
-                    expected="Mapping containing label/prediction/value or probabilities/scores",
+                    "prediction_mapping_fields", dict(item),
+                    "label, prediction, value, or a complete probability row",
                 )
-
-        probability_matrix = None
-        if saw_probabilities:
-            probability_matrix = self._coerce_probabilities(probability_rows, expected_len=expected_len)
-            if not labels:
-                labels = self._labels_from_probabilities(probability_matrix)
-
         if len(labels) != expected_len:
-            raise ValidationFailureError(
-                rule_name="prediction_mapping_length_alignment",
-                data=len(labels),
-                expected=expected_len,
-            )
+            raise ValidationFailureError("prediction_mapping_length_alignment", len(labels), expected_len)
         return labels, probability_matrix
 
     def _coerce_probabilities(self, probabilities: Sequence[Any], *, expected_len: int) -> List[Any]:
+        """Reject malformed/nonfinite scores before accuracy and confidence metrics."""
         if len(probabilities) != expected_len:
-            raise ValidationFailureError(
-                rule_name="probability_length_alignment",
-                data=len(probabilities),
-                expected=expected_len,
-            )
+            raise ValidationFailureError("probability_length_alignment", len(probabilities), expected_len)
         normalized: List[Any] = []
+        width: Optional[int] = None
+        scalar = None
         for row in probabilities:
             if isinstance(row, np.ndarray):
                 row = row.tolist()
-            normalized.append(row)
+            is_scalar = not isinstance(row, Sequence) or isinstance(row, (str, bytes))
+            if scalar is None:
+                scalar = is_scalar
+            elif scalar != is_scalar:
+                raise ValidationFailureError("probability_shape", row, "consistent scalar or vector rows")
+            if is_scalar:
+                if isinstance(row, bool):
+                    raise ValidationFailureError("probability_scalar", row, "finite numeric score")
+                try:
+                    score = float(row)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValidationFailureError("probability_scalar", row, "finite numeric score") from exc
+                if not math.isfinite(score):
+                    raise ValidationFailureError("probability_scalar", row, "finite numeric score")
+                normalized.append(score)
+            else:
+                if len(row) == 0:
+                    raise ValidationFailureError("probability_row", row, "nonempty score vector")
+                if width is None:
+                    width = len(row)
+                elif len(row) != width:
+                    raise ValidationFailureError("probability_row", row, "consistent score vector width")
+                try:
+                    values = [float(value) if not isinstance(value, bool) else float("nan") for value in row]
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValidationFailureError("probability_row", row, "finite score vector") from exc
+                if not all(math.isfinite(value) for value in values):
+                    raise ValidationFailureError("probability_row", row, "finite score vector")
+                normalized.append(values)
         return normalized
 
     def _labels_from_probabilities(self, probabilities: Sequence[Any]) -> List[Any]:

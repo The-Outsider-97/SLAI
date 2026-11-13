@@ -237,6 +237,53 @@ agent.load_checkpoint(manager, version="qnn-v1")
 Shared memory receives only a compact runtime summary and configuration
 fingerprint. It is not a model or checkpoint store.
 
+## Supervised binary classifier (VQC)
+
+`variational_classifier.py` adds the `quantum_binary_classification` capability
+that `QNNAgent.load_classifier()` / `classify_features()` expose. It is a
+CPU-only classical simulation on the agent's own `StateVectorCircuit`; it makes
+no claim of quantum advantage and its probabilities are **not calibrated**.
+
+- **Encoding:** one feature per qubit, angle-encoded after clipping to bounds
+  fitted on the training partition only (`bounds_quantile` can fit the 1st /
+  99th percentile instead of min/max so heavy tails do not squash the data).
+- **Readout:** Born `P(readout qubit == 1)`, default the *last* qubit. The
+  entanglers always use the lower-indexed qubit as control, so qubit 0's marginal
+  cannot depend on higher qubits' features. `reachable_features()` probes the real
+  circuit and `fit()` refuses to train a model that would silently ignore a feature
+  (for example `entanglement: none` with more than one qubit).
+- **Training:** full-batch Adam (or SGD) with parameter-shift gradients, global
+  norm clipping (`quantum_mno.clip_gradient`), optional class balancing, early
+  stopping on validation loss, and automatic restore of weights and step count if
+  a fit fails. When a batch has at least as many rows as the state dimension, the
+  circuit is applied once per basis state (`circuit.forward`) and the resulting
+  unitary scores the whole batch; this equals per-example evaluation exactly.
+- **Artifacts:** `<name>.npz` (weights and feature bounds, no pickle) plus
+  `<name>.json` with the schema, circuit shape, SHA-256, readout and provenance.
+  Saving and loading are atomic, size-bounded and checksum-verified, and every
+  rejection is a typed `QNN*Error` (all `ValueError` subclasses) logged once.
+- **Limits:** the `vqc` section of `configs/quantum_config.yaml` owns qubit,
+  training-row, artifact/manifest size, probability-epsilon and norm tolerances.
+  Inference batch size, epoch budget, gradient-evaluation budget and working set
+  come from `quantum_policy`; the shift comes from `quantum_mno.parameter_shift`.
+
+Train a candidate from real, registry-approved data with the root trainer
+(see its docstring for the evidence rules):
+
+```bash
+python train_vqc.py doctor
+python train_vqc.py all          # collect -> prepare -> train (UCI Wine Quality)
+python train_vqc.py smoke --agent
+python train_vqc.py export --approve   # only after reading the evaluation report
+```
+
+Use an approved artifact explicitly; the agent never loads one on its own:
+
+```python
+agent.load_classifier("src/agents/qnn/models/vqc/vqc_classifier.npz")
+agent.classify_features([[0.1, 0.2, 0.3, 0.4]])
+```
+
 ## Configuration
 
 Agent-level model choices are in
@@ -286,3 +333,9 @@ two- and three-qubit systems, norm preservation, invalid input rejection,
 global-phase fidelity, deterministic seeds, parameter-shift comparison,
 training evidence, BaseAgent metrics, factory creation, checkpoint recovery,
 transaction reset/cleanup, and the complete tuner/evaluator path.
+
+The VQC has its own focused suite:
+
+```bash
+python -m pytest -q tests/test_vqc.py
+```

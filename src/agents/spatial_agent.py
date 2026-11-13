@@ -47,6 +47,7 @@ from .spatial.modules.transform import RigidTransform
 from .spatial.utils.spatial_errors import *
 from .spatial.utils.spatial_helpers import *
 from .spatial.world.geometry import AABB, Mesh, OBB, Plane, PointCloud, Polygon, Ray, Segment, Sphere, Triangle
+from .spatial.world.topology import Topology
 from .spatial.world.occupancy import ESDFVolume, OccupancyGrid2D, OctreeOccupancy, TSDFVolume, VoxelGrid
 from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
 
@@ -164,6 +165,10 @@ class SpatialAgent(BaseAgent):
             "align_point_clouds": self._handle_align_point_clouds,
             "occupancy_lookup": self._handle_occupancy_lookup,
             "occupancy_update": self._handle_occupancy_update,
+            "validate_constraints": self._handle_validate_constraints,
+            "analyze_constraints": self._handle_analyze_constraints,
+            "validate_polygon": self._handle_validate_polygon,
+            "resolve_reference": self._handle_resolve_reference,
         }
         self._operation_aliases = {
             "register_entity": "upsert_entity",
@@ -359,6 +364,56 @@ class SpatialAgent(BaseAgent):
     def _handle_get_entity(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         entity = self._require_entity(self._required_str(payload, "entity_id"))
         return {"entity": self._entity_summary(entity)}
+
+    def _handle_resolve_reference(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Revision-guarded reference resolution; never silently remap geometry."""
+        entity_id = self._required_str(payload, "entity_id")
+        revision = payload.get("revision")
+        if revision is not None and (isinstance(revision, bool) or not isinstance(revision, int) or revision < 0):
+            raise SpatialValidationError("revision must be a non-negative integer")
+        entity = self.index.get(entity_id)
+        if entity is None:
+            return {"status": "missing", "entity_id": entity_id}
+        if revision is not None and entity.revision != revision:
+            return {"status": "stale", "entity_id": entity_id, "expected_revision": revision,
+                    "current_revision": entity.revision}
+        expected_frame = payload.get("frame_id")
+        if expected_frame is not None and entity.frame_id != expected_frame:
+            return {"status": "frame_mismatch", "entity_id": entity_id, "current_frame": entity.frame_id}
+        return {"status": "resolved", "entity": self._entity_summary(entity)}
+
+    @staticmethod
+    def _handle_validate_constraints(payload: Mapping[str, Any]) -> dict[str, Any]:
+        return Topology.validate_constraints(payload.get("entities", {}), payload.get("constraints", []),
+                                             tolerance=payload.get("tolerance", DEFAULT_ABS_TOL))
+
+    @staticmethod
+    def _handle_analyze_constraints(payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Solve a geometric constraint system and report status, degrees of freedom, redundant and conflicting constraints and unresolved references.
+
+        Unlike ``validate_constraints`` (which checks a given configuration), this finds coordinates that satisfy the constraints. The analysis is local
+        (first order, at the solution found) and returns one solution; the result says so. Entities and constraints use the neutral description of
+        ``src.utils.spatial_formats.common.constraint_engine``; nothing is stored and the input is not modified."""
+        try:
+            from src.utils.spatial_formats.common import constraint_engine as engine
+            from src.utils.spatial_formats.common.errors import DependencyUnavailableError, ValidationError as EngineValidationError
+        except ImportError as exc:
+            raise SpatialQueryError("analyze_constraints needs the spatial format constraint engine, which is not importable here",
+                                    context={"reason": str(exc)}) from exc
+        entities, constraints = payload.get("entities"), payload.get("constraints")
+        if not isinstance(entities, Mapping) or not isinstance(constraints, Sequence) or isinstance(constraints, (str, bytes)):
+            raise SpatialValidationError("analyze_constraints needs entities (a mapping) and constraints (a list)",
+                                         context={"entities": type(entities).__name__, "constraints": type(constraints).__name__})
+        try:
+            return engine.analyze(entities, constraints, fixed=list(payload.get("fixed") or ()), tolerance=float(payload.get("tolerance", 1e-8)),
+                                  max_iterations=int(payload.get("max_iterations", 200)))
+        except (EngineValidationError, DependencyUnavailableError, TypeError, ValueError) as exc:
+            raise SpatialValidationError(str(exc), context={"operation": "analyze_constraints"}) from exc
+
+    @staticmethod
+    def _handle_validate_polygon(payload: Mapping[str, Any]) -> dict[str, Any]:
+        return Topology.validate_polygon(Polygon(payload.get("vertices")),
+                                         tolerance=payload.get("tolerance", DEFAULT_ABS_TOL))
 
     def _handle_remove_entity(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         entity_id = self._required_str(payload, "entity_id")
@@ -912,7 +967,8 @@ class SpatialAgent(BaseAgent):
         if not frame_id:
             raise SpatialValidationError("entity.frame_id must be non-empty")
         frame_changed = existing is not None and frame_id != existing.frame_id
-        assert existing is not None
+        # New entities have no previous frame to validate against. The two
+        # frame-change guards below already require an existing entity.
         if frame_changed and existing.geometry is not None and "geometry" not in payload:
             raise SpatialFrameError(
                 "changing the frame of a geometry-bearing entity requires geometry expressed in the new frame",

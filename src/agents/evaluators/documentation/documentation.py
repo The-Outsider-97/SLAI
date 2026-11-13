@@ -265,6 +265,7 @@ class AuditTrail(Documentation):
             "document": payload,
             "document_hash": hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest(),
             "metadata": dict(metadata or {}),
+            "_proof_of_work_required": bool(mine),
         }
     
         block = AuditBlock(
@@ -288,6 +289,8 @@ class AuditTrail(Documentation):
 
         prefix = "0" * self.difficulty if self.difficulty > 0 else ""
         for index, block in enumerate(self.chain):
+            if block.index != index:
+                raise AuditIntegrityError(f"Unexpected audit block index: {block.index} at position {index}.")
             recalculated = block.calculate_hash()
             if recalculated != block.block_hash:
                 raise AuditIntegrityError(
@@ -304,7 +307,14 @@ class AuditTrail(Documentation):
                         f"Broken hash chain detected at block index {block.index}."
                     )
 
-            if prefix and block.index > 0 and not block.block_hash.startswith(prefix):
+            # Ordinary hash-chained audit entries have no PoW requirement.
+            # Enforce proof-of-work only for explicitly mined entries or
+            # legacy entries that contain a nonzero mining nonce.
+            requires_pow = (
+                block.data.get("_proof_of_work_required") is True
+                or ("_proof_of_work_required" not in block.data and block.nonce > 0)
+            )
+            if prefix and block.index > 0 and requires_pow and not block.block_hash.startswith(prefix):
                 raise AuditIntegrityError(
                     f"Block {block.index} does not satisfy configured mining difficulty."
                 )
@@ -333,8 +343,13 @@ class AuditTrail(Documentation):
             raise AuditIntegrityError("Serialized chain payload must be a non-empty list.")
 
         loaded_chain = [AuditBlock.from_dict(item) for item in chain_payload]
+        original_chain = self.chain
         self.chain = loaded_chain
-        self.verify_chain()
+        try:
+            self.verify_chain()
+        except Exception:
+            self.chain = original_chain
+            raise
         logger.info("Audit chain loaded and verified: length=%d", len(self.chain))
         return list(self.chain)
 

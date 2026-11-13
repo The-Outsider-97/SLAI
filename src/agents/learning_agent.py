@@ -43,6 +43,7 @@ from .base.utils.config_contract import assert_valid_config_contract
 from .base.utils.main_config_loader import get_config_section, load_global_config
 from .base_agent import BaseAgent
 from .learning.learning_factory import LearningFactory
+from .learning.external_dispatch import dispatch as _external_dispatch
 from .learning.learning_signal import LearningSignal
 from .learning.slaienv import SLAIEnv
 from .learning.strategy_selector import StrategySelector
@@ -206,13 +207,15 @@ class LearningAgent(BaseAgent):
 
         # ---- Runtime counters --------------------------------------------
         self.observation_count: int = 0
-        self.training_iterations: int = 0
+        self.training_iterations: int = 0  # train *episodes* run; NOT a count of parameter updates (see learner_update_count)
+        self.learner_update_count: int = 0  # strategy-learner train() calls that actually produced a loss (a real optimisation step)
+        self.learner_update_skips: int = 0  # train-mode steps where no learner update ran (replay below warm-up, learner without train())
         self.last_training_time: datetime = (utc_now() - self.retraining_interval)
+        self._external_services: Dict[str, Any] = {}  # learner name -> ExternalLearningService (learning from outside environments)
 
         self._init_shared_memory_keys()
         logger.info(
-            "LearningAgent initialized | task_ids=%s | batch_size=%d | "
-            "max_episode_steps=%d | embedding_dim=%d",
+            "LearningAgent initialized | task_ids=%s | batch_size=%d | max_episode_steps=%d | embedding_dim=%d",
             self.task_ids,
             self.batch_size,
             self.max_episode_steps,
@@ -235,8 +238,7 @@ class LearningAgent(BaseAgent):
             raw = self.learning_config.get(key, 1)
             validate_positive(raw, f"learning_agent.{key}")
 
-        for prob_key in ("performance_threshold", "data_change_threshold",
-                         "novelty_threshold", "uncertainty_threshold"):
+        for prob_key in ("performance_threshold", "data_change_threshold", "novelty_threshold", "uncertainty_threshold"):
             raw = self.learning_config.get(prob_key)
             if raw is not None:
                 validate_in_range(raw, f"learning_agent.{prob_key}", 0.0, 1.0)
@@ -729,6 +731,7 @@ class LearningAgent(BaseAgent):
         episode_id = make_learning_id(f"ep_{strategy}")
         total_reward = 0.0
         losses: List[float] = []
+        skipped_updates = 0
         step_idx = 0
         t_start = monotonic_seconds()
 
@@ -744,6 +747,15 @@ class LearningAgent(BaseAgent):
 
             next_arr = self._prepare_state_array(next_state)
             if train:
+                # Regression fix: this call was dropped in fb195fe0, after which train mode never updated any strategy learner
+                # (and still reported success).  The transition goes to the learner, which updates once its replay allows.
+                loss = self._agent_learn_step(strategy, agent, (state_arr, action_id, reward, next_arr, done))
+                if loss is not None:
+                    losses.append(loss)
+                    self.learner_update_count += 1
+                else:
+                    skipped_updates += 1
+                    self.learner_update_skips += 1
                 self.multi_task_learner.rebalance()
                 # StrategySelector is supervised only by validated external/evaluation
                 # evidence. Do not train it to reproduce its own previous decision.
@@ -787,8 +799,14 @@ class LearningAgent(BaseAgent):
             self.strategy_selector.observe(final_embedding, strategy)
             self.strategy_selector.train_from_embeddings()
 
-        avg_loss = float(np.mean(losses)) if losses else 0.0
+        avg_loss = float(np.mean(losses)) if losses else None  # None = no update ran; never a made-up 0.0
         steps_taken = step_idx + 1
+        if train and not losses:
+            logger.warning(
+                "Train episode finished without any learner update | strategy=%s | steps=%d | skipped=%d "
+                "(replay below warm-up, or the learner exposes no train()) - parameters unchanged",
+                strategy, steps_taken, skipped_updates,
+            )
 
         return {
             "status": "ok",
@@ -798,6 +816,9 @@ class LearningAgent(BaseAgent):
             "steps": steps_taken,
             "avg_loss": avg_loss,
             "loss_samples": len(losses),
+            "learner_updates": len(losses),
+            "learner_update_skips": skipped_updates,
+            "trained": bool(train and losses),
             "train_mode": train,
             "elapsed_ms": elapsed_ms,
             "timestamp": utc_now().isoformat(),
@@ -952,9 +973,13 @@ class LearningAgent(BaseAgent):
         reward_summary = summarize_rewards(per_episode_rewards)
         elapsed_ms = int((monotonic_seconds() - t_start) * 1000)
 
+        learner_updates = sum(int(r.get("learner_updates", 0)) for r in episode_reports)
         result: Dict[str, Any] = {
             "status": "ok",
             "mode": "train",
+            "trained": learner_updates > 0,  # True only if at least one learner optimisation step actually ran
+            "learner_updates": learner_updates,
+            "learner_update_skips": sum(int(r.get("learner_update_skips", 0)) for r in episode_reports),
             "episodes": episodes,
             "avg_reward": reward_summary["mean"],
             "reward_summary": reward_summary,
@@ -963,6 +988,12 @@ class LearningAgent(BaseAgent):
             "task_weights": self.multi_task_learner.get_weights(),
             "elapsed_ms": elapsed_ms,
         }
+
+        if learner_updates == 0:
+            result["warning"] = (
+                "train mode ran episodes but no learner update occurred; parameters are unchanged "
+                "(check replay warm-up / batch_size and error_history)"
+            )
 
         # Trigger recovery if error accumulation exceeds threshold
         if len(self.error_history) >= self.recovery_trigger_threshold:
@@ -1072,6 +1103,7 @@ class LearningAgent(BaseAgent):
         return {
             "mean_reward": float(snapshot.mean),
             "reward_samples": int(snapshot.count),
+            "learner_updates": float(self.learner_update_count),
             "performance_trend": float(
                 self._performance_trend()
             ),
@@ -1083,6 +1115,8 @@ class LearningAgent(BaseAgent):
             "task_ids": list(self.task_ids),
             "observation_count": int(self.observation_count),
             "training_iterations": int(self.training_iterations),
+            "learner_update_count": int(self.learner_update_count),
+            "learner_update_skips": int(self.learner_update_skips),
             "last_training_time": self.last_training_time.isoformat(),
             "performance_history": list(self.performance_history),
             "multi_task_weights": self.multi_task_learner.get_weights(),
@@ -1111,6 +1145,8 @@ class LearningAgent(BaseAgent):
     
         self.observation_count = int(state.get("observation_count", 0))
         self.training_iterations = int(state.get("training_iterations", 0))
+        self.learner_update_count = int(state.get("learner_update_count", 0))  # absent in older checkpoints -> 0
+        self.learner_update_skips = int(state.get("learner_update_skips", 0))
         last_training = state.get("last_training_time")
         if isinstance(last_training, str):
             self.last_training_time = (datetime.fromisoformat(last_training))
@@ -1271,6 +1307,15 @@ class LearningAgent(BaseAgent):
         if mode == "query":
             return self._query_learning(task_data)
 
+        if mode == "external":
+            # Learning from an outside environment through the generic contracts (src/agents/learning/external_dispatch.py).
+            with self._lock:
+                return _external_dispatch(
+                    self._external_services,
+                    task_data,
+                    defaults=dict(self.learning_config.get("external_learning") or {}),
+                )
+
         if mode == "train":
             inbox_result = self._drain_signal_inbox()
             result = self._train_cycles(task_data)
@@ -1307,7 +1352,8 @@ class LearningAgent(BaseAgent):
             )
 
         raise InvalidConfigError(
-            f"Unsupported perform_task mode: {mode!r}. Expected one of: 'train', 'evaluate', 'auto', 'health'.",
+            f"Unsupported perform_task mode: {mode!r}. Expected one of: 'train', 'evaluate', 'auto', 'health', 'observe', "
+            "'ingest_pending', 'query', 'external', 'operational_trl', 'operational_sdqn'.",
             config_key="mode",
             received_value=mode,
         )
@@ -1381,6 +1427,12 @@ class LearningAgent(BaseAgent):
             "task_ids": list(self.task_ids),
             "observations": self.observation_count,
             "training_iterations": self.training_iterations,
+            "learner_updates": {
+                "applied": self.learner_update_count,
+                "skipped": self.learner_update_skips,
+                "note": "training_iterations counts train episodes; only 'applied' counts real optimisation steps",
+            },
+            "external_learners": {name: svc.metadata().brief() for name, svc in self._external_services.items()},
             "trend": self._performance_trend(),
             "last_training_time": self.last_training_time.isoformat(),
             "retraining_due": self._should_retrain(),

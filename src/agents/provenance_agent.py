@@ -1,4 +1,4 @@
-"""SLAI v2.3 Provenance Agent orchestration façade.
+"""SLAI v2.4 Provenance Agent orchestration façade.
 
 The Agent coordinates the completed provenance subsystem across SLAI while
 preserving a strict evidence-only boundary:
@@ -17,7 +17,7 @@ checkpoint/custody reconstruction without introducing trust or quality scoring.
 """
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
@@ -33,7 +33,7 @@ from .provenance.provenance_custody import ProvenanceCustody
 from .provenance.provenance_lineage import ProvenanceLineage
 from .provenance.provenance_memory import ProvenanceMemory
 from .provenance.provenance_store import ProvenanceStore
-from .provenance.provenance_types import CheckpointRecord, ProvenanceEntity
+from .provenance.provenance_types import CheckpointRecord, ProvenanceEntity, RevisionEvidence
 from .provenance.lineage.artifact_lineage import ArtifactLineage
 from .provenance.lineage.dataset_lineage import DatasetLineage
 from .provenance.lineage.dependancy_lineage import DependencyLineage
@@ -545,6 +545,28 @@ class ProvenanceAgent(BaseAgent):
         self._ensure_enabled("get_reproducibility_report")
         return self.reproducibility.reproducibility_report(artifact_id)
 
+    def record_revision_evidence(self, event: RevisionEvidence | Mapping[str, Any]) -> dict[str, Any]:
+        """Persist a plan/revision fact without asserting an external commit."""
+        self._ensure_enabled("record_revision_evidence")
+        try:
+            saved = self.provenance_store.save_revision_event(event)
+        except ProvenanceError as exc:
+            self._mark_failure("revision_event", exc)
+            raise
+        self._mark_success("revision_event", {"event_id": saved["event_id"],
+                                               "project_id": saved["project_id"],
+                                               "artifact_id": saved.get("artifact_id")})
+        return saved
+
+    def get_revision_evidence(self, *, artifact_id: Optional[str] = None,
+                              plan_id: Optional[str] = None) -> list[dict[str, Any]]:
+        self._ensure_enabled("get_revision_evidence")
+        return self.provenance_store.get_revision_events(artifact_id=artifact_id, plan_id=plan_id)
+
+    def get_revision_graph(self, artifact_id: str) -> dict[str, Any]:
+        self._ensure_enabled("get_revision_graph")
+        return self.provenance_store.get_revision_graph(artifact_id)
+
     # ------------------------------------------------------------------
     # Normalized cross-agent event boundary
     # ------------------------------------------------------------------
@@ -592,6 +614,8 @@ class ProvenanceAgent(BaseAgent):
             event.get("event_id")
             or stable_provenance_id("event", event_type, canonical_payload)
         )
+        if event_type in {"revision_event", "workflow_evidence"}:
+            payload.setdefault("event_id", event_id)
         fingerprint = stable_provenance_id("event-fingerprint", event_type, canonical_payload)
 
         with self._lock:
@@ -637,6 +661,8 @@ class ProvenanceAgent(BaseAgent):
             "model_lineage": "model",
             "checkpoint": "checkpoint",
             "custody": "custody",
+            "revision_event": "revision_event",
+            "workflow_evidence": "revision_event",
         }
         normalized = aliases.get(event_type)
         if normalized is None:
@@ -646,6 +672,8 @@ class ProvenanceAgent(BaseAgent):
             )
 
         data = dict(payload)
+        if normalized == "revision_event":
+            return self.record_revision_evidence(data)
         if normalized == "source":
             source_id = data.pop("source_id", None)
             if source_id is None:
@@ -756,6 +784,10 @@ class ProvenanceAgent(BaseAgent):
             return self.chain_of_custody(str(data["artifact_id"]))
         if operation == "get_reproducibility_report":
             return self.get_reproducibility_report(str(data["artifact_id"]))
+        if operation == "get_revision_evidence":
+            return self.get_revision_evidence(**data)
+        if operation == "get_revision_graph":
+            return self.get_revision_graph(str(data["artifact_id"]))
         raise ProvenanceValidationError(
             "unsupported ProvenanceAgent task operation",
             context={"operation": operation},
@@ -785,6 +817,7 @@ class ProvenanceAgent(BaseAgent):
                 "model_lineage",
                 "checkpoint",
                 "custody",
+                "revision_event",
             ),
             "queries": (
                 "provenance",
@@ -795,6 +828,8 @@ class ProvenanceAgent(BaseAgent):
                 "lineage_graph",
                 "custody_history",
                 "reproducibility",
+                "revision_evidence",
+                "revision_graph",
             ),
             "shared_memory": self.publish_shared_memory,
             "checkpointing": self.checkpointing_enabled,

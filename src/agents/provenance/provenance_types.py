@@ -1,5 +1,5 @@
 """
-Typed provenance domain model for SLAI v2.3.
+Typed provenance domain model for SLAI v2.4.
 
 The model follows W3C PROV-DM's Entity/Activity/Agent and relationship semantics
 without requiring RDF.  Records are frozen dataclasses so persisted provenance
@@ -14,7 +14,7 @@ lineage extensions.
 
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 from dataclasses import dataclass, field, fields
 from enum import Enum
@@ -42,6 +42,58 @@ class ProvenanceRelationType(str, Enum):
     SPECIALIZATION_OF = "specializationOf"
     ALTERNATE_OF = "alternateOf"
     DEPENDS_ON = "dependsOn"
+
+
+@dataclass(frozen=True)
+class RevisionEvidence:
+    """One immutable fact about a plan, execution, or artifact revision.
+
+    Proposed/generated/verified events do not imply an authoritative commit.
+    Only ``commit.confirmed`` represents a host-acknowledged mutation, and it
+    requires both a commit identifier and the resulting artifact revision.
+    """
+
+    event_id: str
+    event_type: str
+    project_id: str
+    artifact_id: Optional[str] = None
+    revision_id: Optional[str] = None
+    previous_revision_id: Optional[str] = None
+    plan_id: Optional[str] = None
+    task_id: Optional[str] = None
+    run_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    commit_id: Optional[str] = None
+    timestamp: str = field(default_factory=get_current_timestamp)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in ("event_id", "event_type", "project_id"):
+            object.__setattr__(self, name, require_identifier(getattr(self, name), field_name=name))
+        for name in ("artifact_id", "revision_id", "previous_revision_id", "plan_id",
+                     "task_id", "run_id", "agent_id", "commit_id"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, require_identifier(value, field_name=name))
+        if self.event_type == "commit.confirmed" and not all(
+            (self.artifact_id, self.revision_id, self.commit_id)
+        ):
+            from .utils.provenance_errors import ProvenanceValidationError
+            raise ProvenanceValidationError(
+                "commit.confirmed requires artifact_id, revision_id and authoritative commit_id"
+            )
+        if self.event_type == "commit.confirmed" and self.revision_id == self.previous_revision_id:
+            from .utils.provenance_errors import ProvenanceValidationError
+            raise ProvenanceValidationError("committed revision cannot be its own parent")
+        object.__setattr__(self, "timestamp", normalize_timestamp(self.timestamp))
+        object.__setattr__(self, "metadata", normalize_metadata(self.metadata))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return canonicalize_value({item.name: getattr(self, item.name) for item in fields(self)})
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "RevisionEvidence":
+        return cls(**dict(payload))
 
 
 class ProvenanceRecord:
@@ -491,6 +543,7 @@ class ProvenanceTypes:
     Transformation = TransformationRecord
     Custody = CustodyRecord
     Reproducibility = ReproducibilityReport
+    RevisionEvidence = RevisionEvidence
 
 
 __all__ = [
@@ -515,6 +568,7 @@ __all__ = [
     "ProvenanceRelationType",
     "ProvenanceTypes",
     "ReproducibilityReport",
+    "RevisionEvidence",
     "SourceRecord",
     "TransformationRecord",
     "UsageRecord",

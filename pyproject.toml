@@ -1,8 +1,8 @@
 [project]
 name = "slai"
-version = "2.3.0"
+version = "2.4.0"
 
-description = "Self-Learning Artificial Intelligence — Modular Agent Framework"
+description = "Scalable Learning Artificial Intelligence — Modular Agent Framework"
 
 requires-python = ">=3.10,<3.13"
 
@@ -21,6 +21,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+
+spatial = [
+    "trimesh>=5.2,<6",
+    "manifold3d>=3,<4",
+    "shapely>=2,<3",
+    "scipy>=1.12",
+]
 
 documents = [
     "pypdf",
@@ -105,6 +112,11 @@ package = false
 lstp = { path = "model/LSTP", editable = true }
 
 [tool.pytest.ini_options]
+# The knowledge-assurance suite imports the standalone existing
+# src/agents/knowledge/assurance package as "assurance". Its dedicated
+# unittest workflow already sets this PYTHONPATH; use the same path when
+# collecting the entire repository with pytest from the project root.
+pythonpath = ["src/agents/knowledge"]
 testpaths = [
     "tests",
     "deployment/test",

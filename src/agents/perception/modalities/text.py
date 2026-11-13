@@ -99,6 +99,18 @@ class TextPerception(BasePerceptionModality):
                 component="text_perception",
                 details={"shape": list(input_ids.shape)},
             )
+        limit = int(getattr(self.encoder, "max_position_embeddings", 5000))
+        if input_ids.size(0) < 1 or input_ids.size(0) > 64 or input_ids.size(1) < 1 or input_ids.size(1) > limit:
+            raise ModalityInputError(
+                "Text batch size or sequence length is outside the configured safe range.",
+                component="text_perception",
+                details={"shape": list(input_ids.shape), "max_length": limit},
+            )
+        if bool(torch.any(input_ids < 0)) or bool(torch.any(input_ids >= self.vocab_size)):
+            raise ModalityInputError(
+                "Text token IDs are outside the active vocabulary.",
+                component="text_perception",
+            )
         prepared["input_ids"] = input_ids
 
         attention_mask = prepared.get("attention_mask")

@@ -781,6 +781,13 @@ class NLPEngine:
         if lower in self.lexical_sets["negators"]:
             return "PART", 0.90
 
+        # The structured dictionary sometimes assigns a noun-only POS to
+        # common verbs (for example "go" / "goes").  Prefer explicit verb
+        # morphology in a predicate position after a personal pronoun, while
+        # retaining the noun reading in ordinary nominal contexts.
+        if previous and previous.pos == "PRON" and lower in getattr(self.rule_engine, "form_to_lemmas", {}):
+            return "VERB", 0.82
+
         entry = self.wordlist.get(lower)
         if isinstance(entry, Mapping):
             labels = [_normalize_upos(label) for label in _list(entry.get("upos", entry.get("pos", [])))]

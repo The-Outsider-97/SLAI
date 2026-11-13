@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
@@ -758,7 +759,8 @@ class ValidationProtocol:
 
     @staticmethod
     def _is_number(value: Any) -> bool:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)))
 
 
 __all__ = [

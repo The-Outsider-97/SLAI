@@ -1,0 +1,150 @@
+{
+  "cache": "G:\\GAIA\\AI\\SLAI\\data\\processed\\lantra\\supervised\\.llm_cache.sqlite3",
+  "coverage": {
+    "classification": {
+      "examples": 0,
+      "rejected": 0,
+      "valid": {
+        "test": 0,
+        "train": 0,
+        "validation": 0
+      }
+    },
+    "dialogue": {
+      "examples": 0,
+      "rejected": 0,
+      "valid": {
+        "test": 0,
+        "train": 0,
+        "validation": 0
+      }
+    },
+    "embedding": {
+      "examples": 0,
+      "rejected": 0,
+      "valid": {
+        "test": 0,
+        "train": 0,
+        "validation": 0
+      }
+    },
+    "generation": {
+      "examples": 0,
+      "rejected": 0,
+      "valid": {
+        "test": 0,
+        "train": 0,
+        "validation": 0
+      }
+    },
+    "reranking": {
+      "examples": 0,
+      "rejected": 0,
+      "valid": {
+        "test": 0,
+        "train": 0,
+        "validation": 0
+      }
+    },
+    "summarization": {
+      "examples": 0,
+      "rejected": 0,
+      "valid": {
+        "test": 0,
+        "train": 0,
+        "validation": 0
+      }
+    },
+    "translation": {
+      "examples": 0,
+      "rejected": 0,
+      "valid": {
+        "test": 0,
+        "train": 0,
+        "validation": 0
+      }
+    }
+  },
+  "dataset_version": "08f138a812564ea10f821dcd2ce948b717267843fb4844d21e3ad0eeef8ccc45",
+  "deterministic_fallback_accepted": 0,
+  "evaluation_note": "Teacher data is training-only; use independent local validation/test data.",
+  "external_calls_accepted": 0,
+  "missing_required_coverage": {
+    "classification:train": 8,
+    "dialogue:train": 8,
+    "embedding:train": 8,
+    "generation:train": 8,
+    "reranking:train": 8,
+    "summarization:train": 8,
+    "translation:train": 8
+  },
+  "multi_model_critique_enabled": false,
+  "multi_model_critique_rejections": 0,
+  "origin": "validated_teacher_supervision",
+  "provider_metrics": {
+    "accounting": "conservative reservations, not billed usage",
+    "attempts": [
+      {
+        "provider": "gemini",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 2388,
+        "status": "LLMProviderConfigurationError"
+      },
+      {
+        "provider": "groq",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 2388,
+        "status": "LLMProviderConfigurationError"
+      },
+      {
+        "provider": "openai",
+        "requests": 86,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 813119,
+        "status": "completed"
+      },
+      {
+        "provider": "openrouter",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 9698,
+        "status": "LLMProviderRateLimited"
+      },
+      {
+        "provider": "openrouter",
+        "requests": 1,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 9630,
+        "status": "LLMProviderRequestError"
+      },
+      {
+        "provider": "openrouter",
+        "requests": 66,
+        "reserved_cost": 0.0,
+        "reserved_tokens": 620418,
+        "status": "completed"
+      }
+    ],
+    "next_provider": "groq"
+  },
+  "providers_available": [
+    "openai",
+    "groq",
+    "gemini",
+    "openrouter"
+  ],
+  "rejected": 0,
+  "resume_state": "G:\\GAIA\\AI\\SLAI\\data\\processed\\lantra\\supervised\\.teacher_v2_state.json",
+  "schema": "slai.lantra.validated-teacher-supervision.v1",
+  "supported_tasks": [
+    "generation",
+    "classification",
+    "translation",
+    "summarization",
+    "dialogue",
+    "embedding",
+    "reranking"
+  ]
+}

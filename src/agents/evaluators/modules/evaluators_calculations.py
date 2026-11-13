@@ -50,33 +50,34 @@ class PerformanceMetrics:
         y_prob: Sequence[float],
         bins: int = 10,
     ) -> float:
-        """
-        Expected Calibration Error (ECE), binary.
-        y_true in {0,1}, y_prob in [0,1].
+        """Expected calibration error for binary class confidence.
+
+        Confidence is max(p, 1-p), not p for predictions of class zero.
         """
         yt = np.asarray(y_true, dtype=int)
         yp = np.asarray(y_prob, dtype=float)
-        if yt.shape != yp.shape:
-            raise ValueError("y_true and y_prob must have the same shape.")
+        if yt.ndim != 1 or yt.shape != yp.shape:
+            raise ValueError("y_true and y_prob must be equally sized 1-D arrays.")
+        if type(bins) is not int or bins <= 0:
+            raise ValueError("bins must be a positive integer")
         if yt.size == 0:
-            return 0.0
-
-        yp = np.clip(yp, 0.0, 1.0)
-        edges = np.linspace(0.0, 1.0, bins + 1)
+            raise ValueError("Calibration error requires observed labels")
+        if not np.all((yt == 0) | (yt == 1)):
+            raise ValueError("Binary labels must be zero or one")
+        if not np.all(np.isfinite(yp)) or np.any((yp < 0) | (yp > 1)):
+            raise ValueError("Probabilities must be finite and between 0 and 1")
+        predicted = (yp >= 0.5).astype(int)
+        confidence = np.maximum(yp, 1.0 - yp)
+        edges = np.linspace(0.5, 1.0, bins + 1)
         ece = 0.0
-
         for i in range(bins):
             lo, hi = edges[i], edges[i + 1]
-            if i == bins - 1:
-                mask = (yp >= lo) & (yp <= hi)
-            else:
-                mask = (yp >= lo) & (yp < hi)
+            mask = (confidence >= lo) & (confidence <= hi if i == bins - 1 else confidence < hi)
             count = int(np.sum(mask))
-            if count == 0:
-                continue
-            acc = float(np.mean(yt[mask] == (yp[mask] >= 0.5).astype(int)))
-            conf = float(np.mean(yp[mask]))
-            ece += (count / yt.size) * abs(acc - conf)
+            if count:
+                accuracy = float(np.mean(yt[mask] == predicted[mask]))
+                mean_confidence = float(np.mean(confidence[mask]))
+                ece += count / yt.size * abs(accuracy - mean_confidence)
         return float(ece)
 
     @staticmethod
@@ -710,7 +711,10 @@ class EvaluatorsCalculations:
             "normality": normality,
             "pairwise_tests": self._calculate_pairwise_tests(normalized, confidence),
             "effect_sizes": self._calculate_all_effect_sizes(normalized),
-            "power_analysis": self._calculate_power_analysis(normalized),
+            # Post-hoc power from observed effect is not an independent
+            # measure of evidence; no pre-registered design is available.
+            "power_analysis": {},
+            "power_analysis_status": "not_estimated_without_design_effect_and_sample_plan",
             "confidence_intervals": confidence_intervals,
             "alpha": self.significance_threshold,
             "confidence_level": confidence,
@@ -748,13 +752,19 @@ class EvaluatorsCalculations:
             if len(data) > 5000:
                 data = data[:5000]
 
+            if not np.all(np.isfinite(data)) or float(np.max(data)) == float(np.min(data)):
+                normality_results[name] = {
+                    "test": "shapiro", "statistic": None, "p_value": None,
+                    "is_normal": None, "status": "degenerate_or_nonfinite",
+                }
+                continue
             statistic, p_value = shapiro(data)
             normality_results[name] = {
                 "test": "shapiro",
                 "statistic": float(statistic),
                 "p_value": float(p_value),
-                "is_normal": bool(p_value >= self.significance_threshold),
-                "status": "ok",
+                "is_normal": bool(p_value >= self.significance_threshold) if np.isfinite(p_value) else None,
+                "status": "ok" if np.isfinite(p_value) else "undefined",
             }
         return normality_results
 
@@ -839,6 +849,26 @@ class EvaluatorsCalculations:
                     "variance_test": self._variance_ratio_test(sample_a, sample_b, confidence_level),
                     "effect_size": self.effect_size(sample_a, sample_b),
                 }
+        # Benjamini-Hochberg FDR adjustment over the actual pairwise family.
+        valid = sorted(
+            ((name, float(result["t_test"]["p_value"]))
+             for name, result in comparisons.items()
+             if result["t_test"].get("p_value") is not None),
+            key=lambda pair: pair[1],
+        )
+        count = len(valid)
+        corrected: Dict[str, float] = {}
+        running = 1.0
+        for position in range(count, 0, -1):
+            name, p_value = valid[position - 1]
+            running = min(running, p_value * count / position)
+            corrected[name] = min(1.0, running)
+        for name, result in comparisons.items():
+            adjusted = corrected.get(name)
+            result["t_test"]["p_value_bh_adjusted"] = adjusted
+            result["t_test"]["significant_bh"] = (
+                adjusted < self.significance_threshold if adjusted is not None else None
+            )
         return comparisons
 
     def _welch_t_test(self, sample_a: np.ndarray, sample_b: np.ndarray) -> Dict[str, Any]:
@@ -861,11 +891,9 @@ class EvaluatorsCalculations:
         denominator = math.sqrt((var_a / n_a) + (var_b / n_b))
         if denominator == 0:
             return {
-                "statistic": 0.0,
-                "p_value": 1.0,
-                "degrees_of_freedom": None,
-                "significant": False,
-                "status": "zero_variance",
+                "statistic": None, "p_value": None,
+                "degrees_of_freedom": None, "significant": None,
+                "status": "degenerate_zero_variance",
             }
 
         statistic = (mean_a - mean_b) / denominator
@@ -908,10 +936,8 @@ class EvaluatorsCalculations:
         var_b = float(np.var(sample_b, ddof=1))
         if var_a == 0 and var_b == 0:
             return {
-                "f_statistic": 1.0,
-                "p_value": 1.0,
-                "variance_equal": True,
-                "status": "zero_variance",
+                "f_statistic": None, "p_value": None,
+                "variance_equal": None, "status": "degenerate_zero_variance",
             }
         if var_a == 0 or var_b == 0:
             return {

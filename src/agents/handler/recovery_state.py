@@ -98,6 +98,10 @@ class RecoveryStateMachine:
     )
 
     def __post_init__(self) -> None:
+        # Typed state errors require a concrete policy; callers of the state
+        # machine should not have to inject one merely to get safe validation.
+        if self.error_policy is None:
+            self.error_policy = HandlerErrorPolicy()
         # Load configuration if not provided
         if not self.config:
             global_config = load_global_config()
@@ -161,6 +165,16 @@ class RecoveryStateMachine:
                 f"Target must be a RecoveryState enum, got {type(target).__name__}",
                 code="RECOVERY_INVALID_TARGET",
                 context={"target": target},
+                policy=self.error_policy,
+            )
+
+        # Terminal states are immutable, including self-transitions. Otherwise
+        # a repeated delivery can append a second terminal event/history entry.
+        if self.state in _TERMINAL_STATES:
+            raise ValidationError(
+                f"Recovery is already terminal: {self.state.value}",
+                code="RECOVERY_TERMINAL_STATE_IMMUTABLE",
+                context={"state": self.state.value, "attempted_target": target.value},
                 policy=self.error_policy,
             )
 

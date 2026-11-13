@@ -5,6 +5,7 @@ from .spatial_memory import *
 from .spatial_compute import *
 from .spatial_queries import *
 from .spatial_relations import *
+from .spatial_temporal import *
 
 from .spatial_types import __all__ as _spatial_types_exports
 from .spatial_index import __all__ as _spatial_index_exports
@@ -12,6 +13,7 @@ from .spatial_memory import __all__ as _spatial_memory_exports
 from .spatial_compute import __all__ as _spatial_compute_exports
 from .spatial_queries import __all__ as _spatial_queries_exports
 from .spatial_relations import __all__ as _spatial_relations_exports
+from .spatial_temporal import __all__ as _spatial_temporal_exports
 
 __all__ = [
     *_spatial_types_exports,
@@ -20,4 +22,5 @@ __all__ = [
     *_spatial_compute_exports,
     *_spatial_queries_exports,
     *_spatial_relations_exports,
+    *_spatial_temporal_exports,
 ] # type: ignore

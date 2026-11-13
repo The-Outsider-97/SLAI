@@ -202,6 +202,8 @@ class EnvelopeManager:
         self.snapshot_ttl_seconds = self._get_non_negative_int_config("snapshot_ttl_seconds", 1800)
         self.history_ttl_seconds = self._get_non_negative_int_config("history_ttl_seconds", 7200)
         self.max_envelopes = max(1, self._get_non_negative_int_config("max_envelopes", 5000))
+        # Message ids listed in get_snapshot(); envelope_count stays exact. 0 = list everything.
+        self.snapshot_max_records = self._get_non_negative_int_config("snapshot_max_records", 25)
         self.max_history_size = max(1, self._get_non_negative_int_config("max_history_size", 1000))
         self.max_payload_bytes = self._get_non_negative_int_config("max_payload_bytes", 10 * 1024 * 1024)
         self.response_timeout_ms = coerce_timeout_ms(
@@ -520,15 +522,21 @@ class EnvelopeManager:
             items.sort(key=lambda item: (str(item.get("created_at", "")), str(item.get("message_id", ""))))
             return items
 
-    def get_snapshot(self) -> Dict[str, Any]:
+    def get_snapshot(self, max_records: Optional[int] = None) -> Dict[str, Any]:
+        limit = self.snapshot_max_records if max_records is None else max(0, int(max_records))
         with self._lock:
+            message_ids = list(self._records.keys())
+            truncated = bool(limit and len(message_ids) > limit)
+            if truncated:
+                message_ids = message_ids[-limit:]  # insertion order == newest last
             return {
                 "generated_at": utc_timestamp(),
                 "started_at": self._started_at,
                 "stats": dict(self._stats),
                 "envelope_count": len(self._records),
                 "history_size": len(self._history),
-                "messages": sorted(list(self._records.keys())),
+                "messages": sorted(message_ids),
+                "messages_truncated": truncated,
             }
 
     def _record_from_mapping(self, envelope: Mapping[str, Any]) -> EnvelopeRecord:
@@ -625,10 +633,18 @@ class EnvelopeManager:
         self.memory.set(_ENVELOPE_SNAPSHOT_KEY, self.get_snapshot(), ttl_seconds=self.snapshot_ttl_seconds, source="envelope")
         self.memory.set(
             _ENVELOPE_CACHE_KEY,
-            {"generated_at": utc_timestamp(), "envelopes": [record.to_dict(include_payload=self.preserve_payload_in_memory) for record in self._records.values()]},
+            {"generated_at": utc_timestamp(), "envelopes": self._cache_rows(), "total": len(self._records)},
             ttl_seconds=self.snapshot_ttl_seconds,
             source="envelope",
         )
+
+    def _cache_rows(self) -> list:
+        """Newest ``snapshot_max_records`` envelopes for the memory mirror (0 = all)."""
+        limit = self.snapshot_max_records
+        records = list(self._records.values())
+        if limit:
+            records = records[-limit:]
+        return [record.to_dict(include_payload=self.preserve_payload_in_memory) for record in records]
 
     def _append_history_locked(self, event_type: str, envelope: Mapping[str, Any]) -> None:
         if not self.record_history:

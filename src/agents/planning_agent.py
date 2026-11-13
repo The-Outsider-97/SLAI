@@ -4,7 +4,7 @@ Production-hardened Planning Agent entry point for SLAI.
 
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.4.0"
 
 import copy
 import random
@@ -19,8 +19,13 @@ from .base_agent import BaseAgent
 from .planning.planning_types import Any, ResourceProfile, Task, TaskStatus, TaskType, WorldState
 from .planning.planning_metrics import PlanningMetrics
 from .planning.planning_executor import PlanningExecutor
+from .planning.revision_workflow import RevisionTask, RevisionWorkflowStore
+from .planning.workflow_runtime import (
+    AuthorizationContext, CapabilityBinding, OrchestratorCapabilityAdapter, RevisionWorkflowRunner,
+)
 from .planning.heuristic_selector import HeuristicSelector
 from .planning.task_scheduler import DeadlineAwareScheduler
+from .planning.plan_success_predictor import PlanSuccessPredictor, task_history_from_method_stats
 from .planning.probabilistic_planner import ProbabilisticPlanner
 from .planning.safety_planning import SafetyPlanning
 from .planning.local_behavior_arbitrator import LocalBehaviorArbitrator, LocalPlanningContext
@@ -143,6 +148,9 @@ class PlanningAgent(BaseAgent):
         self._last_replan_at: float = 0.0
         self.last_error: Optional[Dict[str, TypingAny]] = None
         self.last_diagnostics: Dict[str, TypingAny] = {}
+        # Durable project-bound workflows are opt-in. Initializing the legacy
+        # planner does not create a database or change existing task execution.
+        self._revision_workflows: Optional[RevisionWorkflowStore] = None
 
         self.scheduler = DeadlineAwareScheduler()
         self.metrics = PlanningMetrics()
@@ -153,6 +161,11 @@ class PlanningAgent(BaseAgent):
         self.executor.agent = self
         self.probabilistic_planner = ProbabilisticPlanner()
         self.local_arbitrator = LocalBehaviorArbitrator()
+        # Advisory whole-plan outcome predictor: fail-open, never changes a plan (see plan_success_predictor.py).
+        self.plan_success_predictor = PlanSuccessPredictor()
+        self.current_plan_prediction: Dict[str, TypingAny] = {}
+        self._predicted_plan_ids: frozenset = frozenset()
+        self._psp_resource_events = 0
 
         # Wire shared resources where subsystem classes expose compatible fields.
         if hasattr(self.safety_planner, "resource_monitor"):
@@ -172,6 +185,61 @@ class PlanningAgent(BaseAgent):
         self._ensure_shared_memory_defaults()
 
         logger.info("PlanningAgent successfully initialized")
+
+    @property
+    def revision_workflows(self) -> RevisionWorkflowStore:
+        """Application-neutral revision planning, opened only when requested."""
+        if self._revision_workflows is None:
+            path = self.agent_config.get("revision_workflow_path", "data/planning/revision_workflows.sqlite3")
+            self._revision_workflows = RevisionWorkflowStore(path)
+        return self._revision_workflows
+
+    def create_revision_plan(
+        self, project_id: str, tasks: Sequence[Task], source_revisions: Dict[str, str],
+        *, plan_id: Optional[str] = None,
+    ) -> Dict[str, TypingAny]:
+        """Bind existing SLAI Tasks to revision-aware, durable dependency nodes.
+
+        Task context may declare ``read_revisions``, ``write_artifacts`` and
+        ``verification_required``. Tasks with no explicit reads conservatively
+        depend on the complete observed project revision set.
+        """
+        specifications = []
+        for task in tasks:
+            context = getattr(task, "context", {}) or {}
+            specifications.append(RevisionTask(
+                task_id=task.id,
+                depends_on=tuple(self._dependency_ids(task)),
+                reads=dict(context.get("read_revisions") or {}),
+                writes=tuple(context.get("write_artifacts") or ()),
+                capability=context.get("capability"),
+                verification_required=bool(context.get("verification_required", False)),
+            ))
+        return self.revision_workflows.create_plan(project_id, specifications, source_revisions, plan_id=plan_id)
+
+    def revise_revision_plan(self, plan_id: str, tasks: Sequence[RevisionTask], *,
+                             reason: str, expected_plan_revision: Optional[int] = None) -> Dict[str, TypingAny]:
+        """Atomically revise an existing persistent graph; retain prior attempts."""
+        return self.revision_workflows.revise_task_graph(
+            plan_id, tasks, reason=reason, expected_plan_revision=expected_plan_revision,
+        )
+
+    def run_revision_plan(self, plan_id: str, payloads: Dict[str, Dict[str, TypingAny]], *,
+                          orchestrator: TypingAny, capability_bindings: Dict[str, CapabilityBinding],
+                          authorization: AuthorizationContext, max_parallel: int = 4) -> Dict[str, TypingAny]:
+        """Execute ready computations via the existing Orchestrator Agent.
+
+        Capability mappings and authorization come from trusted host code;
+        only specialties already registered with AgentFactory can be called.
+        Host-owned document commits remain a separate API operation.
+        """
+        registered = set(self.agent_factory.get_registered_agent_types())
+        dispatcher = OrchestratorCapabilityAdapter(
+            orchestrator, capability_bindings, registered_specialties=registered,
+        )
+        return RevisionWorkflowRunner(
+            self.revision_workflows, dispatcher, max_parallel=max_parallel,
+        ).run_until_blocked(plan_id, payloads, auth=authorization)
 
     # ------------------------------------------------------------------
     # Configuration and shared-memory helpers
@@ -787,12 +855,14 @@ class PlanningAgent(BaseAgent):
             self.current_plan = self._convert_to_plan(schedule, source_plan=plan)
             self.expected_state_projections = self._generate_state_projections(self.current_plan)
             self._record_plan_generation_metrics(plan, schedule) # type: ignore
+            prediction = self._predict_plan_success(self.current_plan, goal_task)
             self.plan_history.append(
                 {
                     "goal": goal_task.name,
                     "plan_length": len(self.current_plan),
                     "created_at": self._planning_end_time,
                     "schedule": schedule,
+                    "predicted_success": prediction.get("success_probability"),
                 }
             )
             self.last_diagnostics["last_schedule_report"] = getattr(self.scheduler, "last_schedule_report", {})
@@ -1099,6 +1169,70 @@ class PlanningAgent(BaseAgent):
         )
 
     # ------------------------------------------------------------------
+    # Plan outcome prediction (advisory)
+    # ------------------------------------------------------------------
+    def _predict_plan_success(self, plan: Sequence[Task], goal_task: Task) -> Dict[str, TypingAny]:
+        """Score the scheduled plan with PlanSuccessPredictor. Advisory and fail-open: any problem yields ``{}``."""
+        prediction: Dict[str, TypingAny] = {}
+        try:
+            registry = self._get_available_agents()
+            loads = [_coerce_float(a.get("current_load"), 0.0) for a in registry.values() if isinstance(a, dict)]
+            prediction = self.plan_success_predictor.predict_plan(
+                plan,
+                family=str(getattr(goal_task, "name", "") or "default"),
+                plan_id="%s:%d" % (getattr(goal_task, "id", goal_task.name), int(time.time() * 1000)),
+                agents=registry,
+                resources=self.resource_monitor.get_cluster_resources(),
+                safety_margins=getattr(self.safety_planner, "safety_margin_model", None),
+                system_load=(sum(loads) / len(loads)) if loads else None,
+                task_history=task_history_from_method_stats(self.method_stats),
+            )
+        except Exception as exc:  # noqa: BLE001 - an advisory component must never break planning
+            logger.debug("Plan success prediction skipped: %s", exc)
+            prediction = {}
+        self.current_plan_prediction = prediction
+        self._predicted_plan_ids = frozenset(str(getattr(task, "id", task.name)) for task in plan) if prediction else frozenset()
+        self._psp_resource_events = 0
+        if prediction:
+            self.last_diagnostics["plan_success_prediction"] = {k: v for k, v in prediction.items() if k != "features"}
+            if prediction.get("advice"):
+                logger.info("Plan success prediction: P(success)=%.2f tier=%s advice=%s",
+                            prediction.get("success_probability", 0.0), prediction.get("risk_tier"),
+                            prediction["advice"].get("recommendation"))
+        return prediction
+
+    def _claim_plan_prediction(self, plan: Sequence[Task]) -> Dict[str, TypingAny]:
+        """The prediction made for exactly this plan, once; recovery plans and foreign plans get none."""
+        prediction = self.current_plan_prediction
+        if prediction and self._predicted_plan_ids == frozenset(str(getattr(task, "id", task.name)) for task in plan):
+            self.current_plan_prediction, self._predicted_plan_ids = {}, frozenset()
+            return prediction
+        return {}
+
+    @staticmethod
+    def _failure_cause(error: BaseException) -> str:
+        if isinstance(error, ResourceError):
+            return "resource"
+        if isinstance(error, (TemporalError, TaskTimeoutError)):
+            return "temporal"
+        return "task"
+
+    def _observe_plan_outcome(self, prediction: Dict[str, TypingAny], status: str, *, replans: int,
+                              deadline_misses: int, causes: Set[str]) -> None:
+        """Hand the real outcome to PlanSuccessPredictor (history, shadow error, retraining row). Fail-open."""
+        if not prediction:
+            return
+        try:
+            self.plan_success_predictor.observe(
+                prediction,
+                {"status": status, "replans": replans, "resource_events": self._psp_resource_events,
+                 "deadline_misses": deadline_misses, "failure_causes": sorted(causes) if status != TaskStatus.SUCCESS.name else []},
+                goal_id=str(getattr(self.current_goal, "id", "") or "") or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Plan outcome observation skipped: %s", exc)
+
+    # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
     def execute_plan(self, plan: Iterable[Any], goal: Any = None) -> Dict[str, TypingAny]:
@@ -1109,6 +1243,8 @@ class PlanningAgent(BaseAgent):
                 effective_plan.append(item)
             else:
                 raise PlanningError(f"Unsupported plan element type: {type(item)}")
+        prediction = self._claim_plan_prediction(effective_plan)
+        psp_replans, psp_deadline_misses, psp_causes = 0, 0, set()
         # Apply local arbitration (safety overrides)
         effective_plan = self._apply_local_arbitration(effective_plan)
         # Use goal as the goal_task (if it is a Task)
@@ -1130,6 +1266,13 @@ class PlanningAgent(BaseAgent):
 
         try:
             self._assert_plan_acyclic(effective_plan)
+            # The legacy path is sequential, but it must still respect data
+            # dependencies even if callers supplied an unordered task list.
+            task_by_id = {task.id: task for task in effective_plan}
+            if len(task_by_id) != len(effective_plan):
+                raise PlanningError("Cannot execute a plan with duplicate task IDs")
+            ordered_ids = topological_sort(list(task_by_id), self._dependency_map_for_schedule(effective_plan))
+            effective_plan = [task_by_id[task_id] for task_id in ordered_ids]
         except PlanningError as exc:
             self._record_error(exc, stage="execute_plan")
             return {"status": TaskStatus.FAILED.name, "world_state": self.world_state, "metrics": execution_metrics, "error": exc.to_dict()}
@@ -1153,6 +1296,19 @@ class PlanningAgent(BaseAgent):
                     logger.warning("Execution interrupted by monitor")
                     break
 
+                failed_deps = [dep for dep in self._dependency_ids(task)
+                               if dep in task_by_id and task_by_id[dep].status != TaskStatus.SUCCESS]
+                if failed_deps:
+                    task.status = TaskStatus.FAILED
+                    execution_metrics["failure_count"] += 1
+                    psp_causes.add("dependency")
+                    self._record_error(
+                        PlanningError("Required tasks did not complete successfully",
+                                      context={"task_id": task.id, "dependencies": failed_deps}),
+                        stage="task_dependency", task=task,
+                    )
+                    continue
+
                 start_time = time.time()
                 task.status = TaskStatus.EXECUTING
 
@@ -1160,6 +1316,8 @@ class PlanningAgent(BaseAgent):
                     self._validate_task_before_execution(task)
                     self._execute_action(task)
                     task.status = TaskStatus.SUCCESS
+                    if _coerce_float(getattr(task, "deadline", 0.0)) >= 1_000_000_000 and time.time() > task.deadline:
+                        psp_deadline_misses += 1  # absolute (epoch) deadlines only; relative ones have no fixed origin
                     execution_metrics["success_count"] += 1
                     execution_metrics["total_cost"] += _coerce_float(getattr(task, "cost", 0.0), 0.0)
                     self._update_resource_metrics(execution_metrics, task)
@@ -1167,6 +1325,8 @@ class PlanningAgent(BaseAgent):
                 except PlanningError as exc:
                     task.status = TaskStatus.FAILED
                     execution_metrics["failure_count"] += 1
+                    psp_causes.add(self._failure_cause(exc))
+                    self._psp_resource_events += isinstance(exc, ResourceError)
                     self._record_execution_history(task, start_time, time.time(), "failed", error=exc)
                     self._record_error(exc, stage="task_execution", task=task)
                     logger.warning("Execution failure for %s: %s", task.name, _safe_error_message(exc))
@@ -1185,6 +1345,7 @@ class PlanningAgent(BaseAgent):
                             task=task,
                         )
                     if recovery_plan:
+                        psp_replans += 1
                         recovery = recovery_plan if isinstance(recovery_plan, list) else [recovery_plan]
                         recovery_result = self.execute_plan(recovery, goal_task)
                         if recovery_result.get("status") == TaskStatus.SUCCESS.name:
@@ -1198,6 +1359,7 @@ class PlanningAgent(BaseAgent):
                     )
                     task.status = TaskStatus.FAILED
                     execution_metrics["failure_count"] += 1
+                    psp_causes.add("task")
                     self._record_execution_history(task, start_time, time.time(), "failed", error=wrapped)
                     self._record_error(wrapped, stage="task_execution", task=task)
                     logger.error("%s", _safe_error_message(wrapped))
@@ -1226,6 +1388,8 @@ class PlanningAgent(BaseAgent):
                 "last_error": self.last_error,
             }
             self._log_performance(summary)
+            self._observe_plan_outcome(prediction, final_status.name, replans=psp_replans,
+                                       deadline_misses=psp_deadline_misses, causes=psp_causes)
             return summary
         finally:
             try:
@@ -1434,6 +1598,7 @@ class PlanningAgent(BaseAgent):
 
     def adjust_for_resource_violation(self, resource: str, usage: float, limit: float) -> None:
         logger.warning("Resource violation reported by executor: %s %.3f > %.3f", resource, usage, limit)
+        self._psp_resource_events += 1
         self.execution_interrupted = True
 
     def adjust_for_temporal_violation(self, task: Task, time_delta: float) -> None:

@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from statistics import mean, median
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
-from PyQt5.QtCore import QSize, QBuffer # type: ignore
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.evaluation_errors import *
@@ -129,6 +128,10 @@ class BehavioralValidator:
         "exception": 2,
         "monitoring": 2,
     }
+
+    # Default cap on reported failure modes; __init__ overrides it from config.
+    # Declared at class level so partially-constructed validators stay usable.
+    max_failure_modes: int = 10
 
     def __init__(
         self,
@@ -398,7 +401,9 @@ class BehavioralValidator:
         - ``sut`` may be provided explicitly
         """
         active_sut = self._coerce_sut(sut or agent or self.sut)
-        selected_cases = self._prepare_execution_cases(test_cases or self.test_cases)
+        selected_cases = self._prepare_execution_cases(
+            self.test_cases if test_cases is None else test_cases
+        )
         if not selected_cases:
             return self._empty_results(suite_name=suite_name)
 
@@ -507,14 +512,15 @@ class BehavioralValidator:
                 if record.failure_mode is not None:
                     self.failure_modes.append(record.failure_mode)
 
-                if not record.passed and record.severity == "critical":
+                if not record.passed:
                     overall_status = "FAILED"
-                    logger.critical(
-                        "Critical certification requirement failed: test=%s requirement=%s",
-                        record.test_id,
-                        record.requirement_id,
-                    )
-                    break
+                    if record.severity == "critical":
+                        logger.critical(
+                            "Critical certification requirement failed: test=%s requirement=%s",
+                            record.test_id,
+                            record.requirement_id,
+                        )
+                        break
             except Exception as exc:
                 anomaly = {
                     "test_id": case.test_id,
@@ -718,21 +724,23 @@ class BehavioralValidator:
         source: str,
     ) -> Dict[str, Any]:
         executed = len(execution_records)
+        attempted = executed + len(anomalies)
         passed = sum(1 for record in execution_records if record.passed)
         failed = sum(1 for record in execution_records if record.status == "FAILED")
-        errored = sum(1 for record in execution_records if record.status == "ERROR")
+        errored = sum(1 for record in execution_records if record.status == "ERROR") + len(anomalies)
         requirements_encountered = {
             record.requirement_id for record in execution_records if record.requirement_id is not None
         }
 
-        pass_rate = (passed / executed) if executed > 0 else 0.0
-        failure_rate = ((failed + errored) / executed) if executed > 0 else 0.0
+        pass_rate = (passed / attempted) if attempted > 0 else 0.0
+        failure_rate = ((failed + errored) / attempted) if attempted > 0 else 0.0
         requirement_coverage_rate = (
             len(self.requirement_coverage) / len(requirements_encountered)
             if requirements_encountered
             else 0.0
         )
-        test_coverage = 1.0 if executed > 0 else 0.0
+        # Test collection/execution coverage is not source-code coverage.
+        test_coverage = executed / attempted if attempted else 0.0
         composite_score = self._calculate_composite_score(
             pass_rate=pass_rate,
             test_coverage=test_coverage,
@@ -744,6 +752,7 @@ class BehavioralValidator:
         threshold_events = self._evaluate_thresholds(pass_rate=pass_rate, failure_rate=failure_rate)
 
         payload = {
+            "status": "fail" if (failed or errored or threshold_events or not attempted) else "pass",
             "metadata": {
                 "timestamp": completed_at.isoformat(),
                 "started_at": started_at.isoformat(),
@@ -753,7 +762,8 @@ class BehavioralValidator:
                 "source": source,
             },
             "summary": {
-                "total_cases": executed,
+                "total_cases": attempted,
+                "completed_case_records": executed,
                 "passed": passed,
                 "failed": failed,
                 "errored": errored,
@@ -761,6 +771,7 @@ class BehavioralValidator:
                 "pass_rate": pass_rate,
                 "failure_rate": failure_rate,
                 "test_coverage": test_coverage,
+                "coverage_semantics": "attempted_cases_with_execution_records_not_code_coverage",
                 "test_coverage_count": executed,
                 "requirement_coverage": len(self.requirement_coverage),
                 "requirement_coverage_rate": requirement_coverage_rate,
@@ -771,7 +782,7 @@ class BehavioralValidator:
             "thresholds": {
                 "configured": dict(self.thresholds),
                 "events": threshold_events,
-                "passed": len(threshold_events) == 0,
+                "passed": len(threshold_events) == 0 and errored == 0 and failed == 0 and attempted > 0,
             },
             "records": [record.to_dict() for record in execution_records],
             "failure_modes": [failure.to_dict() for failure in self.failure_modes[: self.max_failure_modes]],
@@ -1024,7 +1035,7 @@ class BehavioralValidator:
             pass_rates = [*pass_rates, results["summary"].get("pass_rate", 0.0)]
 
         if pass_rates:
-            pixmap = visualizer.render_temporal_chart(QSize(600, 400), "pass_rate", data=pass_rates)
+            pixmap = visualizer.render_temporal_chart((600, 400), "pass_rate", data=pass_rates)
             assets["pass_rate_trend"] = self._pixmap_to_asset(pixmap, "pass_rate_trend")
 
         failure_counts = [
@@ -1035,7 +1046,7 @@ class BehavioralValidator:
         if results.get("summary"):
             failure_counts = [*failure_counts, results["summary"].get("failed", 0) + results["summary"].get("errored", 0)]
         if failure_counts:
-            pixmap = visualizer.render_temporal_chart(QSize(600, 400), "risks", data=failure_counts)
+            pixmap = visualizer.render_temporal_chart((600, 400), "risks", data=failure_counts)
             assets["failure_trend"] = self._pixmap_to_asset(pixmap, "failure_trend")
 
         return assets
@@ -1122,6 +1133,7 @@ class BehavioralValidator:
     def _empty_results(self, *, suite_name: str) -> Dict[str, Any]:
         now = _utcnow()
         return {
+            "status": "skipped",
             "metadata": {
                 "timestamp": now.isoformat(),
                 "started_at": now.isoformat(),
@@ -1149,7 +1161,7 @@ class BehavioralValidator:
             "thresholds": {
                 "configured": dict(self.thresholds),
                 "events": [],
-                "passed": True,
+                "passed": None,
             },
             "records": [],
             "failure_modes": [],
@@ -1188,6 +1200,7 @@ class BehavioralValidator:
     def _pixmap_to_asset(self, pixmap: Any, chart_type: str) -> Dict[str, Any]:
         if pixmap is None:
             raise SerializationError(chart_type, "Cannot serialize a null pixmap.")
+        from PyQt5.QtCore import QBuffer  # optional; only needed to encode an explicitly requested chart
         buffer = QBuffer()
         buffer.open(QBuffer.ReadWrite)
         if not pixmap.save(buffer, "PNG"):

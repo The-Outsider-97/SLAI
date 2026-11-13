@@ -25,6 +25,7 @@ The agent does not perform direct filesystem persistence for knowledge and does
 not own subsystem configuration or subsystem-local experience storage.
 """
 
+import inspect
 import json
 import time
 import uuid
@@ -127,10 +128,7 @@ class DistributedLock:
         poll_interval_seconds: float = 0.05,
     ) -> None:
         if shared_memory is None:
-            raise ReasoningConfigurationError(
-                "DistributedLock requires shared memory.",
-                context={"lock_key": lock_key},
-            )
+            raise ReasoningConfigurationError("DistributedLock requires shared memory.", context={"lock_key": lock_key})
 
         getter = getattr(shared_memory, "get", None)
         cas = getattr(shared_memory, "compare_and_swap", None)
@@ -241,10 +239,7 @@ class DistributedLock:
     def assert_held(self) -> None:
         with self._state_lock:
             if not self._held or self._lost:
-                raise InferenceExecutionError(
-                    "Distributed reasoning lock was lost.",
-                    context={"lock_key": self.lock_key},
-                )
+                raise InferenceExecutionError("Distributed reasoning lock was lost.", context={"lock_key": self.lock_key})
 
         current = self.sm.get(self.lock_key)
         if (
@@ -1373,11 +1368,17 @@ class ReasoningAgent(BaseAgent):
         self,
         reasoning_type: Optional[str],
         problem: Any = None,
+        context: Optional[Mapping[str, Any]] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         requested = str(reasoning_type or "auto").strip().lower()
         requested = self.reasoning_type_aliases.get(requested, requested)
 
         if requested not in {"", "auto", "default"}:
+            # Canonicalize subsystem aliases ("deductive" -> "deduction", "causal" -> "cause_effect")
+            # so provenance and downstream consumers always see the registry name.
+            canonicalize = getattr(self.types, "resolve_strategy_name", None)
+            if callable(canonicalize):
+                requested = str(canonicalize(requested) or requested)
             return requested, {
                 "requested": reasoning_type,
                 "resolved": requested,
@@ -1387,7 +1388,14 @@ class ReasoningAgent(BaseAgent):
 
         selector = getattr(self.types, "select_reasoning_strategy", None)
         if callable(selector) and problem is not None:
-            selection = selector(str(problem))
+            # Hand the selector the raw problem and the request context (structured fields such as
+            # premises/events are strong routing signals); str(problem) discarded both. Older
+            # selectors that only accept the problem text keep working.
+            try:
+                accepts_context = "context" in inspect.signature(selector).parameters
+            except (TypeError, ValueError):
+                accepts_context = False
+            selection = selector(problem, context) if accepts_context else selector(str(problem))
             if isinstance(selection, Mapping) and selection.get("strategy"):
                 resolved = str(selection["strategy"]).strip().lower()
                 return resolved, {
@@ -1414,11 +1422,7 @@ class ReasoningAgent(BaseAgent):
             "evidence": {},
         }
 
-    def _resolve_reasoning_type(
-        self,
-        reasoning_type: Optional[str],
-        problem: Any = None,
-    ) -> str:
+    def _resolve_reasoning_type(self, reasoning_type: Optional[str], problem: Any = None) -> str:
         """v2.3 compatibility helper returning only the resolved strategy."""
         return self._resolve_reasoning_selection(reasoning_type, problem)[0]
 
@@ -1441,6 +1445,7 @@ class ReasoningAgent(BaseAgent):
         resolved_type, selection = self._resolve_reasoning_selection(
             reasoning_type,
             problem,
+            context,
         )
 
         canonical_reason = getattr(self.types, "reason", None)
@@ -1451,11 +1456,7 @@ class ReasoningAgent(BaseAgent):
             )
 
         try:
-            result = canonical_reason(
-                resolved_type,
-                problem,
-                context,
-            )
+            result = canonical_reason(resolved_type, problem, context)
             if not isinstance(result, Mapping):
                 raise InferenceExecutionError(
                     "ReasoningTypes.reason() must return a mapping.",
@@ -1546,8 +1547,12 @@ class ReasoningAgent(BaseAgent):
         if bool(result.get("degraded", False)):
             reasons.append("degraded_execution")
 
-        if str(result.get("outcome", "")).lower() == "indeterminate":
+        outcome = str(result.get("outcome", "")).lower()
+        if outcome == "indeterminate":
             reasons.append("indeterminate_outcome")
+        elif outcome in {"unsupported", "partial", "failed"}:
+            # Not a settled answer either: nothing evidence-grounded, a relaxed gate, or a failed step.
+            reasons.append(f"{outcome}_outcome")
 
         confidence = result.get("confidence")
         if isinstance(confidence, Mapping) and confidence.get("value") is not None:

@@ -220,6 +220,8 @@ class IdempotencyManager:
         self.snapshot_ttl_seconds = self._get_non_negative_int_config("snapshot_ttl_seconds", 1800)
         self.history_ttl_seconds = self._get_non_negative_int_config("history_ttl_seconds", 7200)
         self.max_records = max(1, self._get_non_negative_int_config("max_records", 5000))
+        # Rows listed per bucket in get_snapshot(); counts stay exact. 0 = list everything.
+        self.snapshot_max_records = self._get_non_negative_int_config("snapshot_max_records", 25)
         self.max_history_size = max(1, self._get_non_negative_int_config("max_history_size", 1000))
         self.max_transitions_per_key = max(1, self._get_non_negative_int_config("max_transitions_per_key", 50))
 
@@ -536,21 +538,32 @@ class IdempotencyManager:
                 self._sync_snapshot_memory()
             return purged
 
-    def get_snapshot(self) -> Dict[str, Any]:
+    def get_snapshot(self, max_records: Optional[int] = None) -> Dict[str, Any]:
+        """Snapshot with exact counts and at most ``max_records`` newest rows per bucket (0 = all)."""
+        limit = self.snapshot_max_records if max_records is None else max(0, int(max_records))
         with self._lock:
             self._expire_stale_locked()
-            active = [record.to_dict(include_history=False) for record in self._records.values() if not record.is_terminal(self.terminal_statuses)]
-            terminal = [record.to_dict(include_history=False) for record in self._records.values() if record.is_terminal(self.terminal_statuses)]
+            active_records: List[IdempotencyRecord] = []
+            terminal_records: List[IdempotencyRecord] = []
+            for record in self._records.values():
+                (terminal_records if record.is_terminal(self.terminal_statuses) else active_records).append(record)
+
+            def newest(records: List[IdempotencyRecord]) -> List[Dict[str, Any]]:
+                if limit and len(records) > limit:
+                    records = sorted(records, key=lambda item: str(item.updated_at))[-limit:]
+                return sorted((item.to_dict(include_history=False) for item in records), key=self._sort_record_dict)
+
             return {
                 "generated_at": utc_timestamp(),
                 "started_at": self._started_at,
                 "stats": dict(self._stats),
                 "record_count": len(self._records),
-                "active_count": len(active),
-                "terminal_count": len(terminal),
+                "active_count": len(active_records),
+                "terminal_count": len(terminal_records),
+                "rows_truncated": bool(limit and (len(active_records) > limit or len(terminal_records) > limit)),
                 "history_size": len(self._history),
-                "active": sorted(active, key=self._sort_record_dict),
-                "terminal": sorted(terminal, key=self._sort_record_dict),
+                "active": newest(active_records),
+                "terminal": newest(terminal_records),
             }
 
     # ------------------------------------------------------------------
@@ -804,15 +817,32 @@ class IdempotencyManager:
     def _sync_snapshot_memory(self) -> None:
         if not self.record_memory_snapshots:
             return
-        active = [record.to_dict(include_history=False) for record in self._records.values() if not record.is_terminal(self.terminal_statuses)]
-        completed = [record.to_dict(include_history=False) for record in self._records.values() if record.status == "completed"]
+        # Mirror only the newest ``snapshot_max_records`` rows (counts stay exact). Mirroring every
+        # record on every transition made each delivery O(records) and the whole run O(records^2).
+        limit = self.snapshot_max_records
+        active_count = 0
+        completed_count = 0
+        active_records: list = []
+        completed_records: list = []
+        for record in reversed(list(self._records.values())):
+            if not record.is_terminal(self.terminal_statuses):
+                active_count += 1
+                if not limit or len(active_records) < limit:
+                    active_records.append(record)
+            elif record.status == "completed":
+                completed_count += 1
+                if not limit or len(completed_records) < limit:
+                    completed_records.append(record)
+        active = [record.to_dict(include_history=False) for record in reversed(active_records)]
+        completed = [record.to_dict(include_history=False) for record in reversed(completed_records)]
         snapshot = {
             "generated_at": utc_timestamp(),
             "started_at": self._started_at,
             "stats": dict(self._stats),
             "record_count": len(self._records),
-            "active_count": len(active),
-            "completed_count": len(completed),
+            "active_count": active_count,
+            "completed_count": completed_count,
+            "rows_truncated": bool(limit) and (active_count > limit or completed_count > limit),
             "states": self._status_counts(),
             "history_size": len(self._history),
         }

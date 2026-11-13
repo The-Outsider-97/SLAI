@@ -20,11 +20,13 @@ _EXPORTS = {
     "RuntimeLifecycle": (".runtime_contracts", "RuntimeLifecycle"),
     "RuntimeStatus": (".runtime_contracts", "RuntimeStatus"),
 
+    "AnimationAgent": (".animation_agent", "AnimationAgent"),
     "AdaptiveAgent": (".adaptive_agent", "AdaptiveAgent"),
     "AlignmentAgent": (".alignment_agent", "AlignmentAgent"),
     "BrowserAgent": (".browser_agent", "BrowserAgent"),
     "CollaborativeAgent": (".collaborative_agent", "CollaborativeAgent"),
     "EvaluationAgent": (".evaluation_agent", "EvaluationAgent"),
+    "FinancialAgent": (".financial_agent", "FinancialAgent"),
     "ExecutionAgent": (".execution_agent", "ExecutionAgent"),
     "HandlerAgent": (".handler_agent", "HandlerAgent"), # done for 2.1.0 needs to be updated and expanded for 2.4.0
     "KnowledgeAgent": (".knowledge_agent", "KnowledgeAgent"),
@@ -44,6 +46,7 @@ _EXPORTS = {
     "ReasoningAgent": (".reasoning_agent", "ReasoningAgent"),
     "SafetyAgent": (".safety_agent", "SafetyAgent"),
     "SimulationAgent": (".simulation_agent", "SimulationAgent"),
+    "SoftwareAgent": (".software_agent", "SoftwareAgent"),
     "SpatialAgent": (".spatial_agent", "SpatialAgent"),
     "STEMAgent": (".stem_agent", "STEMAgent"),
     "VerificationAgent": (".verification_agent", "VerificationAgent"),

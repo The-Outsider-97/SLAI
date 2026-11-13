@@ -1,0 +1,47 @@
+
+financial_memory:
+  max_records: 100
+  ttl_seconds: 86400
+
+financial_data:
+  max_observations_per_series: 1000
+  max_age_seconds: 604800
+
+financial_calculation:
+  precision: 36
+  max_iterations: 300
+  irr_tolerance: "1e-16"
+  irr_scan_points: 300
+  max_amortization_periods: 1200
+
+financial_cashflow:
+  max_schedule_items: 10000
+
+financial_subscription:
+  max_forecast_days: 3650
+  max_subscriptions: 1000
+
+financial_report:
+  max_sections: 16
+  max_output_chars: 1000000
+
+
+financial_economics:
+  max_series_points: 10000
+  max_accounting_items: 256
+
+financial_valuation:
+  max_scenarios: 100
+  min_risk_observations: 5
+  max_risk_observations: 100000
+  default_confidence: "0.95"
+
+financial_portfolio:
+  max_positions: 1000
+
+financial_intelligence:
+  max_history_points: 10000
+  max_horizon_steps: 365
+  min_backtest_points: 5
+  max_models: 20
+  default_value_margin: "0.10"

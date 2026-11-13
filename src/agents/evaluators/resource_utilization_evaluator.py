@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 import psutil
 import yaml
 
+from pathlib import Path
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -332,16 +335,21 @@ class ResourceUtilizationEvaluator:
         metadata_map = dict(metadata or {})
         sample_window = self.monitor_duration
         start_network = psutil.net_io_counters()
+        sample_start = time.perf_counter()
         cpu_percent = psutil.cpu_percent(interval=sample_window)
+        actual_duration = max(time.perf_counter() - sample_start, 0.0)
         end_network = psutil.net_io_counters()
 
         memory_percent = float(psutil.virtual_memory().percent)
-        disk_percent = float(psutil.disk_usage("/").percent)
-        network_mbps = self._calculate_network_mbps(start_network, end_network, sample_window)
+        disk_percent = float(psutil.disk_usage(Path.home().anchor or "/").percent)
+        network_mbps = self._calculate_network_mbps(start_network, end_network, actual_duration)
+        for name, value in (("cpu", cpu_percent), ("memory", memory_percent), ("disk", disk_percent)):
+            if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 100.0:
+                raise MetricCalculationError(name, value, "resource utilization outside [0, 100]")
 
         return ResourceSnapshot(
             sampled_at=_utcnow().isoformat(),
-            sample_window_seconds=sample_window,
+            sample_window_seconds=actual_duration,
             cpu=round(float(cpu_percent), 4),
             memory=round(memory_percent, 4),
             disk=round(disk_percent, 4),
@@ -351,9 +359,14 @@ class ResourceUtilizationEvaluator:
 
     def _calculate_network_mbps(self, start: Any, end: Any, duration: float) -> float:
         try:
-            total_bytes = float((end.bytes_sent - start.bytes_sent) + (end.bytes_recv - start.bytes_recv))
-            total_megabits = (total_bytes * 8.0) / 1_000_000.0
-            return total_megabits / max(duration, 1e-9)
+            transmitted = float(end.bytes_sent - start.bytes_sent)
+            received = float(end.bytes_recv - start.bytes_recv)
+            if not all(map(math.isfinite, (duration, transmitted, received))) or duration <= 0:
+                raise ValueError("network sample duration or counters are invalid")
+            if transmitted < 0 or received < 0:
+                raise ValueError("network counters reset during the sampling interval")
+            total_megabits = (transmitted + received) * 8.0 / 1_000_000.0
+            return total_megabits / duration
         except Exception as exc:
             raise MetricCalculationError(
                 metric_name="network_utilization",

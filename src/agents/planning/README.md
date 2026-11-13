@@ -30,6 +30,7 @@ src/agents/planning/
 ├── planning_metrics.py
 ├── planning_monitor.py
 ├── heuristic_selector.py
+├── plan_success_predictor.py
 ├── decision_tree_heuristic.py
 ├── gradient_boosting_heuristic.py
 ├── reinforcement_learning_heuristic.py
@@ -37,6 +38,8 @@ src/agents/planning/
 ├── case_based_reasoning_heuristic.py
 ├── configs/
 │   └── planning_config.yaml
+├── models/
+│   └── plan_success_predictor/   # manifest.json + evaluation.json (train_psp.py)
 ├── templates/
 │   ├── planning_db.json
 │   └── academic_planning_error.json
@@ -122,6 +125,19 @@ Provides scheduler classes for capability/deadline-aware assignment:
 
 Core behavior includes risk thresholding, retry policy integration, and estimated duration calculations based on task requirements.
 
+### `plan_success_predictor.py` (PlanSuccessPredictor, PSP)
+Advisory whole-plan outcome model, distinct from the per-task `HeuristicSelector`. After the scheduler has produced a
+plan it estimates, as calibrated probabilities: success, replanning / recovery, resource trouble, deadline miss, the
+likely failure cause and the realised-to-planned duration (with an interval). It reports `defer_to_heuristics` when it is
+uncertain or the plan is unlike its training data, and it can never generate, validate or authorise a plan or bypass
+`SafetyPlanning`. Without a loadable checkpoint it returns `{}` and planning behaves exactly as before.
+
+- Runtime: pure-Python inference over a JSON checkpoint (`models/plan_success_predictor/manifest.json`), never pickle.
+- Modes (`plan_success_predictor.mode`): `collect` (record features + outcomes), `shadow` (also predict), `advisory`
+  (also expose a recommendation; requires a checkpoint approved with `train_psp.py export --approve`).
+- Training (repository root): `python train_psp.py all`; add real executions with
+  `python train_psp.py collect --from-log` and retrain. A checkpoint trained only on simulated plans stays `experimental`.
+
 ### `probabilistic_planner.py`
 Contains probabilistic plan structures and planner logic:
 
@@ -195,6 +211,7 @@ Configuration is loaded with `utils/config_loader.py` and drives every subsystem
 - `planning_memory`: checkpoint retention and autosave settings.
 - `planning_metrics`: scoring weights and fallback behaviors.
 - `planning_monitor`: windows, anomaly thresholds, scan intervals.
+- `plan_success_predictor`: mode (`collect`/`shadow`/`advisory`), checkpoint path, observation log, ranking weights.
 
 > Note: `templates/planning_db.json` contains seed data for method statistics and example tasks/world states used by heuristic components.
 
@@ -243,3 +260,122 @@ checkpoint_id = memory.save_checkpoint({"task": task, "method": method})
 - Set conservative `safety_margins` first, then relax with monitored evidence.
 - Persist and rotate checkpoints to support incident replay and postmortem analysis.
 - Use monitor anomalies as triggers for retraining or policy fallback activation.
+
+---
+
+## Revision-aware project workflows (opt-in)
+
+`revision_workflow.py` adds a durable SQLite workflow contract alongside the
+existing HTN scheduler and PlanningMemory checkpoints. It does **not** replace
+`PlanningAgent.execute_plan`, dispatch agents, or commit application documents.
+
+```python
+from src.agents.planning.revision_workflow import RevisionTask, RevisionWorkflowStore
+
+workflows = RevisionWorkflowStore()  # data/planning/revision_workflows.sqlite3
+plan = workflows.create_plan(
+    "engineering-project",
+    [
+        RevisionTask("calculate", reads={"parameters": "revision-1"}),
+        RevisionTask("verify", depends_on=("calculate",), verification_required=True),
+    ],
+    {"parameters": "revision-1"},
+)
+plan_id = plan["plan_id"]
+ready = workflows.ready_groups(plan_id, max_parallel=4)
+attempt = workflows.claim_task(plan_id, "calculate")
+# Dispatch actual computation through the configured SLAI execution facility.
+workflows.complete_task(plan_id, "calculate", attempt["run_id"])
+
+# Supply notifications from the authoritative project owner.
+workflows.apply_change_set(plan_id, {"parameters": "revision-2"})
+workflows.replan_stale(plan_id)
+```
+
+Existing `Task` instances can also be registered through
+`PlanningAgent.create_revision_plan(project_id, tasks, source_revisions)`.
+`Task.context` accepts `read_revisions`, `write_artifacts`, `capability`, and
+`verification_required` for the new contract. No implicit application access
+or dynamic capability is assumed. Tasks with no explicit read set are
+conservatively invalidated by any observed source revision change.
+
+For live projects, inject an authoritative callback via
+`RevisionWorkflowStore(revision_provider=lambda project_id: {...})`.
+It is consulted before tasks start and complete, and missing tracked revision
+identities are rejected. Without a provider, the host **must** deliver change
+sets explicitly; otherwise the planner only knows its last observed state.
+
+Execution attempts carry stable IDs and input snapshots. Verification gates
+must be explicitly satisfied. After a crash, call `mark_interrupted_tasks()`
+and reconcile uncertain outcomes through `resolve_interrupted_task()` with an
+external evidence ID. Never blindly rerun an uncertain side-effecting task.
+
+`publish_provenance_events(plan_id, provenance_agent)` replays durable events
+through `ProvenanceAgent.record_event` using stable identities; retries are
+idempotent. The authoritative host must still enforce expected-revision checks
+at commit time and report confirmed commits separately to Provenance. A
+revision notification cannot be inferred from a cached Planning state alone.
+
+## Authorized specialist delegation and graph revisions
+
+`workflow_runtime.py` provides an opt-in `RevisionWorkflowRunner` that runs
+ready tasks using the existing `OrchestratorAgent.perform_task` delegation API.
+Bindings associate capabilities with **already registered** agent specialties,
+and only the `perform_task` method may be invoked. This prevents workflow
+payloads from selecting arbitrary agent methods or dynamically onboarding
+untrusted specialists. Successful delegated results must return a structured
+`status` and `output_refs` mapping. All computations remain proposed work:
+the runner never commits external project mutations.
+
+```python
+from src.agents.planning.workflow_runtime import (
+    AuthorizationContext, CapabilityBinding, OrchestratorCapabilityAdapter,
+    RevisionWorkflowRunner,
+)
+
+# Both these objects MUST be provisioned by the trusted host, not a task payload.
+authorization = AuthorizationContext("actor-id", "engineering-project",
+                                     frozenset({"workflow:execute"}))
+dispatcher = OrchestratorCapabilityAdapter(
+    orchestrator, {"calculate": CapabilityBinding("stem")},
+    registered_specialties=set(agent_factory.get_registered_agent_types()),
+)
+result = RevisionWorkflowRunner(workflows, dispatcher).run_until_blocked(
+    plan_id, {"calculate": {"operation": "estimate"}}, auth=authorization,
+)
+```
+
+`PlanningAgent.run_revision_plan(...)` exposes this orchestration through the
+normal agent entrypoint, checking the actual AgentFactory registration set.
+`revise_task_graph(plan_id, new_tasks, reason=..., expected_plan_revision=...)`
+atomically edits the DAG, archives removed tasks, preserves independent valid
+results and invalidates changed existing tasks with their transitive dependents.
+Busy or outcome-uncertain tasks cannot be silently removed or modified.
+Added tasks begin as pending; use `replan_stale` to rebase stale tasks.
+
+## Application adapters and durable commit reconciliation
+
+`project_adapter.py` defines `AuthoritativeProjectAdapter` and a concrete
+`CallbackProjectAdapter` for applications already exposing authoritative
+revision, commit and reconciliation APIs. Hosts MUST provide atomic
+expected-revision checking and stable idempotency-key lookup. These adapters
+do not invent document revisions or provide automatic application adapters
+for applications that have not wired the callbacks yet.
+
+`commit_reconciliation.py` persists commit intent **before** external
+dispatch. `CommitReconciliationStore.prepare(...)` requires `workflow:commit`;
+`dispatch(...)` invokes the host only for a previously pending intent. If a
+timeout/crash leaves its outcome uncertain, `reconcile(...)` requires the
+additional `workflow:commit:reconcile` scope and queries the authoritative
+host, without reissuing the mutation. `publish_confirmed(...)` requires
+`workflow:provenance:write` and records host-backed `commit.confirmed` evidence
+through Provenance only after a positive receipt. It uses a stable event ID
+for idempotent replay. Reject uncertain/nonconfirmed receipts as proof of
+success. AuthorizationContext values must come from the host's trusted
+identity/permission boundary, not from LLM or specialist-generated content.
+
+For distributed deployments, outbox recovery prioritizes safety: if the host
+cannot establish whether a request was received, its intent remains
+`outcome_unknown` until independently reconciled. This is not a distributed
+transaction coordinator or a promise of exactly-once delivery. Applications
+must supply real durable lookup and atomic idempotent commit semantics.

@@ -18,6 +18,7 @@ Pipeline
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 import time
@@ -43,7 +44,12 @@ _NEGATION_PREFIXES = (
 )
 _IMPLIES_RE = re.compile(r"^\s*(?:if\s+)?(.+?)\s*(?:,?\s*then\s+|\s+implies\s+|\s*->\s*|\s+therefore\s+|\s+consequently\s+)(.+?)\s*$", re.I)
 _UNIVERSAL_RE = re.compile(r"^\s*(all|every|each)\s+(.+?)\s+(?:are|is)\s+(.+?)\s*$", re.I)
-_ISA_RE = re.compile(r"^\s*(.+?)\s+(?:is|are|has|have)\s+(?:a\s+|an\s+|the\s+)?(.+?)\s*$", re.I)
+# Only the copula (is/are) states class membership or predication. "has/have" is
+# possession and used to be rewritten as "is", which made syllogisms unsound
+# ("Socrates has a dog" + "all dogs are loyal" |- "Socrates is loyal").
+_ISA_RE = re.compile(r"^\s*(.+?)\s+(?:is|are)\s+(?:a\s+|an\s+|the\s+)?(.+?)\s*$", re.I)
+_MEMO_LIMIT = 50_000
+_NO_PARSE = object()
 _DISJ_RE = re.compile(r"\s+(?:or|\|)\s+", re.I)
 
 
@@ -96,6 +102,11 @@ class ReasoningDeductive(BaseReasoning):
         self.certainty_threshold: float = clamp_confidence(self.deductive_config.get("certainty_threshold", 0.85))
         self.min_premise_confidence: float = clamp_confidence(self.deductive_config.get("min_premise_confidence", 0.5))
         self.rule_confidence_decay: float = clamp_confidence(self.deductive_config.get("rule_confidence_decay", 0.95))
+        # Deduction is truth-preserving: a valid derivation is exactly as certain as the
+        # premises it rests on, however many steps it takes. The per-step decay and the
+        # per-rule weights are heuristic discounts and are applied only when explicitly
+        # enabled; otherwise a correct 5-step proof was reported "not proven" (0.95^5 < 0.85).
+        self.apply_rule_decay: bool = bool(self.deductive_config.get("apply_rule_decay", False))
         self.contradiction_penalty: float = clamp_confidence(self.deductive_config.get("contradiction_penalty", 0.5))
         self.negation_penalty: float = clamp_confidence(self.deductive_config.get("negation_penalty", 0.7))
         self.enable_fallacy_check: bool = bool(self.deductive_config.get("enable_fallacy_check", True))
@@ -116,6 +127,10 @@ class ReasoningDeductive(BaseReasoning):
             if self.enable_cache else None
         )
         self._last_trace: Dict[str, Any] = {}
+        # Per-instance (instances are request-scoped) memo tables for the pure text parsers.
+        self._memo_canon: Dict[str, str] = {}
+        self._memo_parse: Dict[Tuple[str, str], Any] = {}
+        self._proof_truncated: bool = False
 
     # ------------------------------------------------------------------
     # Public interface
@@ -123,29 +138,34 @@ class ReasoningDeductive(BaseReasoning):
     def perform_reasoning(self, premises: List[str], hypothesis: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:  # type: ignore
         """Perform bounded deductive proof search for ``hypothesis``."""
         started = time.monotonic()
-        context = context or {}
+        context = context if isinstance(context, dict) else dict(context or {})
         self._validate_inputs(premises, hypothesis)
         cache_key = self._cache_key(premises, hypothesis, context)
         if self.cache is not None:
             cached = self.cache.get(cache_key)
             if cached is not None:
-                return cached
+                return copy.deepcopy(cached)  # never hand out the cached (mutable) object
 
+        self._proof_truncated = False
         normalized_premises = self._normalize_premises(premises, context)
         valid_premises, rejected = self._validate_premises_with_rejections(normalized_premises, context)
         if not valid_premises:
+            inconsistent = any(item.get("reason") in {"direct_negation", "predicate_negation"} for item in rejected)
             result = self._format_result(False, 0.0, [], premises, hypothesis, {
                 "internal_contradictions": [],
                 "hypothesis_contradictions": [],
                 "contradiction_score": 0.0,
                 "rejected_premises": rejected,
-                "reason": "Invalid premises",
+                "reason": "Inconsistent premises" if inconsistent else "Invalid premises",
             })
+            result["verdict"] = "inconsistent" if inconsistent else "undetermined"
+            result["stop_reason"] = "inconsistent_premises" if inconsistent else "no_valid_premises"
             return self._finalize_result(result, started, cache_key)
 
-        proof_steps = self._apply_inference_rules([s.text for s in valid_premises], context)
-        evaluation = self._evaluate_hypothesis(hypothesis, proof_steps, context)
-        contradiction_analysis = self._check_contradictions(proof_steps, hypothesis, context)
+        proof_steps = self._apply_inference_rules([s.text for s in valid_premises], context, {s.canonical: s.confidence for s in valid_premises})
+        truncated = self._proof_truncated
+        evaluation = self._evaluate_hypothesis(hypothesis, proof_steps, context, premises=valid_premises)
+        contradiction_analysis = self._check_contradictions(proof_steps, hypothesis, context, premises=valid_premises)
         fallacies = self._detect_fallacies(valid_premises, proof_steps, hypothesis) if self.enable_fallacy_check else []
         contradiction_analysis["fallacies"] = fallacies
         if rejected and self.include_rejected_premises:
@@ -154,24 +174,73 @@ class ReasoningDeductive(BaseReasoning):
         is_proven, certainty = self._determine_certainty(evaluation, contradiction_analysis)
         result = self._format_result(is_proven, certainty, proof_steps, [s.text for s in valid_premises], hypothesis, contradiction_analysis)
         result["evaluation"] = evaluation
+        result["verdict"] = self._verdict(evaluation, contradiction_analysis, is_proven)
+        result["truncated"] = bool(truncated)
+        if truncated and not is_proven:
+            result["stop_reason"] = "step_budget_exhausted"
         return self._finalize_result(result, started, cache_key)
 
+    @staticmethod
+    def _verdict(evaluation: Mapping[str, Any], contradiction_analysis: Mapping[str, Any], is_proven: bool) -> str:
+        """entailed | entailed_low_confidence | refuted | inconsistent | undetermined.
+
+        ``undetermined`` means "not derivable from these premises with these rules" -- an
+        open-world answer, NOT a proof that the hypothesis is false.
+        """
+        if contradiction_analysis.get("internal_contradictions"):
+            return "inconsistent"
+        if is_proven:
+            return "entailed"
+        established = bool(
+            evaluation.get("direct_proof") or evaluation.get("premise_match") or evaluation.get("derived_proof")
+        )
+        if contradiction_analysis.get("hypothesis_contradictions"):
+            return "refuted"
+        return "entailed_low_confidence" if established else "undetermined"
+
     def identify_contradictions(self, statements: List[str]) -> List[Tuple[str, str, str]]:
-        """Identify direct negation, predicate conflict, and universal-instance conflicts."""
-        # Normalize all statements to canonical form
+        """Identify direct negation, predicate conflict, and universal-instance conflicts.
+
+        Linear-time: a contradiction partner is found by index lookup (the statement's
+        negation, statements whose negation it is, or the same entity with a negated
+        predicate) instead of comparing every pair. Each candidate pair is still verified
+        by ``_contradiction_type``, so the pair semantics are unchanged.
+        """
         canonical_statements = [self._canonical_text(s) for s in statements if str(s).strip()]
         contradictions: List[Tuple[str, str, str]] = []
         seen: Set[Tuple[str, str, str]] = set()
-    
-        for i, left in enumerate(canonical_statements):
-            for right in canonical_statements[i + 1:]:
+
+        known: Set[str] = set(canonical_statements)
+        by_entity: Dict[str, Dict[str, str]] = defaultdict(dict)
+        for text in canonical_statements:
+            parsed = self._parse_isa(text)
+            if parsed:
+                by_entity[parsed[0]].setdefault(parsed[1], text)
+
+        for left in canonical_statements:
+            candidates: List[str] = [self._negate(left), f"not {left}"]
+            candidates.extend(prefix + left for prefix in _NEGATION_PREFIXES)
+            parsed = self._parse_isa(left)
+            if parsed:
+                entity, predicate = parsed
+                if predicate.startswith("not "):
+                    candidates.append(f"{entity} is {predicate[4:]}")
+                    partner = by_entity[entity].get(predicate[4:])
+                else:
+                    candidates.append(f"{entity} is not {predicate}")
+                    partner = by_entity[entity].get(f"not {predicate}")
+                if partner:
+                    candidates.append(partner)
+            for right in dict.fromkeys(candidates):
+                if right not in known or right == left:
+                    continue
                 ctype = self._contradiction_type(left, right)
-                if ctype:
-                    # Ensure deterministic ordering for deduplication
-                    key = (left, right, ctype) if left <= right else (right, left, ctype)
-                    if key not in seen:
-                        seen.add(key)
-                        contradictions.append((left, right, ctype))
+                if not ctype:
+                    continue
+                key = (left, right, ctype) if left <= right else (right, left, ctype)
+                if key not in seen:
+                    seen.add(key)
+                    contradictions.append((left, right, ctype))
         return contradictions
 
     def diagnostics(self) -> Dict[str, Any]:
@@ -224,7 +293,7 @@ class ReasoningDeductive(BaseReasoning):
         return [item.text for item in valid]
 
     def _validate_premises_with_rejections(self, premises: List[DeductiveStatement], context: Mapping[str, Any]) -> Tuple[List[DeductiveStatement], List[Dict[str, Any]]]:
-        known_falsehoods = {self._canonical_text(item) for item in context.get("known_falsehoods", [])}
+        known_falsehoods = {self._canonical_text(item) for item in self._as_seq(context.get("known_falsehoods"))}
         rejected: List[Dict[str, Any]] = []
         valid: List[DeductiveStatement] = []
         for item in premises:
@@ -264,8 +333,13 @@ class ReasoningDeductive(BaseReasoning):
     # ------------------------------------------------------------------
     # Inference engine
     # ------------------------------------------------------------------
-    def _apply_inference_rules(self, premises: List[str], context: Dict) -> List[Dict[str, Any]]:
-        current: Dict[str, float] = {self._canonical_text(p): 1.0 for p in premises}
+    def _apply_inference_rules(self, premises: List[str], context: Dict, confidences: Optional[Mapping[str, float]] = None) -> List[Dict[str, Any]]:
+        # ``confidences`` maps canonical premise text -> confidence. Previously every premise was
+        # seeded at 1.0, silently discarding evidence confidences from the proof.
+        confidences = confidences or {}
+        current: Dict[str, float] = {
+            self._canonical_text(p): clamp_confidence(confidences.get(self._canonical_text(p), 1.0)) for p in premises
+        }
         display: Dict[str, str] = {self._canonical_text(p): self._clean_statement(p) for p in premises}
         proof_steps: List[ProofStep] = []
         seen_steps: Set[Tuple[str, str, Tuple[str, ...]]] = set()
@@ -311,9 +385,13 @@ class ReasoningDeductive(BaseReasoning):
                     step_no += 1
                     added_this_round += 1
                     if step_no >= self.max_steps:
+                        self._proof_truncated = True
                         return [p.to_dict() for p in proof_steps]
             if added_this_round == 0:
                 break
+        else:
+            # Iteration budget used up while the last round was still productive.
+            self._proof_truncated = True
         return [p.to_dict() for p in proof_steps]
 
     @staticmethod
@@ -373,18 +451,56 @@ class ReasoningDeductive(BaseReasoning):
                     results.append((conclusion, [display.get(inst_stmt, inst_stmt), display.get(uni_stmt, uni_stmt)], self._rule_confidence("syllogism", current[inst_stmt], current[uni_stmt]), {"pattern": "instance_subsumption"}))
         return results
 
+    def _split_disjuncts(self, statement: str) -> List[str]:
+        """Clausal disjuncts of ``statement`` (canonical, de-duplicated), or ``[]``.
+
+        Elliptical coordination ("alice likes tea or coffee") is not a disjunction of
+        clauses; treating it as one made "alice likes tea" appear to be refutable.
+        """
+        parts = [part for part in _DISJ_RE.split(statement) if part.strip()]
+        if len(parts) < 2:
+            return []
+        options = list(dict.fromkeys(self._canonical_text(part) for part in parts))
+        if len(options) < 2:
+            return []
+        if len(options[0].split()) >= 3 and any(len(option.split()) == 1 for option in options[1:]):
+            return []
+        return options
+
     def _derive_disjunctive_syllogism(self, current: Mapping[str, float], display: Mapping[str, str], context: Dict) -> List[Tuple[str, List[str], float, Dict[str, Any]]]:
+        """Sound disjunctive syllogism for n-ary disjunctions.
+
+        From ``A or B or C`` and ``not A`` the only valid conclusion is ``B or C`` -- not
+        ``B`` and not ``C`` separately (the earlier implementation derived each remaining
+        option, which is unsound for three or more options). When exactly one option
+        survives it is derived outright. If every option is refuted the premises are
+        inconsistent and nothing is derived (no ex falso explosion).
+        """
         results = []
         for stmt in current:
-            options = [self._canonical_text(p) for p in _DISJ_RE.split(stmt) if p.strip()]
-            if len(options) < 2:
+            options = self._split_disjuncts(stmt)
+            if not options:
                 continue
+            eliminated = []
+            negations = []
             for option in options:
-                neg = self._negate(option)
-                if neg in current:
-                    for other in options:
-                        if other != option:
-                            results.append((other, [display.get(stmt, stmt), display.get(neg, neg)], self._rule_confidence("disjunctive_syllogism", current[stmt], current[neg]), {"eliminated": option}))
+                negation = self._negate(option)
+                if negation in current and negation != stmt:
+                    eliminated.append(option)
+                    negations.append(negation)
+            if not eliminated:
+                continue
+            remaining = [option for option in options if option not in eliminated]
+            if not remaining:
+                continue
+            conclusion = remaining[0] if len(remaining) == 1 else " or ".join(remaining)
+            confidence = self._rule_confidence("disjunctive_syllogism", current[stmt], *[current[n] for n in negations])
+            results.append((
+                conclusion,
+                [display.get(stmt, stmt)] + [display.get(n, n) for n in negations],
+                confidence,
+                {"eliminated": eliminated, "remaining": remaining},
+            ))
         return results
 
     def _derive_hypothetical_syllogism(self, current: Mapping[str, float], display: Mapping[str, str], context: Dict) -> List[Tuple[str, List[str], float, Dict[str, Any]]]:
@@ -431,23 +547,40 @@ class ReasoningDeductive(BaseReasoning):
     # ------------------------------------------------------------------
     # Proof evaluation
     # ------------------------------------------------------------------
-    def _evaluate_hypothesis(self, hypothesis: str, proof_steps: List[Dict[str, Any]], context: Dict) -> Dict[str, Any]:
+    def _evaluate_hypothesis(
+        self,
+        hypothesis: str,
+        proof_steps: List[Dict[str, Any]],
+        context: Dict,
+        premises: Optional[Sequence[DeductiveStatement]] = None,
+    ) -> Dict[str, Any]:
         target = self._canonical_text(hypothesis)
         neg_target = self._negate(target)
         conclusions = {self._canonical_text(step.get("output", "")): step for step in proof_steps}
+        # A hypothesis that is itself an accepted premise is trivially entailed (P |- P),
+        # and a premise that contradicts the hypothesis refutes it even when no rule used it.
+        premise_conf = {p.canonical: p.confidence for p in (premises or [])}
+        premise_match = target in premise_conf
         direct = target in conclusions
-        negated = neg_target in conclusions or any(self._contradiction_type(target, c) for c in conclusions)
-        derived = direct or self._can_derive(hypothesis, [s.get("output", "") for s in proof_steps], context)
+        negated = (
+            neg_target in conclusions
+            or neg_target in premise_conf
+            or any(self._contradiction_type(target, c) for c in list(conclusions) + list(premise_conf))
+        )
+        derived = direct or premise_match or self._can_derive(hypothesis, [s.get("output", "") for s in proof_steps], context)
         support_step = conclusions.get(target)
         proof_strength = 0.0
         if direct and support_step:
             proof_strength = clamp_confidence(support_step.get("confidence", 0.9))
+        elif premise_match:
+            proof_strength = clamp_confidence(premise_conf[target])
         elif derived:
             proof_strength = 0.7
-        elif not negated:
-            proof_strength = 0.25
+        # Not derivable (and not refuted) = no established support. The earlier 0.25
+        # baseline reported a non-zero "certainty" for a hypothesis nothing supported.
         return {
             "direct_proof": direct,
+            "premise_match": premise_match,
             "negation_proof": bool(negated),
             "derived_proof": bool(derived),
             "proof_strength": clamp_confidence(proof_strength),
@@ -463,8 +596,14 @@ class ReasoningDeductive(BaseReasoning):
                 return True
         return False
 
-    def _check_contradictions(self, proof_steps: List[Dict[str, Any]], hypothesis: str, context: Dict) -> Dict[str, Any]:
-        statements: List[str] = []
+    def _check_contradictions(
+        self,
+        proof_steps: List[Dict[str, Any]],
+        hypothesis: str,
+        context: Dict,
+        premises: Optional[Sequence[DeductiveStatement]] = None,
+    ) -> Dict[str, Any]:
+        statements: List[str] = [p.text for p in (premises or [])]
         for step in proof_steps:
             statements.extend(step.get("input", []))
             statements.append(step.get("output", ""))
@@ -483,7 +622,7 @@ class ReasoningDeductive(BaseReasoning):
         certainty -= clamp_confidence(contradiction_analysis.get("contradiction_score", 0.0)) * self.contradiction_penalty
         if evaluation.get("negation_proof"):
             certainty *= (1.0 - self.negation_penalty)
-        if contradiction_analysis.get("fallacies"):
+        if any(f.get("type") != "begging_the_question" for f in contradiction_analysis.get("fallacies", [])):
             certainty *= 0.9
         certainty = clamp_confidence(certainty)
         is_proven = certainty >= self.certainty_threshold and not contradiction_analysis.get("hypothesis_contradictions")
@@ -509,7 +648,38 @@ class ReasoningDeductive(BaseReasoning):
             text = text[: self.max_statement_length].rstrip()
         return text
 
+    @staticmethod
+    def _as_seq(value: Any) -> List[Any]:
+        """Tolerant list view of an optional context field (None/scalars never raise)."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return list(value)
+        if isinstance(value, str):
+            return [value]
+        return []
+
     def _canonical_text(self, value: Any) -> str:
+        key = value if isinstance(value, str) else str(value)
+        hit = self._memo_canon.get(key)
+        if hit is not None:
+            return hit
+        result = self._canonical_text_uncached(key)
+        if len(self._memo_canon) < _MEMO_LIMIT:
+            self._memo_canon[key] = result
+        return result
+
+    def _memoized_parse(self, kind: str, text: str, compute: Any) -> Any:
+        key = (kind, text)
+        hit = self._memo_parse.get(key, _NO_PARSE)
+        if hit is not _NO_PARSE:
+            return hit
+        result = compute(text)
+        if len(self._memo_parse) < _MEMO_LIMIT:
+            self._memo_parse[key] = result
+        return result
+
+    def _canonical_text_uncached(self, value: Any) -> str:
         text = self._clean_statement(value).lower().strip(" .")
         text = text.replace("can't", "cannot")
         leading_neg = re.match(r"^not\s+(.+?)\s+(is|are)\s+(.+)$", text)
@@ -548,18 +718,27 @@ class ReasoningDeductive(BaseReasoning):
         return self._canonical_text(match.group(1)), self._canonical_text(match.group(2))
 
     def _parse_implication(self, text: str) -> Optional[Tuple[str, str]]:
+        return self._memoized_parse("implication", text, self._parse_implication_uncached)
+
+    def _parse_implication_uncached(self, text: str) -> Optional[Tuple[str, str]]:
         if " implies " in text:
             left, right = text.split(" implies ", 1)
             return self._canonical_text(left), self._canonical_text(right)
         return self._parse_implication_raw(text)
 
     def _parse_universal(self, text: str) -> Optional[Tuple[str, str]]:
+        return self._memoized_parse("universal", text, self._parse_universal_uncached)
+
+    def _parse_universal_uncached(self, text: str) -> Optional[Tuple[str, str]]:
         match = _UNIVERSAL_RE.match(text)
         if not match:
             return None
         return self._term(match.group(2)), self._term(match.group(3))
 
     def _parse_isa(self, text: str) -> Optional[Tuple[str, str]]:
+        return self._memoized_parse("isa", text, self._parse_isa_uncached)
+
+    def _parse_isa_uncached(self, text: str) -> Optional[Tuple[str, str]]:
         if self._parse_implication(text) or self._parse_universal(text) or _DISJ_RE.search(text):
             return None
         match = _ISA_RE.match(text)
@@ -606,6 +785,8 @@ class ReasoningDeductive(BaseReasoning):
 
     def _rule_confidence(self, rule_name: str, *support_confidences: float) -> float:
         base = min([clamp_confidence(c) for c in support_confidences] or [1.0])
+        if not self.apply_rule_decay:
+            return clamp_confidence(base)  # truth-preserving: as certain as the weakest premise
         weight = self.rule_weights.get(rule_name, 1.0)
         return clamp_confidence(base * weight * self.rule_confidence_decay)
 
@@ -619,11 +800,18 @@ class ReasoningDeductive(BaseReasoning):
         return mapping
 
     def _cache_key(self, premises: Sequence[str], hypothesis: str, context: Mapping[str, Any]) -> str:
+        evidence = context.get("evidence", [])
         payload = {
             "premises": [self._canonical_text(p) for p in premises],
             "hypothesis": self._canonical_text(hypothesis),
-            "known_falsehoods": [self._canonical_text(x) for x in context.get("known_falsehoods", [])],
+            "known_falsehoods": [self._canonical_text(x) for x in self._as_seq(context.get("known_falsehoods"))],
+            # Evidence and the default premise confidence change certainty, so they are part of the key.
+            "evidence": sorted(
+                f"{k}={v}" for k, v in self._evidence_confidence_map(evidence).items()
+            ),
+            "default_premise_confidence": context.get("default_premise_confidence", 1.0),
             "rules": self.rule_priority,
+            "apply_rule_decay": self.apply_rule_decay,
         }
         raw = str(json_safe_reasoning_state(payload))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -634,7 +822,7 @@ class ReasoningDeductive(BaseReasoning):
         safe = json_safe_reasoning_state(result)
         self._last_trace = {"hypothesis": safe.get("hypothesis"), "metrics": safe.get("metrics", {})}
         if self.cache is not None:
-            self.cache.set(cache_key, safe, ttl_seconds=self.cache_ttl_seconds)
+            self.cache.set(cache_key, copy.deepcopy(safe), ttl_seconds=self.cache_ttl_seconds)
         return safe
 
     def _format_result(self, is_proven: bool, certainty: float, proof_steps: List[Dict[str, Any]], premises: List[str], hypothesis: str, contradiction_analysis: Dict[str, Any]) -> Dict[str, Any]:

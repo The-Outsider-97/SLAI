@@ -4,6 +4,7 @@ from .perception_fusion import *
 from .perception_memory import *
 from .perception_objectives import *
 from .perception_trainer import *
+from .perception_models import MultimodalPerception, MultimodalContrastiveEncoder
 
 
 from .data_loader import __all__ as _data_loader_exports
@@ -21,4 +22,6 @@ __all__ = [
     *_perception_memory_exports,
     *_perception_objectives_exports,
     *_perception_trainer_exports,
+    "MultimodalPerception",
+    "MultimodalContrastiveEncoder",
 ] # type: ignore

@@ -5,6 +5,7 @@ from .counterfactual_auditor import *
 from .ethical_constraints import *
 from .fairness_evaluator import *
 from .runtime import *
+from .learned_models import AlignmentModelBundle, RepresentationEncoder, ValueAlignmentScorer
 from .value_embedding_model import *
 
 

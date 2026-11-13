@@ -333,6 +333,10 @@ value_embedding:
   margin: 0.20
   max_seq_length: 128
   text_feature_dim: 128
+  # New model checkpoints use deterministic token hashing. Existing checkpoints
+  # trained with Python hash need explicit legacy_python_hash_v0 selection and
+  # a fixed PYTHONHASHSEED; they are not reproducible by default.
+  text_hash_strategy: blake2b_v1
   alignment_hidden_dim: 512
   preference_hidden_dim: 256
   policy_hidden_dims: [1024, 512]

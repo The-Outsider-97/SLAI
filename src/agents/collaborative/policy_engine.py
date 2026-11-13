@@ -365,12 +365,17 @@ class PolicyEngine:
         for rule in rules or ():
             self.add_rule(rule)
 
-        logger.info("Policy Engine initialized")
+        logger.info(
+            "Policy Engine initialized (enabled=%s, rules=%d, fail_closed=%s, default=%s, audit=%s)",
+            self.enabled, len(self._rules), self.fail_closed,
+            self.default_decision.value, self.audit_enabled,
+        )
 
     def add_rule(self, rule: PolicyRule) -> None:
         normalized = ensure_policy_rule(rule)
         with self._lock:
             if len(self._rules) >= self.max_rules and normalized.rule_id not in self._rule_index:
+                logger.error("Policy rule limit exceeded: max=%d", self.max_rules)
                 raise _policy_error(
                     "Policy rule limit exceeded.",
                     context={"max_rules": self.max_rules, "rule_id": normalized.rule_id},
@@ -378,6 +383,7 @@ class PolicyEngine:
                 )
             if normalized.rule_id in self._rule_index:
                 if not self.allow_duplicate_rule_ids:
+                    logger.error("Duplicate policy rule id rejected: %s", normalized.rule_id)
                     raise _policy_error(
                         "Duplicate policy rule id is not allowed.",
                         context={"rule_id": normalized.rule_id},
@@ -388,7 +394,8 @@ class PolicyEngine:
 
             self._rule_index[normalized.rule_id] = normalized
             self._rules = sorted(self._rule_index.values(), key=lambda item: (item.priority, item.created_at, item.rule_id))
-            logger.debug("Policy rule registered: %s", normalized.rule_id)
+            logger.debug("Policy rule registered: id=%s effect=%s priority=%d",
+                         normalized.rule_id, normalized.effect.value, normalized.priority)
 
     def add_simple_rule(self, *, rule_id: str, description: str, effect: PolicyDecision, priority: int,
                         predicate: PolicyPredicate, enabled: bool = True,
@@ -434,6 +441,8 @@ class PolicyEngine:
         if configured is None:
             return 0
         if not isinstance(configured, Sequence) or isinstance(configured, (str, bytes)):
+            logger.error("policy_engine.configured_rules must be a sequence of mappings, got %s",
+                         type(configured).__name__)
             raise _policy_error(
                 "policy_engine.configured_rules must be a sequence of mappings.",
                 context={"received_type": type(configured).__name__},
@@ -446,6 +455,8 @@ class PolicyEngine:
             rule = build_rule_from_config(item)
             self.add_rule(rule)
             count += 1
+        if count:
+            logger.debug("Loaded %d configured policy rule(s)", count)
         return count
 
     def remove_rule(self, rule_id: str) -> bool:
@@ -455,12 +466,16 @@ class PolicyEngine:
             if existed:
                 del self._rule_index[normalized_id]
                 self._rules = sorted(self._rule_index.values(), key=lambda item: (item.priority, item.created_at, item.rule_id))
+                logger.info("Policy rule removed: %s", normalized_id)
             return existed
 
     def clear_rules(self) -> None:
         with self._lock:
+            count = len(self._rules)
             self._rules.clear()
             self._rule_index.clear()
+            if count:
+                logger.info("Policy rule registry cleared (%d removed)", count)
 
     def get_rule(self, rule_id: str) -> Optional[PolicyRule]:
         return self._rule_index.get(normalize_rule_id(rule_id))
@@ -480,6 +495,7 @@ class PolicyEngine:
             updated = clone_rule(current, enabled=enabled, updated_at=epoch_seconds())
             self._rule_index[normalized_id] = updated
             self._rules = sorted(self._rule_index.values(), key=lambda item: (item.priority, item.created_at, item.rule_id))
+            logger.info("Policy rule %s %s", normalized_id, "enabled" if enabled else "disabled")
             return True
 
     def evaluate(self, task: Dict[str, Any], agent_meta: Optional[Dict[str, Any]] = None,
@@ -508,11 +524,16 @@ class PolicyEngine:
                 duration_ms=elapsed_ms(start_ms),
                 metadata={"enabled": False},
             )
+            logger.debug("Policy evaluate: engine disabled, returning default=%s",
+                         self.default_decision.value)
             self._record_evaluation(evaluation, normalized_task, normalized_agent, normalized_context)
             return evaluation
 
         with self._lock:
             rules = list(self._rules)
+
+        logger.debug("Policy evaluate start: task_type=%r rule_count=%d correlation=%s",
+                     normalized_task.get("task_type"), len(rules), correlation_id)
 
         for rule in rules:
             if not rule.enabled:
@@ -575,6 +596,8 @@ class PolicyEngine:
                     )
                 )
                 warnings.append(f"Policy rule '{rule.rule_id}' failed: {type(exc).__name__}")
+                logger.warning("Policy rule '%s' failed during evaluation: %s",
+                               rule.rule_id, exc)
                 synthetic = PolicyRuleEvaluation(
                     rule_id=rule.rule_id,
                     matched=True,
@@ -646,6 +669,12 @@ class PolicyEngine:
             correlation_id=correlation_id,
             duration_ms=elapsed_ms(start_ms),
         )
+        logger.debug(
+            "Policy evaluate done: decision=%s matched=%d denied=%d review=%d errors=%d duration_ms=%.2f",
+            evaluation.decision.value, len(evaluation.matched_rules),
+            len(evaluation.denied_rules), len(evaluation.review_rules),
+            len(evaluation.errors), evaluation.duration_ms,
+        )
         self._record_evaluation(evaluation, normalized_task, normalized_agent, normalized_context)
         return evaluation
 
@@ -656,7 +685,10 @@ class PolicyEngine:
         agent_meta: Mapping[str, Any],
         context: Mapping[str, Any],
     ) -> None:
-        if not self.audit_enabled or self.shared_memory is None:
+        if not self.audit_enabled:
+            return
+        if self.shared_memory is None:
+            logger.debug("Policy audit enabled but shared_memory is None; skipping event")
             return
         try:
             event = build_audit_event(
@@ -1071,6 +1103,7 @@ def describe_predicate(predicate: Optional[PolicyPredicate]) -> Optional[Dict[st
 
 def _policy_error(message: str, *, context: Optional[Mapping[str, Any]] = None, severity: str = "high") -> Exception:
     payload = merge_mappings({"component": "policy_engine"}, context, deep=True, drop_none=True)
+    logger.debug("Policy boundary error: %s context=%s severity=%s", message, payload, severity)
     return CollaborationError(
         CollaborationErrorType.ROUTING_FAILURE, # type: ignore
         message,
@@ -1103,7 +1136,7 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    print("\n=== Running Policy Engine ===\n")
+    printer.section_header("Policy Engine Self-Test")
     printer.status("TEST", "Policy Engine initialized", "info")
 
     class _Memory:
@@ -1186,4 +1219,4 @@ if __name__ == "__main__":
     assert isinstance(engine.export_rules(), list)
     assert memory.get(engine.audit_key), "audit events should be recorded"
 
-    print("\n=== Test ran successfully ===\n")
+    printer.status("OK", "Policy Engine self-test passed", "success")

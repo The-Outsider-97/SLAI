@@ -12,7 +12,7 @@ __version__ = "2.3.0"
 import numpy as np # type: ignore
 
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from .geometry import AABB, Polygon, Segment, Sphere, aabb_intersects, point_in_aabb, point_in_polygon_2d, segment_intersection_2d, sphere_intersects
 from ..utils.spatial_errors import SpatialTopologyError, SpatialValidationError
@@ -165,6 +165,135 @@ def interior(geometry: Any, point: Any, *, tolerance: float = DEFAULT_ABS_TOL) -
 
 
 class Topology:
+    @staticmethod
+    def validate_constraints(entities: Mapping[str, Any], constraints: Sequence[Mapping[str, Any]],
+                             *, tolerance: float = DEFAULT_ABS_TOL) -> dict[str, Any]:
+        """Evaluate point/vector constraints without moving caller-owned entities.
+
+        Supported kinds: coincident, distance, minimum_clearance, parallel,
+        perpendicular, collinear.  Does not claim solver completeness.
+        """
+        if not isinstance(entities, Mapping) or not isinstance(constraints, (list, tuple)) or len(constraints) > 5000:
+            raise SpatialValidationError("entities must be mapping and constraints a bounded sequence")
+        if not isinstance(tolerance, (int, float)) or not np.isfinite(tolerance) or tolerance < 0:
+            raise SpatialValidationError("tolerance must be finite and non-negative")
+        points: dict[str, np.ndarray] = {}
+        frames: dict[str, str] = {}
+        for key, value in entities.items():
+            if not isinstance(key, str) or not key:
+                raise SpatialValidationError("entity identifiers must be non-empty strings")
+            raw = value.position if hasattr(value, "position") else value
+            vec = np.asarray(raw, dtype=float)
+            if vec.ndim != 1 or vec.size not in (2, 3) or not np.all(np.isfinite(vec)):
+                raise SpatialValidationError("constraint entities require finite 2D or 3D points")
+            points[key] = vec.copy()
+            frames[key] = str(getattr(value, "frame_id", "world"))
+        results: list[dict[str, Any]] = []
+        for index, specification in enumerate(constraints):
+            if not isinstance(specification, Mapping):
+                raise SpatialValidationError("constraints must be mappings")
+            kind, refs = specification.get("kind"), specification.get("entities")
+            expected_size = {"coincident": 2, "distance": 2, "minimum_clearance": 2,
+                             "parallel": 4, "perpendicular": 4, "collinear": 3}
+            if kind not in expected_size or not isinstance(refs, (list, tuple)) or len(refs) != expected_size[kind] or any(not isinstance(x, str) or not x for x in refs):
+                raise SpatialValidationError("unsupported constraint kind or invalid entity references")
+            missing = [ref for ref in refs if ref not in points]
+            if missing:
+                results.append({"index": index, "kind": kind, "status": "unresolved", "missing": missing})
+                continue
+            if len({frames[ref] for ref in refs}) > 1 or len({points[ref].size for ref in refs}) > 1:
+                results.append({"index": index, "kind": kind, "status": "unresolved", "reason": "incompatible coordinate frames or dimensions"})
+                continue
+            coords = [points[ref] for ref in refs]
+            residual: float
+            if kind == "coincident":
+                residual = float(np.linalg.norm(coords[0] - coords[1]))
+            elif kind in ("distance", "minimum_clearance"):
+                target = specification.get("target")
+                if isinstance(target, bool) or not isinstance(target, (int, float)) or not np.isfinite(target) or target < 0:
+                    raise SpatialValidationError("distance constraints need a finite non-negative target")
+                measured = float(np.linalg.norm(coords[0] - coords[1]))
+                residual = abs(measured - target) if kind == "distance" else max(0.0, target - measured)
+            elif kind == "collinear":
+                u, v = coords[1] - coords[0], coords[2] - coords[0]
+                length = float(np.linalg.norm(u))
+                residual = float(np.linalg.norm(v - np.dot(u, v) / (length * length) * u)) if length > tolerance else float("inf")
+            else:
+                u, v = coords[1] - coords[0], coords[3] - coords[2]
+                lu, lv = float(np.linalg.norm(u)), float(np.linalg.norm(v))
+                if min(lu, lv) <= tolerance:
+                    residual = float("inf")
+                else:
+                    cosine = float(np.clip(np.dot(u, v) / (lu * lv), -1, 1))
+                    residual = abs(abs(cosine) - 1) if kind == "parallel" else abs(cosine)
+            results.append({"index": index, "kind": kind,
+                            "status": "unresolved" if not np.isfinite(residual) else ("satisfied" if residual <= tolerance else "violated"),
+                            "residual": residual if np.isfinite(residual) else None,
+                            "tolerance": tolerance})
+        # Detect only contradictions provable from direct constraints on the
+        # same referenced point pair. General nonlinear system consistency,
+        # redundancy, and degrees of freedom require a separate solver.
+        pair_constraints: dict[tuple[str, str], list[tuple[int, str, float]]] = {}
+        for index, specification in enumerate(constraints):
+            kind = specification["kind"]
+            if kind not in {"coincident", "distance", "minimum_clearance"}:
+                continue
+            refs = specification["entities"]
+            if results[index]["status"] == "unresolved":
+                continue
+            target = 0.0 if kind == "coincident" else float(specification["target"])
+            pair_constraints.setdefault(tuple(sorted(refs)), []).append((index, kind, target))
+        conflicts: list[dict[str, Any]] = []
+        for pair, checks in pair_constraints.items():
+            for left_index, left_kind, left_target in checks:
+                for right_index, right_kind, right_target in checks:
+                    if right_index <= left_index:
+                        continue
+                    left_exact = left_kind != "minimum_clearance"
+                    right_exact = right_kind != "minimum_clearance"
+                    if left_exact and right_exact:
+                        contradictory = abs(left_target - right_target) > tolerance
+                    elif left_exact:
+                        contradictory = left_target + tolerance < right_target
+                    else:
+                        contradictory = right_exact and right_target + tolerance < left_target
+                    if contradictory:
+                        conflicts.append({"entities": list(pair), "constraint_indices": [left_index, right_index],
+                                          "kind": "provable_pairwise_conflict"})
+        return {"constraints": results, "satisfied": all(item["status"] == "satisfied" for item in results) and not conflicts,
+                "unresolved": sum(item["status"] == "unresolved" for item in results),
+                "consistency": "inconsistent" if conflicts else "not_proven",
+                "conflicts": conflicts, "scope": "geometric-validation-only"}
+
+    @staticmethod
+    def validate_polygon(polygon: Polygon, *, tolerance: float = DEFAULT_ABS_TOL) -> dict[str, Any]:
+        """Report duplicate/degenerate edges and crossings in a planar polygon.
+
+        This is a read-only topology diagnostic, not a mesh repair operation.
+        """
+        if not isinstance(polygon, Polygon) or polygon.dimension != 2:
+            raise SpatialTopologyError("validate_polygon requires a 2D Polygon")
+        if not np.isfinite(tolerance) or tolerance < 0:
+            raise SpatialTopologyError("tolerance must be finite and non-negative")
+        points = polygon.vertices
+        n = len(points)
+        findings: list[dict[str, Any]] = []
+        for i in range(n):
+            if float(np.linalg.norm(points[i] - points[(i + 1) % n])) <= tolerance:
+                findings.append({"kind": "degenerate_edge", "edges": [i]})
+        twice_area = float(sum(points[i, 0] * points[(i + 1) % n, 1] - points[(i + 1) % n, 0] * points[i, 1] for i in range(n)))
+        if abs(twice_area) <= tolerance * tolerance:
+            findings.append({"kind": "zero_signed_area"})
+        for i in range(n):
+            a, b = points[i], points[(i + 1) % n]
+            for j in range(i + 1, n):
+                if j == i + 1 or (i == 0 and j == n - 1):
+                    continue  # adjacent edges share a permitted endpoint
+                c, d = points[j], points[(j + 1) % n]
+                if segment_intersection_2d(Segment(a, b), Segment(c, d), tolerance=tolerance):
+                    findings.append({"kind": "self_intersection", "edges": [i, j]})
+        return {"valid": not findings, "findings": findings, "signed_area": twice_area / 2.0}
+
     """Facade for topological predicates with stable method names."""
 
     connected = staticmethod(connected)

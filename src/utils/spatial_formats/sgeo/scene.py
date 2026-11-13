@@ -1,0 +1,707 @@
+"""SGEO document scene graph: one parent per object, acyclic, stable object IDs.
+
+Since 0.2.0 a scene also owns a material registry (``materials``), an image registry (``images``, records only)
+and the encoded image bytes (``image_data``: image id -> PNG/JPEG bytes). The bytes never appear in
+:meth:`Scene.as_dict`; the container stores them as ``textures/`` members."""
+from __future__ import annotations
+from copy import deepcopy
+from itertools import product
+from threading import RLock
+from ..common.errors import ReferenceError
+from ..common import ValidationError, ResourceLimitError, new_id, require_id, assert_unique, require_unit, require_metadata
+from ..common.transforms import IDENTITY, compose, require_transform, transform_point
+from ..common.modifiers import validate_modifiers
+from ..container.versions import CURRENT_VERSION, schema_id
+from .geometry import validate_geometry, local_bounds
+from .images import texture_path
+from .materials import validate_registries, verify_image_bytes
+
+MAX_OBJECTS = 100_000
+MAX_FAMILIES = 10_000
+MAX_ANIMATION_UNDO = 16
+MAX_ANIMATION_HISTORY_BYTES = 32 * 1024 * 1024
+
+_LEGACY_PARAMETER_FIELDS={"type","default","min","max","expression","read_only","description"}
+
+
+class Scene:
+    def __init__(self, name="Untitled", *, unit="m", document_id=None, revision=1,
+                 objects=None, metadata=None, document_kind="model", families=None, materials=None, images=None,
+                 image_data=None, modifiers=None):
+        self._mutation_lock=RLock()
+        self.name=name
+        self.unit=require_unit(unit)
+        self.document_id=document_id or new_id()
+        self.revision=revision
+        self.objects=deepcopy(objects) if objects is not None else []
+        self.metadata=deepcopy(metadata) if metadata is not None else {}
+        self.document_kind=document_kind
+        self.families=deepcopy(families) if families is not None else []
+        self.materials=deepcopy(materials) if materials is not None else []
+        self.images=deepcopy(images) if images is not None else []
+        self.image_data=dict(image_data) if image_data else {}
+        self.modifiers=deepcopy(modifiers) if modifiers is not None else []
+        self._modifier_cache={}
+        # Ephemeral journal of animation metadata edits, not a second scene
+        # database. Persisted documents keep authoritative revisions only.
+        self._animation_undo = []
+        self._animation_redo = []
+        self.validate()
+
+    @staticmethod
+    def _check_object(obj):
+        """Validate everything about one object record that needs no other object."""
+        if not isinstance(obj,dict):
+            raise ValidationError("scene object must be an object")
+        if set(obj) - {"id","name","parent","transform","geometry","metadata","family_id","family_type","parameters","material"}:
+            raise ValidationError("unknown scene object field")
+        if "family_type" in obj:
+            from .families import validate_type_name
+            validate_type_name(obj["family_type"])
+            if "family_id" not in obj:
+                raise ValidationError("a family type requires a family reference")
+        if "material" in obj:
+            require_id(obj["material"])
+            if obj.get("geometry") is None:
+                raise ValidationError("only an object with geometry can have a material")
+        if not isinstance(obj.get("name",""),str) or len(obj.get("name",""))>255:
+            raise ValidationError("invalid object name")
+        require_transform(obj.get("transform",IDENTITY))
+        if obj.get("geometry") is not None:
+            validate_geometry(obj["geometry"])
+        require_metadata(obj.get("metadata",{}))
+        if obj.get("parent") is not None:
+            require_id(obj["parent"])
+
+    def _detached_copy(self):
+        """Deep copy for transactional candidates; the caller validates before commit."""
+        clone=object.__new__(type(self))
+        clone._mutation_lock=RLock()
+        clone.name=self.name
+        clone.unit=self.unit
+        clone.document_id=self.document_id
+        clone.revision=self.revision
+        clone.objects=deepcopy(self.objects)
+        clone.metadata=deepcopy(self.metadata)
+        clone.document_kind=self.document_kind
+        clone.families=deepcopy(self.families)
+        clone.materials=deepcopy(self.materials)
+        clone.images=deepcopy(self.images)
+        clone.image_data=dict(self.image_data)
+        clone.modifiers=deepcopy(self.modifiers)
+        clone._modifier_cache=dict(getattr(self, "_modifier_cache", {}))
+        return clone
+
+    def validate(self):
+        require_id(self.document_id)
+        if type(self.revision) is not int or self.revision<1:
+            raise ValidationError("scene revision must be positive")
+        if not isinstance(self.name,str) or len(self.name)>255:
+            raise ValidationError("invalid scene name")
+        if self.document_kind not in ("model","family"):
+            raise ValidationError("invalid SGEO document kind")
+        require_metadata(self.metadata)
+        if not isinstance(self.objects,list) or len(self.objects)>MAX_OBJECTS:
+            raise ValidationError("invalid scene object count")
+        assert_unique(o.get("id") if isinstance(o,dict) else None for o in self.objects)
+        index={o["id"]:o for o in self.objects}
+        for obj in self.objects:
+            self._check_object(obj)
+            parent=obj.get("parent")
+            if parent is not None and (parent not in index or parent==obj["id"]):
+                raise ReferenceError("invalid scene parent reference")
+        # Iterative three-colour DFS avoids recursion and detects every cycle.
+        state={}
+        for oid in index:
+            cursor=oid
+            chain=[]
+            while cursor is not None and state.get(cursor) is None:
+                state[cursor]=1
+                chain.append(cursor)
+                cursor=index[cursor].get("parent")
+            if cursor is not None and state.get(cursor)==1:
+                raise ValidationError("scene graph contains a parent cycle")
+            for key in chain:
+                state[key]=2
+        validate_registries(self.materials,self.images,image_data=self.image_data or None)
+        material_ids={m["id"] for m in self.materials}
+        for obj in self.objects:
+            if "material" in obj and obj["material"] not in material_ids:
+                raise ReferenceError("object references an unknown material",context={"material":obj["material"]})
+        if not isinstance(self.families,list) or len(self.families)>MAX_FAMILIES:
+            raise ValidationError("families must be a list")
+        from .families import validate_family, generate_geometry
+        assert_unique(f.get("id") if isinstance(f,dict) else None for f in self.families)
+        fam_index={f["id"]:f for f in self.families}
+        for family in self.families:
+            validate_family(family)
+        for obj in self.objects:
+            if "family_id" in obj:
+                require_id(obj["family_id"])
+                if obj["family_id"] not in fam_index:
+                    raise ReferenceError("unknown family reference")
+                expected=generate_geometry(fam_index[obj["family_id"]],obj.get("parameters",{}),obj.get("family_type"))
+                if obj.get("geometry") != expected:
+                    raise ValidationError("family instance geometry does not match its parameters")
+            elif "parameters" in obj:
+                raise ValidationError("parameters require a family reference")
+        validate_modifiers(self.modifiers, format_id="slai.sgeo", document_id=self.document_id,
+                           revision=self.revision,
+                           items={obj["id"]: obj for obj in self.objects if obj.get("geometry") is not None},
+                           hierarchy={obj["id"]: obj.get("parent") for obj in self.objects})
+        from .animation import ANIMATION_KEY, ANIMATION_V2_KEY, validate_animation, validate_animation_v2
+        if ANIMATION_KEY in self.metadata and ANIMATION_V2_KEY in self.metadata:
+            raise ValidationError("scene cannot contain both v1 and v2 animation")
+        if ANIMATION_KEY in self.metadata:
+            validate_animation(self.metadata[ANIMATION_KEY], self)
+        if ANIMATION_V2_KEY in self.metadata:
+            validate_animation_v2(self.metadata[ANIMATION_V2_KEY], self)
+        return self
+
+
+    @staticmethod
+    def _animation_state_bytes(metadata):
+        """Compact, bounded, lossless snapshot of only the two versioned keys."""
+        import json
+        from zlib import compress
+        from .animation import ANIMATION_KEYS
+        payload = {key: metadata[key] for key in ANIMATION_KEYS if key in metadata}
+        return compress(json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8"), 1)
+
+    @staticmethod
+    def _restore_animation_bytes(candidate, payload):
+        from zlib import decompress
+        import json
+        from .animation import ANIMATION_KEYS
+        data = json.loads(decompress(payload).decode("utf-8"))
+        for key in ANIMATION_KEYS:
+            candidate.metadata.pop(key, None)
+        candidate.metadata.update(data)
+
+    def _record_animation_change(self, before: bytes, after: bytes):
+        """Record an animation-only inverse patch after a validated commit."""
+        if not hasattr(self, "_animation_undo"):
+            self._animation_undo, self._animation_redo = [], []
+        if self._animation_undo and self._animation_undo[-1]["revision"] != self.revision - 1:
+            self._animation_undo.clear()  # unrelated revisions invalidate earlier undo
+        self._animation_redo.clear()
+        entry = {"before": before, "after": after, "revision": self.revision}
+        self._animation_undo.append(entry)
+        while len(self._animation_undo) > MAX_ANIMATION_UNDO or (
+                sum(len(e["before"]) + len(e["after"]) for e in self._animation_undo)
+                > MAX_ANIMATION_HISTORY_BYTES and len(self._animation_undo) > 1):
+            self._animation_undo.pop(0)
+
+    def undo_animation(self, *, expected_revision=None):
+        """Undo one native animation edit without reverting unrelated scene data.
+
+        Interleaved non-animation edits invalidate the journal instead of
+        restoring stale object references. Revisions remain monotonically
+        increasing on both undo and redo.
+        """
+        from ..common.errors import ConflictError
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+            raise ValidationError("expected_revision must be a positive integer")
+        with self._mutation_lock:
+            if expected_revision is not None and expected_revision != self.revision:
+                raise ConflictError("scene revision mismatch")
+            if not getattr(self, "_animation_undo", []):
+                raise ValidationError("no available animation undo revision")
+            entry = self._animation_undo[-1]
+            if entry["revision"] != self.revision:
+                raise ConflictError("intervening scene modifications invalidate animation undo")
+            candidate = self._detached_copy()
+            self._restore_animation_bytes(candidate, entry["before"])
+            candidate.revision += 1
+            candidate.validate()
+            self.metadata, self.revision = candidate.metadata, candidate.revision
+            self._animation_undo.pop()
+            entry["revision"] = self.revision
+            self._animation_redo.append(entry)
+            if self._animation_undo:
+                self._animation_undo[-1]["revision"] = self.revision
+            return self.revision
+
+    def redo_animation(self, *, expected_revision=None):
+        """Reapply one previously undone animation change as a new revision."""
+        from ..common.errors import ConflictError
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+            raise ValidationError("expected_revision must be a positive integer")
+        with self._mutation_lock:
+            if expected_revision is not None and expected_revision != self.revision:
+                raise ConflictError("scene revision mismatch")
+            if not getattr(self, "_animation_redo", []):
+                raise ValidationError("no available animation redo revision")
+            entry = self._animation_redo[-1]
+            if entry["revision"] != self.revision:
+                raise ConflictError("intervening scene modifications invalidate animation redo")
+            candidate = self._detached_copy()
+            self._restore_animation_bytes(candidate, entry["after"])
+            candidate.revision += 1
+            candidate.validate()
+            self.metadata, self.revision = candidate.metadata, candidate.revision
+            self._animation_redo.pop()
+            entry["revision"] = self.revision
+            self._animation_undo.append(entry)
+            if self._animation_redo:
+                self._animation_redo[-1]["revision"] = self.revision
+            return self.revision
+
+    def set_animation(self, animation: dict | None, *, version: int | None = None) -> int:
+        """Atomically replace animation, preserving the active version by default.
+
+        Explicit version=2 upgrades v1 data only when the caller chooses it.
+        Removing animation clears both supported versions. Validation precedes
+        committing the detached candidate.
+        """
+        from .animation import (ANIMATION_KEY, ANIMATION_V2_KEY, validate_animation,
+                                validate_animation_v2)
+        if version is not None and (type(version) is not int or version not in (1, 2)):
+            raise ValidationError("animation version must be 1 or 2")
+        with self._mutation_lock:
+            candidate = self._detached_copy()
+            previous_metadata = self.metadata
+            active_v2 = ANIMATION_V2_KEY in candidate.metadata
+            chosen = (2 if active_v2 else 1) if version is None else version
+            candidate.metadata.pop(ANIMATION_KEY, None)
+            candidate.metadata.pop(ANIMATION_V2_KEY, None)
+            if animation is not None:
+                if chosen == 2:
+                    candidate.metadata[ANIMATION_V2_KEY] = validate_animation_v2(animation, candidate)
+                else:
+                    candidate.metadata[ANIMATION_KEY] = validate_animation(animation, candidate)
+            candidate.revision += 1
+            candidate.validate()
+            # Serialization is prepared *before* the authoritative commit so
+            # a failed journal encoding can never leave a committed scene
+            # behind an apparent edit error.
+            before_blob = self._animation_state_bytes(previous_metadata)
+            after_blob = self._animation_state_bytes(candidate.metadata)
+            self.metadata = candidate.metadata
+            self.revision = candidate.revision
+            self._record_animation_change(before_blob, after_blob)
+            return self.revision
+
+    def upgrade_animation(self, *, expected_revision: int | None = None) -> int:
+        """Explicitly migrate valid legacy v1 animation to equivalent native v2.
+
+        V1 schema is a strict subset of v2. Migration preserves keyframe data
+        exactly; no implicit upgrade is performed by loading or evaluation.
+        """
+        from .animation import ANIMATION_KEY, ANIMATION_V2_KEY
+        from ..common.errors import ConflictError
+        with self._mutation_lock:
+            if expected_revision is not None and (
+                    type(expected_revision) is not int or expected_revision < 1):
+                raise ValidationError("expected_revision must be positive integer")
+            if expected_revision is not None and self.revision != expected_revision:
+                raise ConflictError("scene revision does not match expected revision")
+            if ANIMATION_V2_KEY in self.metadata:
+                raise ValidationError("scene animation is already v2")
+            spec = self.metadata.get(ANIMATION_KEY)
+            if spec is None:
+                raise ValidationError("scene has no legacy v1 animation to migrate")
+            return self.set_animation(deepcopy(spec), version=2)
+
+    def evaluate(self, time: float):
+        """Evaluate read-only motion state without changing this scene."""
+        from .animation import evaluate_scene
+        return evaluate_scene(self, time)
+
+    def retarget_rig_motion(self, source_scene, source_clips, joint_map, *,
+                            translation_scales=None):
+        """Propose multiple mapped joint clips as one validated SGEO choreography.
+
+        Native clip instances bind to one object, so coordinated articulated
+        motion is expressed through reusable per-joint clips and one shared
+        normalized-phase choreography. Neither source nor target is edited.
+        """
+        from .kinematics import retarget_joint_clip
+        from .animation import ANIMATION_V2_KEY, validate_animation_v2
+        from ..common.ids import new_id
+        if not isinstance(source_scene, Scene):
+            raise ValidationError("source_scene must be a native SGEO Scene")
+        if (not isinstance(joint_map, dict) or not joint_map
+                or not isinstance(source_clips, dict)
+                or set(source_clips) != set(joint_map)):
+            raise ValidationError("source_clips must identify every mapped source joint")
+        scales = {} if translation_scales is None else translation_scales
+        if not isinstance(scales, dict) or set(scales) - set(joint_map):
+            raise ValidationError("invalid joint translation scale map")
+        with source_scene._mutation_lock:
+            source_scene.validate()
+            source_snapshot = source_scene._detached_copy()
+        with self._mutation_lock:
+            self.validate()
+            target_snapshot = self._detached_copy()
+        spec = target_snapshot.metadata.get(ANIMATION_V2_KEY)
+        if spec is None:
+            raise ValidationError("target requires native v2 animation")
+        proposal = deepcopy(spec)
+        clips = proposal.setdefault("clips", [])
+        instances = proposal.setdefault("instances", [])
+        created = []
+        for source_id in sorted(joint_map):
+            part = retarget_joint_clip(
+                source_snapshot, target_snapshot, source_clips[source_id],
+                {source_id: joint_map[source_id]},
+                translation_scales=(
+                    {source_id: scales[source_id]} if source_id in scales else None
+                ),
+            )
+            clip = part["clip"]
+            instance = {"id": new_id(), "clip_id": clip["id"],
+                        "object_id": part["target_object_id"], "start": 0}
+            clips.append(clip)
+            instances.append(instance)
+            created.append(instance)
+        if len(created) > 1:
+            proposal.setdefault("choreographies", []).append({
+                "id": new_id(), "leader": created[0]["id"],
+                "followers": [
+                    {"instance_id": entry["id"]} for entry in created[1:]
+                ],
+            })
+        validate_animation_v2(proposal, target_snapshot)
+        return {"status": "proposed", "animation": proposal,
+                "revision": target_snapshot.revision,
+                "source_revision": source_snapshot.revision,
+                "clip_ids": [entry["clip_id"] for entry in created],
+                "instance_ids": [entry["id"] for entry in created]}
+
+    def retarget_joint_clip(self, source_scene, source_clip_id, joint_map, *,
+                            translation_scales=None):
+        """Propose a compatible target joint clip; no scene mutation occurs."""
+        from .kinematics import retarget_joint_clip
+        if not isinstance(source_scene, Scene):
+            raise ValidationError("source_scene must be an authoritative SGEO Scene")
+        # The retargeting function validates both detached copies; no live
+        # authoring state is ever exposed to its numerical conversion.
+        with source_scene._mutation_lock:
+            source_scene.validate()
+            source_snapshot = source_scene._detached_copy()
+        with self._mutation_lock:
+            self.validate()
+            target_snapshot = self._detached_copy()
+        return retarget_joint_clip(
+            source_snapshot, target_snapshot, source_clip_id, joint_map,
+            translation_scales=translation_scales,
+        )
+
+    def animation_events(self, start, end, *, include_start: bool = False):
+        """Query native v2 declarative markers without executing side effects."""
+        from .animation import query_animation_events
+        return query_animation_events(self, start, end, include_start=include_start)
+
+    def forward_kinematics(self, values: dict | None = None):
+        """Compute a detached articulated pose from native v2 joint defaults."""
+        from .kinematics import forward_kinematics
+        from .animation import ANIMATION_V2_KEY
+        with self._mutation_lock:
+            self.validate()
+            spec = self.metadata.get(ANIMATION_V2_KEY)
+            if spec is None:
+                raise ValidationError("forward kinematics requires native v2 animation")
+            candidate = self._detached_copy()
+        return forward_kinematics(candidate, spec.get("joints", []), values)
+
+    def solve_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Return validated joint proposals without editing authoritative state."""
+        from .kinematics import solve_inverse_kinematics
+        from .animation import ANIMATION_V2_KEY
+        if expected_revision is not None and (
+                type(expected_revision) is not int or expected_revision < 1):
+            raise ValidationError("expected_revision must be a positive integer")
+        with self._mutation_lock:
+            if expected_revision is not None and self.revision != expected_revision:
+                from ..common.errors import ConflictError
+                raise ConflictError("scene revision does not match expected revision")
+            self.validate()
+            spec = self.metadata.get(ANIMATION_V2_KEY)
+            if spec is None:
+                raise ValidationError("inverse kinematics requires native v2 animation")
+            candidate = self._detached_copy()
+        result = solve_inverse_kinematics(
+            candidate, spec.get("joints", []), end_effector, target,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+        return {"revision": candidate.revision, **result}
+
+    def apply_inverse_kinematics(self, end_effector, target, *,
+                                 expected_revision=None, max_iterations=200,
+                                 tolerance=1e-5):
+        """Solve and commit a supported static joint pose atomically.
+
+        This intentionally refuses authored tracks/drivers/constraints so an
+        IK proposal cannot be committed when the evaluated pose differs from
+        its verified unanimated kinematic baseline. Animation-track authoring
+        remains the responsibility of the existing animation editing API.
+        """
+        from .animation import ANIMATION_V2_KEY
+        from ..common.errors import ConflictError
+        solution = self.solve_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+        if solution["status"] != "solved":
+            return {**solution, "committed": False}
+        with self._mutation_lock:
+            if self.revision != solution["revision"]:
+                raise ConflictError("scene changed during IK solve; commit rejected")
+            spec = deepcopy(self.metadata.get(ANIMATION_V2_KEY))
+            if spec is None:
+                raise ValidationError("scene has no v2 animation")
+            if spec.get("tracks") or spec.get("drivers") or spec.get("constraints") or spec.get("instances"):
+                raise ValidationError("IK pose commit requires an unanimated, unconstrained joint assembly")
+            proposals = solution["joint_values"]
+            for joint in spec.get("joints", []):
+                if joint["object_id"] in proposals:
+                    joint["value"] = proposals[joint["object_id"]]
+            committed_revision = self.set_animation(spec, version=2)
+        return {**solution, "revision": committed_revision, "committed": True}
+
+    def generate_joint_motion(self, end_effector, target, duration, *,
+                              expected_revision=None, max_iterations=200,
+                              tolerance=1e-5):
+        """Build (without committing) smooth native joint motion toward an IK goal.
+
+        The output is an authored SGEO v2 animation proposal, not a claim of
+        collision avoidance, dynamics, or general-purpose task planning.
+        Commit with set_animation(proposal, version=2) at its reported revision.
+        """
+        from .animation import ANIMATION_V2_KEY, validate_animation_v2, evaluate_scene
+        from ..common.helpers import finite
+        from ..common.errors import ConflictError
+        seconds = finite(duration, "motion duration", limit=1e7)
+        if seconds <= 0:
+            raise ValidationError("motion duration must be positive")
+        solution = self.solve_inverse_kinematics(
+            end_effector, target, expected_revision=expected_revision,
+            max_iterations=max_iterations, tolerance=tolerance,
+        )
+        if solution["status"] != "solved":
+            return {**solution, "animation": None, "status": solution["status"]}
+        with self._mutation_lock:
+            if self.revision != solution["revision"]:
+                raise ConflictError("scene changed during motion generation")
+            preview_scene = self._detached_copy()
+        spec = deepcopy(preview_scene.metadata[ANIMATION_V2_KEY])
+        if seconds > spec["duration"]:
+            raise ValidationError("generated motion exceeds existing animation duration")
+        if any(spec.get(key) for key in ("tracks", "instances", "layers", "drivers", "constraints", "transitions")):
+            raise ValidationError("joint motion generation requires a clean articulated animation baseline")
+        defaults = {joint["object_id"]: joint.get("value", 0.0)
+                    for joint in spec.get("joints", [])}
+        for oid, value in sorted(solution["joint_values"].items()):
+            base = defaults[oid]
+            spec["tracks"].append({
+                "object_id": oid, "property": "joint", "interpolation": "cubic",
+                "keyframes": [
+                    {"time": 0, "value": base, "in_tangent": 0.0, "out_tangent": 0.0},
+                    {"time": seconds, "value": value, "in_tangent": 0.0, "out_tangent": 0.0},
+                ],
+            })
+        validate_animation_v2(spec, preview_scene)
+        preview_scene.metadata[ANIMATION_V2_KEY] = spec
+        preview_scene.validate()
+        endpoint = evaluate_scene(preview_scene, seconds)
+        actual_world = endpoint.world_transform(end_effector)
+        actual = [actual_world[3], actual_world[7], actual_world[11]]
+        goal = solution["target"]
+        from math import hypot
+        endpoint_error = hypot(*(actual[i] - goal[i] for i in range(3)))
+        if endpoint_error > tolerance:
+            raise ValidationError("generated trajectory failed end-effector verification",
+                                  context={"error": endpoint_error, "tolerance": tolerance})
+        return {**solution, "status": "proposed", "animation": spec,
+                "duration": seconds, "endpoint_position_error": endpoint_error,
+                "verified_endpoint": actual}
+
+    def add_object(self, *, name="", geometry=None, parent=None, transform=None, metadata=None, object_id=None,
+                   material=None):
+        """Commit one individually validated leaf object under the scene lock.
+
+        A new object has no children and no family reference, so only the new
+        record and its parent reference need checking; the full-scene audit in
+        :meth:`validate` stays reserved for load/save paths. This keeps building
+        a scene object by object linear rather than quadratic.
+        """
+        with self._mutation_lock:
+            if len(self.objects) >= MAX_OBJECTS:
+                raise ResourceLimitError("invalid scene object count")
+            oid=new_id() if object_id is None else require_id(object_id)
+            if object_id is not None and any(o.get("id")==oid for o in self.objects):
+                raise ValidationError("duplicate object identifier")
+            obj={"id":oid,"name":name,"parent":parent,
+                 "transform":list(transform if transform is not None else IDENTITY),
+                 "geometry":deepcopy(geometry),"metadata":deepcopy(metadata or {})}
+            if not isinstance(name,str) or len(name)>255:
+                raise ValidationError("invalid object name")
+            require_transform(obj["transform"])
+            if obj["geometry"] is not None:
+                validate_geometry(obj["geometry"])
+            require_metadata(obj["metadata"])
+            if parent is not None:
+                require_id(parent)
+                if not any(o.get("id")==parent for o in self.objects):
+                    raise ReferenceError("invalid scene parent reference")
+            if material is not None:
+                require_id(material)
+                if obj["geometry"] is None:
+                    raise ValidationError("only an object with geometry can have a material")
+                if not any(m.get("id")==material for m in self.materials):
+                    raise ReferenceError("object references an unknown material",context={"material":material})
+                obj["material"]=material
+            self.objects.append(obj)
+            self.revision+=1
+            return obj["id"]
+
+    def remove_object(self, object_id):
+        """Remove an unreferenced object without racing another scene mutation."""
+        with self._mutation_lock:
+            require_id(object_id)
+            if any(obj.get("parent")==object_id for obj in self.objects):
+                raise ValidationError("cannot remove scene object with children")
+            if any(mod["target"]["item_id"] == object_id or
+                   any(ref["item_id"] == object_id for ref in mod["operands"])
+                   for mod in self.modifiers):
+                raise ValidationError("cannot remove object referenced by a modifier")
+            for key in ("slai.animation.v1", "slai.animation.v2"):
+                spec = self.metadata.get(key, {})
+                if any(track["object_id"] == object_id for track in spec.get("tracks", [])):
+                    raise ValidationError("cannot remove object referenced by animation")
+                if key == "slai.animation.v2":
+                    if any(object_id in (d["source_object_id"], d["target_object_id"])
+                           for d in spec.get("drivers", [])):
+                        raise ValidationError("cannot remove object referenced by driver")
+                    if any(object_id in (c["object_id"], c.get("other_id"))
+                           for c in spec.get("constraints", [])):
+                        raise ValidationError("cannot remove object referenced by constraint")
+                    if any(j["object_id"] == object_id for j in spec.get("joints", [])):
+                        raise ValidationError("cannot remove object referenced by joint")
+                    if any(i["object_id"] == object_id for i in spec.get("instances", [])):
+                        raise ValidationError("cannot remove object referenced by animation clip")
+            pos=next((i for i,obj in enumerate(self.objects) if obj["id"]==object_id),None)
+            if pos is None:
+                raise ValidationError("object ID not found")
+            self.objects.pop(pos)
+            self.revision+=1
+
+    def world_transforms(self):
+        """Return detached world matrices, computing each parent chain once."""
+        with self._mutation_lock:
+            self.validate()
+            nodes={obj["id"]:obj for obj in self.objects}
+            matrices={}
+            for oid in nodes:
+                chain=[]
+                cursor=oid
+                while cursor is not None and cursor not in matrices:
+                    chain.append(cursor)
+                    cursor=nodes[cursor].get("parent")
+                matrix=matrices.get(cursor,IDENTITY)
+                for key in reversed(chain):
+                    matrix=compose(matrix,nodes[key].get("transform",IDENTITY))
+                    matrices[key]=matrix
+            return matrices
+
+    def world_transform(self, object_id):
+        require_id(object_id)
+        matrices=self.world_transforms()
+        if object_id not in matrices:
+            raise ValidationError("unknown object identifier")
+        return matrices[object_id]
+
+    def bounds_by_object(self):
+        """Snapshot broad-phase world AABBs for all geometric objects."""
+        with self._mutation_lock:
+            matrices=self.world_transforms()
+            bounds={}
+            for obj in self.objects:
+                if obj.get("geometry") is None:
+                    continue
+                minimum,maximum=local_bounds(obj["geometry"])
+                corners=[transform_point(matrices[obj["id"]],p) for p in product(*zip(minimum,maximum))]
+                bounds[obj["id"]]=(tuple(min(p[i] for p in corners) for i in range(3)),
+                                    tuple(max(p[i] for p in corners) for i in range(3)))
+            return bounds
+
+    def world_bounds(self, object_id):
+        require_id(object_id)
+        bounds=self.bounds_by_object()
+        if object_id not in bounds:
+            raise ValidationError("object has no geometric representation")
+        return bounds[object_id]
+
+    def as_dict(self):
+        with self._mutation_lock:
+            self.validate()
+            return deepcopy({"document_id":self.document_id,"revision":self.revision,"name":self.name,
+                             "objects":self.objects,"families":self.families,"metadata":self.metadata,
+                             "materials":self.materials,"images":self.images,"modifiers":self.modifiers})
+
+    def manifest(self):
+        with self._mutation_lock:
+            self.validate()
+            return {"format_id":"slai.sgeo","format_version":CURRENT_VERSION,"schema":schema_id("slai.sgeo",CURRENT_VERSION),
+                    "document_kind":self.document_kind,"spatial_dimension":3,"document_id":self.document_id,
+                    "revision":self.revision,"units":self.unit,"axis_up":"+Z","handedness":"right",
+                    "requires":self._requires()}
+
+    def _requires(self):
+        kinds={o["geometry"]["kind"] for o in self.objects if o.get("geometry") is not None}
+        requires=["scene-graph","analytic-primitives","triangle-mesh"]
+        if self.families:
+            requires.append("families")
+            from .parameters import LEGACY_PARAMETER_TYPES
+            if any(f.get("types") for f in self.families):
+                requires.append("family-types-v1")
+            if any(s.get("type") not in LEGACY_PARAMETER_TYPES or set(s)-_LEGACY_PARAMETER_FIELDS
+                   for f in self.families for s in f["parameters"].values()):
+                requires.append("parameter-types-v2")
+        if kinds & {"nurbs_curve","nurbs_surface"}:
+            requires.append("nurbs")
+        if "brep" in kinds:
+            requires.append("brep")
+        if self.materials or any("material" in o for o in self.objects):
+            requires.append("materials")
+        if self.images:
+            requires.append("textures")
+        if "slai.animation.v1" in self.metadata:
+            requires.append("animation-v1")
+        if "slai.animation.v2" in self.metadata:
+            requires.append("animation-v2")
+        if self.modifiers:
+            requires.append("modifier-graph-v1")
+        if any(not m["kind"].endswith(".identity") for m in self.modifiers):
+            requires.append("modifier-ops-v1")
+        return requires
+
+    def texture_bytes(self, image_id):
+        """The encoded bytes (PNG or JPEG) of a registered image."""
+        require_id(image_id)
+        with self._mutation_lock:
+            if image_id not in self.image_data:
+                raise ReferenceError("no embedded bytes for this image",context={"image":image_id})
+            return self.image_data[image_id]
+
+    @classmethod
+    def from_package(cls,package):
+        from ..verification import validate_document
+        validate_document(package.manifest,package.document)
+        if package.manifest["format_id"]!="slai.sgeo":
+            raise ValidationError("package does not contain SGEO scene")
+        image_data={}
+        for record in package.document.get("images",[]):
+            raw=package.assets.get(texture_path(record["sha256"],record["mime"]))
+            if raw is None:
+                raise ValidationError("package is missing the bytes of an image",context={"image":record["id"]})
+            verify_image_bytes(record,raw)
+            image_data[record["id"]]=raw
+        return cls(**package.document,unit=package.manifest["units"],
+                   document_kind=package.manifest["document_kind"],image_data=image_data)

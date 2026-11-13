@@ -19,6 +19,7 @@ from __future__ import annotations
 
 __version__ = "2.3.0"
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -83,8 +84,7 @@ def _normalize_weights(problem: OptimizationProblem, weights: Mapping[str, float
     if unknown:
         raise MultiObjectiveError("weights contain unknown objectives", context={"unknown": sorted(unknown)})
 
-    normalized: dict[str, float] = {}
-    total = 0.0
+    raw: dict[str, float] = {}
     for objective in problem.objectives:
         value = require_finite(weights.get(objective.name, objective.weight), f"weight[{objective.name}]")
         if value < 0:
@@ -92,11 +92,15 @@ def _normalize_weights(problem: OptimizationProblem, weights: Mapping[str, float
                 "multi-objective weights must be non-negative",
                 context={"objective": objective.name, "weight": value},
             )
-        normalized[objective.name] = value
-        total += value
-    if total <= 0:
+        raw[objective.name] = value
+    largest = max(raw.values(), default=0.0)
+    if largest <= 0.0:
         raise MultiObjectiveError("at least one multi-objective weight must be positive")
-    return {name: value / total for name, value in normalized.items()}
+    # Summing raw finite weights can overflow to infinity (e.g. two 1e308
+    # weights). Scale before summation so valid weights retain their meaning.
+    scaled = {name: value / largest for name, value in raw.items()}
+    denominator = math.fsum(scaled.values())
+    return {name: value / denominator for name, value in scaled.items()}
 
 
 def weighted_sum_transform(

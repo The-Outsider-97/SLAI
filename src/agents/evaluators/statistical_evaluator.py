@@ -9,6 +9,7 @@ import json
 import math
 import numpy as np
 import yaml
+from scipy.stats import f as f_distribution, t as student_t
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -120,7 +121,10 @@ class StatisticalEvaluator:
         )
         pairwise_summary = self._build_pairwise_summary(analysis)
         advanced_analysis = {
-            "demsar_protocol": self._build_demsar_protocol(normalized_datasets),
+            "demsar_protocol": self._build_demsar_protocol(
+                normalized_datasets,
+                paired_design=metadata.get("paired_design") is True if isinstance(metadata, Mapping) else False,
+            ),
             "dataset_cardinality": {name: len(values) for name, values in normalized_datasets.items()},
         }
         diagnostics = self._build_diagnostics(normalized_datasets, analysis)
@@ -170,32 +174,32 @@ class StatisticalEvaluator:
         )
 
     def anova(self, groups: Sequence[Sequence[float]]) -> Dict[str, Any]:
+        """One-way fixed-effects ANOVA with explicit undefined-inference states."""
         if len(groups) < 2:
             raise StatisticalAnalysisError("anova", groups, "At least two groups are required.")
-        flattened = {f"group_{index+1}": list(group) for index, group in enumerate(groups)}
-        analysis = self.calculations.calculate_statistical_analysis(flattened, confidence_level=self.confidence_level)
-        if "pairwise_tests" not in analysis:
-            raise StatisticalAnalysisError("anova", groups, "Pairwise statistical analysis could not be completed.")
-        names = list(flattened.keys())
-        grand_values = [value for group in groups for value in group]
-        if not grand_values:
-            raise StatisticalAnalysisError("anova", groups, "No observations available for ANOVA.")
-        k = len(groups)
-        n_total = sum(len(group) for group in groups)
-        grand_mean = float(np.mean(grand_values))
-        ss_between = sum(len(group) * (float(np.mean(group)) - grand_mean) ** 2 for group in groups)
-        ss_within = sum(sum((value - float(np.mean(group))) ** 2 for value in group) for group in groups)
-        df_between = k - 1
-        df_within = n_total - k
-        ms_between = ss_between / df_between if df_between > 0 else 0.0
-        ms_within = ss_within / df_within if df_within > 0 else 1e-12
-        f_stat = ms_between / ms_within if ms_within > 0 else 0.0
-        # simple tail approximation is intentionally not reimplemented here; rely on calculations for pairwise tests
+        arrays = [np.asarray(group, dtype=float) for group in groups]
+        if any(a.ndim != 1 or len(a) < 2 or not np.all(np.isfinite(a)) for a in arrays):
+            raise StatisticalAnalysisError("anova", groups, "Each group needs at least two finite observations.")
+        names = [f"group_{index + 1}" for index in range(len(arrays))]
+        n_total = sum(len(arr) for arr in arrays)
+        k = len(arrays)
+        grand_mean = float(sum(float(np.sum(a)) for a in arrays) / n_total)
+        ss_between = sum(len(a) * (float(np.mean(a)) - grand_mean) ** 2 for a in arrays)
+        ss_within = sum(float(np.sum((a - np.mean(a)) ** 2)) for a in arrays)
+        df_between, df_within = k - 1, n_total - k
+        if df_within <= 0 or ss_within == 0:
+            return {
+                "f_stat": None, "p_value": None, "significant": None,
+                "degrees_of_freedom": {"between": df_between, "within": df_within},
+                "group_names": names, "status": "degenerate_zero_within_group_variance",
+            }
+        f_stat = (ss_between / df_between) / (ss_within / df_within)
+        p_value = float(f_distribution.sf(f_stat, df_between, df_within))
         return {
-            "f_stat": f_stat,
+            "f_stat": float(f_stat), "p_value": p_value,
+            "significant": p_value < self.significance_threshold,
             "degrees_of_freedom": {"between": df_between, "within": df_within},
-            "group_names": names,
-            "status": "ok",
+            "group_names": names, "status": "ok",
         }
 
     def pareto_frontier(
@@ -228,26 +232,51 @@ class StatisticalEvaluator:
         return frontiers
 
     def statistical_analysis(self, baseline: Sequence[float], treatment: Sequence[float]) -> Dict[str, Any]:
+        """Paired observations require a paired test, not Welch's independent test.
+
+        A constant nonzero difference has zero estimated standard error; it is
+        classified as degenerate rather than assigned fabricated significance.
+        """
         baseline_values = np.asarray(baseline, dtype=float)
         treatment_values = np.asarray(treatment, dtype=float)
-        if baseline_values.size != treatment_values.size or baseline_values.size == 0:
+        if (baseline_values.ndim != 1 or treatment_values.ndim != 1
+                or baseline_values.size != treatment_values.size
+                or baseline_values.size < 2
+                or not np.all(np.isfinite(baseline_values))
+                or not np.all(np.isfinite(treatment_values))):
             raise ValidationFailureError(
                 "demsar_protocol_inputs",
-                {"baseline": baseline_values.size, "treatment": treatment_values.size},
-                "Equal non-empty paired samples",
+                {"baseline_size": int(baseline_values.size), "treatment_size": int(treatment_values.size)},
+                "Equal paired finite sample arrays, at least two observations",
             )
-        diffs = baseline_values - treatment_values
-        mean_diff = float(np.mean(diffs))
-        std_diff = float(np.std(diffs, ddof=1)) if diffs.size > 1 else 0.0
-        z_scores = [float(diff / math.sqrt(max(len(diffs), 1))) for diff in diffs]
-        baseline_list = baseline_values.tolist()
-        treatment_list = treatment_values.tolist()
+        differences = baseline_values - treatment_values
+        n = int(differences.size)
+        mean_diff = float(np.mean(differences))
+        std_diff = float(np.std(differences, ddof=1))
+        if std_diff <= 0:
+            paired_test: Dict[str, Any] = {
+                "test": "paired_student_t", "statistic": None, "p_value": None,
+                "degrees_of_freedom": n - 1, "significant": None,
+                "status": "degenerate_zero_difference_variance",
+            }
+            paired_effect_size = None
+        else:
+            statistic = mean_diff / (std_diff / math.sqrt(n))
+            p_value = float(2 * student_t.sf(abs(statistic), n - 1))
+            paired_test = {
+                "test": "paired_student_t", "statistic": float(statistic),
+                "p_value": p_value, "degrees_of_freedom": n - 1,
+                "significant": p_value < self.significance_threshold, "status": "ok",
+            }
+            paired_effect_size = mean_diff / std_diff
         return {
             "mean_diff": mean_diff,
-            "effect_size": self._hedges_g(baseline_list, treatment_list),
-            "significance": any(abs(z) > 2.58 for z in z_scores),
-            "paired_test": self.t_test(baseline_list, treatment_list),
+            "effect_size": self._hedges_g(baseline_values.tolist(), treatment_values.tolist()),
+            "paired_effect_size_dz": paired_effect_size,
+            "significance": paired_test["significant"],
+            "paired_test": paired_test,
             "std_diff": std_diff,
+            "sample_size": n,
         }
 
     def _hedges_g(self, a: Sequence[float], b: Sequence[float]) -> float:
@@ -325,9 +354,12 @@ class StatisticalEvaluator:
             coerced = []
             for value in values:
                 try:
-                    coerced.append(float(value))
-                except (TypeError, ValueError) as exc:
+                    number = float(value)
+                except (TypeError, ValueError, OverflowError) as exc:
                     raise ValidationFailureError(f"dataset.{name}", value, "numeric value") from exc
+                if not math.isfinite(number):
+                    raise ValidationFailureError(f"dataset.{name}", value, "finite numeric value")
+                coerced.append(number)
             if len(coerced) < self.min_sample_size:
                 raise ValidationFailureError("sample_size_validation", {"dataset": name, "size": len(coerced)}, f"Minimum sample size {self.min_sample_size}")
             normalized[str(name)] = coerced
@@ -335,7 +367,8 @@ class StatisticalEvaluator:
 
     def _build_pairwise_summary(self, analysis: Mapping[str, Any]) -> Dict[str, Any]:
         pairwise = analysis.get("pairwise_tests", {})
-        significant = [name for name, value in pairwise.items() if value.get("t_test", {}).get("significant")]
+        significant = [name for name, value in pairwise.items()
+                       if value.get("t_test", {}).get("significant_bh") is True]
         strongest = None
         strongest_value = -1.0
         for name, value in analysis.get("effect_sizes", {}).items():
@@ -346,23 +379,30 @@ class StatisticalEvaluator:
         return {
             "significant_comparisons": significant,
             "significant_count": len(significant),
+            "significance_correction": "Benjamini-Hochberg FDR",
             "strongest_effect": strongest,
         }
 
-    def _build_demsar_protocol(self, datasets: Mapping[str, Sequence[float]]) -> Dict[str, Any]:
+    def _build_demsar_protocol(
+        self, datasets: Mapping[str, Sequence[float]], *, paired_design: bool = False
+    ) -> Dict[str, Any]:
         names = list(datasets.keys())
-        if len(names) != 2:
-            return {"status": "skipped", "reason": "Requires exactly two paired datasets."}
+        if len(names) != 2 or not paired_design:
+            return {"status": "skipped", "reason": "Requires two explicitly paired datasets."}
+        if len(datasets[names[0]]) != len(datasets[names[1]]):
+            return {"status": "skipped", "reason": "Unequal paired sample lengths."}
         return self.statistical_analysis(datasets[names[0]], datasets[names[1]])
 
     def _build_diagnostics(self, datasets: Mapping[str, Sequence[float]], analysis: Mapping[str, Any]) -> Dict[str, Any]:
         normality = analysis.get("normality", {})
         non_normal = [name for name, result in normality.items() if result.get("is_normal") is False]
-        low_power = [name for name, power in analysis.get("power_analysis", {}).items() if float(power) < 0.8]
+        low_power = [name for name, power in analysis.get("power_analysis", {}).items()
+                     if isinstance(power, (int, float)) and math.isfinite(float(power)) and float(power) < 0.8]
         return {
             "dataset_count": len(datasets),
             "non_normal_datasets": non_normal,
             "low_power_datasets": low_power,
+            "power_analysis_status": analysis.get("power_analysis_status", "not_estimated"),
             "significant_pairwise_tests": self._build_pairwise_summary(analysis).get("significant_count", 0),
         }
 
@@ -372,8 +412,10 @@ class StatisticalEvaluator:
             recommendations.append("Consider non-parametric alternatives for datasets that fail normality assumptions.")
         if diagnostics.get("low_power_datasets"):
             recommendations.append("Increase sample size for low-power datasets before drawing strong conclusions.")
+        if diagnostics.get("power_analysis_status") != "ok":
+            recommendations.append("Power was not estimated: provide a prespecified effect size and sample design.")
         if not recommendations:
-            recommendations.append("Statistical assumptions and power look acceptable for the evaluated datasets.")
+            recommendations.append("No diagnostic issue was identified in the available evidence; this is not proof that all assumptions hold.")
         if self._build_pairwise_summary(analysis).get("significant_count", 0) == 0:
             recommendations.append("No statistically significant pairwise differences were detected at the configured alpha level.")
         return recommendations
@@ -441,7 +483,7 @@ class StatisticalEvaluator:
         better = False
         for objective in objectives:
             if objective not in a or objective not in b:
-                continue
+                raise ValidationFailureError("pareto_objective", objective, "present in each solution")
             a_val = float(a[objective]) * float(weights.get(objective, 1.0))
             b_val = float(b[objective]) * float(weights.get(objective, 1.0))
             if a_val < b_val:

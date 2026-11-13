@@ -187,6 +187,13 @@ class OrthographyProcessor:
     exposing structured results for newer integrations.
     """
 
+    # These forms have context-dependent auxiliaries (is/has, had/would).
+    # Preserve them unless a caller explicitly supplies an expansion map.
+    AMBIGUOUS_CONTRACTIONS = frozenset({
+        "he'd", "he's", "i'd", "it's", "she'd", "she's", "that's", "there's",
+        "they'd", "we'd", "what's", "where's", "who's", "you'd",
+    })
+
     DEFAULT_CONTRACTIONS: Dict[str, str] = {
         "aren't": "are not",
         "can't": "cannot",
@@ -197,41 +204,27 @@ class OrthographyProcessor:
         "hadn't": "had not",
         "hasn't": "has not",
         "haven't": "have not",
-        "he'd": "he would",
         "he'll": "he will",
-        "he's": "he is",
-        "i'd": "I would",
         "i'll": "I will",
         "i'm": "I am",
         "i've": "I have",
         "isn't": "is not",
-        "it's": "it is",
         "let's": "let us",
         "mightn't": "might not",
         "mustn't": "must not",
         "shan't": "shall not",
-        "she'd": "she would",
         "she'll": "she will",
-        "she's": "she is",
         "shouldn't": "should not",
-        "that's": "that is",
-        "there's": "there is",
-        "they'd": "they would",
         "they'll": "they will",
         "they're": "they are",
         "they've": "they have",
         "wasn't": "was not",
-        "we'd": "we would",
         "we'll": "we will",
         "we're": "we are",
         "we've": "we have",
         "weren't": "were not",
-        "what's": "what is",
-        "where's": "where is",
-        "who's": "who is",
         "won't": "will not",
         "wouldn't": "would not",
-        "you'd": "you would",
         "you'll": "you will",
         "you're": "you are",
         "you've": "you have",
@@ -510,6 +503,8 @@ class OrthographyProcessor:
             return False
         normalized = self._normalize_lookup(token.text)
         if not normalized or normalized in self.protected_terms:
+            return False
+        if normalized in self.AMBIGUOUS_CONTRACTIONS and normalized not in self.contraction_map:
             return False
         if len(normalized) > self.max_token_length:
             return False

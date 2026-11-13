@@ -2,7 +2,9 @@
 from .biology import Biology
 from .computer import Computing
 from .engineering import Engineering, EngineeringQuantity
+from .engineering_analysis import EngineeringAnalysis
 from .math import Algebra, Calculus, Dual, NumericalMethods, OnlineCovariance, OnlineMoments, Statistics
+from .parametric import ParametricMath
 from .physics import Physics
 from .stem_memory import STEMMemory
 from .stem_types import (
@@ -25,8 +27,8 @@ __all__ = [
     "Dimension", "Unit", "Quantity", "PrecisionPolicy", "Tolerance", "UncertaintyValue",
     "UncertaintyBudget", "UncertaintyType", "Distribution", "NumericResult", "SolverResult",
     "ConvergenceStatus", "BoundaryCondition", "BoundaryConditionKind", "InitialCondition", "Domain",
-    "Equation", "PhysicalConstant", "Dimensions", "UnitSystem", "Uncertainty",
+    "Equation", "PhysicalConstant", "Dimensions", "UnitSystem", "Uncertainty", "EngineeringAnalysis",
     "standard_uncertainty", "combined_standard_uncertainty", "expanded_uncertainty",
     "covariance_propagation", "jacobian_propagation", "sensitivity_coefficients",
-    "coverage_interval", "monte_carlo_propagation", "numerical_error_budget",
+    "coverage_interval", "monte_carlo_propagation", "numerical_error_budget", "ParametricMath",
 ]

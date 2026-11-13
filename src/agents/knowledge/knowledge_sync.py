@@ -350,8 +350,13 @@ class KnowledgeSynchronizer:
             current_value = memory_rows[0][0]
             if self._detect_conflict(current_value, external_value):
                 stats["memory_conflicts"] += 1
-                resolved = self.resolve_conflict(key, current_value, external_value)
-                self.knowledge_memory.update(key, resolved)
+                # P0: no automatic authoritative overwrite by time/confidence/text.
+                # Preserve current data and escalate; canonical revisions require
+                # explicit approval before changing source-backed knowledge.
+                stats["memory_conflicts_pending_review"] = (
+                    stats.get("memory_conflicts_pending_review", 0) + 1
+                )
+                logger.warning("Sync conflict held for manual review: key=%s", key)
 
         return stats
 

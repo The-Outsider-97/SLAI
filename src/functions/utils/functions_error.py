@@ -995,6 +995,95 @@ class QueryExecutionError(QueryError):
         super().__init__(message)
 
 
+# ============================================================================
+# Font and ToC
+# ============================================================================
+
+class FontSettingsError(FunctionsError, ValueError):
+    """Raised when typography settings are invalid.
+
+    Inherits both ``FunctionsError`` (structured ``to_dict``, ``error_code``,
+    ``details``) and ``ValueError`` for backwards compatibility with callers
+    that catch ``ValueError``.
+    """
+    default_code = "font_settings_error"
+
+
+class FontColorError(FontSettingsError):
+    """Raised when a color cannot be parsed, converted, or adjusted."""
+    default_code = "font_color_error"
+
+    def __init__(self, reason: str, *, value: object = None) -> None:
+        self.reason = reason
+        self.value = value
+        details = {"reason": reason}
+        if value is not None:
+            details["value"] = repr(value)
+        super().__init__(reason, error_code=self.default_code, details=details)
+
+
+class FontSizeError(FontSettingsError):
+    """Raised when a size cannot be parsed or converted."""
+    default_code = "font_size_error"
+
+    def __init__(self, reason: str, *, value: object = None,
+                 from_unit: Optional[str] = None,
+                 to_unit: Optional[str] = None) -> None:
+        self.reason = reason
+        self.value = value
+        self.from_unit = from_unit
+        self.to_unit = to_unit
+        details = {"reason": reason}
+        if value is not None:
+            details["value"] = repr(value)
+        if from_unit:
+            details["from_unit"] = from_unit
+        if to_unit:
+            details["to_unit"] = to_unit
+        super().__init__(reason, error_code=self.default_code, details=details)
+
+
+class TocError(FunctionsError):
+    """Base exception for table-of-contents operations."""
+    default_code = "toc_error"
+
+
+class TocOptionsError(TocError):
+    """Raised when ``TocOptions`` values are invalid or mutually inconsistent."""
+    default_code = "toc_options_error"
+
+
+class TocParseError(TocError):
+    """Raised when HTML / Markdown / heading-list parsing fails."""
+    default_code = "toc_parse_error"
+
+    def __init__(self, source: str, reason: str) -> None:
+        self.source = source
+        self.reason = reason
+        super().__init__(
+            f"Failed to parse TOC from {source}: {reason}",
+            error_code=self.default_code,
+            details={"source": source, "reason": reason},
+        )
+
+
+class TocInjectError(TocError):
+    """Raised when injecting ``id`` attributes into HTML fails."""
+    default_code = "toc_inject_error"
+
+    def __init__(self, reason: str, *, html_hint: Optional[str] = None) -> None:
+        self.reason = reason
+        self.html_hint = html_hint
+        details: Dict[str, Any] = {"reason": reason}
+        if html_hint is not None:
+            details["html_hint"] = html_hint
+        super().__init__(
+            f"Failed to inject IDs into HTML: {reason}",
+            error_code=self.default_code,
+            details=details,
+        )
+
+
 __all__ =[
     "AccountLockedError",
     "AuthError",
@@ -1071,4 +1160,11 @@ __all__ =[
     "WebhookSecurityError",
     "WebhookSerializationError",
     "WebhookSignatureError",
+    "FontSettingsError",
+    "FontColorError",
+    "FontSizeError",
+    "TocError",
+    "TocOptionsError",
+    "TocParseError",
+    "TocInjectError",
 ]

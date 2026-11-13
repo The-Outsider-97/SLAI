@@ -8,7 +8,7 @@ Implements:
 """
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 import threading
 import time as _time
@@ -117,7 +117,7 @@ class RiskAssessment:
 
 
 class AlignmentAgent(BaseAgent):
-    """Application-facing alignment orchestration boundary for SLAI v2.3."""
+    """Application-facing alignment orchestration boundary for SLAI v2.4."""
 
     AGENT_KEY = "alignment_agent"
 
@@ -222,9 +222,13 @@ class AlignmentAgent(BaseAgent):
             "value_embedding_model": self.value_embedding_model,
             "counterfactual_auditor": self.counterfactual_auditor,
         }
+        # Configuration, not untrusted task data, determines whether the
+        # Alignment-owned dynamic constraint registry is enforced.
+        subsystem_runtime_config = dict(self.runtime_config)
+        subsystem_runtime_config["enforce_alignment_constraints"] = self.enable_ethics_check
         self.subsystem = AlignmentSubsystem(
             assessment_config=self.assessment_config,
-            runtime_config=self.runtime_config,
+            runtime_config=subsystem_runtime_config,
             components=components,
         )
         if assessor is not None:
@@ -696,7 +700,9 @@ class AlignmentAgent(BaseAgent):
         payload.setdefault("enable_individual_fairness", self.enable_individual_fairness)
         payload.setdefault("enable_counterfactual_audit", self.enable_counterfactual_audit)
         payload.setdefault("enable_value_alignment", self.enable_value_alignment)
-        payload.setdefault("enable_ethics_check", self.enable_ethics_check)
+        # Task input must not disable checks enabled by the trusted agent config.
+        payload["enable_ethics_check"] = self.enable_ethics_check
+        payload["evaluate_alignment_constraints"] = self.enable_ethics_check
 
         if "input_data" not in payload:
             for key in ("data", "features", "records"):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
@@ -34,7 +36,7 @@ class BudgetContract:
 class ContractCheckResult:
     agent: str
     contract: Dict[str, Any]
-    observed: Dict[str, float]
+    observed: Dict[str, Optional[float]]
     violations: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     passed: bool = True
@@ -65,7 +67,7 @@ class PerformanceBudgetEvaluator:
                 "metadata": {"enabled": False, "evaluated_at": self._utc_now()},
                 "status": "skipped",
                 "contracts": [],
-                "summary": {"passed": True, "violations": 0, "warnings": 0},
+                "summary": {"passed": None, "violations": 0, "warnings": 0, "missing_evidence": 0},
             }
         if not isinstance(observed_metrics, Mapping):
             raise ValidationFailureError(
@@ -77,11 +79,12 @@ class PerformanceBudgetEvaluator:
         checks: List[ContractCheckResult] = []
         total_violations = 0
         total_warnings = 0
+        total_missing = 0
 
         for contract in self.contracts.values():
             observed = observed_metrics.get(contract.agent, {}) if isinstance(observed_metrics.get(contract.agent, {}), Mapping) else {}
-            latency = self._to_float(observed.get("latency_ms"), default=0.0)
-            memory = self._to_float(observed.get("memory_mb"), default=0.0)
+            latency = self._observed_value(observed.get("latency_ms"))
+            memory = self._observed_value(observed.get("memory_mb"))
 
             check = ContractCheckResult(
                 agent=contract.agent,
@@ -89,7 +92,11 @@ class PerformanceBudgetEvaluator:
                 observed={"latency_ms": latency, "memory_mb": memory},
             )
 
-            if latency > contract.max_latency_ms:
+            if latency is None:
+                check.passed = False
+                total_missing += 1
+                check.warnings.append("Missing or invalid latency_ms: budget unverified.")
+            elif latency > contract.max_latency_ms:
                 check.passed = False
                 check.violations.append({
                     "metric": "latency_ms",
@@ -102,7 +109,11 @@ class PerformanceBudgetEvaluator:
                     f"Latency approaching hard limit ({latency:.2f}ms > soft {contract.soft_latency_ms:.2f}ms)."
                 )
 
-            if memory > contract.max_memory_mb:
+            if memory is None:
+                check.passed = False
+                total_missing += 1
+                check.warnings.append("Missing or invalid memory_mb: budget unverified.")
+            elif memory > contract.max_memory_mb:
                 check.passed = False
                 check.violations.append({
                     "metric": "memory_mb",
@@ -119,8 +130,13 @@ class PerformanceBudgetEvaluator:
             total_warnings += len(check.warnings)
             checks.append(check)
 
-        passed = total_violations == 0
-        status = "pass" if passed else ("fail" if self.strict_mode else "warn")
+        passed = total_violations == 0 and total_missing == 0 and bool(checks)
+        status = (
+            ("fail" if self.strict_mode else "warn") if total_violations
+            else "incomplete" if total_missing
+            else "no_contracts" if not checks
+            else "pass"
+        )
         payload = {
             "metadata": {
                 "module_version": MODULE_VERSION,
@@ -135,6 +151,7 @@ class PerformanceBudgetEvaluator:
                 "passed": passed,
                 "violations": total_violations,
                 "warnings": total_warnings,
+                "missing_evidence": total_missing,
             },
         }
         if self.store_results:
@@ -144,13 +161,15 @@ class PerformanceBudgetEvaluator:
     def _load_contracts(self, contracts_payload: Any) -> Dict[str, BudgetContract]:
         contracts: Dict[str, BudgetContract] = {}
         if not isinstance(contracts_payload, list):
-            return contracts
+            raise ValueError("Performance budget contracts must be a list")
         for item in contracts_payload:
             if not isinstance(item, Mapping):
-                continue
+                raise ValueError("Performance budget contract must be a mapping")
             agent = str(item.get("agent", "")).strip()
             if not agent:
-                continue
+                raise ValueError("Performance budget contract is missing agent")
+            if agent in contracts:
+                raise ValueError(f"Duplicate performance budget contract: {agent}")
             contract = BudgetContract(
                 agent=agent,
                 max_latency_ms=self._to_float(item.get("max_latency_ms"), default=1000.0),
@@ -161,15 +180,36 @@ class PerformanceBudgetEvaluator:
                 enabled=bool(item.get("enabled", True)),
             )
             if contract.enabled:
+                if contract.soft_latency_ms is not None and contract.soft_latency_ms > contract.max_latency_ms:
+                    raise ValueError(f"Soft latency exceeds hard budget for {agent}")
+                if contract.soft_memory_mb is not None and contract.soft_memory_mb > contract.max_memory_mb:
+                    raise ValueError(f"Soft memory exceeds hard budget for {agent}")
                 contracts[agent] = contract
         return contracts
 
     @staticmethod
     def _to_float(value: Any, *, default: float) -> float:
+        if value is None:
+            value = default
+        if isinstance(value, bool):
+            raise ValueError("Budget limit cannot be boolean")
         try:
-            return float(value)
-        except (TypeError, ValueError):
-            return float(default)
+            number = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Budget limit must be a positive finite number") from exc
+        if not math.isfinite(number) or number <= 0:
+            raise ValueError("Budget limit must be a positive finite number")
+        return number
+
+    @staticmethod
+    def _observed_value(value: Any) -> Optional[float]:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
 
     @classmethod
     def _to_optional_float(cls, value: Any) -> Optional[float]:

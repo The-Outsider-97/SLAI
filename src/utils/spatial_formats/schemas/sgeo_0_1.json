@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slai.local/schemas/sgeo_0_1.json",
+  "type": "object",
+  "required": [
+    "document_id",
+    "revision",
+    "name",
+    "objects",
+    "families",
+    "metadata"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "document_id": {
+      "$ref": "spatial_core.json#/$defs/uuid"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 255
+    },
+    "metadata": {
+      "$ref": "spatial_core.json#/$defs/metadata"
+    },
+    "families": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object"
+      }
+    },
+    "objects": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "spatial_core.json#/$defs/uuid"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "$ref": "spatial_core.json#/$defs/uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transform": {
+            "$ref": "spatial_core.json#/$defs/matrix4"
+          },
+          "geometry": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "metadata": {
+            "$ref": "spatial_core.json#/$defs/metadata"
+          },
+          "family_id": {
+            "$ref": "spatial_core.json#/$defs/uuid"
+          },
+          "parameters": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "description": "Frozen schema of format version 0.1.0; used only to validate files before they are migrated."
+}

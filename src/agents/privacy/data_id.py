@@ -536,6 +536,26 @@ class DataID:
                 return True
         return False
 
+    @staticmethod
+    def _field_keyword_matches(keyword: str, normalized_field: str, field_tokens: List[str]) -> bool:
+        """Return whether a field-name keyword applies to a normalized field name.
+
+        Longer keywords keep substring semantics (``phone`` matches
+        ``customer_phone_number``).  Very short keywords (``ip``, ``dob``,
+        ``ssn``) must match whole ``_``-separated tokens: as a substring,
+        ``ip`` matched ``relationships`` and flagged harmless counters as IP
+        addresses.
+        """
+
+        key = str(keyword).lower()
+        if len(key) > 3:
+            return key in normalized_field
+        parts = [part for part in key.split("_") if part]
+        size = len(parts)
+        if not size:
+            return False
+        return any(field_tokens[i:i + size] == parts for i in range(len(field_tokens) - size + 1))
+
     def _detect_from_field_name(self, field_name: Optional[str], path: str, value: Any) -> List[EntityDetection]:
         detections: List[EntityDetection] = []
         if not field_name:
@@ -544,8 +564,9 @@ class DataID:
         normalized_field = re.sub(r"[^a-z0-9_]+", "_", field_name.lower())
         text_preview = self._preview_text(value)
 
+        field_tokens = self._field_tokens(field_name)
         for keyword, (entity_type, category, confidence) in self.field_keywords.items():
-            if keyword in normalized_field:
+            if self._field_keyword_matches(keyword, normalized_field, field_tokens):
                 if self._should_skip_field_heuristic(entity_type, keyword, field_name):
                     continue
                 detections.append(

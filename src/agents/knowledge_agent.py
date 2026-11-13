@@ -445,10 +445,10 @@ class KnowledgeAgent(BaseAgent):
         """Store documents, generate TF-IDF, and optionally dense embeddings."""
         try:
             if isinstance(text, tuple) and len(text) == 3:
-                subject, predicate, obj = text
-                self.ontology_manager.add_triple(subject, predicate, obj)
-                self.add_to_ontology(subject, predicate, obj)
-                return
+                raise PermissionError(
+                    "Unscoped ontology writes are disabled on the public legacy index; "
+                    "use the authorization-aware canonical knowledge service"
+                )
 
             if not isinstance(text, str) or len(text.strip()) < 3:
                 raise InvalidDocumentError(text, "Document text must be a non-empty string of length >= 3")
@@ -466,6 +466,11 @@ class KnowledgeAgent(BaseAgent):
 
                 tokens = self._preprocess(normalized_text)
                 doc_metadata = dict(metadata or {})
+                if doc_metadata.get("visibility") != "public":
+                    raise PermissionError(
+                        "Legacy document index accepts only explicitly classified public data; "
+                        "use assurance.KnowledgeRepository for project/organization knowledge"
+                    )
                 doc_metadata.setdefault("timestamp", time.time())
                 doc_metadata.setdefault("source", self.source)
                 if self.bias_detection_enabled and self.governor is not None:
@@ -686,17 +691,19 @@ class KnowledgeAgent(BaseAgent):
             return []
 
         start_time = time.time()
-        cache_key = self.knowledge_cache.hash_query(
-            f"knowledge-agent:{self.retrieval_mode}:{k}:{len(self.knowledge_agent)}:{query}"
-        )
+        cache_key = hashlib.sha256(
+            f"public-only:{self.retrieval_mode}:{k}:{len(self.knowledge_agent)}:{query}".encode("utf-8")
+        ).hexdigest()
         with self.cache_lock:
             cached_result = self.knowledge_cache.get(cache_key)
         if cached_result is not None:
             self._record_retrieval_metrics(start_time, cache_hit=True)
-            return cached_result
+            return [(score, doc) for score, doc in cached_result
+                    if doc.get("metadata", {}).get("visibility") == "public"]
 
         if query.strip() == "*":
-            results = [(1.0, doc) for doc in self.knowledge_agent[:k]]
+            results = [(1.0, doc) for doc in self.knowledge_agent
+                       if doc.get("metadata", {}).get("visibility") == "public"][:k]
             with self.cache_lock:
                 self.knowledge_cache.set(cache_key, results, ttl=self.retrieval_cache_ttl)
             self._record_retrieval_metrics(start_time, cache_hit=False)
@@ -718,7 +725,8 @@ class KnowledgeAgent(BaseAgent):
         tfidf_results = self._retrieve_tfidf(expanded_query)
         dense_results = self._retrieve_dense(expanded_query)
         combined = self._combine_results(tfidf_results, dense_results)
-        final_results = combined[:k]
+        final_results = [(score, doc) for score, doc in combined
+                         if doc.get("metadata", {}).get("visibility") == "public"][:k]
 
         if self.governor is not None:
             try:
@@ -1111,7 +1119,9 @@ class KnowledgeAgent(BaseAgent):
 
     def broadcast_knowledge(self, context=None, ttl: int = 300):
         broadcast_keys = []
-        for idx, doc in enumerate(self.knowledge_agent[-5:]):
+        public_documents = [doc for doc in self.knowledge_agent
+                            if doc.get("metadata", {}).get("visibility") == "public"]
+        for idx, doc in enumerate(public_documents[-5:]):
             key = f"{self.knowledge_tag}:{idx}"
             text = doc.get("text", "")
             metadata = doc.get("metadata", {})
@@ -1224,31 +1234,6 @@ class KnowledgeAgent(BaseAgent):
         final_results = fresh_results if fresh_results else retrieved
 
         response_text = "\n\n".join(doc.get("text", "") for _, doc in final_results[:3])
-        action_required = self._detect_action_trigger(query, final_results)
-        if action_required:
-            action_docs = [{"text": doc.get("text", "")} for _, doc in final_results]
-            action_result = self.orchestrator.execute_actions(action_docs)
-            self.update_memory(
-                key=f"knowledge:actions:{int(time.time())}",
-                value={
-                    "trigger": action_required,
-                    "query": query,
-                    "results_used": len(final_results),
-                    "action_result": action_result,
-                },
-                metadata={"type": "action_execution", "source": "knowledge_agent"},
-                context={"query": query, "source": "respond_to_query"},
-                ttl=3600,
-            )
-            return {
-                "response": response_text,
-                "confidence": float(final_results[0][0]) if final_results else 0.0,
-                "action": action_required,
-                "action_result": action_result,
-                "bias_analysis": bias_analysis,
-                "violations": audit_report.get("violations", []),
-            }
-
         return {
             "response": response_text,
             "confidence": float(final_results[0][0]) if final_results else 0.0,

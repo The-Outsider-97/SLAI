@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://slai.local/schemas/spatial_core.json",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "vec2": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "vec3": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "matrix4": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 16,
+      "maxItems": 16
+    },
+    "metadata": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^(?:[^:]+:[^:]+|slai\\..+)$"
+      },
+      "additionalProperties": true
+    },
+    "modifier_reference": {
+      "type": "object",
+      "required": ["document_id", "item_id"],
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {"$ref": "#/$defs/uuid"},
+        "item_id": {"$ref": "#/$defs/uuid"},
+        "revision": {"type": "integer", "minimum": 1},
+        "subelement": {
+          "type": "object", "required": ["kind", "id"], "additionalProperties": false,
+          "properties": {
+            "kind": {"enum": ["vertex", "edge", "face", "shell", "solid", "segment", "region", "anchor"]},
+            "id": {"$ref": "#/$defs/uuid"}
+          }
+        }
+      }
+    },
+    "evaluation_policy": {
+      "type": "object", "required": ["mode"], "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["exact", "tolerance_controlled", "bounded_approximation", "display_only"]},
+        "absolute": {"type": "number", "minimum": 0},
+        "relative": {"type": "number", "minimum": 0},
+        "angular": {"type": "number", "minimum": 0},
+        "max_error": {"type": "number", "minimum": 0}
+      }
+    },
+    "modifier": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "version", "target", "operands", "parameters", "enabled", "depends_on", "evaluation_policy"],
+      "properties": {
+        "id": {"$ref": "#/$defs/uuid"},
+        "kind": {"type": "string", "maxLength": 128},
+        "version": {"type": "integer", "minimum": 1},
+        "target": {"$ref": "#/$defs/modifier_reference"},
+        "operands": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/modifier_reference"}},
+        "parameters": {"type": "object"},
+        "enabled": {"type": "boolean"},
+        "depends_on": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/uuid"}},
+        "evaluation_policy": {"$ref": "#/$defs/evaluation_policy"}
+      }
+    },
+    "part": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

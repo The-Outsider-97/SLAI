@@ -6,7 +6,7 @@ ad-hoc dictionaries.
 """
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 import ast
 import math
@@ -488,15 +488,13 @@ class Equation:
     def evaluate(self, *args: Any, **kwargs: Any) -> Any:
         if self.callable is not None:
             return self.callable(*args, **kwargs)
-        env = dict(_ALLOWED_EXPR_FUNCS)
-        env.update(self.parameters)
+        from .parametric import ParametricMath
+        env = dict(self.parameters)
         env.update(kwargs)
-        for name, value in zip(self.variables, args):
-            env[name] = value
-        try:
-            return eval(compile(ast.parse(self.expression or "", mode="eval"), "<stem-equation>", "eval"), {"__builtins__": {}}, env)
-        except Exception as exc:
-            raise STEMEquationError("Failed to evaluate equation", context={"equation": self.name}, cause=exc) from exc
+        for key, value in zip(self.variables, args):
+            env[key] = value
+        result = ParametricMath().evaluate_expression(self.expression or "", env)
+        return result.unit.to_base(result.magnitude) if result.unit.dimension.is_dimensionless else result
 
     def residual_for(self, *args: Any, **kwargs: Any) -> Any:
         return self.residual(*args, **kwargs) if self.residual is not None else self.evaluate(*args, **kwargs)
@@ -544,51 +542,118 @@ class Quantity:
         uncertainty = self.uncertainty
         if uncertainty is not None:
             # uncertainty is a difference, so offsets never apply
-            converted_u = abs(uncertainty.value * self.unit.scale / target_unit.scale)
+            source_scale = uncertainty.unit.scale if uncertainty.unit else self.unit.scale
+            converted_u = abs(uncertainty.value * source_scale / target_unit.scale)
             uncertainty = Uncertainty(converted_u, uncertainty.coverage_factor, uncertainty.distribution, uncertainty.uncertainty_type, uncertainty.degrees_freedom, target_unit)
         return Quantity(magnitude, target_unit, uncertainty, self.precision)
 
     def __add__(self, other: "Quantity") -> "Quantity":
         if not isinstance(other, Quantity):
             return NotImplemented
+        if self.unit.is_affine or other.unit.is_affine:
+            raise STEMUnitError("Addition of absolute affine temperatures is not defined")
         rhs = other.convert(self.unit)
-        u = self._rss(rhs)
-        return Quantity(self.magnitude + rhs.magnitude, self.unit, u, self.precision or rhs.precision)
+        return Quantity(self.magnitude + rhs.magnitude, self.unit, self._rss(rhs),
+                        self.precision or rhs.precision)
 
     def __sub__(self, other: "Quantity") -> "Quantity":
         if not isinstance(other, Quantity):
             return NotImplemented
+        if self.unit.dimension != other.unit.dimension:
+            raise STEMUnitError("Cannot subtract incompatible physical quantities")
+        if self.unit.is_affine or other.unit.is_affine:
+            # Subtract absolute temperatures in kelvin; the result is a DELTA.
+            if self.unit.dimension != Dimension({"Θ": 1}):
+                raise STEMUnitError("Affine subtraction only supports temperatures")
+            q = Quantity(self.unit.to_base(self.magnitude) - other.unit.to_base(other.magnitude),
+                         Unit("K", "kelvin difference", Dimension({"Θ": 1})))
+            ua = (self.uncertainty.value * self.uncertainty.unit.scale
+                  if self.uncertainty and self.uncertainty.unit else
+                  self.uncertainty.value * self.unit.scale if self.uncertainty else 0.0)
+            ub = (other.uncertainty.value * other.uncertainty.unit.scale
+                  if other.uncertainty and other.uncertainty.unit else
+                  other.uncertainty.value * other.unit.scale if other.uncertainty else 0.0)
+            if self.uncertainty or other.uncertainty:
+                return Quantity(q.magnitude, q.unit, Uncertainty(math.hypot(ua, ub), unit=q.unit))
+            return q
         rhs = other.convert(self.unit)
-        return Quantity(self.magnitude - rhs.magnitude, self.unit, self._rss(rhs), self.precision or rhs.precision)
+        return Quantity(self.magnitude - rhs.magnitude, self.unit, self._rss(rhs),
+                        self.precision or rhs.precision)
+
+    def __neg__(self) -> "Quantity":
+        if self.unit.is_affine:
+            raise STEMUnitError("Negating an absolute affine temperature is undefined")
+        return Quantity(-self.magnitude, self.unit, self.uncertainty, self.precision)
 
     def __mul__(self, other: Union["Quantity", int, float]) -> "Quantity":
         if isinstance(other, Quantity):
+            result_unit = self.unit * other.unit
             magnitude = self.magnitude * other.magnitude
-            return Quantity(magnitude, self.unit * other.unit, self._relative_uncertainty(other, magnitude, self.unit * other.unit), self.precision or other.precision)
-        return Quantity(self.magnitude * float(other), self.unit, self.uncertainty, self.precision)
+            ua = self._std_uncertainty()
+            ub = other._std_uncertainty()
+            uncertainty = (Uncertainty(math.hypot(other.magnitude * ua, self.magnitude * ub), unit=result_unit)
+                           if self.uncertainty or other.uncertainty else None)
+            return Quantity(magnitude, result_unit, uncertainty, self.precision or other.precision)
+        if self.unit.is_affine:
+            raise STEMUnitError("Cannot scale an absolute affine temperature")
+        scalar = ensure_finite_number(other, "scalar")
+        uncertainty = (Uncertainty(abs(scalar) * self._std_uncertainty(), unit=self.unit)
+                       if self.uncertainty else None)
+        return Quantity(self.magnitude * scalar, self.unit, uncertainty, self.precision)
+
+    __rmul__ = __mul__
 
     def __truediv__(self, other: Union["Quantity", int, float]) -> "Quantity":
         if isinstance(other, Quantity):
             if other.magnitude == 0.0:
                 raise STEMValidationError("Division by zero quantity")
+            result_unit = self.unit / other.unit
             magnitude = self.magnitude / other.magnitude
-            return Quantity(magnitude, self.unit / other.unit, self._relative_uncertainty(other, magnitude, self.unit / other.unit), self.precision or other.precision)
-        if float(other) == 0.0:
+            ua = self._std_uncertainty()
+            ub = other._std_uncertainty()
+            uncertainty = (Uncertainty(math.hypot(ua / other.magnitude,
+                       self.magnitude * ub / other.magnitude ** 2), unit=result_unit)
+                       if self.uncertainty or other.uncertainty else None)
+            return Quantity(magnitude, result_unit, uncertainty, self.precision or other.precision)
+        scalar = ensure_finite_number(other, "scalar")
+        if scalar == 0.0:
             raise STEMValidationError("Division by zero")
-        return Quantity(self.magnitude / float(other), self.unit, self.uncertainty, self.precision)
+        if self.unit.is_affine:
+            raise STEMUnitError("Cannot divide absolute affine temperature")
+        uncertainty = (Uncertainty(self._std_uncertainty() / abs(scalar), unit=self.unit)
+                       if self.uncertainty else None)
+        return Quantity(self.magnitude / scalar, self.unit, uncertainty, self.precision)
+
+    def __pow__(self, exponent: float) -> "Quantity":
+        p = ensure_finite_number(exponent, "exponent")
+        if self.unit.is_affine:
+            raise STEMUnitError("Cannot exponentiate absolute affine temperature")
+        if self.magnitude < 0 and not p.is_integer():
+            raise STEMValidationError("Complex powers are not supported")
+        if self.magnitude == 0 and p < 0:
+            raise STEMValidationError("Zero raised to negative power")
+        result_unit = self.unit ** p
+        y = self.magnitude ** p
+        u = None
+        if self.uncertainty is not None:
+            if self.magnitude == 0 and p < 1:
+                raise STEMValidationError("Uncertainty derivative undefined at zero")
+            u = Uncertainty(abs(p * self.magnitude ** (p-1) * self._std_uncertainty()), unit=result_unit)
+        return Quantity(y, result_unit, u, self.precision)
+
+    def _std_uncertainty(self) -> float:
+        if self.uncertainty is None:
+            return 0.0
+        if self.uncertainty.unit is None:
+            return float(self.uncertainty.value)
+        return self.uncertainty.value * self.uncertainty.unit.scale / self.unit.scale
 
     def _rss(self, other: "Quantity") -> Optional[Uncertainty]:
+        # Independent first-order standard uncertainties only; covariances must
+        # use the dedicated Uncertainty subsystem, not be silently ignored.
         if self.uncertainty is None and other.uncertainty is None:
             return None
-        combined = math.hypot(self.uncertainty.value if self.uncertainty else 0.0, other.uncertainty.value if other.uncertainty else 0.0)
-        return Uncertainty(combined, unit=self.unit)
-
-    def _relative_uncertainty(self, other: "Quantity", result_magnitude: float, result_unit: Unit) -> Optional[Uncertainty]:
-        if self.uncertainty is None and other.uncertainty is None:
-            return None
-        rel_a = 0.0 if self.uncertainty is None or self.magnitude == 0 else self.uncertainty.value / abs(self.magnitude)
-        rel_b = 0.0 if other.uncertainty is None or other.magnitude == 0 else other.uncertainty.value / abs(other.magnitude)
-        return Uncertainty(abs(result_magnitude) * math.hypot(rel_a, rel_b), unit=result_unit)
+        return Uncertainty(math.hypot(self._std_uncertainty(), other._std_uncertainty()), unit=self.unit)
 
     def isclose(self, other: "Quantity", policy: Optional[PrecisionPolicy] = None) -> bool:
         rhs = other.convert(self.unit)
