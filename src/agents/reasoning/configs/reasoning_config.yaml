@@ -277,6 +277,7 @@ reasoning_cache:
 
 reasoning_types:
   max_combined_types: 3
+  max_input_depth: 64          # reject deeper problem/context nesting with a typed error
   # Optional learned strategy selector (train it with train_rss.py). Off by default: the
   # keyword policy below stays authoritative until a checkpoint is enabled here.
   learned_selector:
@@ -368,9 +369,11 @@ reasoning_cause_effect:
   temporal_weight: 0.6       # Weight for temporal validation
   correlation_weight: 0.4    # Weight for correlation validation
   network_mode: 'bayesian'   # 'bayesian' or 'simple' modeling
+  max_events: 5000           # Reject larger event streams (candidate search is O(events x pair distance))
 
 reasoning_decompositional:
   max_depth: 4
+  max_input_depth: 64        # Reject inputs nested deeper than this (typed error instead of RecursionError)
   min_component_size: 1
   max_components: 512
   max_children_per_node: 64
@@ -413,6 +416,7 @@ reasoning_deductive:
   return_trace: true
   include_rejected_premises: true
   rule_confidence_decay: 0.95
+  apply_rule_decay: false    # Deduction is truth-preserving; decay/rule_weights only apply when true
   contradiction_penalty: 0.5
   negation_penalty: 0.7
   enable_cache: true
@@ -443,6 +447,7 @@ reasoning_inductive:
   dominant_value_threshold: 0.7
   counterexample_tolerance: 0.2
   numeric_residual_tolerance: 0.2
+  trend_significance_alpha: 0.05   # Numeric trends must be statistically distinguishable from noise
   extrapolation_limit: 1.5
   trend_analysis_weight: 0.45
   pattern_analysis_weight: 0.35
