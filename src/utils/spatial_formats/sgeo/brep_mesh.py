@@ -232,6 +232,21 @@ def _bridge_holes(xy, outer, holes):
                     key = (abs(ry - my) / max(abs(rx - mx), 1e-300), (rx - mx) ** 2 + (ry - my) ** 2)
                     if chosen_key is None or key < chosen_key:
                         chosen, chosen_key = j, key
+        # A vertex that an earlier bridge already visited appears more than once in ``poly``. The bridge must leave from the occurrence whose
+        # corner (between its incoming and outgoing edges, interior on the left) actually faces the hole, or the bridged loop crosses itself.
+        target = poly[chosen]
+        rx, ry = xy[target]
+        d = (mx - rx, my - ry)
+        for j in [j for j in range(count) if poly[j] == target]:
+            prv, nxt_ = xy[poly[j - 1]], xy[poly[(j + 1) % count]]
+            e_out = (nxt_[0] - rx, nxt_[1] - ry)
+            e_in = (prv[0] - rx, prv[1] - ry)
+            c_out = e_out[0] * d[1] - e_out[1] * d[0]
+            c_in = d[0] * e_in[1] - d[1] * e_in[0]
+            convex = e_out[0] * e_in[1] - e_out[1] * e_in[0] >= 0
+            if (c_out >= -_EPS and c_in >= -_EPS) if convex else not (c_out < -_EPS and c_in < -_EPS):
+                chosen = j
+                break
         ring = hole[mi:] + hole[:mi] + [hole[mi]]
         poly = poly[:chosen + 1] + ring + [poly[chosen]] + poly[chosen + 1:]
     return poly
