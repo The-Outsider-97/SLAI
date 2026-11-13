@@ -9,7 +9,7 @@ across all QNN components.
 from __future__ import annotations
 
 import math
-import numpy as np
+import numpy as np # type: ignore
 import sys
 
 from collections.abc import Mapping, Sequence
@@ -282,9 +282,54 @@ def ensure_complex_state(
     return np.ascontiguousarray(arr, dtype=np.complex128)
 
 
-# -----------------------------------------------------------------------------
-# Exports
-# -----------------------------------------------------------------------------
+def _matrix(values: Any, width: int, *, name: str, max_rows: int = 128) -> np.ndarray:
+    """Return a finite real ``(rows, width)`` float64 matrix (1-D input is one row).
+
+    ``max_rows`` bounds the batch; callers that legitimately hold larger
+    partitions (e.g. supervised training) pass their configured limit. All
+    failures are ``QNNInputError`` subclasses, which remain ``ValueError``
+    subclasses for existing callers.
+    """
+    limit = positive_int(max_rows, "max_rows")
+    try:
+        raw = np.asarray(values)
+    except (TypeError, ValueError) as exc:
+        raise QNNConversionError(f"{name} must be finite numeric features") from exc
+    if np.iscomplexobj(raw):
+        raise QNNInputError(f"{name} must be real")
+    try:
+        array = np.asarray(raw, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise QNNConversionError(f"{name} must be finite numeric features") from exc
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    if array.ndim != 2 or array.shape[1] != width:
+        raise QNNDimensionError(f"{name} must have shape (1..{limit}, {width}), got {array.shape}")
+    if not 0 < array.shape[0] <= limit:
+        raise QNNResourceLimitError(
+            f"{name} must contain 1..{limit} rows, got {array.shape[0]}"
+        )
+    if not np.isfinite(array).all():
+        raise QNNFiniteValueError(f"{name} contains non-finite values")
+    return np.ascontiguousarray(array)
+
+
+def _labels(values: Any, count: int, *, name: str = "labels") -> np.ndarray:
+    """Return strictly binary (0/1) labels as float64 aligned with ``count`` samples."""
+    labels = np.asarray(values)
+    if labels.shape != (count,) or np.iscomplexobj(labels):
+        raise QNNDimensionError(f"{name} must align with {count} samples and contain only 0/1")
+    try:
+        floating = labels.astype(np.float64)
+    except (ValueError, TypeError) as exc:
+        raise QNNConversionError(f"{name} must contain only 0/1") from exc
+    if not np.isfinite(floating).all() or not np.isin(floating, (0.0, 1.0)).all():
+        raise QNNInputError(f"{name} must contain only 0/1")
+    if not np.array_equal(labels, floating):
+        raise QNNInputError(f"{name} must contain only 0/1")
+    return floating
+
+
 __all__ = [
     "positive_int",
     "positive_float",
@@ -300,4 +345,6 @@ __all__ = [
     "validate_normalized",
     "json_safe",
     "ensure_complex_state",
+    "_matrix",
+    "_labels",
 ]
