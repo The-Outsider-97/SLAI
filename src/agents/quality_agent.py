@@ -19,7 +19,7 @@ of agents_config.yaml. They must not load subsystem configuration themselves.
 
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 import time
 import uuid
