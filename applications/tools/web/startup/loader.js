@@ -1,8 +1,9 @@
 // A classic script placed immediately before the application's module entry point.
 (() => {
-  const { name, logo, fallback } = document.currentScript.dataset;
+  const { name, logo, fallback, variant, subtitle } = document.currentScript.dataset;
+  const branded = variant === 'spadra';
   const panel = document.createElement('dialog');
-  panel.className = 'slai-startup';
+  panel.className = branded ? 'slai-startup spadra-startup' : 'slai-startup';
   panel.setAttribute('aria-label', name + ' startup');
   const orb = document.createElement('div');
   orb.className = 'slai-startup-orb';
@@ -17,8 +18,23 @@
   orb.append(mark);
   const message = document.createElement('p');
   message.setAttribute('role', 'status');
-  message.textContent = 'Loading ' + name;
-  panel.append(orb, message);
+  message.textContent = branded ? 'Loading ...' : 'Loading ' + name;
+  if (branded) {
+    const content = document.createElement('section');
+    content.className = 'spadra-startup-content';
+    const progress = document.createElement('progress');
+    progress.max = 1; // Indeterminate until the application actually reports measured progress.
+    progress.setAttribute('aria-label', name + ' initialization progress');
+    const title = document.createElement('h1');
+    title.textContent = name;
+    const tagline = document.createElement('p');
+    tagline.className = 'spadra-startup-subtitle';
+    tagline.textContent = subtitle || '';
+    content.append(orb, message, progress, title, tagline);
+    panel.append(content);
+  } else {
+    panel.append(orb, message);
+  }
   document.body.append(panel);
   panel.showModal();
 
@@ -57,7 +73,7 @@
   window.addEventListener('slai:startup-update', event => {
     if (panel.classList.contains('failed')) return;
     const { message: status, progress } = event.detail || {};
-    if (typeof status === 'string' && status.trim()) message.textContent = status;
+    if (!branded && typeof status === 'string' && status.trim()) message.textContent = status;
     if (!Number.isFinite(progress) || progress < 0 || progress > 1) return;
     let meter = panel.querySelector('progress');
     if (!meter) {
