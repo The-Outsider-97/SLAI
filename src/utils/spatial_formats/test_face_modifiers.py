@@ -51,6 +51,7 @@ class ParametricFaceModifierTests(unittest.TestCase):
         self.assertEqual(len(cells), 6)
         self.assertEqual(len(set(cells)), 6)
         self.assertEqual(len(self.scene.face_references(self.wall)), 12)
+        self.assertAlmostEqual(self.scene.face_references(self.wall)[self.front]["physical_thickness"], .3)
         self.assert_solid(evaluated["result"]["geometry"])
         self.assertEqual(len(evaluated["result"]["geometry"]["faces"]), 44)
         # Actual surface hit resolves to the narrowest subface, not a triangle index.

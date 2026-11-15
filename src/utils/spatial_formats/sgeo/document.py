@@ -101,7 +101,7 @@ class SceneDocument(SpatialDocument):
         ``evaluated=True`` includes generated subfaces and reports a missing
         face after a topology edit, rather than silently remapping by mesh index.
         """
-        from .face_modifiers import face_catalog
+        from .face_modifiers import _face_world_frame, _lineage, face_catalog
         from ..common.ids import require_id
         ident = require_id(object_id)
         with self._model._mutation_lock:
@@ -112,7 +112,15 @@ class SceneDocument(SpatialDocument):
                 for item in self.evaluate_modifiers():
                     if item["item_id"] == ident and item["status"] == "ok":
                         source = item["result"]
-            return deepcopy(face_catalog(source))
+            faces = deepcopy(face_catalog(source))
+            if faces:
+                lineage = _lineage(source)
+                for face in faces.values():
+                    center, u, v, normal, thickness = _face_world_frame(lineage, face)
+                    face["center"] = center
+                    face["normal"] = normal
+                    face["physical_thickness"] = thickness
+            return faces
 
     def pick_face(self, object_id: str, local_position, local_normal, *, tolerance=1e-7):
         """Resolve an actual viewport surface hit to a stable face UUID."""
