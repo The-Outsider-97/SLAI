@@ -21,7 +21,8 @@ MAX_DEPENDENCIES = 64
 MAX_GRAPH_DEPTH = 256
 MAX_PARAMETERS_NODES = 1_000
 _OPERATIONS = {
-    "sgeo": frozenset({"identity", "boolean", "split", "bend", "chamfer"}),
+    "sgeo": frozenset({"identity", "boolean", "split", "bend", "chamfer",
+                        "face_subdivide", "face_extrude", "face_bevel"}),
     "sdrw": frozenset({"identity", "boolean", "trim", "extend", "offset", "bend", "chamfer"}),
 }
 MODIFIER_KINDS = frozenset(f"{format_name}.{kind}" for format_name, kinds in _OPERATIONS.items()
@@ -52,7 +53,7 @@ def validate_reference(reference, *, path="reference") -> dict:
 
 
 def reference_status(reference, *, document_id, revision, items) -> dict:
-    """Report stable resolution states; subelement mapping is not implemented yet."""
+    """Report stable resolution states, including supported SGEO face lineage."""
     validate_reference(reference)
     if reference["document_id"] != document_id:
         return {"status": "external", "reason": "external references require an authorized resolver"}
@@ -61,7 +62,12 @@ def reference_status(reference, *, document_id, revision, items) -> dict:
     if "revision" in reference and reference["revision"] != revision:
         return {"status": "stale", "reason": "pinned document revision differs"}
     if "subelement" in reference:
-        return {"status": "unsupported", "reason": "topological lineage is not yet available"}
+        sub = reference["subelement"]
+        if sub["kind"] != "face":
+            return {"status": "unsupported", "reason": "only planar SGEO face references are implemented"}
+        from ..sgeo.face_modifiers import face_catalog
+        if sub["id"] not in face_catalog(items[reference["item_id"]]):
+            return {"status": "missing", "reason": "face no longer exists in this evaluated topology"}
     return {"status": "resolved"}
 
 
@@ -129,6 +135,11 @@ def validate_modifier(value, *, format_id, path="modifier") -> dict:
                   "angle": (int, float), "segments": int}, 0),
         "chamfer": ({"amount": (int, float), "depth": (int, float), "segments": int}, 0),
         "split": ({"origin": list, "normal": list, "side": str}, 0),
+        "face_subdivide": ({"rows": int, "columns": int}, 0),
+        "face_extrude": ({"depth": (int, float), "mode": str, "direction": str,
+                          "thickness_limit": (int, float)}, 0),
+        "face_bevel": ({"depth": (int, float), "width": (int, float), "edge": str,
+                        "mode": str, "thickness_limit": (int, float)}, 0),
     }
     fields, expected_operands = specifications[operation]
     if set(params) != set(fields) or len(operands) != expected_operands:
@@ -164,6 +175,26 @@ def validate_modifier(value, *, format_id, path="modifier") -> dict:
         normal = vector(params["normal"], 3)
         if sum(x*x for x in normal) <= 1e-24 or params["side"] not in {"positive", "negative"}:
             raise ValidationError("invalid split plane or side", path=path)
+    if operation in {"face_subdivide", "face_extrude", "face_bevel"}:
+        if format_id != "slai.sgeo" or value["target"].get("subelement", {}).get("kind") != "face":
+            raise ValidationError("face modifier requires an SGEO face reference", path=path)
+        if operation == "face_subdivide":
+            if not 1 <= params["rows"] <= 64 or not 1 <= params["columns"] <= 64:
+                raise ResourceLimitError("face grid counts must be within 1..64", path=path)
+            if params["rows"] * params["columns"] <= 1:
+                raise ValidationError("subdivision needs at least two regions", path=path)
+        else:
+            if not 0 < finite(params["depth"], "depth") <= finite(params["thickness_limit"], "thickness_limit"):
+                raise ValidationError("face modifier depth exceeds local thickness limit", path=path)
+            if operation == "face_extrude":
+                if params["mode"] not in {"add", "recess"} or params["direction"] not in {"normal", "reverse"}:
+                    raise ValidationError("invalid face extrusion mode or direction", path=path)
+            elif (not 0 < finite(params["width"], "width")
+                  or params["edge"] not in {"u_min", "u_max", "v_min", "v_max"}
+                  or params["mode"] != "inline"):
+                raise ValidationError("face bevel currently supports inline straight chamfers", path=path)
+    elif "subelement" in value["target"]:
+        raise UnsupportedFeatureError("modifier does not support a face target", path=path)
     validate_evaluation_policy(value["evaluation_policy"], path=path + "/evaluation_policy")
     return value
 
@@ -253,8 +284,8 @@ def validate_modifiers(modifiers, *, format_id, document_id, revision, items,
         ref = modifier["target"]
         if ref["document_id"] != document_id or ref["item_id"] not in items:
             raise ReferenceError("modifier target must exist in this document", path=f"/modifiers/{i}/target")
-        if "subelement" in ref:
-            raise UnsupportedFeatureError("Phase 0 does not resolve topology targets", path=f"/modifiers/{i}/target")
+        # Face lineage is resolved against evaluated preceding geometry, not
+        # against the unmodified input (subfaces may be created by this graph).
         if ref.get("revision", revision) != revision:
             raise ConflictError("modifier target is pinned to a stale revision", path=f"/modifiers/{i}/target")
         target_lists[ref["item_id"]].append(mid)
@@ -388,7 +419,8 @@ def evaluate_identity_modifiers(model, *, format_id, items) -> list[dict]:
                            "result": None})
             continue
         target = modifier["target"]
-        state = reference_status(target, document_id=model.document_id, revision=model.revision, items=items)
+        state = reference_status(target, document_id=model.document_id, revision=model.revision,
+                                 items={**items, **last_output})
         if state["status"] != "resolved":
             raise ReferenceError("modifier target could not be resolved", context={"status": state["status"]})
         key = target["item_id"]

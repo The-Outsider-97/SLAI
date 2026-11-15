@@ -323,8 +323,19 @@ def evaluate(source, operands, modifier, *, source_world=IDENTITY, operand_world
         geometry, details = _bend(source, modifier)
     elif operation == "chamfer":
         geometry, details = _chamfer(source, modifier)
+    elif operation in {"face_subdivide", "face_extrude", "face_bevel"}:
+        from .face_modifiers import bevel_face, extrude_face, subdivide_face
+        _policy(modifier, {"tolerance_controlled", "display_only"} if operation != "face_subdivide"
+                else {"exact", "tolerance_controlled", "display_only"})
+        return {"face_subdivide": subdivide_face, "face_extrude": extrude_face,
+                "face_bevel": bevel_face}[operation](source, modifier)
     else:
         raise UnsupportedFeatureError("unimplemented SGEO modifier kind")
     output = deepcopy(source)
     output["geometry"] = geometry
+    # Generic topology-changing modifiers have no proved face correspondence.
+    # Drop derived lineage rather than allowing a stale face to resolve to an
+    # unrelated region after a Boolean, split, bend or whole-object chamfer.
+    from .face_modifiers import FACE_KEY
+    output.get("metadata", {}).pop(FACE_KEY, None)
     return output, details
