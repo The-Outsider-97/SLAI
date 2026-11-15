@@ -95,6 +95,39 @@ class SceneDocument(SpatialDocument):
     FILE_SUFFIX = ".sgeo"
     KIND_LABEL = "scene"
 
+    def face_references(self, object_id: str, *, evaluated: bool = True) -> dict:
+        """Return persistent face UUIDs with local frames and parameter ranges.
+
+        ``evaluated=True`` includes generated subfaces and reports a missing
+        face after a topology edit, rather than silently remapping by mesh index.
+        """
+        from .face_modifiers import face_catalog
+        from ..common.ids import require_id
+        ident = require_id(object_id)
+        with self._model._mutation_lock:
+            source = self._modifier_items().get(ident)
+            if source is None:
+                raise ReferenceError("face source object does not exist")
+            if evaluated:
+                for item in self.evaluate_modifiers():
+                    if item["item_id"] == ident and item["status"] == "ok":
+                        source = item["result"]
+            return deepcopy(face_catalog(source))
+
+    def pick_face(self, object_id: str, local_position, local_normal, *, tolerance=1e-7):
+        """Resolve an actual viewport surface hit to a stable face UUID."""
+        from .face_modifiers import pick_face
+        from ..common.ids import require_id
+        ident = require_id(object_id)
+        with self._model._mutation_lock:
+            source = self._modifier_items().get(ident)
+            if source is None:
+                raise ReferenceError("face source object does not exist")
+            for item in self.evaluate_modifiers():
+                if item["item_id"] == ident and item["status"] == "ok":
+                    source = item["result"]
+            return pick_face(source, local_position, local_normal, tolerance=tolerance)
+
     def __init__(self, scene: Scene | None = None, *, name: str = "Untitled", unit: str = "m",
                  document_kind: str = "model", path=None, source_sha256=None, read_only: bool = False, source_version=None):
         if scene is None:

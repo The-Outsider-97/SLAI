@@ -296,7 +296,8 @@ class SpatialDocument:
 
     def add_modifier(self, item_id: str, *, kind: str | None = None, operands=None,
                      parameters=None, depends_on=None, evaluation_policy=None,
-                     enabled: bool = True, modifier_id: str | None = None) -> str:
+                     enabled: bool = True, modifier_id: str | None = None,
+                     target_subelement: dict | None = None) -> str:
         """Create a versioned modifier as one atomic document revision.
 
         Operations are evaluated on demand; creating a record never executes
@@ -307,7 +308,10 @@ class SpatialDocument:
         kind = kind or self.FORMAT_ID.split(".")[-1] + ".identity"
         ident = new_id() if modifier_id is None else require_id(modifier_id)
         ref = lambda item: {"document_id": self.document_id, "item_id": require_id(item)}
-        value = {"id": ident, "kind": kind, "version": 1, "target": ref(item_id),
+        target = ref(item_id)
+        if target_subelement is not None:
+            target["subelement"] = deepcopy(target_subelement)
+        value = {"id": ident, "kind": kind, "version": 1, "target": target,
                  "operands": [ref(item) for item in (operands or [])],
                  "parameters": {} if parameters is None else deepcopy(parameters),
                  "enabled": enabled, "depends_on": list(depends_on or []),
