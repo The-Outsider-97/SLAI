@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from lstp import (
@@ -24,14 +24,19 @@ from lstp import (
     Pragmatics,
     canonical_dumps,
     canonical_loads,
+    compact_dumps,
+    compact_loads,
     compile_canonical_lattice,
+    incremental_dumps,
+    incremental_loads,
+    prepare_action_input,
+    project_action,
 )
+from lstp.inference import ActionProjection, ModelInput
 from lstp.models import JSONValue
 from lstp.packet.compiler import CompilerOptions, compile_lattice
 
-_QUALIFIED_IDENTIFIER = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$"
-)
+_QUALIFIED_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$")
 
 _ACT_MAPPING = {
     "ASSERTIVE": ("inform", "statement"),
@@ -61,13 +66,8 @@ def _json_value(value: Any, *, path: str) -> JSONValue:
             output[key] = _json_value(item, path=f"{path}.{key}")
         return output
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return tuple(
-            _json_value(item, path=f"{path}[{index}]")
-            for index, item in enumerate(value)
-        )
-    raise LSTPIntegrationError(
-        f"unsupported SLAI value type at {path}: {type(value).__name__}"
-    )
+        return tuple(_json_value(item, path=f"{path}[{index}]") for index, item in enumerate(value))
+    raise LSTPIntegrationError(f"unsupported SLAI value type at {path}: {type(value).__name__}")
 
 
 def _act_name(frame: Any) -> str:
@@ -118,9 +118,7 @@ def _atoms(frame: Any) -> tuple[Atom, ...]:
             )
         )
 
-    proposition = str(
-        getattr(frame, "propositional_content", "") or ""
-    ).strip()
+    proposition = str(getattr(frame, "propositional_content", "") or "").strip()
     if proposition:
         atoms.append(
             Atom(
@@ -160,11 +158,7 @@ def packet_from_frame(
         raise LSTPIntegrationError("frame confidence must be finite")
     confidence = min(1.0, max(0.0, confidence))
 
-    evidence = (
-        (EvidenceItem("e0", "user", source_ref=source_text),)
-        if source_text
-        else ()
-    )
+    evidence = (EvidenceItem("e0", "user", source_ref=source_text),) if source_text else ()
     carrier: dict[str, JSONValue] = {
         "source": "slai_language_agent",
     }
@@ -201,12 +195,8 @@ def packet_from_language_response(
     frame = getattr(response, "frame", None)
     if frame is None:
         raise LSTPIntegrationError("language response has no semantic frame")
-    resolved_packet_id = packet_id or str(
-        getattr(response, "trace_id", "") or ""
-    )
-    resolved_thread_id = thread_id or str(
-        getattr(response, "session_id", "") or resolved_packet_id
-    )
+    resolved_packet_id = packet_id or str(getattr(response, "trace_id", "") or "")
+    resolved_thread_id = thread_id or str(getattr(response, "session_id", "") or resolved_packet_id)
     return packet_from_frame(
         frame,
         source_text=source_text,
@@ -229,6 +219,51 @@ def validate_json_packet(source: str | bytes) -> PacketEnvelope:
     return canonical_loads(source)
 
 
+def encode_compact_packet(packet: PacketEnvelope) -> bytes:
+    """Encode an already validated semantic packet without changing its authority."""
+    return compact_dumps(packet)
+
+
+def decode_compact_packet(source: str | bytes) -> PacketEnvelope:
+    """Explicit L1 ingress; canonical JSON ingress never guesses a new carrier."""
+    return compact_loads(source)
+
+
+def encode_incremental_packet(
+    packet: PacketEnvelope,
+    *,
+    base: PacketEnvelope | None = None,
+) -> bytes:
+    """Content-addressed transport reuse with a self-contained fallback."""
+    return incremental_dumps(packet, base=base)
+
+
+def decode_incremental_packet(
+    source: str | bytes,
+    *,
+    base: PacketEnvelope | None = None,
+) -> PacketEnvelope:
+    """Restore full semantics before host authorization, replay checks or inference."""
+    return incremental_loads(source, base=base)
+
+
+def prepare_action_extraction(
+    packet: PacketEnvelope,
+    count_tokens: Callable[[str, str], int],
+) -> ModelInput:
+    """Measure the complete model request; unsupported views retain the full packet."""
+    return prepare_action_input(packet, count_tokens)
+
+
+def extract_action_fields(packet: PacketEnvelope) -> ActionProjection:
+    """Deterministically extract an already structured task without an API request.
+
+    This returns source-bound task data, never an authorization decision.
+    Unsupported packet shapes raise rather than losing additional semantics.
+    """
+    return project_action(packet)
+
+
 def canonical_lattice_to_packet(
     source: str,
     *,
@@ -238,9 +273,7 @@ def canonical_lattice_to_packet(
 
     document = compile_canonical_lattice(source)
     if len(document.packets) != 1:
-        raise LSTPIntegrationError(
-            "SLAI canonical-Lattice ingress accepts exactly one packet"
-        )
+        raise LSTPIntegrationError("SLAI canonical-Lattice ingress accepts exactly one packet")
     packet = document.packets[0]
     return PacketEnvelope(
         packet.octad,
