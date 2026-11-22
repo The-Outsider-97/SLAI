@@ -299,7 +299,11 @@ class SafetyAgent(BaseAgent):
         self.config = load_global_config()
         self.safety_config: Dict[str, Any] = dict(get_config_section("safety_agent") or {})
         if config:
-            logger.warning("SafetyAgent runtime config override ignored; use agents_config.yaml:safety_agent.")
+            # AgentFactory always hands each agent its own agents_config.yaml section as ``config``; only values that differ from
+            # what this agent loads are overrides that are really being ignored (and the warning names the keys).
+            ignored = sorted(str(k) for k, v in dict(config).items() if k not in self.safety_config or self.safety_config[k] != v)
+            if ignored:
+                logger.warning("SafetyAgent runtime config override ignored for %s; use agents_config.yaml:safety_agent.", ignored)
 
         assert_valid_config_contract(
             global_config=self.config,
