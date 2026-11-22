@@ -13,6 +13,7 @@ from ..common.errors import (DependencyUnavailableError, GeometryValidationError
                              ResourceLimitError, UnsupportedFeatureError)
 from ..common.transforms import IDENTITY
 from .box_boolean import boolean_boxes
+from .box_split import split_box
 from .geometry import MAX_TRIANGLES, MAX_VERTICES, validate_geometry
 
 
@@ -138,6 +139,12 @@ def _split(source, modifier):
         result["center"][axis] = (lo + hi) / 2
         result["size"][axis] = hi - lo
         return validate_geometry(result), {"backend": "analytic-box-split", "approximate": False, "empty": False}
+    # A box cut by any other plane is still exact: it is convex, so the kept part is the clipped polyhedron (no numerical mesh library involved).
+    if geometry is not None and geometry["kind"] == "box":
+        _policy(modifier, {"exact", "tolerance_controlled", "display_only"})
+        kept, outcome, info = split_box(geometry, normal, origin)
+        return (deepcopy(kept) if outcome == "unchanged" else kept), {"backend": "analytic-box-plane-split", "approximate": False, "empty": kept is None,
+                                                                    "outcome": outcome, "tolerance": info["tolerance"]}
     _policy(modifier, {"tolerance_controlled", "display_only"})
     np, trimesh = _dependencies()
     mesh, tessellated = _to_trimesh(source)
@@ -145,8 +152,11 @@ def _split(source, modifier):
         raise GeometryValidationError("solid split requires a watertight positive-volume input")
     try:
         result = mesh.slice_plane(plane_origin=origin, plane_normal=normal, cap=True)
-    except (ValueError, RuntimeError, ImportError) as exc:
-        raise GeometryValidationError("mesh split and cap failed") from exc
+    except ImportError as exc:                                              # a missing module is a missing dependency, not an invalid solid
+        raise DependencyUnavailableError(f"capping a split solid needs the optional module '{exc.name or exc}', which is not installed",
+                                         context={"module": exc.name}) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise GeometryValidationError("mesh split and cap failed", context={"error": f"{type(exc).__name__}: {exc}"[:300]}) from exc
     geometry = _from_trimesh(result)
     return geometry, {"backend": "mesh-plane-split", "approximate": True,
                       "tessellated_input": tessellated, "error_bound": None,

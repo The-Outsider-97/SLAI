@@ -34,6 +34,7 @@ def analyze_mesh(geometry: dict) -> MeshDiagnostics:
     if geometry["kind"] != "mesh":
         raise ValidationError("mesh diagnostics require triangle mesh geometry")
     vertices, faces=geometry["vertices"], geometry["faces"]
+    ref=vertices[0] if vertices else (0.0,0.0,0.0)     # volumes are summed relative to a vertex of the mesh: from the world origin they lose all precision far from it
     adjacency={i:[] for i in range(len(vertices))}
     used=set()
     edges={}
@@ -42,7 +43,7 @@ def analyze_mesh(geometry: dict) -> MeshDiagnostics:
     for face in faces:
         a,b,c=face
         used.update(face)
-        p,q,r=(vertices[i] for i in face)
+        p,q,r=([vertices[i][k]-ref[k] for k in range(3)] for i in face)
         u=(q[0]-p[0],q[1]-p[1],q[2]-p[2])
         v=(r[0]-p[0],r[1]-p[1],r[2]-p[2])
         n=(u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0])
