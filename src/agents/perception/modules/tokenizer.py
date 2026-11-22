@@ -54,7 +54,8 @@ class BytePairEncoder:
                 return [token]
             return [self.unk_token]
 
-        while True:
+        # A word whose merges fold it into a single symbol has no pairs left; min() of an empty set would raise.
+        while len(word) > 1 and pairs:
             bigram = min(pairs, key=lambda pair: self.bpe_ranks.get(pair, float('inf')))
             if bigram not in self.bpe_ranks:
                 break

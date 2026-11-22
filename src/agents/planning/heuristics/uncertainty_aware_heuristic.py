@@ -96,6 +96,11 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
         self.model = None
         self.trained = False
         self._lock = threading.RLock()
+        # Readiness cache: (signature of the training data source) -> verdict of the last attempt.  Without it every
+        # prediction (one per candidate method per decision) re-read the planning database and rebuilt every feature.
+        self._readiness_signature: Optional[Tuple[Any, ...]] = None
+        self._readiness_reason: Optional[str] = None
+        self._warned_signature: Optional[Tuple[Any, ...]] = None
 
         self._load_model()
 
@@ -172,21 +177,54 @@ class UncertaintyAwareHeuristic(BaseHeuristics):
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
 
+    MIN_TRAINING_SAMPLES = 10
+
+    def _training_source_signature(self) -> Tuple[Any, ...]:
+        """Cheap identity of the training data source (path, mtime, size); changes whenever the planning database does."""
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            path = os.path.join(base_dir, os.fspath(self.planning_db_path))
+            st = os.stat(path)
+            return (path, st.st_mtime_ns, st.st_size)
+        except (OSError, TypeError):
+            return ("unavailable",)
+
+    def invalidate_training_cache(self) -> None:
+        """Forget the cached readiness verdict (call after appending execution history to the planning database)."""
+        with self._lock:
+            self._readiness_signature = None
+            self._readiness_reason = None
+
+    @property
+    def readiness(self) -> Dict[str, Any]:
+        """Explicit readiness state: ``ready`` when a trained model is available, otherwise why predictions fall back."""
+        return {"ready": bool(self.trained), "reason": self._readiness_reason}
+
     def _ensure_model_ready(self) -> bool:
         if self.trained:
             return True
         with self._lock:
             if self.trained:
                 return True
+            signature = self._training_source_signature()
+            if signature == self._readiness_signature:
+                return False  # same data as the attempt that already failed: do not re-read it or rebuild features
+            self._readiness_signature = signature
             try:
                 X, y = self.load_training_data()
-                if len(X) < 10:
-                    logger.warning("Insufficient training data, using fallback.")
+                if len(X) < self.MIN_TRAINING_SAMPLES:
+                    self._readiness_reason = f"insufficient_training_data ({len(X)} < {self.MIN_TRAINING_SAMPLES})"
+                    if self._warned_signature != signature:  # once per data version, not once per prediction
+                        self._warned_signature = signature
+                        logger.warning("Insufficient training data, using fallback.")
                     return False
-                if len(X) > 0 and len(np.unique(y)) >= 2:
+                if len(np.unique(y)) >= 2:
                     self.train(X, y)
+                    self._readiness_reason = None if self.trained else "training_did_not_produce_a_model"
                     return self.trained
+                self._readiness_reason = "training_data_has_a_single_class"
             except Exception as e:
+                self._readiness_reason = f"auto_training_failed: {type(e).__name__}"
                 logger.error(f"Auto‑training failed: {e}")
         return False
 

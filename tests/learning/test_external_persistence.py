@@ -108,6 +108,19 @@ class Persistence(unittest.TestCase):
         other = ContextualBandit(contexts=6, actions=4)
         with self.assertRaises(CheckpointIntegrityError): make_service(other, checkpoint_dir=self.dir)
 
+    def test_same_dimensions_but_different_schema_fingerprint_is_refused(self):
+        """Dimensions cannot tell a reordered/redefined feature or action schema from the original: the fingerprint can."""
+        a = self.svc(seed=1, schema_fingerprint="schema-A")
+        train(a, self.env, 20)
+        a.save_checkpoint("test")
+        ok = self.svc(seed=2, schema_fingerprint="schema-A")                       # same meaning: restored
+        self.assertEqual(ok.status()["restore"]["status"], "restored")
+        with self.assertRaises(CheckpointIntegrityError) as cm:                    # same shape, different meaning: refused
+            self.svc(seed=3, schema_fingerprint="schema-B")
+        self.assertIn("schema fingerprint", str(cm.exception))
+        legacy = self.svc(seed=4)                                                  # an adapter that declares no schema keeps working
+        self.assertEqual(legacy.status()["restore"]["status"], "restored")
+
     def test_restore_on_start_false_leaves_a_fresh_learner(self):
         a = self.svc(seed=1); train(a, self.env, 5); a.save_checkpoint()
         b = self.svc(restore_on_start=False)

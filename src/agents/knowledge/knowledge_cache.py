@@ -222,15 +222,21 @@ class KnowledgeCache:
             return None
 
         key = encryption_key or os.getenv("CACHE_ENCRYPTION_KEY")
+        self.ephemeral_key = False
         if not key:
-            # Generate a persistent key from a known secret (e.g., machine ID) OR just warn and generate a random one.
-            # For production, you MUST provide a key. For development, generate a random key (breaks across restarts).
-            warnings.warn(
-                "No encryption key provided. Generating a random key. "
-                "Cache will be unreadable after restart. Set CACHE_ENCRYPTION_KEY for persistence.",
-                RuntimeWarning
-            )
+            # This cache is held in memory only (nothing here writes it to disk), so a per-process random key is correct: the
+            # contents cannot outlive the process whatever the key is. The warning is reserved for the case where it would matter:
+            # a deployment that declares it needs a restart-stable key (``require_persistent_key: true``) but supplied none.
+            if bool(self.cache_config.get("require_persistent_key", False)):
+                warnings.warn(
+                    "require_persistent_key is set but no encryption key was provided (argument or CACHE_ENCRYPTION_KEY); "
+                    "generating a random per-process key: anything encrypted with it is unreadable after a restart.",
+                    RuntimeWarning
+                )
+            else:
+                logger.info("No cache encryption key provided: using a per-process random key (the cache is memory-only)")
             key = Fernet.generate_key()
+            self.ephemeral_key = True
             self.enable_encryption = True  # still enabled
 
         if isinstance(key, str):
