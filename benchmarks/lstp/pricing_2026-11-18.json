@@ -1,0 +1,20 @@
+{
+  "openai": {
+    "model": "gpt-6-luna",
+    "input_per_million": "0.10",
+    "output_per_million": "0.50",
+    "cached_input_per_million": "0.01",
+    "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    "verified_at": "2026-11-18",
+    "service_tier": "standard"
+  },
+  "gemini": {
+    "model": "gemini-3.1-flash-lite",
+    "input_per_million": "0.25",
+    "output_per_million": "1.50",
+    "cached_input_per_million": "0.025",
+    "source": "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-flash-lite",
+    "verified_at": "2026-11-18",
+    "service_tier": "standard"
+  }
+}
