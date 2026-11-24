@@ -14,8 +14,10 @@ removed.
 """
 from __future__ import annotations
 
+import errno
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
@@ -57,11 +59,43 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def _rename_refused(exc: OSError) -> bool:
+    """WinError 17 / EXDEV: some folders (redirected or virtualised AppData, Store Python) refuse to rename even inside one folder."""
+    return getattr(exc, "winerror", None) == 17 or exc.errno == errno.EXDEV
+
+
+def _write_in_place(temporary: str, destination: Path, overwrite: bool) -> None:
+    """Last resort when renaming is refused: copy the finished bytes into the destination (not atomic, but the work is saved).
+    ``overwrite=False`` still never clobbers: the destination is created exclusively."""
+    with open(temporary, "rb") as source:
+        data = source.read()
+    try:
+        out = open(destination, "wb" if overwrite else "xb")
+    except FileExistsError as exc:
+        raise ConflictError("output file already exists", path=str(destination)) from exc
+    with out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
+
+
 def _publish(temporary: str, destination: Path, overwrite: bool) -> None:
     if overwrite:
-        os.replace(temporary, destination)
-        _fsync_directory(destination.parent)
-        return
+        last: OSError | None = None
+        for attempt in range(5):
+            try:
+                os.replace(temporary, destination)
+                _fsync_directory(destination.parent)
+                return
+            except OSError as exc:
+                last = exc
+                if not _rename_refused(exc) and getattr(exc, "winerror", None) not in (5, 32, 33):
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        if last is not None and _rename_refused(last):
+            _write_in_place(temporary, destination, True)
+            return
+        raise last  # type: ignore[misc]
     try:
         os.link(temporary, destination)
     except FileExistsError as exc:
@@ -76,6 +110,9 @@ def _publish(temporary: str, destination: Path, overwrite: bool) -> None:
             except FileExistsError as inner:
                 raise ConflictError("output file already exists", path=str(destination)) from inner
             except OSError as inner:
+                if _rename_refused(inner):
+                    _write_in_place(temporary, destination, False)
+                    return
                 raise ConflictError("filesystem does not support atomic no-clobber publication",
                                     path=str(destination)) from inner
         # A streamed copy would expose partial data: fail without publishing.

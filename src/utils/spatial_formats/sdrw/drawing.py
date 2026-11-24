@@ -6,7 +6,7 @@ from ..common.errors import ReferenceError
 from ..common import ValidationError, ResourceLimitError, new_id, require_id, assert_unique, require_unit, require_metadata
 from ..common.modifiers import validate_modifiers
 from ..container.versions import CURRENT_VERSION, schema_id
-from .entities import validate_entity, validate_style, make_entity, ANNOTATION_KINDS
+from .entities import validate_entity, validate_style, make_entity, ANNOTATION_KINDS, CURVE_KINDS
 from .linetypes import validate_linetype, check_linetype_ref, MAX_LINETYPES
 from .blocks import validate_block_record, check_block_graph, MAX_BLOCKS, MAX_BLOCK_ENTITIES
 
@@ -238,6 +238,8 @@ class Drawing:
         entities = list(self.entities) + [e for b in self.blocks for e in b["entities"]]
         if any(e["kind"] in ANNOTATION_KINDS for e in entities):
             features.append("annotations")
+        if any(e["kind"] in CURVE_KINDS for e in entities):
+            features.append("sdrw-curves-v1")
         if self.blocks or any(e["kind"] == "insert" for e in entities):
             features.append("blocks")
         if self.linetypes:

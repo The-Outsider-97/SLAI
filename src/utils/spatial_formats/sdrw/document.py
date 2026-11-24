@@ -18,6 +18,7 @@ from ..common.units import convert_area, convert_length, require_unit
 from ..documents import SpatialDocument, _checked_metadata
 from ..verification.report import ValidationReport, check_drawing
 from . import annotations as _ann
+from . import curves as _curves
 from .constraints import (CONSTRAINT_METADATA_KEY, ConstraintResult, ConstraintSolution,
                           check_constraints, solve_constraints)
 from .drawing import Drawing
@@ -219,6 +220,33 @@ class DrawingDocument(SpatialDocument):
                     "end_angle": _angle(end_angle, "end_angle", degrees)}
         return self._add("arc", geometry, options)
 
+    def add_ellipse(self, center, rx: float, ry: float, *, rotation: float = 0.0, degrees: bool = False, **options) -> str:
+        """Full ellipse. ``rx`` is the semi-axis along ``rotation`` (counter-clockwise from +x), ``ry`` the one at +90° from it; either may be larger."""
+        return self._add("ellipse", {"center": _pt(center, "center"), "rx": rx, "ry": ry,
+                                     "rotation": _angle(rotation, "rotation", degrees)}, options)
+
+    def add_spline(self, control_points, *, degree: int = 3, knots=None, **options) -> str:
+        """Clamped, non-rational B-spline through its first and last control point. Without ``knots`` the interior knots are evenly spaced."""
+        if isinstance(control_points, (str, bytes)) or not hasattr(control_points, "__iter__"):
+            raise ValidationError("control_points must be a sequence of (x, y) pairs")
+        pts = [_pt(p, "control point") for p in control_points]
+        if type(degree) is not int:
+            raise ValidationError("spline degree must be an integer")
+        ks = [float(k) for k in knots] if knots is not None else _curves.clamped_uniform_knots(len(pts), degree)
+        return self._add("spline", {"degree": degree, "control_points": pts, "knots": ks}, options)
+
+    def add_bezier_spline(self, segments, **options) -> str:
+        """A chain of cubic Béziers, each ``(p0, c1, c2, p3)`` starting where the previous one ended, as one spline entity (interior knots repeated three times)."""
+        segs = [[_pt(q, "Bezier point") for q in seg] for seg in segments]
+        if not segs or any(len(seg) != 4 for seg in segs):
+            raise ValidationError("each Bezier segment needs four points")
+        for a, b in zip(segs, segs[1:]):
+            if hypot(a[3][0] - b[0][0], a[3][1] - b[0][1]) > 1e-9 * max(1.0, abs(a[3][0]), abs(a[3][1])):
+                raise ValidationError("Bezier segments must join end to start")
+        pts = [segs[0][0]] + [q for seg in segs for q in seg[1:]]
+        knots = [0.0] * 4 + [float(i) for i in range(1, len(segs)) for _ in range(3)] + [float(len(segs))] * 4
+        return self._add("spline", {"degree": 3, "control_points": pts, "knots": knots}, options)
+
     def add_arc_through(self, start, through, end, **options) -> str:
         """Arc passing through three points, directed start -> through -> end.
 
@@ -270,7 +298,7 @@ class DrawingDocument(SpatialDocument):
         return self.update(entity_id, geometry={**entity["geometry"], "text": text})
 
     def _loop(self, item) -> dict:
-        """Accept a loop dict, a list of points (polygon), or the id of a closed polyline / circle."""
+        """Accept a loop dict, a list of points (polygon), or the id of a closed polyline, circle, ellipse or closed spline."""
         if isinstance(item, dict):
             return deepcopy(item)
         if isinstance(item, str):
@@ -278,9 +306,14 @@ class DrawingDocument(SpatialDocument):
             g = entity["geometry"]
             if entity["kind"] == "circle":
                 return {"kind": "circle", "center": list(g["center"]), "radius": g["radius"]}
+            if entity["kind"] == "ellipse":
+                return {"kind": "ellipse", "center": list(g["center"]), "rx": g["rx"], "ry": g["ry"], "rotation": g.get("rotation", 0.0)}
+            if entity["kind"] == "spline" and _curves.spline_is_closed(g):
+                return {"kind": "path", "segments": [{"kind": "spline", "degree": g["degree"], "control_points": [list(p) for p in g["control_points"]],
+                                                      "knots": list(g["knots"])}]}
             if entity["kind"] == "polyline" and g.get("closed"):
                 return {"kind": "polygon", "points": [list(p) for p in g["points"]]}
-            raise ValidationError("a hatch boundary entity must be a circle or closed polyline",
+            raise ValidationError("a hatch boundary entity must be a circle, ellipse, closed polyline or closed spline",
                                   context={"id": item, "kind": entity["kind"]})
         return {"kind": "polygon", "points": [_pt(p) for p in item]}
 
@@ -288,9 +321,9 @@ class DrawingDocument(SpatialDocument):
                   spacing: float | None = None, **options) -> str:
         """Add a hatch filling ``boundary`` (even-odd: nested loops alternate fill and hole).
 
-        Each boundary item is a loop dict (``polygon``, ``circle`` or ``path`` of line/arc
-        segments), a list of points (polygon), or the id of an existing circle or closed
-        polyline. ``pattern`` is ``solid``, ``lines`` or ``cross`` (the latter two need
+        Each boundary item is a loop dict (``polygon``, ``circle``, ``ellipse`` or ``path`` of
+        line/arc/spline segments), a list of points (polygon), or the id of an existing circle,
+        ellipse, closed polyline or closed spline. ``pattern`` is ``solid``, ``lines`` or ``cross`` (the latter two need
         ``spacing``). Use ``style={"fill": "#cccccc"}`` / ``{"stroke": ...}`` for colour.
         """
         if isinstance(boundary, (str, dict)):
@@ -719,7 +752,7 @@ class DrawingDocument(SpatialDocument):
     def total_length(self, *, layer: str | None = None, unit: str | None = None) -> float:
         with self._model._mutation_lock:
             value = sum(entity_length(e) for e in self._matching(None, layer, None, None, None)
-                        if e["kind"] in ("point", "line", "polyline", "circle", "arc"))
+                        if e["kind"] in ("point", "line", "polyline", "circle", "arc", "ellipse", "spline"))
         return value if unit is None or unit == self.unit else convert_length(value, self.unit, require_unit(unit))
 
     def constraints(self) -> list[dict]:

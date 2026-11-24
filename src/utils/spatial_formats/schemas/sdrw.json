@@ -161,6 +161,8 @@
             "polyline",
             "circle",
             "arc",
+            "ellipse",
+            "spline",
             "text",
             "dimension",
             "hatch",

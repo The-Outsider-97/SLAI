@@ -13,6 +13,7 @@ from __future__ import annotations
 from math import atan2, ceil, cos, hypot, pi, sin, sqrt
 
 from ..common import ValidationError, finite, vector
+from . import curves as _curves
 from ..common.errors import GeometryValidationError
 
 _TAU = 2.0 * pi
@@ -102,6 +103,23 @@ MAX_LOOP_SEGMENTS = 1_024
 MAX_LOOP_POINTS = 100_000
 
 
+def _spline_seg(seg) -> dict:
+    """The spline geometry of a hatch path segment (kind removed), validated like a spline entity."""
+    if set(seg) - {"kind", *_curves.SPLINE_KEYS}:
+        raise GeometryValidationError("unknown fields in hatch spline segment")
+    g = {k: v for k, v in seg.items() if k != "kind"}
+    _curves.validate_spline(g)
+    return g
+
+
+def _ellipse_loop(loop) -> dict:
+    if set(loop) - {"kind", *_curves.ELLIPSE_KEYS}:
+        raise GeometryValidationError("unknown fields in hatch ellipse loop")
+    g = {k: v for k, v in loop.items() if k != "kind"}
+    _curves.validate_ellipse(g)
+    return g
+
+
 def _arc_ok(seg):
     vector(seg.get("center"), 2)
     if finite(seg.get("radius"), "arc radius") <= 0:
@@ -126,6 +144,8 @@ def _chain(segments, tolerance=None):
     def ends(seg):
         if seg["kind"] == "line":
             return tuple(seg["start"]), tuple(seg["end"])
+        if seg["kind"] == "spline":
+            return _curves.spline_ends(seg)
         return arc_point(seg, seg["start_angle"]), arc_point(seg, seg["end_angle"])
 
     scale = max([1.0] + [abs(v) for seg in segments for p in ends(seg) for v in p])
@@ -190,6 +210,8 @@ def validate_hatch_loop(loop) -> None:
         vector(loop.get("center"), 2)
         if finite(loop.get("radius"), "radius") <= 0:
             raise GeometryValidationError("hatch circle radius must be positive")
+    elif kind == "ellipse":
+        _ellipse_loop(loop)
     elif kind == "path":
         if set(loop) - {"kind", "segments"}:
             raise GeometryValidationError("unknown fields in hatch path loop")
@@ -208,16 +230,21 @@ def validate_hatch_loop(loop) -> None:
                 if set(seg) - {"kind", "center", "radius", "start_angle", "end_angle"}:
                     raise GeometryValidationError("unknown fields in hatch arc segment")
                 _arc_ok(seg)
+            elif seg.get("kind") == "spline":
+                _spline_seg(seg)
             else:
-                raise GeometryValidationError("hatch segment kind must be 'line' or 'arc'")
+                raise GeometryValidationError("hatch segment kind must be 'line', 'arc' or 'spline'")
         if len(segs) == 1:
             seg = segs[0]
-            if seg["kind"] != "arc" or abs(seg["end_angle"] - seg["start_angle"] - _TAU) > 1e-9:
-                raise GeometryValidationError("a one-segment hatch path must be a full circle")
+            if seg["kind"] == "spline":
+                if not _curves.spline_is_closed(seg):
+                    raise GeometryValidationError("a one-segment hatch path made of a spline must be closed (its end points must coincide)")
+            elif seg["kind"] != "arc" or abs(seg["end_angle"] - seg["start_angle"] - _TAU) > 1e-9:
+                raise GeometryValidationError("a one-segment hatch path must be a full circle or a closed spline")
         else:
             _chain(segs)
     else:
-        raise GeometryValidationError("hatch loop kind must be polygon, circle or path")
+        raise GeometryValidationError("hatch loop kind must be polygon, circle, ellipse or path")
 
 
 def validate_hatch(g: dict) -> None:
@@ -257,11 +284,25 @@ def _arc_samples(seg, forward=True, step=pi / 90):
     return pts if forward else pts[::-1]
 
 
-def loop_polygon(loop, *, step=pi / 90):
+def _curve_tolerance(extent: float, step: float, tolerance) -> float:
+    """Chord tolerance for an ellipse or spline: the given one, else what a circle of the same extent would get from the angular ``step``."""
+    if tolerance is not None:
+        return max(float(tolerance), 1e-12 * max(extent, 1e-300))
+    return max(extent * (1.0 - cos(step / 2.0)), 1e-12 * max(extent, 1e-300))
+
+
+def _spline_extent(g) -> float:
+    (x0, y0), (x1, y1) = _curves.spline_bounds(g)
+    return max(hypot(x1 - x0, y1 - y0) / 2.0, 1e-300)
+
+
+def loop_polygon(loop, *, step=pi / 90, tolerance=None):
     """Closed polygon approximating one hatch loop (no repeated end point).
 
     Circles and arcs are sampled every ``step`` radians (2 degrees by default),
-    which keeps chord error under 0.06% of the radius.
+    which keeps chord error under 0.06% of the radius. Ellipses and splines are
+    flattened so the polygon stays within ``tolerance`` of the curve (default:
+    what a circle of the same size gets from ``step``); that bound is guaranteed.
     """
     kind = loop["kind"]
     if kind == "polygon":
@@ -271,14 +312,25 @@ def loop_polygon(loop, *, step=pi / 90):
         cx, cy = loop["center"]
         r = loop["radius"]
         return [(cx + r * cos(_TAU * i / n), cy + r * sin(_TAU * i / n)) for i in range(n)]
+    if kind == "ellipse":
+        g = _ellipse_loop(loop)
+        return _curves.flatten_ellipse(g, _curve_tolerance(max(g["rx"], g["ry"]), step, tolerance))
     segs = loop["segments"]
     if len(segs) == 1:
+        if segs[0]["kind"] == "spline":
+            g = _spline_seg(segs[0])
+            return _curves.flatten_spline(g, _curve_tolerance(_spline_extent(g), step, tolerance))[:-1]
         return _arc_samples(segs[0], step=step)[:-1]
     points = []
     for seg, rev in _chain(segs):
         if seg["kind"] == "line":
             a, b = tuple(seg["start"]), tuple(seg["end"])
             pts = [b, a] if rev else [a, b]
+        elif seg["kind"] == "spline":
+            g = _spline_seg(seg)
+            pts = _curves.flatten_spline(g, _curve_tolerance(_spline_extent(g), step, tolerance))
+            if rev:
+                pts = pts[::-1]
         else:
             pts = _arc_samples(seg, not rev, step)
         points.extend(pts[:-1])
@@ -292,8 +344,12 @@ def loop_signed_area(loop) -> float:
         return _shoelace([tuple(p) for p in loop["points"]])
     if kind == "circle":
         return pi * loop["radius"] ** 2
+    if kind == "ellipse":
+        return _curves.ellipse_area(loop["rx"], loop["ry"])
     segs = loop["segments"]
     if len(segs) == 1:
+        if segs[0]["kind"] == "spline":
+            return _curves.spline_green(_spline_seg(segs[0]))
         return pi * segs[0]["radius"] ** 2
     total = 0.0
     for seg, rev in _chain(segs):
@@ -302,6 +358,9 @@ def loop_signed_area(loop) -> float:
             if rev:
                 a, b = b, a
             total += 0.5 * (a[0] * b[1] - b[0] * a[1])
+        elif seg["kind"] == "spline":
+            part = _curves.spline_green(_spline_seg(seg))
+            total += -part if rev else part
         else:
             cx, cy = seg["center"]
             r, a, b = seg["radius"], seg["start_angle"], seg["end_angle"]
@@ -380,11 +439,15 @@ def hatch_bounds(g: dict):
             boxes.append(((min(p[0] for p in pts), min(p[1] for p in pts)), (max(p[0] for p in pts), max(p[1] for p in pts))))
         elif kind == "circle":
             boxes.append(arc_extent(loop["center"], loop["radius"], 0.0, _TAU))
+        elif kind == "ellipse":
+            boxes.append(_curves.ellipse_bounds(_ellipse_loop(loop)))
         else:
             for seg in loop["segments"]:
                 if seg["kind"] == "line":
                     a, b = seg["start"], seg["end"]
                     boxes.append(((min(a[0], b[0]), min(a[1], b[1])), (max(a[0], b[0]), max(a[1], b[1]))))
+                elif seg["kind"] == "spline":
+                    boxes.append(_curves.spline_bounds(_spline_seg(seg)))
                 else:
                     boxes.append(arc_extent(seg["center"], seg["radius"], seg["start_angle"], seg["end_angle"]))
     return ((min(b[0][0] for b in boxes), min(b[0][1] for b in boxes)),

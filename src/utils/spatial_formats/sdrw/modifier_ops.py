@@ -12,6 +12,7 @@ from math import acos, ceil, cos, hypot, pi, sin
 from ..common.errors import (DependencyUnavailableError, GeometryValidationError,
                              ResourceLimitError, UnsupportedFeatureError)
 from ..common.helpers import finite
+from . import curves as _curves
 from .entities import validate_entity
 
 
@@ -42,6 +43,23 @@ def _sampling_step(radius, policy):
     return min(pi / 2, angular_step)
 
 
+def _curve_tolerance(extent, policy):
+    """Chord tolerance for an ellipse or spline operand, from the evaluation policy (the same rule ``_sampling_step`` applies to circles)."""
+    if policy["mode"] == "display_only":
+        return max(extent * (1.0 - cos(pi / 256)), 1e-12 * extent)
+    tolerance = max(policy.get("absolute", 0.0), extent * policy.get("relative", 0.0))
+    if tolerance <= 0:
+        raise UnsupportedFeatureError("curved region requires a positive chord tolerance")
+    if extent / tolerance > 1.0e7:
+        raise ResourceLimitError("requested curve chord tolerance would require too many segments")
+    return tolerance
+
+
+def _spline_extent(g):
+    (x0, y0), (x1, y1) = _curves.spline_bounds(g)
+    return max(hypot(x1 - x0, y1 - y0) / 2.0, 1e-300)
+
+
 def _region(record, policy):
     _, _, Polygon, Point = _shapely()
     if record is None:
@@ -56,6 +74,20 @@ def _region(record, policy):
         step = _sampling_step(g["radius"], policy)
         area = Point(g["center"]).buffer(g["radius"], quad_segs=max(4, int(ceil(pi / (2 * step)))))
         approximate = True
+    elif kind == "ellipse":
+        tol = _curve_tolerance(max(g["rx"], g["ry"]), policy)
+        points = _curves.flatten_ellipse(g, tol)
+        if len(points) > 50_000:
+            raise ResourceLimitError("region Boolean input has too many sampled boundary vertices")
+        area = Polygon(points)
+        approximate = True
+    elif kind == "spline" and _curves.spline_is_closed(g):
+        tol = _curve_tolerance(_spline_extent(g), policy)
+        points = _curves.flatten_spline(g, tol)[:-1]
+        if not 3 <= len(points) <= 50_000:
+            raise ResourceLimitError("region Boolean input has too few or too many sampled boundary vertices")
+        area = Polygon(points)
+        approximate = True
     elif kind == "hatch":
         from .annotations import loop_polygon
         area = None
@@ -64,7 +96,13 @@ def _region(record, policy):
             radii = ([loop["radius"]] if loop["kind"] == "circle" else
                      [seg["radius"] for seg in loop.get("segments", ()) if seg["kind"] == "arc"])
             step = _sampling_step(max(radii), policy) if radii else pi / 128
-            points = loop_polygon(loop, step=step)
+            tolerance = None
+            if loop["kind"] == "ellipse":
+                tolerance = _curve_tolerance(max(loop["rx"], loop["ry"]), policy)
+            elif any(seg["kind"] == "spline" for seg in loop.get("segments", ())):
+                tolerance = min(_curve_tolerance(_spline_extent({k: v for k, v in seg.items() if k != "kind"}), policy)
+                                for seg in loop["segments"] if seg["kind"] == "spline")
+            points = loop_polygon(loop, step=step, tolerance=tolerance)
             total_points += len(points)
             if total_points > 50_000:
                 raise ResourceLimitError("region Boolean input has too many sampled boundary vertices")
@@ -74,7 +112,7 @@ def _region(record, policy):
             area = poly if area is None else area.symmetric_difference(poly)
             approximate |= loop["kind"] != "polygon"
     else:
-        raise UnsupportedFeatureError("region modifier requires a closed polyline, circle or hatch")
+        raise UnsupportedFeatureError("region modifier requires a closed polyline, circle, ellipse, closed spline or hatch")
     if not area.is_valid or area.is_empty or area.area <= 0:
         raise GeometryValidationError("invalid, empty or self-intersecting input region")
     return area, approximate
@@ -180,6 +218,21 @@ def _offset(source, modifier):
                            {"points": coords, "closed": False})
         return validate_entity(out), {"backend": "geos-offset-curve", "approximate": False,
                                       "error_bound": None}
+    if kind == "spline" and not _curves.spline_is_closed(source["geometry"]):
+        g = source["geometry"]
+        tol = _curve_tolerance(_spline_extent(g), modifier["evaluation_policy"])
+        flat = _curves.flatten_spline(g, tol)
+        if len(flat) > 50_000:
+            raise ResourceLimitError("region Boolean input has too many sampled boundary vertices")
+        offset = LineString(flat).offset_curve(distance, join_style="mitre")
+        if offset.is_empty or offset.geom_type != "LineString":
+            raise GeometryValidationError("offset produced empty or disconnected linework")
+        coords = [[float(x), float(y)] for x, y in offset.coords]
+        out = deepcopy(source)
+        out["kind"] = "polyline"
+        out["geometry"] = {"points": coords, "closed": False}
+        return validate_entity(out), {"backend": "geos-offset-curve", "approximate": True, "error_bound": None,
+                                      "source_flatten_tolerance": tol}
     area, approximate = _region(source, modifier["evaluation_policy"])
     region = area.buffer(distance, join_style="mitre")
     result = _as_hatch(source, region)

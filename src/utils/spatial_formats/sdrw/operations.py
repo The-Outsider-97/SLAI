@@ -11,6 +11,7 @@ from math import atan2, cos, hypot, pi, sin, sqrt
 
 from ..common import ValidationError, finite, new_id, vector
 from . import annotations as _ann
+from . import curves as _curves
 from .blocks import MAX_BLOCK_DEPTH, insert_matrix
 from .entities import validate_entity
 
@@ -41,6 +42,10 @@ def entity_bounds(entity: dict, blocks=None) -> tuple[tuple[float, float], tuple
         boxes = [entity_bounds(transform_entity(e, matrix, preserve_id=True), blocks) for e in block["entities"]]
         return ((min(b[0][0] for b in boxes), min(b[0][1] for b in boxes)),
                 (max(b[1][0] for b in boxes), max(b[1][1] for b in boxes)))
+    if kind == "ellipse":
+        return _curves.ellipse_bounds(geometry)
+    if kind == "spline":
+        return _curves.spline_bounds(geometry)
     if kind == "point":
         points = [geometry["position"]]
     elif kind == "line":
@@ -80,6 +85,10 @@ def entity_length(entity: dict) -> float:
         return finite(_TAU*g["radius"], "circumference", limit=1e18)
     if kind == "arc":
         return finite((g["end_angle"]-g["start_angle"])*g["radius"], "arc length", limit=1e18)
+    if kind == "ellipse":
+        return finite(_curves.ellipse_length(g["rx"], g["ry"]), "ellipse circumference", limit=1e18)
+    if kind == "spline":
+        return finite(_curves.spline_length(g), "spline length", limit=1e18)
     points = g["points"]
     pairs = list(zip(points, points[1:]))
     if g.get("closed", False):
@@ -89,7 +98,7 @@ def entity_length(entity: dict) -> float:
 
 
 def enclosed_area(entity: dict) -> float:
-    """Positive filled area of a closed polyline or circle, in squared document units.
+    """Positive filled area of a closed polyline, circle, ellipse or closed spline (end points coincide), in squared document units.
 
     Open entities, arcs and lines are not regions. Reject instead of guessing.
     A self-intersecting polygon has ambiguous filled area and is not supported.
@@ -100,8 +109,12 @@ def enclosed_area(entity: dict) -> float:
         return finite(_ann.hatch_area(g), "hatch area", limit=1e18)
     if kind == "circle":
         return finite(pi*g["radius"]**2, "circle area", limit=1e18)
+    if kind == "ellipse":
+        return finite(_curves.ellipse_area(g["rx"], g["ry"]), "ellipse area", limit=1e18)
+    if kind == "spline" and _curves.spline_is_closed(g):
+        return finite(abs(_curves.spline_green(g)), "spline area", limit=1e18)
     if kind != "polyline" or not g.get("closed"):
-        raise ValidationError("enclosed area requires a closed polyline or circle")
+        raise ValidationError("enclosed area requires a closed polyline, circle, ellipse or closed spline")
     points = [tuple(p) for p in g["points"]]
     if points[0] == points[-1]:
         points.pop()
@@ -217,6 +230,14 @@ def transform_entity(entity: dict, matrix, *, preserve_id=False) -> dict:
         g["start"],g["end"]=move(g["start"]),move(g["end"])
     elif kind=="polyline":
         g["points"]=[move(p) for p in g["points"]]
+    elif kind=="ellipse":
+        g["center"]=move(g["center"])
+        g["rx"]=finite(g["rx"]*scale,"scaled ellipse rx")
+        g["ry"]=finite(g["ry"]*scale,"scaled ellipse ry")
+        g["rotation"]=finite(g.get("rotation",0.0)+rotation,"ellipse rotation",limit=1e8)
+    elif kind=="spline":
+        g["control_points"]=[move(p) for p in g["control_points"]]
+        g["knots"]=list(g["knots"])
     else:
         g["center"]=move(g["center"])
         g["radius"]=finite(g["radius"]*scale,"scaled radius")
@@ -227,17 +248,24 @@ def transform_entity(entity: dict, matrix, *, preserve_id=False) -> dict:
 
 
 def _transform_loop(loop, move, scale, rotation):
-    """Similarity transform of one hatch loop (circles stay circles, arcs stay arcs)."""
+    """Similarity transform of one hatch loop (circles stay circles, arcs stay arcs, ellipses and splines stay themselves)."""
     kind = loop["kind"]
     if kind == "polygon":
         return {"kind": "polygon", "points": [move(p) for p in loop["points"]]}
     if kind == "circle":
         return {"kind": "circle", "center": move(loop["center"]),
                 "radius": finite(loop["radius"] * scale, "scaled radius")}
+    if kind == "ellipse":
+        return {"kind": "ellipse", "center": move(loop["center"]),
+                "rx": finite(loop["rx"] * scale, "scaled ellipse rx"), "ry": finite(loop["ry"] * scale, "scaled ellipse ry"),
+                "rotation": finite(loop.get("rotation", 0.0) + rotation, "ellipse rotation", limit=1e8)}
     segments = []
     for seg in loop["segments"]:
         if seg["kind"] == "line":
             segments.append({"kind": "line", "start": move(seg["start"]), "end": move(seg["end"])})
+        elif seg["kind"] == "spline":
+            segments.append({"kind": "spline", "degree": seg["degree"], "control_points": [move(q) for q in seg["control_points"]],
+                             "knots": list(seg["knots"])})
         else:
             segments.append({"kind": "arc", "center": move(seg["center"]),
                              "radius": finite(seg["radius"] * scale, "scaled radius"),

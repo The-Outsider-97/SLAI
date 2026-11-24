@@ -1,7 +1,8 @@
 """Strict native SDRW entity representation, coordinates in declared drawing units.
 
-Kinds: ``point``, ``line``, ``polyline``, ``circle``, ``arc`` (0.1) and ``text``,
-``dimension``, ``hatch``, ``insert`` (0.2).
+Kinds: ``point``, ``line``, ``polyline``, ``circle``, ``arc`` (0.1), ``text``,
+``dimension``, ``hatch``, ``insert`` (0.2) and ``ellipse``, ``spline`` (feature ``sdrw-curves-v1``,
+see ``curves``).
 """
 from __future__ import annotations
 from math import pi
@@ -9,12 +10,14 @@ from copy import deepcopy
 from ..common.errors import GeometryValidationError, ReferenceError
 from ..common import ValidationError, finite, vector, require_id, new_id, require_metadata
 from . import annotations as _ann
+from . import curves as _curves
 from .blocks import INSERT_KEYS, validate_insert
 from .linetypes import check_linetype_ref
 
 PRIMITIVE_KINDS = frozenset(("point", "line", "polyline", "circle", "arc"))
+CURVE_KINDS = frozenset(("ellipse", "spline"))
 ANNOTATION_KINDS = frozenset(("text", "dimension", "hatch"))
-KINDS = PRIMITIVE_KINDS | ANNOTATION_KINDS | {"insert"}
+KINDS = PRIMITIVE_KINDS | CURVE_KINDS | ANNOTATION_KINDS | {"insert"}
 MAX_POLYLINE_POINTS = 100_000
 _GEOMETRY_KEYS = {
     "point": frozenset({"position"}),
@@ -22,6 +25,8 @@ _GEOMETRY_KEYS = {
     "polyline": frozenset({"points", "closed"}),
     "circle": frozenset({"center", "radius"}),
     "arc": frozenset({"center", "radius", "start_angle", "end_angle"}),
+    "ellipse": _curves.ELLIPSE_KEYS,
+    "spline": _curves.SPLINE_KEYS,
     "text": _ann.TEXT_KEYS,
     "hatch": _ann.HATCH_KEYS,
     "insert": INSERT_KEYS,
@@ -102,6 +107,10 @@ def validate_entity(entity: dict, layers: set[str] | None = None, *, linetypes=N
             end = finite(data.get("end_angle"), "end_angle", limit=1e8)
             if not 0 < end - start <= 2*pi + 1e-10:
                 raise GeometryValidationError("arc sweep must lie in (0, 2π]")
+    elif kind == "ellipse":
+        _curves.validate_ellipse(data)
+    elif kind == "spline":
+        _curves.validate_spline(data)
     elif kind == "text":
         _ann.validate_text(data)
     elif kind == "hatch":
