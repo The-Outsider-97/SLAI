@@ -28,7 +28,6 @@ import fnmatch
 import heapq
 import math
 import os
-import pickle
 import random
 import sys
 import tempfile
@@ -45,6 +44,7 @@ from multiprocessing.managers import BaseManager, NamespaceProxy  # type: ignore
 
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.collaboration_error import *
+from .utils import secure_persistence as _sp
 from .utils.collaborative_helpers import *
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
@@ -519,10 +519,11 @@ class SharedMemory:
             return results
 
     def save_to_file(self, filename):
-        """Persist memory state atomically using pickle.
+        """Persist memory state atomically in the authenticated SLAIMEM v2 container.
 
-        This method is intended for trusted local state only. Pickle files should
-        never be loaded from untrusted sources.
+        The file is integrity-protected (HMAC-SHA256) and AES-256-GCM encrypted when the
+        ``cryptography`` package is available. A key must be configured via
+        ``SLAI_SHARED_MEMORY_KEY``; without one nothing is written (fail closed).
         """
 
         self._record_operation("save_to_file")
@@ -545,11 +546,13 @@ class SharedMemory:
                     "operation_counts": dict(self._operation_counts),
                 }
 
+            sealed = _sp.seal(payload)
             temp_dir = str(path.parent if str(path.parent) else Path.cwd())
             fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=temp_dir)
             try:
+                os.fchmod(fd, 0o600) if hasattr(os, "fchmod") else None
                 with os.fdopen(fd, "wb") as file_obj:
-                    pickle.dump(payload, file_obj, protocol=pickle.HIGHEST_PROTOCOL)
+                    file_obj.write(sealed)
                     file_obj.flush()
                     os.fsync(file_obj.fileno())
                 os.replace(temp_name, path)
@@ -561,15 +564,24 @@ class SharedMemory:
         except Exception as exc:
             self._raise_memory_error("save_to_file", "failed to persist shared memory state", cause=exc, context={"filename": str(filename)})
 
-    def load_from_file(self, filename):
-        """Load memory state from a trusted pickle file."""
+    def load_from_file(self, filename, *, migrate_legacy: bool = False):
+        """Load memory state from an authenticated SLAIMEM v2 file.
+
+        Raw pickle files are refused unless ``migrate_legacy=True`` is passed explicitly, in
+        which case they are decoded with the restricted unpickler only (no arbitrary objects).
+        Re-save the state afterwards to complete the migration.
+        """
 
         self._record_operation("load_from_file")
         self._ensure_open("load_from_file")
         path = Path(filename)
         try:
-            with path.open("rb") as file_obj:
-                payload = pickle.load(file_obj)
+            blob = path.read_bytes()
+            if migrate_legacy and not blob.startswith(_sp.MAGIC):
+                logger.warning("Migrating legacy unauthenticated shared-memory file %s via restricted decoder", path)
+                payload = _sp.migrate_legacy_pickle(blob, versioned_item=VersionedItem)
+            else:
+                payload = _sp.unseal(blob, versioned_item=VersionedItem)
 
             with self._lock:
                 if isinstance(payload, tuple) and len(payload) == 3:
@@ -596,6 +608,8 @@ class SharedMemory:
             return True
         except CollaborationError: # type: ignore
             raise
+        except _sp.PersistenceSecurityError as exc:
+            self._raise_memory_error("load_from_file", f"persisted shared memory rejected: {exc}", cause=exc, context={"filename": str(filename)})
         except Exception as exc:
             self._raise_memory_error("load_from_file", "failed to load shared memory state", cause=exc, context={"filename": str(filename)})
 
