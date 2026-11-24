@@ -58,7 +58,7 @@ class SDRWDocument(DrawingDocument):
 
     Construction: :meth:`new`, :meth:`open`, :meth:`from_bytes`, :meth:`from_svg`,
     :meth:`import_svg`, :meth:`import_dxf`, :meth:`import_dwg`.
-    Entities: ``add_point/line/polyline/polygon/rectangle/circle/arc/arc_through``.
+    Entities: ``add_point/line/polyline/polygon/rectangle/circle/arc/arc_through/ellipse/spline/bezier_spline``.
     Edits (one revision each): ``update``, ``remove``, ``move``, ``rotate``, ``scale``,
     ``transform``, ``duplicate``, layer methods, ``attach_semantics``, ``add_claim``,
     ``convert_unit``, and ``apply`` for atomic batches.
