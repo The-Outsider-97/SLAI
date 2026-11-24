@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from collections import Counter, deque
 from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Deque, Dict, List, Literal, Optional, Tuple, Union, cast
+from typing import Any, Deque, Dict, List, Optional, Tuple, Union, cast
 
 from ..utils.config_loader import load_global_config, get_config_section
 from ..utils.base_errors import *

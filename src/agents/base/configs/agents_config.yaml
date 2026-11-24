@@ -1811,3 +1811,49 @@ verification_agent:
     max_unresolved_sites: 0
     min_confidence: 0.0
     required_gates: [verification, safety, execution, evaluation]
+
+
+governance_agent:
+  # NOTE: 'enabled: false' is ignored by design - regulatory enforcement cannot be switched off.
+  enabled: true
+  state_dir: "data/governance"
+  # The master key is NEVER stored here. Provide it via the environment:
+  #   SLAI_GOVERNANCE_MASTER_KEY or SLAI_GOVERNANCE_MASTER_KEY_FILE (>= 32 characters).
+  qualified_roles: [oversight_reviewer, dpo, governance_admin]
+  emergency_roles: [safety_officer, governance_admin]
+  authorised_reporter_roles: [dpo, authorised_reporter]
+  independent_evidence_producers: [verification_agent, ci_pipeline]
+  min_review_seconds: 5.0
+  max_approval_ttl_seconds: 3600.0
+  grant_ttl_seconds: 900.0
+  max_delegation_depth: 2
+  # true = deny delegations to unregistered capabilities; audit (default) = allow but count+log what would be denied; false = off.
+  enforce_capability_registry: audit
+  sanitize_logs: true   # central PII/secret sanitising filter on all root log handlers (audit 4.9)
+  # Central gate every BaseAgent.execute() passes through (see governance/agent_gate.py).
+  #   observe = evaluate + durably record, never block (default; NOT enforcement)
+  #   enforce = non-permitting decision raises GovernanceDenied before the agent runs
+  # Calls carrying an explicit 'governance_context' and agents in enforce_agents are always enforced.
+  agent_gate:
+    mode: observe
+    enforce_agents: []
+    default_purpose: agent_execution
+    default_purposes: {}
+    default_tenant_id: null
+    learning_agents: [learning]
+    learn_modes: [train, auto, fine_tune, finetune]
+    # Art. 50 marking of Mapping results of generative agents (string results cannot carry a marking; counted, reported)
+    marking_agents:
+      language:
+        system_id: slai-language
+        name: SLAI Language Agent
+        model: slai-lantra
+        interacts_with_natural_persons: true
+        generates_synthetic_content: true
+  # Runtime registration of erasure adapters / access providers (governance/registrations.py)
+  privacy_memory_tenant_id: null   # PrivacyMemory is not tenant-aware: name the deployment's tenant to cover it
+  file_store_roots: []             # directories holding files named by subject_tag(...)
+  portable_stores: []              # stores whose data is subject-provided + consent/contract based (Art. 20); never inferred
+  shared_memory_persist_path: null # sealed SharedMemory state file to rewrite after erasure
+  auto_start: true                 # AgentFactory instantiates the Governance Agent before any other agent
+  require_for_agent_creation: false # true: agent creation fails when governance cannot start
