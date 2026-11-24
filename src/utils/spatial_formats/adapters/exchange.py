@@ -95,6 +95,7 @@ def _drawing_features(drawing) -> dict:
         "hatches": sum(1 for e in _all_entities(drawing) if e["kind"] == "hatch"),
         "curved_hatches": sum(1 for e in _all_entities(drawing) if e["kind"] == "hatch" and any(
             loop["kind"] != "polygon" for loop in e["geometry"]["boundary"])),
+        "high_degree_splines": [e["geometry"] for e in _all_entities(drawing) if e["kind"] == "spline" and e["geometry"]["degree"] > 3],
         "dimensions": sum(1 for e in _all_entities(drawing) if e["kind"] == "dimension"),
         "inserts": sum(1 for e in entities if e["kind"] == "insert"),
         "blocks": len(drawing.blocks),
@@ -134,6 +135,12 @@ def _drawing_loss(drawing, target: str):
         warnings.append("SVG display coordinates may use a different y-axis orientation")
         if f["points"]:
             approximations.append(f"{f['points']} point(s) drawn as tiny circles (data-kind=point restores them)")
+        if f["high_degree_splines"]:
+            from ..sdrw.curves import svg_spline_tolerance
+            worst = max(svg_spline_tolerance(g) for g in f["high_degree_splines"])
+            approximations.append(f"{len(f['high_degree_splines'])} spline(s) of degree above 3 drawn as polylines within {worst:.3g} of the curve "
+                                  "(SVG has no primitive for them); the exact degree, knots and control points are written to data attributes "
+                                  "and reimport reads them back exactly")
         assumptions.append("entity identifiers are written to data-id attributes")
         assumptions.append("stroke, stroke-width, fill and stroke-dasharray are written for styled entities and "
                            "layers; reimport ignores them")

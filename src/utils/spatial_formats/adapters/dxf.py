@@ -8,6 +8,8 @@ SDRW           DXF
 point, line,   POINT, LINE, LWPOLYLINE, CIRCLE, ARC (as before)
 polyline,
 circle, arc
+ellipse        ELLIPSE (full; major axis along the longer semi-axis, ratio <= 1)
+spline         SPLINE (open, clamped, non-rational B-spline with explicit knots)
 text           TEXT (one line) or MTEXT (several lines / wrapping width)
 dimension      DIMENSION (linear, aligned, angular 3-point, radius, diameter) with its
                rendered block, so any viewer shows the drawing
@@ -28,7 +30,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
-from math import atan2, cos, degrees, hypot, radians, sin, tau
+from math import atan2, cos, degrees, hypot, pi, radians, sin, tau
 from pathlib import Path
 
 from ..common import DependencyUnavailableError, UnsupportedFeatureError, ValidationError
@@ -47,7 +49,7 @@ _MAX_EXPLODE_DEPTH = 8
 _ARROW_BLOCKS = frozenset({"_DOT", "_DOTSMALL", "_DOTBLANK", "_ORIGIN", "_ORIGIN2", "_OPEN", "_OPEN90", "_OPEN30",
                            "_CLOSED", "_SMALL", "_NONE", "_OBLIQUE", "_BOXFILLED", "_BOXBLANK", "_CLOSEDBLANK",
                            "_CLOSEDFILLED", "_DATUMFILLED", "_DATUMBLANK", "_INTEGRAL", "_ARCHTICK"})
-_SUPPORTED = ("POINT", "LINE", "LWPOLYLINE", "CIRCLE", "ARC", "TEXT", "MTEXT", "DIMENSION", "HATCH", "INSERT")
+_SUPPORTED = ("POINT", "LINE", "LWPOLYLINE", "CIRCLE", "ARC", "ELLIPSE", "SPLINE", "TEXT", "MTEXT", "DIMENSION", "HATCH", "INSERT")
 
 
 def capabilities():
@@ -123,6 +125,16 @@ class _Writer:
                 layout.add_circle((*g["center"], 0), g["radius"], dxfattribs=attrs)
             else:
                 layout.add_arc((*g["center"], 0), g["radius"], angles[0], angles[1], dxfattribs=attrs)
+        elif kind == "ellipse":
+            rot = float(g.get("rotation", 0.0))
+            rx, ry = float(g["rx"]), float(g["ry"])
+            if rx >= ry:
+                major, ratio = (rx * cos(rot), rx * sin(rot), 0.0), ry / rx
+            else:                                    # DXF's ratio is minor/major, so the major axis is the one at +90 degrees
+                major, ratio = (ry * cos(rot + pi / 2), ry * sin(rot + pi / 2), 0.0), rx / ry
+            layout.add_ellipse((*g["center"], 0), major_axis=major, ratio=ratio, start_param=0.0, end_param=tau, dxfattribs=attrs)
+        elif kind == "spline":
+            layout.add_open_spline([(x, y, 0.0) for x, y in g["control_points"]], degree=g["degree"], knots=g["knots"], dxfattribs=attrs)
         elif kind == "text":
             self.text(layout, g, attrs)
         elif kind == "hatch":
@@ -172,12 +184,26 @@ class _Writer:
                 hatch.paths.add_polyline_path([tuple(p) for p in loop["points"]], is_closed=True)
             elif kind == "circle":
                 hatch.paths.add_edge_path().add_arc(tuple(loop["center"]), loop["radius"], 0, 360)
+            elif kind == "ellipse":
+                rot = float(loop.get("rotation", 0.0))
+                rx, ry = float(loop["rx"]), float(loop["ry"])
+                if rx >= ry:
+                    major, ratio = (rx * cos(rot), rx * sin(rot)), ry / rx
+                else:
+                    major, ratio = (ry * cos(rot + pi / 2), ry * sin(rot + pi / 2)), rx / ry
+                hatch.paths.add_edge_path().add_ellipse(tuple(loop["center"]), major_axis=major, ratio=ratio, start_angle=0.0, end_angle=360.0)
             else:
                 edges = hatch.paths.add_edge_path()
-                for seg, reverse in ann.chain_segments(loop["segments"]):
+                for seg, reverse in (ann.chain_segments(loop["segments"]) if len(loop["segments"]) > 1 or loop["segments"][0]["kind"] != "spline"
+                                     else [(loop["segments"][0], False)]):
                     if seg["kind"] == "line":
                         a, b = (seg["end"], seg["start"]) if reverse else (seg["start"], seg["end"])
                         edges.add_line(tuple(a), tuple(b))
+                    elif seg["kind"] == "spline":
+                        pts, knots = [tuple(q) for q in seg["control_points"]], [float(k) for k in seg["knots"]]
+                        if reverse:                                  # the same curve walked the other way: reversed points, mirrored knots
+                            pts, knots = pts[::-1], [knots[0] + knots[-1] - k for k in knots[::-1]]
+                        edges.add_spline(control_points=pts, knot_values=knots, degree=int(seg["degree"]))
                     else:
                         edges.add_arc(tuple(seg["center"]), seg["radius"], degrees(seg["start_angle"]) % 360.0,
                                       degrees(seg["end_angle"]) % 360.0 or 360.0, ccw=not reverse)
@@ -445,6 +471,30 @@ class _Importer:
         return self._finish(e, "arc", {"center": _vec(e.dxf.center), "radius": e.dxf.radius,
                                        "start_angle": radians(start), "end_angle": radians(end)})
 
+    def _c_ellipse(self, e, depth):
+        if abs(float(e.dxf.center[2])) > 1e-9 or abs(float(e.dxf.major_axis[2])) > 1e-9:
+            return self.refuse("3D/elevated DXF entity cannot be silently projected", "ELLIPSE")
+        start, end = float(e.dxf.get("start_param", 0.0)), float(e.dxf.get("end_param", tau))
+        if abs((end - start) - tau) > 1e-9:
+            return self.refuse("elliptical arcs (a partial ELLIPSE) are not supported", "ELLIPSE")
+        mx, my = float(e.dxf.major_axis[0]), float(e.dxf.major_axis[1])
+        rx = hypot(mx, my)
+        ratio = float(e.dxf.ratio)
+        return self._finish(e, "ellipse", {"center": _vec(e.dxf.center), "rx": rx, "ry": rx * ratio, "rotation": atan2(my, mx)})
+
+    def _c_spline(self, e, depth):
+        points, knots = [tuple(float(c) for c in p) for p in e.control_points], [float(k) for k in e.knots]
+        weights = [float(w) for w in e.weights]
+        if not points or not knots:
+            return self.refuse("a SPLINE defined only by fit points has no control polygon to convert exactly", "SPLINE")
+        if any(abs(p[2]) > 1e-9 for p in points):
+            return self.refuse("3D/elevated DXF entity cannot be silently projected", "SPLINE")
+        if weights and any(abs(w - 1.0) > 1e-12 for w in weights):
+            return self.refuse("rational SPLINE (weights other than 1) is not supported", "SPLINE")
+        if e.closed or (int(e.dxf.get("flags", 0)) & 2):
+            return self.refuse("closed or periodic SPLINE is not supported", "SPLINE")
+        return self._finish(e, "spline", {"degree": int(e.dxf.degree), "control_points": [[p[0], p[1]] for p in points], "knots": knots})
+
     # -- text --------------------------------------------------------------------------------
     def _font_of(self, e):
         name = e.dxf.get("style", "Standard") or "Standard"
@@ -582,7 +632,7 @@ class _Importer:
 
     def _loop(self, hatch, path):
         kind = type(path).__name__
-        segments, flat_only = [], False
+        segments, flat_only, ellipse_loop = [], False, None
         if kind == "PolylinePath":
             from ezdxf.math import bulge_to_arc
             verts = [(float(v[0]), float(v[1]), float(v[2]) if len(v) > 2 else 0.0) for v in path.vertices]
@@ -609,6 +659,22 @@ class _Importer:
                 if name == "LineEdge":
                     if hypot(edge.end[0] - edge.start[0], edge.end[1] - edge.start[1]) >= 1e-12:
                         segments.append({"kind": "line", "start": _vec(edge.start), "end": _vec(edge.end)})
+                elif name == "EllipseEdge" and len(path.edges) == 1:
+                    sweep = (float(edge.end_angle) - float(edge.start_angle)) % 360.0
+                    major = (float(edge.major_axis[0]), float(edge.major_axis[1]))
+                    rx = hypot(*major)
+                    if (sweep < 1e-9 or abs(sweep - 360.0) < 1e-9) and rx > 1e-12 and 0 < float(edge.ratio) <= 1.0 + 1e-12:
+                        ellipse_loop = {"kind": "ellipse", "center": _vec(edge.center), "rx": rx, "ry": rx * float(edge.ratio), "rotation": atan2(major[1], major[0])}
+                    else:
+                        flat_only = True
+                elif name == "SplineEdge":
+                    weights = [float(w) for w in (edge.weights or [])]
+                    pts = [[float(q[0]), float(q[1])] for q in (edge.control_points or [])]
+                    if (not pts or not edge.knot_values or edge.periodic or (weights and any(abs(w - 1.0) > 1e-12 for w in weights))
+                            or any(abs(float(q[2])) > 1e-9 for q in (edge.control_points or ()) if len(q) > 2)):
+                        flat_only = True                        # rational, periodic or fit-point-only: no exact spline segment
+                    else:
+                        segments.append({"kind": "spline", "degree": int(edge.degree), "control_points": pts, "knots": [float(k) for k in edge.knot_values]})
                 elif name == "ArcEdge":
                     sweep = (float(edge.end_angle) - float(edge.start_angle)) % 360.0
                     if sweep < 1e-9:
@@ -620,6 +686,12 @@ class _Importer:
                     flat_only = True
         else:
             flat_only = True
+        if not flat_only and ellipse_loop is not None:
+            try:
+                ann.validate_hatch_loop(ellipse_loop)
+                return ellipse_loop
+            except ValidationError:
+                pass
         if not flat_only and segments:
             if len(segments) == 1 and segments[0]["kind"] == "arc" and \
                     abs(segments[0]["end_angle"] - segments[0]["start_angle"] - tau) < 1e-9:
@@ -633,8 +705,8 @@ class _Importer:
                 pass
         loop = self._flatten(hatch, path)
         if loop is not None:
-            self.notes.add("approximations", "hatch boundaries with curves other than lines/arcs (or not exactly "
-                                             "closed) flattened to polygons")
+            self.notes.add("approximations", "hatch boundaries with curves other than lines, arcs, full ellipses and "
+                                             "non-rational splines (or not exactly closed) flattened to polygons")
         return loop
 
     def _pattern(self, e):

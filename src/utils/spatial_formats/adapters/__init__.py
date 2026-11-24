@@ -23,7 +23,7 @@ def capabilities(*, dwg_executable=None) -> dict:
     from . import dwg, dxf, gltf, ifc, step
     builtin = {
         "svg": Capabilities("svg", "xml.etree", True, ("1.1 subset",), ("1.1 subset",),
-                            ("point", "line", "polyline", "polygon", "circle", "arc"),
+                            ("point", "line", "polyline", "polygon", "circle", "arc", "ellipse", "spline"),
                             ("Fails closed on styles, text, transforms, use-elements and general path data",
                              "Display coordinates are not y-flipped")),
         "stl": Capabilities("stl", "struct", True, ("binary",), ("binary",), ("triangle mesh",),
