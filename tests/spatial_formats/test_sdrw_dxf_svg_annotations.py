@@ -200,10 +200,10 @@ def foreign(tmp_path, build):
 def test_dxf_unsupported_entities_fail_closed_or_are_skipped_with_a_report(tmp_path):
     def build(doc, msp, ezdxf):
         msp.add_line((0, 0), (1, 1))
-        msp.add_spline([(0, 0), (1, 2), (3, 3), (5, 0)])
-        msp.add_ellipse((0, 0), major_axis=(2, 0), ratio=0.5)
+        msp.add_spline([(0, 0), (1, 2), (3, 3), (5, 0)])                                    # fit points only: no control polygon to take over
+        msp.add_ellipse((0, 0), major_axis=(2, 0), ratio=0.5, start_param=0.0, end_param=math.pi)   # an elliptical arc, not a full ellipse
     path = foreign(tmp_path, build)
-    with pytest.raises(UnsupportedFeatureError, match="unsupported DXF entity: SPLINE"):
+    with pytest.raises(UnsupportedFeatureError, match="SPLINE defined only by fit points"):
         SDRWDocument.import_dxf(path)
     document, report = SDRWDocument.import_dxf(path, skip_unsupported=True)
     assert document.count() == 1
@@ -265,16 +265,25 @@ def test_dxf_foreign_hatches(tmp_path):
         g = msp.add_hatch()
         g.paths.add_polyline_path([(30, 40), (40, 40), (40, 50)], is_closed=True)
         g.set_gradient((255, 0, 0), (0, 0, 255))
+        half = msp.add_hatch()                                                         # a half ellipse closed by a line: no exact boundary kind holds it
+        edges = half.paths.add_edge_path()
+        edges.add_ellipse((0, 60), (4, 0), 0.5, start_angle=0, end_angle=180)
+        edges.add_line((-4, 60), (4, 60))
+        half.set_solid_fill(style=0)
     path = foreign(tmp_path, build)
     document, report = SDRWDocument.import_dxf(path)
     hatches = by_kind(document, "hatch")
-    assert len(hatches) == 4
+    assert len(hatches) == 5
     bulged = hatches[0]["geometry"]
     assert bulged["boundary"][0]["kind"] == "path" and hatches[0]["style"] == {"fill": "#00ff00"}
     assert ann.hatch_area(bulged) == pytest.approx(100 + math.pi * 25 / 2)
     ellipse = hatches[1]["geometry"]
-    assert ellipse["boundary"][0]["kind"] == "polygon"
-    assert ann.hatch_area(ellipse) == pytest.approx(math.pi * 4 * 2, rel=1e-2)
+    loop = ellipse["boundary"][0]                                                      # a full ellipse edge is now an exact ellipse loop
+    assert (loop["kind"], loop["rx"], loop["ry"]) == ("ellipse", pytest.approx(4), pytest.approx(2))
+    assert ann.hatch_area(ellipse) == pytest.approx(math.pi * 4 * 2, rel=1e-12)
+    half_loop = hatches[4]["geometry"]["boundary"][0]
+    assert half_loop["kind"] == "polygon"                                              # a partial ellipse edge still has to be flattened
+    assert ann.hatch_area(hatches[4]["geometry"]) == pytest.approx(math.pi * 4, rel=1e-2)
     ansi = hatches[2]["geometry"]
     assert ansi["pattern"] == "lines" and ansi["spacing"] == pytest.approx(3.175 * 2, rel=1e-3)
     assert ansi["angle"] == pytest.approx(math.radians(55), abs=1e-6)
