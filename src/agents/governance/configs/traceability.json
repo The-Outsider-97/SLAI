@@ -1,0 +1,435 @@
+{
+  "version": "0.1-phase1",
+  "note": "Declared implementation status is an input; the reported status is computed from evidence (see regulatory_reporting.py).",
+  "rows": [
+    {
+      "article": "GDPR Art. 5(1)(a)-(b)",
+      "requirement": "Lawfulness, purpose limitation",
+      "applicability": "personal data",
+      "components": [
+        "governance/policy_engine.py",
+        "governance/processing_registry.py"
+      ],
+      "tests": [
+        "tests/compliance/test_processing_authority.py",
+        "tests/compliance/test_lawful_basis.py"
+      ],
+      "controls": [
+        "TC-LAW-01"
+      ],
+      "declared": "partial",
+      "limitation": "Engine enforces; Privacy Agent/ledger integration is pending."
+    },
+    {
+      "article": "GDPR Art. 6",
+      "requirement": "All six lawful bases validated with evidence",
+      "applicability": "personal data",
+      "components": [
+        "governance/lawful_basis.py",
+        "governance/processing_registry.py"
+      ],
+      "tests": [
+        "tests/compliance/test_lawful_basis.py"
+      ],
+      "controls": [
+        "TC-LAW-01"
+      ],
+      "declared": "implemented",
+      "limitation": "Cited legal provisions are attributed to a named reviewer; software cannot confirm they exist or apply."
+    },
+    {
+      "article": "GDPR Art. 7-8",
+      "requirement": "Consent validity, withdrawal, children",
+      "applicability": "consent-based processing",
+      "components": [
+        "governance/privacy_ledger.py",
+        "governance/policy_engine.py"
+      ],
+      "tests": [
+        "tests/compliance/test_consent.py"
+      ],
+      "controls": [
+        "TC-CON-03"
+      ],
+      "declared": "partial",
+      "limitation": "Consent state comes from a ConsentProvider; the authoritative privacy ledger is not yet implemented."
+    },
+    {
+      "article": "GDPR Art. 9-10",
+      "requirement": "Special-category and criminal-offence conditions",
+      "applicability": "special-category data",
+      "components": [
+        "governance/lawful_basis.py",
+        "governance/policy_engine.py"
+      ],
+      "tests": [
+        "tests/compliance/test_lawful_basis.py"
+      ],
+      "controls": [
+        "TC-SPC-02"
+      ],
+      "declared": "implemented",
+      "limitation": "Condition evidence is structural; Member-State law conditions need legal review."
+    },
+    {
+      "article": "GDPR Art. 12-14",
+      "requirement": "Privacy notices",
+      "applicability": "personal data",
+      "components": [],
+      "tests": [],
+      "controls": [
+        "ORG-NOTICE"
+      ],
+      "declared": "organisational",
+      "limitation": "Notices must be written and published by the controller."
+    },
+    {
+      "article": "GDPR Art. 15-16",
+      "requirement": "Access and rectification workflows",
+      "applicability": "personal data",
+      "components": [
+        "governance/subject_rights.py",
+        "governance/privacy_dashboard.py"
+      ],
+      "tests": [
+        "tests/compliance/test_rights_workflows.py"
+      ],
+      "controls": [],
+      "declared": "partial",
+      "limitation": "Workflows, deadlines and dashboard API implemented and tested; no store has registered a RightsProvider yet, so nothing is exportable in production until applications register providers."
+    },
+    {
+      "article": "GDPR Art. 17-19",
+      "requirement": "Erasure with verified completion, restriction, recipient notification",
+      "applicability": "personal data",
+      "components": [
+        "governance/privacy_ledger.py",
+        "privacy/data_retention.py (verification gate, no mandatory reason)",
+        "governance/policy_engine.py"
+      ],
+      "tests": [
+        "tests/compliance/test_subject_rights.py"
+      ],
+      "controls": [
+        "TC-DEL-04"
+      ],
+      "declared": "partial",
+      "limitation": "Distributed deletion coordination with verified adapters is not implemented yet (Phase 2)."
+    },
+    {
+      "article": "GDPR Art. 20-21",
+      "requirement": "Portability and objection",
+      "applicability": "personal data",
+      "components": [
+        "governance/subject_rights.py",
+        "governance/privacy_ledger.py",
+        "governance/privacy_dashboard.py"
+      ],
+      "tests": [
+        "tests/compliance/test_subject_rights.py"
+      ],
+      "controls": [],
+      "declared": "partial",
+      "limitation": "Objection enforced at processing time; portability export implemented; providers must be registered per store."
+    },
+    {
+      "article": "GDPR Art. 22",
+      "requirement": "Automated decisions: exception check and human intervention",
+      "applicability": "solely automated significant decisions",
+      "components": [
+        "governance/policy_engine.py",
+        "governance/human_oversight.py"
+      ],
+      "tests": [
+        "tests/compliance/test_human_oversight.py",
+        "tests/compliance/test_subject_rights.py"
+      ],
+      "controls": [
+        "TC-OVS-10"
+      ],
+      "declared": "implemented",
+      "limitation": "Explanations are supplied by the deciding component through the dossier."
+    },
+    {
+      "article": "GDPR Art. 24-25",
+      "requirement": "Accountability, privacy by design/default",
+      "applicability": "all",
+      "components": [
+        "governance/core.py"
+      ],
+      "tests": [
+        "tests/compliance/test_processing_authority.py"
+      ],
+      "controls": [
+        "TC-POL-11"
+      ],
+      "declared": "partial",
+      "limitation": "Enforcement is not yet wired into every agent entry point."
+    },
+    {
+      "article": "GDPR Art. 26-29",
+      "requirement": "Controller/processor roles and recipient registry",
+      "applicability": "processors",
+      "components": [
+        "governance/processing_registry.py"
+      ],
+      "tests": [
+        "tests/compliance/test_processing_authority.py"
+      ],
+      "controls": [
+        "ORG-DPA"
+      ],
+      "declared": "partial",
+      "limitation": "Contracts (Art. 28) are organisational."
+    },
+    {
+      "article": "GDPR Art. 30",
+      "requirement": "Records of Processing Activities",
+      "applicability": "all controllers/processors",
+      "components": [
+        "governance/processing_registry.py"
+      ],
+      "tests": [
+        "tests/compliance/test_lawful_basis.py"
+      ],
+      "controls": [
+        "ORG-ROPA"
+      ],
+      "declared": "implemented",
+      "limitation": "Content must be supplied by the controller."
+    },
+    {
+      "article": "GDPR Art. 32",
+      "requirement": "Security of processing",
+      "applicability": "all",
+      "components": [
+        "governance/utils/identity.py",
+        "governance/regulatory_context.py",
+        "collaborative/utils/secure_persistence.py",
+        "safety/secure_memory.py (tenant isolation)",
+        "governance/utils/diagnostics.py",
+        "governance/delegation_guard.py"
+      ],
+      "tests": [
+        "tests/compliance/test_processing_authority.py"
+      ],
+      "controls": [
+        "TC-ISO-05",
+        "TC-SEC-06",
+        "TC-LOG-07"
+      ],
+      "declared": "partial",
+      "limitation": "Secure memory, shared-memory persistence and log sanitisation fixes are pending (Phase 2)."
+    },
+    {
+      "article": "GDPR Art. 33-34",
+      "requirement": "Breach lifecycle and deadlines",
+      "applicability": "personal-data breaches",
+      "components": [
+        "governance/incident_registry.py"
+      ],
+      "tests": [
+        "tests/compliance/test_incident_management.py"
+      ],
+      "controls": [
+        "TC-INC-15"
+      ],
+      "declared": "implemented",
+      "limitation": "Notifications are drafted, never sent; an authorised human submits them."
+    },
+    {
+      "article": "GDPR Art. 35-36",
+      "requirement": "DPIA and prior consultation",
+      "applicability": "high-risk processing",
+      "components": [],
+      "tests": [],
+      "controls": [
+        "ORG-DPIA"
+      ],
+      "declared": "organisational",
+      "limitation": "Assessment must be performed by the controller."
+    },
+    {
+      "article": "GDPR Art. 37-39",
+      "requirement": "DPO",
+      "applicability": "if required",
+      "components": [],
+      "tests": [],
+      "controls": [
+        "ORG-DPO"
+      ],
+      "declared": "organisational",
+      "limitation": "Appointment is organisational."
+    },
+    {
+      "article": "GDPR Art. 44-49",
+      "requirement": "International transfers",
+      "applicability": "transfers outside EEA",
+      "components": [
+        "governance/policy_engine.py"
+      ],
+      "tests": [
+        "tests/compliance/test_external_transfers.py"
+      ],
+      "controls": [
+        "TC-TRF-12",
+        "ORG-TIA"
+      ],
+      "declared": "implemented",
+      "limitation": "Adequacy list is data that must be kept current; TIAs are organisational."
+    },
+    {
+      "article": "AI Act Art. 5",
+      "requirement": "Prohibited practices",
+      "applicability": "all AI systems",
+      "components": [
+        "governance/risk_classification.py",
+        "governance/policy_engine.py"
+      ],
+      "tests": [
+        "tests/compliance/test_prohibited_practices.py"
+      ],
+      "controls": [
+        "TC-AI5-09"
+      ],
+      "declared": "implemented",
+      "limitation": "Practice tags must be raised by detectors/profiles; the engine cannot discover practices on its own."
+    },
+    {
+      "article": "AI Act Art. 6, Annex I/III",
+      "requirement": "Risk classification",
+      "applicability": "all AI systems",
+      "components": [
+        "governance/risk_classification.py"
+      ],
+      "tests": [
+        "tests/compliance/test_risk_classification.py"
+      ],
+      "controls": [],
+      "declared": "implemented",
+      "limitation": "Ruleset dates confirmed from secondary sources only."
+    },
+    {
+      "article": "AI Act Art. 9-15, 17",
+      "requirement": "High-risk requirements",
+      "applicability": "high-risk deployments (from 2027-12-02 / 2028-08-02)",
+      "components": [
+        "governance/risk_classification.py (obligation catalogue)"
+      ],
+      "tests": [],
+      "controls": [
+        "TC-HR-16"
+      ],
+      "declared": "partial",
+      "limitation": "Obligations are enumerated and gated; reusable risk-management, documentation and logging controls are not yet built."
+    },
+    {
+      "article": "AI Act Art. 14",
+      "requirement": "Human oversight",
+      "applicability": "high-risk systems",
+      "components": [
+        "governance/human_oversight.py"
+      ],
+      "tests": [
+        "tests/compliance/test_human_oversight.py"
+      ],
+      "controls": [
+        "TC-OVS-10"
+      ],
+      "declared": "implemented",
+      "limitation": "Control-loop/agent wiring pending."
+    },
+    {
+      "article": "AI Act Art. 26-27",
+      "requirement": "Deployer duties, FRIA",
+      "applicability": "deployers of high-risk systems",
+      "components": [],
+      "tests": [],
+      "controls": [
+        "ORG-FRIA"
+      ],
+      "declared": "organisational",
+      "limitation": "FRIA is organisational."
+    },
+    {
+      "article": "AI Act Art. 43, 49",
+      "requirement": "Conformity assessment and registration",
+      "applicability": "high-risk systems",
+      "components": [],
+      "tests": [],
+      "controls": [
+        "ORG-CONF"
+      ],
+      "declared": "organisational",
+      "limitation": "Performed with notified bodies / by the provider."
+    },
+    {
+      "article": "AI Act Art. 50",
+      "requirement": "Transparency, marking, deepfake disclosure",
+      "applicability": "interactive/generative systems (from 2026-08-02; marking for pre-existing systems 2026-12-02)",
+      "components": [
+        "governance/transparency.py",
+        "governance/risk_classification.py"
+      ],
+      "tests": [
+        "tests/compliance/test_risk_classification.py"
+      ],
+      "controls": [
+        "TC-TRN-13"
+      ],
+      "declared": "partial",
+      "limitation": "Signed marking, PNG embedding, disclosures and fail-closed release implemented and tested. Not yet called by any generating agent; metadata marking is removable (not a robust watermark)."
+    },
+    {
+      "article": "AI Act Art. 53-55",
+      "requirement": "GPAI obligations",
+      "applicability": "GPAI providers",
+      "components": [
+        "governance/learning_governance.py (gpai_assessment)",
+        "governance/risk_classification.py"
+      ],
+      "tests": [
+        "tests/compliance/test_risk_classification.py"
+      ],
+      "controls": [
+        "TC-GPA-17"
+      ],
+      "declared": "partial",
+      "limitation": "Documentation completeness check and systemic-risk presumption implemented; the documents themselves are organisational."
+    },
+    {
+      "article": "AI Act Art. 72-73",
+      "requirement": "Post-market monitoring, serious incidents",
+      "applicability": "high-risk systems",
+      "components": [
+        "governance/incident_registry.py",
+        "governance/incident_bridge.py"
+      ],
+      "tests": [
+        "tests/compliance/test_incident_management.py"
+      ],
+      "controls": [
+        "TC-INC-15"
+      ],
+      "declared": "partial",
+      "limitation": "Intake bridge from Observability/Handler events implemented; bridge attached only when explicitly wired to a SharedMemory instance."
+    },
+    {
+      "article": "GDPR Art. 5(1)(b), 25; AI Act Art. 10",
+      "requirement": "Governed learning, lineage and erasure impact",
+      "applicability": "AI Act / GDPR",
+      "components": [
+        "governance/learning_governance.py"
+      ],
+      "tests": [
+        "tests/compliance/test_learning_governance.py",
+        "tests/compliance/test_model_governance.py"
+      ],
+      "controls": [
+        "TC-LRN-01"
+      ],
+      "declared": "partial",
+      "limitation": "Registry and gates implemented; training code paths in LearningAgent do not yet call it."
+    }
+  ]
+}

@@ -574,7 +574,12 @@ class OutOfProcessAgentProxy:
     # Backward-compatible proxy methods
     # ------------------------------------------------------------------
     def execute(self, *args: Any, **kwargs: Any) -> Any:
-        return self._invoke("execute", *args, **kwargs)
+        # The child process has no governance gate of its own: the parent-side proxy is where governance applies.
+        from ..governance.agent_gate import gate_after, gate_before
+
+        payload = args[0] if args else kwargs.get("input_data")
+        gate_before(self.agent_type, payload)
+        return gate_after(self.agent_type, payload, self._invoke("execute", *args, **kwargs))
 
     def perform_task(self, *args: Any, **kwargs: Any) -> Any:
         return self._invoke("perform_task", *args, **kwargs)
