@@ -53,7 +53,12 @@ class DataRetention:
         self.auto_schedule_due_deletion = bool(self.retention_config.get("auto_schedule_due_deletion", True))
         self.auto_update_deleted_status = bool(self.retention_config.get("auto_update_deleted_status", True))
         self.allow_legal_hold_override = bool(self.retention_config.get("allow_legal_hold_override", False))
-        self.right_to_be_forgotten_requires_reason = bool(self.retention_config.get("right_to_be_forgotten_requires_reason", True))
+        # GDPR Art. 12(2)/17: a data subject is never required to justify an erasure request.
+        # The legacy key is read for compatibility but can no longer make a reason mandatory.
+        self.right_to_be_forgotten_requires_reason = False
+        self.require_identity_verification_for_erasure = bool(
+            self.retention_config.get("require_identity_verification_for_erasure", True)
+        )
         self.immediate_forget_request_deletion = bool(self.retention_config.get("immediate_forget_request_deletion", True))
         self.require_subject_id_for_obligation = bool(self.retention_config.get("require_subject_id_for_obligation", False))
         self.require_policy_id = bool(self.retention_config.get("require_policy_id", True))
@@ -770,21 +775,52 @@ class DataRetention:
                 context={"record_id": record_id, "request_id": request_id},
             ) from exc
 
+    _ART17_GROUNDS = frozenset({
+        "art17_1_a_no_longer_necessary", "art17_1_b_consent_withdrawn", "art17_1_c_objection",
+        "art17_1_d_unlawful_processing", "art17_1_e_legal_obligation", "art17_1_f_child_isss", "unassessed",
+    })
+
+    def _require_verified_requester(self, verification: Optional[Mapping[str, Any]], subject_id: Optional[str]) -> None:
+        """Erasure must be requested by the verified data subject (or an authorised representative).
+
+        The caller (rights workflow) performs the actual verification; this gate refuses to
+        execute an irreversible deletion without a recorded, subject-bound verification.
+        """
+        if not self.require_identity_verification_for_erasure:
+            return
+        v = verification or {}
+        if not (v.get("verified") is True and str(v.get("method") or "").strip() and str(v.get("verified_by") or "").strip()):
+            raise PolicyEvaluationError(
+                stage="process_forget_request",
+                details="Erasure requires a recorded identity verification (verified, method, verified_by).",
+                context={"subject_id": subject_id},
+            )
+        if subject_id and str(v.get("subject_id") or "") != str(subject_id):
+            raise PolicyEvaluationError(
+                stage="process_forget_request",
+                details="Identity verification is not bound to the subject of this erasure request.",
+                context={"subject_id": subject_id},
+            )
+
     def process_forget_request(self, *, record_id: str, request_id: str,
         subject_id: Optional[str] = None,
         reason: Optional[str] = None,
         allow_legal_hold_override: bool = False,
         audit_trail_ref: Optional[str] = None,
+        identity_verification: Optional[Mapping[str, Any]] = None,
+        erasure_ground: Optional[str] = None,
     ) -> Dict[str, Any]:
         operation = "process_forget_request"
         try:
             self._require_enabled(operation)
             normalized_record_id = self._normalize_identity(record_id, "record_id")
             normalized_request_id = self._normalize_identity(request_id, "request_id")
-            normalized_reason = str(reason or "").strip()
-            if self.right_to_be_forgotten_requires_reason and not normalized_reason:
-                raise ValueError("'reason' is required for right-to-be-forgotten workflows")
+            normalized_reason = str(reason or "").strip()  # optional; never required (Art. 12(2))
             effective_reason = normalized_reason or "data_subject_deletion_request"
+            self._require_verified_requester(identity_verification, subject_id)
+            ground = str(erasure_ground or "").strip() or "unassessed"
+            if ground not in self._ART17_GROUNDS:
+                raise ValueError(f"Unknown Art. 17(1) erasure ground: {ground!r}")
 
             snapshot = self.memory.retention_obligation(normalized_record_id)
             if subject_id and snapshot.get("subject_id") and str(snapshot.get("subject_id")) != str(subject_id):
@@ -796,6 +832,15 @@ class DataRetention:
                         "expected_subject_id": snapshot.get("subject_id"),
                         "provided_subject_id": subject_id,
                     },
+                )
+
+            # Art. 17(3): a legal hold must survive an erasure request. The status update below would otherwise
+            # overwrite the "legal_hold" status and silently release the hold (defect found by test_retention).
+            if snapshot.get("legal_hold") and not (allow_legal_hold_override and self.allow_legal_hold_override):
+                raise PolicyEvaluationError(
+                    stage=operation,
+                    details="erasure deferred: record is under an active legal hold (GDPR Art. 17(3))",
+                    context={"record_id": normalized_record_id, "hold_ref": snapshot.get("hold_ref")},
                 )
 
             if str(snapshot.get("status") or "").lower() != "due":
@@ -826,7 +871,12 @@ class DataRetention:
                 decision=PrivacyDecision.BLOCK,
                 rationale="Right-to-be-forgotten request accepted; retention must yield to deletion workflow.",
                 retention_policy_id=updated.get("policy_id"),
-                context={"reason": effective_reason, "immediate_due": due_at is not None},
+                context={
+                    "reason": effective_reason,
+                    "immediate_due": due_at is not None,
+                    "art17_ground": ground,
+                    "identity_verified_by": str(identity_verification.get("verified_by")) if identity_verification else None,
+                },
                 audit_trail_ref=updated.get("audit_trail_ref") or audit_trail_ref,
             )
             return updated
@@ -889,7 +939,9 @@ if __name__ == "__main__":
         record_id="record-rtbf-001",
         request_id="request-retention-005",
         subject_id="subject-001",
-        reason="Data subject requested erasure.",
+        identity_verification={
+            "verified": True, "method": "authenticated_session", "verified_by": "identity_authority", "subject_id": "subject-001",
+        },
     )
     printer.status("TEST", "Right-to-be-forgotten request processed", "info")
 
@@ -936,4 +988,4 @@ if __name__ == "__main__":
         "memory_stats": retention.memory.stats(),
     }, indent=2, default=str))
 
-    print("\n=== Test ran successfully ===\n")
+    print("\n=== Test ran successfully ===\n")

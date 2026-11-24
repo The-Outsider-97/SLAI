@@ -15,6 +15,7 @@ import copy
 import json
 import time
 import uuid
+import weakref
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from threading import RLock
@@ -41,10 +42,19 @@ class PrivacyMemory:
     RETENTION_STATUSES = {"active", "due", "expired", "deleted", "legal_hold"}
     DELETION_STATUSES = {"scheduled", "in_progress", "completed", "failed", "cancelled", "legal_hold"}
 
+    # Every privacy component creates its own PrivacyMemory, so subject erasure/export must reach ALL live
+    # instances. Weak references: registration never keeps an instance alive.
+    _live_instances: "weakref.WeakSet[PrivacyMemory]" = weakref.WeakSet()
+
+    @classmethod
+    def live_instances(cls) -> List["PrivacyMemory"]:
+        return list(cls._live_instances)
+
     def __init__(self) -> None:
         self.config = load_global_config()
         self.memory_config = get_config_section("privacy_memory")
         self._lock = RLock()
+        PrivacyMemory._live_instances.add(self)
 
         self.enabled = bool(self.memory_config.get("enabled", True))
         self.strict_mode = bool(self.memory_config.get("strict_mode", True))
@@ -1439,6 +1449,70 @@ class PrivacyMemory:
                 raise self._handle_exception(exc, stage="privacy_memory.stats") from exc
             raise
 
+    # ---------------------------------------------------------------------
+    # Erasure support (GDPR Art. 17) - used by governance/deletion_adapters.py
+    # ---------------------------------------------------------------------
+    def erase_subject(self, subject_id: str, *, skip_record_ids: Sequence[str] = ()) -> Dict[str, int]:
+        """Remove every in-memory trace linked to ``subject_id`` and return per-index counts.
+
+        Covers consent and purpose-binding entries, decision and retention entries, the deletion
+        entries and the lineage/redaction/shared-contract entries of the removed records and
+        requests, and the audit events that name the subject. ``skip_record_ids`` keeps retention
+        entries under a legal hold (the caller is responsible for deciding which).
+        """
+        sid = self._normalize_identity(subject_id, "subject_id")
+        skip = {str(r) for r in skip_record_ids}
+        counts = {"consent": 0, "purpose_binding": 0, "decision": 0, "retention": 0, "deletion": 0,
+                  "lineage": 0, "redaction": 0, "shared_contract": 0, "events": 0}
+        with self._lock:
+            for key in [k for k in self._consent_index if k[0] == sid]:
+                del self._consent_index[key]; counts["consent"] += 1
+            for key in [k for k in self._purpose_binding_index if k[0] == sid]:
+                del self._purpose_binding_index[key]; counts["purpose_binding"] += 1
+            request_ids = set()
+            for rid in [r for r, e in self._decision_index.items() if e.get("subject_id") == sid]:
+                request_ids.add(rid); del self._decision_index[rid]; counts["decision"] += 1
+            record_ids = set()
+            for rec in [r for r, e in self._retention_index.items() if e.get("subject_id") == sid and r not in skip]:
+                record_ids.add(rec); del self._retention_index[rec]; counts["retention"] += 1
+            for rec in [r for r in self._deletion_index if r in record_ids]:
+                del self._deletion_index[rec]; counts["deletion"] += 1
+            for rid in [r for r in self._lineage_index if r in request_ids]:
+                del self._lineage_index[rid]; counts["lineage"] += 1
+            for rid in [r for r in self._redaction_index if r in request_ids]:
+                del self._redaction_index[rid]; counts["redaction"] += 1
+            for rid in [r for r in self._shared_contract_index if r in request_ids]:
+                del self._shared_contract_index[rid]; counts["shared_contract"] += 1
+            kept = [e for e in self._event_log if not (e.get("subject_id") == sid and e.get("record_id") not in skip)]
+            counts["events"] = len(self._event_log) - len(kept)
+            self._event_log[:] = kept
+        return counts
+
+    def export_subject(self, subject_id: str) -> Dict[str, Any]:
+        """Deep copy of everything this instance holds about ``subject_id`` (right of access / portability)."""
+        sid = self._normalize_identity(subject_id, "subject_id")
+        with self._lock:
+            return copy.deepcopy({
+                "consent": [e for k, e in self._consent_index.items() if k[0] == sid],
+                "purpose_bindings": [e for k, e in self._purpose_binding_index.items() if k[0] == sid],
+                "decisions": [e for e in self._decision_index.values() if e.get("subject_id") == sid],
+                "retention": [e for e in self._retention_index.values() if e.get("subject_id") == sid],
+                "events": [e for e in self._event_log if e.get("subject_id") == sid],
+            })
+
+    def contains_subject(self, subject_id: str, *, ignore_record_ids: Sequence[str] = ()) -> bool:
+        """True while any index or event still references ``subject_id``."""
+        sid = self._normalize_identity(subject_id, "subject_id")
+        ignore = {str(r) for r in ignore_record_ids}
+        with self._lock:
+            return bool(
+                any(k[0] == sid for k in self._consent_index)
+                or any(k[0] == sid for k in self._purpose_binding_index)
+                or any(e.get("subject_id") == sid for e in self._decision_index.values())
+                or any(e.get("subject_id") == sid and r not in ignore for r, e in self._retention_index.items())
+                or any(e.get("subject_id") == sid and e.get("record_id") not in ignore for e in self._event_log)
+            )
+
     def export_state(self) -> Dict[str, Any]:
         operation = "export_state"
         try:
@@ -1595,4 +1669,4 @@ if __name__ == "__main__":
         "stats": memory.stats(),
     }, indent=2, default=str))
 
-    print("\n=== Test ran successfully ===\n")
+    print("\n=== Test ran successfully ===\n")

@@ -213,7 +213,9 @@ data_retention:
   auto_schedule_due_deletion: true
   auto_update_deleted_status: true
   allow_legal_hold_override: false
-  right_to_be_forgotten_requires_reason: true
+  # Deprecated and ignored: a data subject never has to justify erasure (GDPR Art. 12(2)).
+  right_to_be_forgotten_requires_reason: false
+  require_identity_verification_for_erasure: true
   immediate_forget_request_deletion: true
   require_subject_id_for_obligation: false
   require_policy_id: true
@@ -453,4 +455,4 @@ privacy_risk_engine:
       - "Stop processing the deleted record and investigate lineage after deletion completion."
 
     incomplete_evidence:
-      - "Complete the missing privacy evidence before allowing sensitive downstream processing."
+      - "Complete the missing privacy evidence before allowing sensitive downstream processing."
