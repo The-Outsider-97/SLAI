@@ -45,6 +45,8 @@ from .base.light_metric_store import LightMetricStore
 from .base.failure_taxonomy import DEFAULT_FAILURE_TAXONOMY, FailureTaxonomy
 from .base.success_taxonomy import DEFAULT_SUCCESS_TAXONOMY, SuccessTaxonomy
 from .collaborative.shared_memory import SharedMemory
+from .governance.agent_gate import gate_after, gate_before
+from .governance.delegation_guard import check_delegable
 from .runtime_contracts import *
 from checkpointing.checkpoint_manager import CheckpointManager # pyright: ignore[reportMissingImports]
 from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
@@ -895,6 +897,18 @@ class BaseAgent(abc.ABC):
 
 
     def execute(self, input_data: Any) -> Any:
+        """Governed entry point: gate -> execute with accurate outcomes and side-effect-safe retries -> Art. 50 marking.
+
+        The gate (audit 4.6) runs before any work. It is a no-op until the Governance Agent installs it; in enforce mode, or when
+        ``input_data`` carries an explicit ``governance_context``, a non-permitting decision raises ``GovernanceDenied`` here.
+        Marking runs after, outside the retry/recovery machinery, so a marking failure can never cause re-execution.
+        """
+        if self._runtime_status.lifecycle in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
+            gate_before(self.name, input_data)
+        result = self._execute_governed(input_data)
+        return result if self._is_failure_result(result) else gate_after(self.name, input_data, result)
+
+    def _execute_governed(self, input_data: Any) -> Any:
         """Execute with accurate outcomes and side-effect-safe retries."""
         if self._runtime_status.lifecycle not in {
             RuntimeLifecycle.ACTIVE,
@@ -1690,9 +1704,8 @@ class BaseAgent(abc.ABC):
             module_agent = factory(module, self.shared_memory)
         else:
             raise BaseStateError("agent_factory must be callable or expose create().", component=self.name)
-        action_method = getattr(module_agent, action, None)
-        if not callable(action_method):
-            raise AttributeError(f"Module '{module}' has no callable action '{action}'.")
+        # Governed delegation (audit 4.6): only public, class-defined, authorised actions.
+        action_method = check_delegable(module_agent, target_name=str(module), action=action, caller=self.name)
         return action_method(**dict(params))
 
     def process_command(self, command: str, context: MutableMapping[str, Any]) -> Dict[str, Any]:

@@ -115,6 +115,14 @@ class PrivacyAgent(BaseAgent):
         self.privacy_config = get_config_section("privacy_agent", config=self.config)
         self._load_agent_configuration()
         self._validate_runtime_configuration()
+        if not self.enabled:
+            logger.critical(
+                "privacy_agent.enabled=false: personal/unclassified payloads are BLOCKED (fail-closed); "
+                "only structurally non-personal numeric payloads pass. This is a degraded runtime state."
+            )
+            self._mark_runtime_degraded(
+                "configuration", "privacy_agent.disabled", RuntimeError("privacy_agent.enabled=false")
+            )
 
         # ------------------------------------------------------------------
         # Subsystem composition
@@ -559,6 +567,67 @@ class PrivacyAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Main privacy runtime
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Fail-closed behaviour when the agent is configured as disabled
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _structurally_non_personal(value: Any, _depth: int = 0) -> bool:
+        """Conservative, deterministic check used ONLY when the full pipeline is unavailable.
+
+        Only numbers, booleans and None are accepted as leaves. Any string, bytes or
+        unknown object could carry personal data, so it is treated as unclassified.
+        Mapping keys are not inspected (keys are not payload content) but are bounded.
+        """
+        if _depth > 8:
+            return False
+        if value is None or isinstance(value, (bool, int, float)):
+            return True
+        if isinstance(value, Mapping):
+            return len(value) <= 256 and all(
+                PrivacyAgent._structurally_non_personal(v, _depth + 1) for v in value.values()
+            )
+        if isinstance(value, (list, tuple)):
+            return len(value) <= 4096 and all(
+                PrivacyAgent._structurally_non_personal(v, _depth + 1) for v in value
+            )
+        return False
+
+    def _disabled_privacy_decision(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        request_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """A disabled Privacy Agent must never become a bypass (GDPR Art. 5(1)(a), 25).
+
+        Verified non-personal payloads (numeric/boolean structures) pass unchanged so
+        calculation and geometry workloads are not penalised. Everything else is
+        unclassified and is blocked (quarantined) because the mandatory authorisation
+        pipeline is unavailable.
+        """
+        req = self._nonempty(request_id, self._new_id("privacy_req"))
+        if self._structurally_non_personal(payload):
+            return {
+                "request_id": req,
+                "decision": PrivacyDecision.ALLOW.value,
+                "summary": "Privacy Agent disabled; payload is structurally non-personal (numeric/boolean only) and passed unchanged.",
+                "sanitized_payload": dict(payload),
+                "decision_sources": {"disabled_mode": "structural_non_personal_verification"},
+                "stages": {},
+            }
+        logger.warning(
+            "Privacy Agent disabled: unclassified payload blocked (request_id=%s). Enable privacy_agent to process personal or free-text data.",
+            req,
+        )
+        return {
+            "request_id": req,
+            "decision": PrivacyDecision.BLOCK.value,
+            "summary": "Privacy Agent disabled: payload could contain personal data and mandatory authorisation is unavailable; quarantined (fail-closed).",
+            "sanitized_payload": {},
+            "decision_sources": {"disabled_mode": "fail_closed_unclassified"},
+            "stages": {},
+        }
+
     def evaluate_privacy(
         self,
         payload: Mapping[str, Any],
@@ -586,15 +655,7 @@ class PrivacyAgent(BaseAgent):
             raise TypeError("payload must be a mapping")
 
         if not self.enabled:
-            req = self._nonempty(request_id, self._new_id("privacy_req"))
-            return {
-                "request_id": req,
-                "decision": PrivacyDecision.ALLOW.value,
-                "summary": "Privacy Agent disabled; passing through without mutation.",
-                "sanitized_payload": dict(payload),
-                "decision_sources": {},
-                "stages": {},
-            }
+            return self._disabled_privacy_decision(payload, request_id=request_id)
 
         started_at = time.time()
         req_id = self._nonempty(request_id, self._new_id("privacy_req"))
@@ -1419,4 +1480,4 @@ if __name__ == "__main__":
         ],
     )
 
-    print("\n== Task run successfully ==\n")
+    print("\n== Task run successfully ==\n")

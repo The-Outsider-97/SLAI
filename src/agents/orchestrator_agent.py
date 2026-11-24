@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .base_agent import BaseAgent
+from .governance.delegation_guard import check_delegable
 from .base.utils.main_config_loader import get_config_section
 from .factory.utils.factory_errors import FactoryError
 from .factory.utils.factory_helpers import *
@@ -634,13 +635,10 @@ class OrchestratorAgent(BaseAgent):
         agent = self.agent_factory.create(normalized, self.shared_memory, _ephemeral=ephemeral)
 
         try:
-            method = getattr(agent, action, None)
-            if not callable(method):
-                raise AttributeError(
-                    f"Specialist '{normalized}' has no "
-                    f"callable action '{action}'"
-                )
-
+            # Governed delegation (audit 4.6): only public, class-defined, authorised actions.
+            method = check_delegable(
+                agent, target_name=normalized, action=action, caller=getattr(self, "name", "orchestrator")
+            )
             return method(**dict(params))
 
         finally:

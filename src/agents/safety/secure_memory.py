@@ -286,10 +286,18 @@ class SecureMemory:
                 return AccessDecision(False, "insufficient_sensitivity_access_level", action, required_level, supplied_level, principal, purpose, entry_id=meta.get("entry_id"))
             if meta.get("status") not in {None, "active"}:
                 return AccessDecision(False, f"entry_status_{meta.get('status')}", action, required_level, supplied_level, principal, purpose, entry_id=meta.get("entry_id"))
+            # Tenant isolation (audit 4.7) - fail closed in every direction:
+            #  * a tenanted entry requires a caller tenant and the two must be identical,
+            #  * a tenant-scoped caller may not read untenanted (global) entries unless explicitly allowed,
+            #  * a missing tenant on the caller is never a wildcard.
             entry_tenant = get_nested(meta, "extra.tenant_id", None)
             caller_tenant = context.get("tenant_id")
-            if entry_tenant and caller_tenant and normalize_identifier(entry_tenant) != normalize_identifier(caller_tenant):
+            entry_t = normalize_identifier(entry_tenant, max_length=128) if entry_tenant else None
+            caller_t = normalize_identifier(caller_tenant, max_length=128) if caller_tenant else None
+            if entry_t and caller_t != entry_t:
                 return AccessDecision(False, "tenant_mismatch", action, required_level, supplied_level, principal, purpose, entry_id=meta.get("entry_id"))
+            if not entry_t and caller_t and not coerce_bool(cfg.get("allow_untenanted_entries_for_tenant_callers", False), False):
+                return AccessDecision(False, "tenant_scope_violation", action, required_level, supplied_level, principal, purpose, entry_id=meta.get("entry_id"))
         return AccessDecision(True, "access_allowed", action, min_level, supplied_level, principal, purpose, entry_id=get_nested(entry or {}, "meta.entry_id", None))
 
     def _validate_access(self, context: Dict) -> bool:
@@ -311,6 +319,7 @@ class SecureMemory:
         source: str = "runtime",
         metadata: Optional[Mapping[str, Any]] = None,
         entry_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> str:
         with self.lock:
             self._purge_expired_locked()
@@ -320,6 +329,11 @@ class SecureMemory:
             normalized_tags = self._normalize_tags(tags)
             now = utc_iso()
             extra = redact_value(dict(metadata or {}))
+            # Tenant ownership is stamped from the explicit argument only; a tenant_id smuggled in via
+            # free-form metadata is discarded so it can neither forge nor erase ownership.
+            extra.pop("tenant_id", None)
+            if tenant_id:
+                extra["tenant_id"] = normalize_identifier(tenant_id, max_length=128)
             meta_obj = MemoryMetadata(
                 entry_id=normalized_entry_id,
                 created_at=now,
@@ -415,7 +429,7 @@ class SecureMemory:
                 "data_size_bytes": len(stable_json(redact_value(entry)).encode("utf-8", errors="replace")),
                 "data_fingerprint": self._fingerprint_entry_data(entry),
                 "revision": coerce_int(old_meta.get("revision", 1), 1) + 1,
-                "extra": redact_value(dict(metadata if metadata is not None else old_meta.get("extra", {}))),
+                "extra": self._extra_preserving_tenant(old_meta.get("extra", {}), metadata),
             })
             current["meta"]["metadata_fingerprint"] = self._fingerprint_metadata(current["meta"])
             self._index_entry_locked(normalized, current["meta"])
@@ -601,6 +615,11 @@ class SecureMemory:
         algorithm = safe_hash_algorithm(str(self._cfg("checkpoint_security.hash_algorithm", "sha256")))
         return hmac.new(self._checkpoint_key(), stable_json(payload).encode("utf-8"), algorithm).hexdigest()
 
+    def checkpoint_files(self) -> List[Path]:
+        """Existing checkpoint files (used by erasure to find on-disk copies of subject data)."""
+        directory = self._checkpoint_dir()
+        return sorted(directory.glob("*.json")) if directory.exists() else []
+
     def create_checkpoint(self, name: Optional[str] = None) -> bool:
         with self.lock:
             safe_name = normalize_identifier(name or f"secure_memory_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}", max_length=140)
@@ -782,6 +801,15 @@ class SecureMemory:
         if len(self.access_log) > max_log:
             del self.access_log[: len(self.access_log) - max_log]
         self.stats["audit_events"] += 1
+
+    @staticmethod
+    def _extra_preserving_tenant(old_extra: Mapping[str, Any], new_metadata: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        """Updates may replace metadata but can never change or drop the owning tenant."""
+        extra = redact_value(dict(new_metadata if new_metadata is not None else old_extra))
+        extra.pop("tenant_id", None)
+        if old_extra.get("tenant_id"):
+            extra["tenant_id"] = old_extra["tenant_id"]
+        return extra
 
     def _normalize_tags(self, tags: Optional[Iterable[str]]) -> List[str]:
         values = list(self._cfg("default_tags", []) or []) + list(tags or [])

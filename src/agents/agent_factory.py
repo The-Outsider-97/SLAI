@@ -233,6 +233,7 @@ class AgentFactory:
         "perception": {"module_path": "src.agents.perception_agent", "class_name": "PerceptionAgent"},
         "planning": {"module_path": "src.agents.planning_agent", "class_name": "PlanningAgent"},
         "privacy": {"module_path": "src.agents.privacy_agent", "class_name": "PrivacyAgent"},
+        "governance": {"module_path": "src.agents.governance_agent", "class_name": "GovernanceAgent"},
         "provenance": {"module_path": "src.agents.provenance_agent", "class_name": "ProvenanceAgent"},
         "qnn": {"module_path": "src.agents.qnn_agent", "class_name": "QNNAgent"},
         "quality": {"module_path": "src.agents.quality_agent", "class_name": "QualityAgent"},
@@ -258,6 +259,7 @@ class AgentFactory:
         "financial_agent": "financial",
         "knowledge_agent": "knowledge",
         "privacy_agent": "privacy",
+        "governance_agent": "governance",
         "quality_agent": "quality",
         "observability_agent": "observability",
         "reasoning_agent": "reasoning",
@@ -282,6 +284,7 @@ class AgentFactory:
         "network": {"torch_required": False, "notes": "Network transport/routing/reliability stack is torch-free."},
         "safety": {"torch_required": False, "notes": "Safety policy checks run without torch."},
         "privacy": {"torch_required": False, "notes": "Privacy policy checks are rule/config driven and torch-free."},
+        "governance": {"torch_required": False, "notes": "Regulatory governance is deterministic, stdlib-only and torch-free."},
         "quality": {"torch_required": False, "notes": "Document/data quality gates are dependency-light and torch-free by default."},
         "learning": {"torch_required": True, "notes": "RL/meta-learning pipelines require torch."},
         "alignment": {"torch_required": True, "notes": "Value embedding model is torch-based."},
@@ -1101,6 +1104,32 @@ class AgentFactory:
         self.active_agents[cached.identity.agent_type] = cached.instance
         return cached
 
+    def _ensure_governance(self, normalized: str, shared_memory: Any) -> None:
+        """Start the Governance Agent (which installs the central gate) before any other agent is created.
+
+        Governance is a mandatory architectural component: if it cannot start, that is logged as CRITICAL and counted; agent creation
+        only fails when ``governance_agent.require_for_agent_creation`` is true. Attempted once per factory (no retry storm).
+        """
+        if normalized == "governance" or getattr(self, "_governance_attempted", False):
+            return
+        self._governance_attempted = True
+        try:
+            from .base.utils.main_config_loader import get_config_section, load_global_config  # local import: avoid cycles
+
+            cfg = dict(get_config_section("governance_agent", config=load_global_config()) or {})
+        except Exception:
+            cfg = {}
+        if cfg.get("auto_start", True) is False:
+            return
+        try:
+            self.create("governance", shared_memory)
+        except Exception as exc:
+            self._record_counter("governance.bootstrap_failed")
+            logger.critical("Governance Agent could not be started (%s): agents run WITHOUT the central governance gate", type(exc).__name__)
+            self.governance_bootstrap_error = type(exc).__name__
+            if cfg.get("require_for_agent_creation"):
+                raise
+
     def create(self, agent_type: str, shared_memory: Any = None, **kwargs: Any) -> Any:
         """Create or retrieve an agent instance by registered agent type.
 
@@ -1114,6 +1143,7 @@ class AgentFactory:
 
         started_ms = monotonic_ms()
         normalized = self.normalize_agent_type(agent_type)
+        self._ensure_governance(normalized, shared_memory)
         version = kwargs.get("version")
         self._record_counter("create.requested")
 

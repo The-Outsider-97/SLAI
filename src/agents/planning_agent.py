@@ -32,7 +32,6 @@ from .planning.local_behavior_arbitrator import LocalBehaviorArbitrator, LocalPl
 from .planning.utils.resource_monitor import ResourceMonitor
 from .planning.utils.planning_errors import *
 from .planning.utils.planning_helpers import *
-from .planning.planning_types import Any  # re-bind SLAI's Any: the star import above rebinds the name to typing.Any
 from logs.logger import get_logger, PrettyPrinter  # pyright: ignore[reportMissingImports]
 
 logger = get_logger("Planning Agent")

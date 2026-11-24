@@ -228,7 +228,11 @@ class ComplianceChecker:
                 "name": get_nested(self.compliance_framework, "documentInfo.name", get_nested(self.compliance_framework, "documentInfo.title", "Safety Compliance Framework")),
                 "fingerprint": self.framework_fingerprint,
             },
-            "assurance_scope": "Internal evidence-based control assessment; not legal certification.",
+            "assurance_scope": "Internal operational control indicators; NOT a legal compliance determination and not certification.",
+            # Audit 4.10: a high operational score must never be read as GDPR / EU AI Act compliance.
+            "legal_compliance": "not_determined",
+            "regulatory_assessment_source": "GovernanceAgent.compliance_report() (evidence-driven, per-requirement, no scores)",
+            "operational_status": status,
             "sections": sections_out,
             "overall_score": clamp_score(overall),
             "status": status,
@@ -601,4 +605,4 @@ if __name__ == "__main__":
     Evaluate = Checker.evaluate_compliance()
 
     printer.status("Public API", Evaluate, "success" if Evaluate.get("decision") in {"allow", "review"} else "error")
-    print("\n== Task run successfully ==\n")
+    print("\n== Task run successfully ==\n")
