@@ -30,7 +30,7 @@ OPS = ("configure", "start_episode", "decide", "feedback", "executed", "end_epis
 
 _CONFIG_KEYS = ("seed", "mode", "learning_enabled", "min_episodes_per_update", "max_episodes_per_update", "evaluate_greedy",
                 "checkpoint_dir", "autosave_every_updates", "restore_on_start", "max_live_episodes", "max_decisions_per_episode",
-                "max_pending_episodes", "schema_fingerprint")
+                "max_pending_episodes")
 
 
 def _config_digest(payload: Mapping[str, Any]) -> str:

@@ -74,10 +74,6 @@ class ExternalLearningConfig:
     max_live_episodes: int = 64
     max_decisions_per_episode: int = 20_000
     max_pending_episodes: int = 256
-    # Environment-defined identity of what the feature vector and the action indices MEAN (e.g. a hash of the ordered feature
-    # names and action labels).  Dimensions alone cannot tell a reordered or redefined schema from the original; a checkpoint
-    # written under one fingerprint is refused by a learner configured with another.  None = the adapter declares no schema.
-    schema_fingerprint: Optional[str] = None
 
     def validate(self) -> None:
         if self.mode not in MODES:
@@ -331,7 +327,7 @@ class ExternalLearningService:
                     "parameter_hash": p.parameter_hash, "hyperparameter_hash": md.hyperparameter_hash, "training_step": p.training_step,
                     "consumed_transitions": p.consumed_transitions, "consumed_episodes": p.consumed_episodes,
                     "action_dim": p.action_dim, "feature_dim": p.feature_dim, "parent_checkpoint_id": self._checkpoint_id or "",
-                    "reason": reason, "schema_fingerprint": self.config.schema_fingerprint or ""}
+                    "reason": reason}
             prov = CheckpointProvenance(
                 agent_id=f"external-learning:{self.config.name}"[:120], checkpoint_reason=reason,
                 lineage=CheckpointLineage(parent_checkpoint_id=self._checkpoint_id, generation=self._generation + 1))
@@ -386,11 +382,6 @@ class ExternalLearningService:
                 raise CheckpointIntegrityError(f"incompatible checkpoint schema/algorithm: {md.get('schema_version')}/{md.get('algorithm')}")
             if int(md.get("action_dim", -1)) != p.action_dim or int(md.get("feature_dim", -1)) != p.feature_dim:
                 raise CheckpointIntegrityError("checkpoint dimensions do not match this learner")
-            recorded_fp, wanted_fp = str(md.get("schema_fingerprint") or ""), self.config.schema_fingerprint or ""
-            if wanted_fp and recorded_fp != wanted_fp:
-                raise CheckpointIntegrityError(
-                    f"checkpoint schema fingerprint {recorded_fp[:16] or '<none>'!r} does not match this learner's {wanted_fp[:16]!r}: "
-                    "the feature/action definitions changed; migrate or retrain instead of loading these weights")
             p.load_state(res.components["model"], {k: md.get(k, 0) for k in ("training_step", "consumed_transitions", "consumed_episodes")},
                          expect_parameter_hash=md.get("parameter_hash"), expect_state_hash=md.get("state_hash"))
             lin = man.provenance.lineage
