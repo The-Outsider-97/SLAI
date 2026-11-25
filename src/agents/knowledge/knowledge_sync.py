@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - exercised in dependency-light environmen
     psycopg2 = None
     sql = None
 
+from ..governance.effect_boundary import guard_effect
 from .utils.config_loader import load_global_config, get_config_section
 from .utils.knowledge_helpers import *
 from .utils.knowledge_errors import *
@@ -601,6 +602,7 @@ class KnowledgeSynchronizer:
                 headers["Authorization"] = f"Bearer {token}"
 
         params = source_config.get("params", {})
+        guard_effect("network_outbound", str(endpoint).split("/")[2] if "://" in str(endpoint) else "api")
         response = requests.get(endpoint, headers=headers, params=params, timeout=timeout_seconds)
         response.raise_for_status()
         data = response.json()
@@ -623,6 +625,7 @@ class KnowledgeSynchronizer:
             connect_kwargs = {}
         connect_kwargs.setdefault("connect_timeout", int(timeout_seconds))
 
+        guard_effect("network_outbound", "database")
         with psycopg2.connect(conn_str, **connect_kwargs) as connection:
             with connection.cursor() as cursor:
                 for table in tables:

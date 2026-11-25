@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from ..governance.effect_boundary import guard_effect
+from ..governance.processing_context import GovernanceDenied
+from ..governance.reassessment import AuthorizationRevoked
 from .knowledge_memory import KnowledgeMemory
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.knowledge_errors import *
@@ -314,6 +317,10 @@ class PerformAction:
                     "error": str(exc),
                     "attempts": attempt + 1,
                 }
+            except (GovernanceDenied, AuthorizationRevoked) as exc:
+                # Authorisation outcomes are final: no retry budget is spent trying to get around a refusal.
+                logger.warning("Action %s refused at the governance boundary: %s", action_type, type(exc).__name__)
+                return {"action": action_type, "status": "rejected", "error": f"governance:{type(exc).__name__}", "attempts": attempt + 1}
             except Exception as exc:  # execution failures should flow through retry budget
                 last_error = exc
                 if isinstance(exc, KnowledgeError):
@@ -476,6 +483,7 @@ class PerformAction:
 
     def _execute_http(self, payload: str) -> Dict[str, Any]:
         method, url, body, headers = self._parse_http_payload(payload)
+        guard_effect("network_outbound", urlparse(url).netloc or "http")
         try:
             response = requests.request(
                 method=method,
@@ -553,6 +561,7 @@ class PerformAction:
 
     def _execute_shell(self, command: str) -> Dict[str, Any]:
         argv = self._build_shell_argv(command)
+        guard_effect("subprocess", argv[0])
         try:
             result = subprocess.run(
                 argv,

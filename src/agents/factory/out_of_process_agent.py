@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from ..governance.effect_boundary import guard_effect
+from ..governance.processing_context import GovernanceDenied
+from ..governance.reassessment import AuthorizationRevoked
 from .utils.config_loader import get_config_section, load_global_config
 from .utils.factory_errors import *
 from .utils.factory_helpers import *
@@ -302,6 +305,9 @@ class OutOfProcessAgentProxy:
             exc.log()
             return self._degraded_result(exc, method_name, duration_ms)
 
+        except (GovernanceDenied, AuthorizationRevoked):
+            raise  # a governance refusal is an authorisation outcome, never a retryable worker failure to be reported as "degraded"
+
         except Exception as exc:
             wrapped = wrap_factory_exception(
                 exc,
@@ -347,6 +353,8 @@ class OutOfProcessAgentProxy:
         )
 
     def _run_once(self, method: str, serialised_payload: str, *, attempt: int) -> Dict[str, Any]:
+        # Side-effect boundary: the worker process is spawned only under a still-valid authorisation (re-checked on every retry).
+        guard_effect("subprocess", f"{self.agent_type}.{method}")
         try:
             completed = subprocess.run(
                 self._command(),
@@ -575,11 +583,12 @@ class OutOfProcessAgentProxy:
     # ------------------------------------------------------------------
     def execute(self, *args: Any, **kwargs: Any) -> Any:
         # The child process has no governance gate of its own: the parent-side proxy is where governance applies.
-        from ..governance.agent_gate import gate_after, gate_before
+        from ..governance.agent_gate import gate_after, governed_execution
 
         payload = args[0] if args else kwargs.get("input_data")
-        gate_before(self.agent_type, payload)
-        return gate_after(self.agent_type, payload, self._invoke("execute", *args, **kwargs))
+        with governed_execution(self.agent_type, payload) as decision:
+            result = self._invoke("execute", *args, **kwargs)
+            return gate_after(self.agent_type, payload, result, decision)
 
     def perform_task(self, *args: Any, **kwargs: Any) -> Any:
         return self._invoke("perform_task", *args, **kwargs)
