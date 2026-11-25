@@ -1,0 +1,74 @@
+name: compliance
+
+# Governance Agent regression suite. It runs on every pull request and on every push to the long-lived branches, on Linux AND
+# Windows (SQLite file-handle and locking semantics differ), on the supported Python range (pyproject: >=3.10,<3.13) plus 3.13 as
+# a non-gating forward-compatibility signal. The suite needs only the packages installed below: heavyweight runtime dependencies
+# (torch, ...) are stubbed by tests/compliance/test_deletion_adapters.py ONLY when absent, and the complete-dependency run of
+# these same tests happens in ci.yml (`pytest -q` over the whole repository, real torch).
+
+on:
+  push:
+    branches:
+      - main
+      - SLAI-v.2.3
+      - SLAI-v.2.4
+      - SLAI-v.2.5
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compliance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance-suite:
+    name: Governance suite (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+        experimental: [false]
+        include:
+          - { os: ubuntu-latest, python: "3.13", experimental: true }
+          - { os: windows-latest, python: "3.13", experimental: true }
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d
+        with:
+          version: "0.11.33"
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+
+      # Database lifecycle and concurrency first: these are the tests that behave differently on Windows, and a failure here is
+      # the fastest, most specific signal.
+      - name: Governance database lifecycle and concurrency
+        run: >
+          uv run --no-project --python ${{ matrix.python }} --with cryptography --with colorama
+          python -m unittest -v
+          tests.compliance.test_governance_runtime.DatabaseLifecycleTests
+          tests.compliance.test_concurrency_adversarial
+          tests.compliance.test_secure_persistence
+
+      - name: Complete governance suite
+        run: >
+          uv run --no-project --python ${{ matrix.python }} --with cryptography --with colorama
+          python -m unittest discover -s tests/compliance -t . -v
+
+      # Decision-quality benchmark (FP/FN, latency percentiles, adaptive evaluation) in smoke mode: it asserts nothing about
+      # absolute latency (machine dependent) but exits non-zero on any false negative or false positive in the labelled corpus.
+      - name: Governance quality benchmark (smoke)
+        run: >
+          uv run --no-project --python ${{ matrix.python }} --with cryptography --with colorama
+          python -m tests.compliance.benchmarks.bench_quality --smoke
