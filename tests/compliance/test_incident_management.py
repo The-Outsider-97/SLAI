@@ -10,6 +10,7 @@ T0 = 1_800_000_000.0
 class IncidentTests(unittest.TestCase):
     def setUp(self):
         self.reg = IncidentRegistry()
+        self.addCleanup(self.reg.close)
 
     def breach(self, **kw):
         return self.reg.detect(IncidentKind.PERSONAL_DATA_BREACH, reporter="observability", description="Unencrypted export left on shared drive", now=T0, **kw)
@@ -98,9 +99,15 @@ class IncidentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "inc.db")
             r1 = IncidentRegistry(p)
-            iid = r1.detect(IncidentKind.GOVERNANCE_FAILURE, reporter="gov", description="Policy tamper attempt detected", now=T0)
+            try:
+                iid = r1.detect(IncidentKind.GOVERNANCE_FAILURE, reporter="gov", description="Policy tamper attempt detected", now=T0)
+            finally:
+                r1.close()
             r2 = IncidentRegistry(p)
-            self.assertEqual(r2.get(iid)["state"], "detected")
+            try:
+                self.assertEqual(r2.get(iid)["state"], "detected")
+            finally:
+                r2.close()
 
 
 if __name__ == "__main__":
