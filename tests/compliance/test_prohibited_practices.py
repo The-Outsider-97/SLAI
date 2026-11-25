@@ -7,11 +7,10 @@ from tests.compliance._fixtures import GovernanceTestCase
 
 class ProhibitedPracticeTests(GovernanceTestCase):
     def _ctx(self, tags, system="sys-1"):
-        return ProcessingContext(Operation.PROCESS, "analysis", data_class=DataClass.NON_PERSONAL, classification_verified=True,
-                                 ai_system_id=system, ai_practices=tags, identity=self.ident())
+        return self.np_ctx(Operation.PROCESS, "analysis", ai_system_id=system, ai_practices=tags, identity=self.ident())
 
     def test_every_art5_practice_is_blocked_without_exception(self):
-        self.core.profiles.register(AISystemProfile("sys-1", "test system", intended_purpose="test"))
+        self.reg_profile(AISystemProfile("sys-1", "test system", intended_purpose="test"))
         for tag in PROHIBITED_PRACTICES:
             with self.subTest(tag=tag):
                 d = self.core.authorize(self._ctx((tag,)))
@@ -19,7 +18,7 @@ class ProhibitedPracticeTests(GovernanceTestCase):
                 self.assertIn("GOV-AI5-03", self.rule_ids(d))
 
     def test_human_approval_cannot_unblock_a_prohibited_practice(self):
-        self.core.profiles.register(AISystemProfile("sys-1", "t", intended_purpose="t"))
+        self.reg_profile(AISystemProfile("sys-1", "t", intended_purpose="t"))
         c = self._ctx(("social_scoring",))
         reviewer = self.human("reviewer-1")
         requester = self.ident("svc-1")
@@ -32,12 +31,12 @@ class ProhibitedPracticeTests(GovernanceTestCase):
         self.assertEqual(self.core.authorize(approved).decision, Decision.BLOCK)
 
     def test_unknown_practice_tag_is_quarantined_not_ignored(self):
-        self.core.profiles.register(AISystemProfile("sys-1", "t", intended_purpose="t"))
+        self.reg_profile(AISystemProfile("sys-1", "t", intended_purpose="t"))
         self.assertEqual(self.core.authorize(self._ctx(("mystery_practice",))).decision, Decision.QUARANTINE)
 
     def test_complete_statutory_exception_in_registered_profile_is_honoured(self):
         # Art. 5(1)(f): emotion recognition for medical or safety reasons is outside the prohibition.
-        self.core.profiles.register(AISystemProfile(
+        self.reg_profile(AISystemProfile(
             "med-1", "driver fatigue", intended_purpose="fatigue detection for safety", practices=("emotion_recognition_workplace_education",),
             practice_details={"emotion_recognition_workplace_education": {"medical_or_safety_purpose": True}}))
         d = self.core.authorize(self._ctx(("emotion_recognition_workplace_education",), "med-1"))
@@ -45,15 +44,15 @@ class ProhibitedPracticeTests(GovernanceTestCase):
         self.assertNotIn("GOV-AI5-03", self.rule_ids(d))
 
     def test_exception_cannot_be_claimed_by_the_request_only_by_registered_profile(self):
-        self.core.profiles.register(AISystemProfile("sys-1", "t", intended_purpose="t"))
-        c = ProcessingContext(Operation.PROCESS, "x", data_class=DataClass.NON_PERSONAL, classification_verified=True, ai_system_id="sys-1",
-                              ai_practices=("emotion_recognition_workplace_education",), attributes={"medical_or_safety_purpose": True}, identity=self.ident())
+        self.reg_profile(AISystemProfile("sys-1", "t", intended_purpose="t"))
+        c = self.np_ctx(Operation.PROCESS, "x", ai_system_id="sys-1", ai_practices=("emotion_recognition_workplace_education",),
+                        attributes={"medical_or_safety_purpose": True}, identity=self.ident())
         self.assertEqual(self.core.authorize(c).decision, Decision.BLOCK)
 
     def test_incomplete_rbi_exception_stays_prohibited(self):
         p = AISystemProfile("rbi", "rbi", intended_purpose="x", practices=("realtime_remote_biometric_id_law_enforcement",),
                             practice_details={"realtime_remote_biometric_id_law_enforcement": {"authorised_objective": True}})
-        self.core.profiles.register(p)
+        self.reg_profile(p)
         self.assertEqual(self.core.profiles.classification("rbi").tier.value, "prohibited")
 
     def test_ai_system_without_profile_is_quarantined(self):

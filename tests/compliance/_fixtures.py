@@ -9,6 +9,7 @@ import unittest
 
 from typing import Any, Dict, Mapping, Optional
 
+from src.agents.governance.classification_evidence import ClassifierResult
 from src.agents.governance.core import GovernanceCore
 from src.agents.governance.processing_context import (
     Art9Condition,
@@ -45,6 +46,24 @@ class FakeRestrictions:
         return self.state.get(subject_id, {})
 
 
+def structural_test_classifier(payload: Any, *, purpose: str) -> ClassifierResult:
+    """Test double for the Privacy Agent classifier interface: numbers/booleans only are provably non-personal;
+    anything else is reported as personal. Everything under test (authority, engine, rules) is production code."""
+    def numeric(v: Any, depth: int = 0) -> bool:
+        if depth > 8:
+            return False
+        if v is None or isinstance(v, (bool, int, float)):
+            return True
+        if isinstance(v, Mapping):
+            return all(numeric(x, depth + 1) for x in v.values())
+        if isinstance(v, (list, tuple)):
+            return all(numeric(x, depth + 1) for x in v)
+        return False
+    if numeric(payload):
+        return ClassifierResult(DataClass.NON_PERSONAL, (DataClass.NON_PERSONAL,), 1.0, "test.structural", "1", True, True)
+    return ClassifierResult(DataClass.PERSONAL, (DataClass.PERSONAL,), 0.95, "test.structural", "1", True, False)
+
+
 REVIEW = {"reviewed_by": "dpo.jansen", "reviewed_at": "2026-11-01"}
 
 
@@ -77,10 +96,12 @@ def make_activity(activity_id: str = "act-1", **over: Any) -> ProcessingActivity
 class GovernanceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        self.payload_np = {"value": 42}
         self.consent = FakeConsent()
         self.restrictions = FakeRestrictions()
         GovernanceCore.reset_shared()
         self.core = GovernanceCore(self._tmp.name, master_key=KEY, consent=self.consent, restrictions=self.restrictions)
+        self.core.classification.attach_classifier(structural_test_classifier)
         self.addCleanup(self._tmp.cleanup)
         self.addCleanup(self.core.close)
 
@@ -95,11 +116,26 @@ class GovernanceTestCase(unittest.TestCase):
     def ctx(self, **over: Any) -> ProcessingContext:
         defaults: Dict[str, Any] = dict(
             operation=Operation.PROCESS, purpose="document_editing", data_class=DataClass.PERSONAL,
-            classification_verified=True, activity_id="act-1", subject_ids=("subj-1",), tenant_id="tenant-a",
+            activity_id="act-1", subject_ids=("subj-1",), tenant_id="tenant-a",
             identity=self.ident(),
         )
         defaults.update(over)
         return ProcessingContext(**defaults)
+
+    def np_ctx(self, operation: Operation, purpose: str, payload: Any = None, **over: Any) -> ProcessingContext:
+        """A context for provably non-personal data, backed by REAL signed classification evidence."""
+        payload = self.payload_np if payload is None else payload
+        token = self.core.classification.classify(
+            payload, purpose=purpose, tenant_id=over.get("tenant_id"), identity=over.get("identity"), resource=over.get("resource"))
+        return ProcessingContext(operation, purpose, data_class=DataClass.NON_PERSONAL, classification_evidence=token,
+                                 data_digest=self.core.classification.digest(payload), **over)
+
+    def profile_admin(self):
+        return self.ident("profile-admin", None, actor="human", roles=("ai_governance_officer",))
+
+    def reg_profile(self, profile):
+        """Register a regulatory profile as an authorised profile administrator (profile changes need a verified identity)."""
+        return self.core.profiles.register(profile, self.profile_admin(), "test registration")
 
     def register(self, **over: Any) -> ProcessingActivity:
         return self.core.activities.register(make_activity(**over), actor="dpo.jansen")

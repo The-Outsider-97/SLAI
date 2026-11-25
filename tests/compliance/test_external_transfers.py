@@ -46,6 +46,13 @@ class TransferTests(GovernanceTestCase):
         self.reg([{"country": "IN", "mechanism": "scc", "ref": "scc-2021"}])
         self.assertEqual(self.core.authorize(self.req("IN")).decision, Decision.BLOCK)
         self.core.activities.update(make_activity("act-1", operations=(Operation.PROCESS, Operation.TRANSFER), transfers=({"country": "IN", "mechanism": "scc", "ref": "scc-2021", "tia_ref": "tia-5"},)), expected_version=1, actor="dpo")
+        # The TIA exists but the supplementary measures it prescribes are not evidenced: the control is an unmet PRE
+        # condition, so the transfer is not allowed yet (GOV-P1-01) - it is no longer a free-text suggestion.
+        d = self.core.authorize(self.req("IN"))
+        self.assertEqual(d.decision, Decision.REVIEW_REQUIRED)
+        self.assertIn("GOV-CND-02", self.rule_ids(d))
+        self.core.activities.update(make_activity("act-1", operations=(Operation.PROCESS, Operation.TRANSFER), transfers=({
+            "country": "IN", "mechanism": "scc", "ref": "scc-2021", "tia_ref": "tia-5", "supplementary_measures_ref": "sm-9"},)), expected_version=2, actor="dpo")
         d = self.core.authorize(self.req("IN"))
         self.assertEqual(d.decision, Decision.ALLOW_WITH_CONTROLS)
         self.assertIn("apply_supplementary_measures", d.conditions)

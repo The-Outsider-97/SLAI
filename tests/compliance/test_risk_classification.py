@@ -81,7 +81,27 @@ class RiskClassificationTests(unittest.TestCase):
     def test_ruleset_is_versioned_and_states_its_verification_status(self):
         d = C.classify(AISystemProfile("s", "s", intended_purpose="x", is_gpai_model=False)).to_dict()
         self.assertIn("2026/1744", d["ruleset_version"])
-        self.assertIn("not yet confirmed", d["ruleset_verification"])
+        # The verification statement must say what was verified, what was NOT, and who must confirm.
+        self.assertIn("Verified 2026-11-25 against EUR-Lex", d["ruleset_verification"])
+        self.assertIn("NOT independently confirmed", d["ruleset_verification"])
+        self.assertIn("Counsel must confirm", d["ruleset_verification"])
+        self.assertIn("2026-11-25", d["ruleset_version"])
+
+    def test_dates_match_verified_sources(self):
+        from datetime import date
+        from src.agents.governance.risk_classification import PROHIBITED_APPLICABLE_FROM
+        self.assertEqual(RISK_DATES["new_prohibitions_art5_ba_bb"], date(2026, 12, 2))
+        self.assertEqual(RISK_DATES["transparency_art50"], date(2026, 8, 2))
+        self.assertEqual(RISK_DATES["high_risk_annex_iii"], date(2027, 12, 2))
+        self.assertEqual(RISK_DATES["high_risk_annex_i"], date(2028, 8, 2))
+        self.assertEqual(PROHIBITED_APPLICABLE_FROM["csam_ncii_generation"], RISK_DATES["new_prohibitions_art5_ba_bb"])
+
+    def test_new_prohibition_blocked_early_with_explicit_legal_date(self):
+        c = C.classify(AISystemProfile("s", "s", intended_purpose="x", practices=("csam_ncii_generation",)))
+        self.assertEqual(c.tier, RiskTier.PROHIBITED)
+        from datetime import date
+        if date.today() < date(2026, 12, 2):
+            self.assertTrue(any("legally applicable from 2026-12-02" in r for r in c.rationale))
 
 
 if __name__ == "__main__":

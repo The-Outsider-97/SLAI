@@ -26,16 +26,16 @@ class ProcessingAuthorityTests(GovernanceTestCase):
         self.assertIn("GOV-PUR-05", self.rule_ids(self.core.authorize(self.ctx(operation=Operation.SHARE))))
 
     def test_unclassified_is_quarantined_not_allowed(self):
-        d = self.core.authorize(self.ctx(data_class=DataClass.UNCLASSIFIED, classification_verified=False))
+        d = self.core.authorize(self.ctx(data_class=DataClass.UNCLASSIFIED))
         self.assertEqual(d.decision, Decision.QUARANTINE)
 
     def test_unverified_non_personal_claim_is_treated_as_unclassified(self):
-        c = ProcessingContext(Operation.PROCESS, "calc", data_class=DataClass.NON_PERSONAL, classification_verified=False)
+        c = ProcessingContext(Operation.PROCESS, "calc", data_class=DataClass.NON_PERSONAL, )
         self.assertEqual(c.effective_data_class, DataClass.UNCLASSIFIED)
         self.assertNotEqual(self.core.authorize(c).decision, Decision.ALLOW)
 
     def test_verified_non_personal_is_not_burdened(self):
-        c = ProcessingContext(Operation.PROCESS, "geometry_conversion", data_class=DataClass.NON_PERSONAL, classification_verified=True)
+        c = self.np_ctx(Operation.PROCESS, "geometry_conversion")
         self.assertEqual(self.core.authorize(c).decision, Decision.ALLOW)
 
     def test_inactive_or_suspended_activity_is_blocked(self):
@@ -75,7 +75,7 @@ class ProcessingAuthorityTests(GovernanceTestCase):
             try:
                 self.assertFalse(keyless.health()["ready"])
                 self.assertFalse(keyless.identity.available)
-                c = ProcessingContext(Operation.PROCESS, "x", data_class=DataClass.PERSONAL, classification_verified=True)
+                c = ProcessingContext(Operation.PROCESS, "x", data_class=DataClass.PERSONAL)
                 self.assertFalse(keyless.authorize(c).allowed)
             finally:
                 keyless.close()
@@ -96,7 +96,7 @@ class ProcessingAuthorityTests(GovernanceTestCase):
         def boom(c, e):
             raise RuntimeError("bug")
         self.core.engine._rules = tuple(self.core.engine._rules) + (boom,)
-        d = self.core.authorize(ProcessingContext(Operation.PROCESS, "x", data_class=DataClass.NON_PERSONAL, classification_verified=True))
+        d = self.core.authorize(self.np_ctx(Operation.PROCESS, "x"))
         self.assertEqual(d.decision, Decision.BLOCK)
         self.assertIn("GOV-ERR-99", self.rule_ids(d))
 
@@ -109,11 +109,11 @@ class ProcessingAuthorityTests(GovernanceTestCase):
             self.core.policies.register(Policy("GOV-LAW-04", 1, "same version", ()))
 
     def test_unregistered_capability_is_blocked_and_registered_one_is_scoped(self):
-        c = ProcessingContext(Operation.EXECUTE, "calc", data_class=DataClass.NON_PERSONAL, classification_verified=True, capability="stem.solve", identity=self.ident())
+        c = self.np_ctx(Operation.EXECUTE, "calc", capability="stem.solve", identity=self.ident())
         self.assertIn("GOV-CAP-13", self.rule_ids(self.core.authorize(c)))
         self.core.capabilities.register(Capability("stem.solve", "stem", "solve"))
         self.assertEqual(self.core.authorize(c).decision, Decision.ALLOW)
-        personal = ProcessingContext(Operation.EXECUTE, "calc", data_class=DataClass.PERSONAL, classification_verified=True, capability="stem.solve", identity=self.ident())
+        personal = ProcessingContext(Operation.EXECUTE, "calc", data_class=DataClass.PERSONAL, capability="stem.solve", identity=self.ident())
         self.assertIn("GOV-CAP-13", self.rule_ids(self.core.authorize(personal)))
 
     def test_decisions_are_recorded_without_payload(self):
@@ -166,7 +166,7 @@ class ProcessingAuthorityTests(GovernanceTestCase):
     def test_delegation_only_narrows_and_is_depth_limited(self):
         self.core.capabilities.register(Capability("stem.solve", "stem", "solve"))
         self.core.capabilities.register(Capability("stem.plot", "stem", "plot"))
-        c = ProcessingContext(Operation.EXECUTE, "calc", data_class=DataClass.NON_PERSONAL, classification_verified=True, capability="stem.solve", identity=self.ident())
+        c = self.np_ctx(Operation.EXECUTE, "calc", capability="stem.solve", identity=self.ident())
         token = self.core.issue_grant(c, self.core.authorize(c))
         child = self.core.grants.delegate(token, to_agent="sub", capabilities=["stem.solve"])
         with self.assertRaises(GrantError) as cm:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -10,7 +11,7 @@ from unittest import mock
 from src.agents.governance.core import GovernanceCore, load_master_key
 from src.agents.governance.delegation_guard import check_delegable, install_authorizer
 from src.agents.governance.agent_gate import install_gate, installed_gate
-from src.agents.governance.processing_context import GovernanceDenied
+from src.agents.governance.processing_context import DataClass, GovernanceDenied, Operation, ProcessingContext
 
 from .test_deletion_adapters import _shim_and_import
 
@@ -41,7 +42,59 @@ class DatabaseLifecycleTests(unittest.TestCase):
     def connections(core):
         return [core.activities._db, core.oversight._db, core.grants._db,
                 core.evidence._db, core.incidents._db, core.ledger._db,
-                core.learning._db, core.rights._db, core._decisions]
+                core.learning._db, core.rights._db, core._decisions,
+                core.classification._db, core.reassessment._db, core.conditions._db, core.profiles._db, core.adaptive._db]
+
+    @staticmethod
+    def discovered_connections(core):
+        """Every sqlite3 connection reachable from the core's components (so a new store cannot be forgotten by the list above)."""
+        found, seen = [], set()
+        for owner in [core, *vars(core).values()]:
+            if id(owner) in seen:
+                continue
+            seen.add(id(owner))
+            try:
+                attributes = vars(owner).values()
+            except TypeError:
+                continue
+            found.extend(v for v in attributes if isinstance(v, sqlite3.Connection))
+        return list({id(c): c for c in found}.values())
+
+    def test_every_reachable_connection_is_listed_closed_and_the_state_directory_is_deletable(self):
+        """Windows cannot delete a SQLite file that still has an open handle: removing the state directory after close() is the
+        portable proof that no store leaked a connection (this is the check the Windows CI job exists for)."""
+        import shutil
+        tmp = tempfile.mkdtemp()
+        try:
+            core = GovernanceCore(tmp, master_key=b"x" * 32)
+            core.authorize(ProcessingContext(Operation.PROCESS, "document_editing", data_class=DataClass.PERSONAL))
+            listed = self.connections(core)
+            discovered = self.discovered_connections(core)
+            self.assertEqual({id(c) for c in discovered} - {id(c) for c in listed}, set(), "a SQLite connection is not covered by the lifecycle test")
+            self.assertGreaterEqual(len(discovered), 13)
+            core.close()
+            self.assert_closed(discovered)
+            if sys.platform.startswith("linux"):
+                held = [os.readlink(f"/proc/self/fd/{fd}") for fd in os.listdir("/proc/self/fd") if os.path.exists(f"/proc/self/fd/{fd}")]
+                self.assertEqual([h for h in held if h.startswith(tmp)], [])
+            shutil.rmtree(tmp)  # raises PermissionError on Windows if any handle is still open
+            self.assertFalse(os.path.exists(tmp))
+        finally:
+            GovernanceCore.reset_shared()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_state_survives_a_restart_and_reopen_does_not_corrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = GovernanceCore(tmp, master_key=b"x" * 32)
+            first.ledger.record_consent("tenant-a", "subj-1", "document_editing", explicit=False, notice_version="v1", evidence_ref="e1")
+            first.close()
+            second = GovernanceCore(tmp, master_key=b"x" * 32)
+            try:
+                self.assertTrue(second.ledger.consent_snapshot("tenant-a", "subj-1", "document_editing")["active"])
+                self.assertTrue(second.ledger.verify_chain())
+                self.assertTrue(second.health()["ready"])
+            finally:
+                second.close()
 
     def assert_closed(self, connections):
         for connection in connections:
@@ -176,9 +229,40 @@ class RuntimeTests(unittest.TestCase):
                 return {"status": "success"}
 
         agent = ReaderAgent(shared_memory=self.SharedMemory(), agent_factory=None, config={})
+        # Free text cannot be proven non-personal, so it stays UNCLASSIFIED and is refused before the agent runs.
         with self.assertRaises(GovernanceDenied):
-            agent.execute({"x": 1})
+            agent.execute({"text": "please summarise the attached meeting notes"})
         self.assertFalse(ReaderAgent.ran)
+        self.assertEqual(self.agent.agent_gate.status()["stats"]["default_unclassified"], 1)
+
+    def test_enforce_mode_admits_provably_non_personal_internal_calls_inside_one_scope(self):
+        from src.agents.governance.effect_boundary import current_scope, guard_effect
+
+        self.agent.agent_gate.mode = "enforce"
+        seen = {}
+
+        class ReaderAgent(self.BaseAgent):
+            def perform_task(self, task):
+                scope = current_scope()
+                seen["scope"] = scope.auth_id if scope else None
+                seen["permit"] = guard_effect("file_write", "report.txt").outcome  # inherits the scope: no second decision
+                return {"status": "success"}
+
+        agent = ReaderAgent(shared_memory=self.SharedMemory(), agent_factory=None, config={})
+        self.assertEqual(agent.execute({"x": 1}), {"status": "success"})
+        self.assertIsNotNone(seen["scope"])
+        self.assertEqual(seen["permit"], "scoped")
+        stats = self.agent.agent_gate.status()["stats"]
+        self.assertEqual((stats["evaluated"], stats["default_classified"]), (1, 1))
+        self.assertIsNone(current_scope())  # the scope never outlives the execution
+        self.assertEqual(self.agent.core.reassessment.active(), [])  # and its lease is completed
+
+    def test_side_effect_outside_any_execution_is_refused_in_enforce_mode(self):
+        from src.agents.governance.effect_boundary import guard_effect
+
+        self.agent.agent_gate.mode = "enforce"
+        with self.assertRaises(GovernanceDenied):
+            guard_effect("subprocess", "rm")
 
 
 class FactoryBootstrapTests(unittest.TestCase):

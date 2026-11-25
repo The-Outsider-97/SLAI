@@ -49,9 +49,9 @@ def main(n: int = 2000) -> dict:
         tok = core.identity.issue("svc-writer", "tenant-a", actor_type="service", ttl_seconds=3600)
         ident = core.identity.verify(tok)
         allowed = ProcessingContext(operation=Operation.PROCESS, purpose="document_editing", data_class=DataClass.PERSONAL,
-                                    classification_verified=True, activity_id="act-1", subject_ids=("s1",), tenant_id="tenant-a", identity=ident)
+                                    activity_id="act-1", subject_ids=("s1",), tenant_id="tenant-a", identity=ident)
         blocked = ProcessingContext(operation=Operation.PROCESS, purpose="advertising", data_class=DataClass.PERSONAL,
-                                    classification_verified=True, activity_id="act-1", subject_ids=("s1",), tenant_id="tenant-a", identity=ident)
+                                    activity_id="act-1", subject_ids=("s1",), tenant_id="tenant-a", identity=ident)
 
         def work(ctx):  # stand-in for the guarded unit of work
             return {"ok": True}
