@@ -6,7 +6,8 @@ import unittest
 from unittest import mock
 
 from src.agents.governance.agent_gate import AgentGate, install_gate, installed_gate
-from src.agents.governance.processing_context import DataClass, GovernanceDenied, Operation, ProcessingContext
+from src.agents.governance.processing_context import DataClass, Decision, GovernanceDenied, Operation, ProcessingContext
+from src.agents.governance.policy_registry import Policy, PolicyRegistry
 
 from ._fixtures import GovernanceTestCase
 from .test_deletion_adapters import _shim_and_import
@@ -104,6 +105,63 @@ class GateUnitTests(GovernanceTestCase):
         with self.assertRaises(ValueError):
             gate._explicit({"governance_context": "nope"})
 
+    def test_malformed_explicit_context_fails_closed_in_all_modes(self):
+        for mode in ("observe", "off", "enforce"):
+            for raw in (None, "invalid", {"operation": "invalid", "purpose": "test"}):
+                with self.subTest(mode=mode, raw=raw):
+                    gate = make_gate(self.core, mode=mode)
+                    with self.assertRaises(GovernanceDenied) as cm:
+                        gate.before("reader", {"governance_context": raw})
+                    self.assertEqual(gate.status()["stats"]["blocked"], 1)
+                    self.assertEqual(self.core.decision_log(1)[0]["request_id"], cm.exception.decision.request_id)
+
+    def test_lineage_failure_is_the_durable_final_decision(self):
+        self.register(purposes=("model_training",), operations=(Operation.LEARN,))
+        ctx = self.ctx(operation=Operation.LEARN, purpose="model_training")
+        gate = make_gate(self.core, mode="enforce")
+        with mock.patch.object(self.core.oversight, "consume", wraps=self.core.oversight.consume) as consume:
+            with self.assertRaises(GovernanceDenied):
+                gate.before("learning", {"mode": "train", "dataset_ids": ["unknown"], "governance_context": ctx})
+            consume.assert_not_called()
+        row = self.core.decision_log(1)[0]
+        self.assertEqual(row["request_id"], ctx.request_id)
+        self.assertEqual(row["decision"], Decision.BLOCK.value)
+        self.assertIn("GOV-GATE-LRN-01", row["rules"])
+
+    def test_training_cannot_be_disguised_as_an_ordinary_processing_operation(self):
+        self.register()
+        with self.assertRaises(GovernanceDenied) as cm:
+            make_gate(self.core).before("learning", {"mode": "train", "governance_context": self.ctx()})
+        self.assertIn("GOV-GATE-LRN-01", self.rule_ids(cm.exception.decision))
+
+    def test_explicit_context_cannot_claim_a_different_execution_agent(self):
+        self.register()
+        with self.assertRaises(GovernanceDenied) as cm:
+            make_gate(self.core).before("reader", {"governance_context": self.ctx(agent_id="language")})
+        self.assertIn("GOV-CAP-13", self.rule_ids(cm.exception.decision))
+
+    def test_lineage_dataset_lookup_deduplicates_without_changing_scope(self):
+        gate = make_gate(self.core)
+        ctx = self.ctx(operation=Operation.LEARN)
+        with mock.patch.object(self.core.learning, "dataset_registered", return_value=True) as registered:
+            self.assertIsNone(gate._lineage_failure(ctx, {"dataset_ids": ["ds", "ds"]}))
+            registered.assert_called_once_with("ds", ctx.tenant_id)
+            self.assertIsNotNone(gate._lineage_failure(ctx, {"dataset_ids": "ds"}))
+
+    def test_policy_version_reuses_digest_and_invalidates_on_mutation(self):
+        registry = PolicyRegistry()
+        with mock.patch("src.agents.governance.policy_registry.fingerprint", wraps=__import__(
+                "src.agents.governance.processing_context", fromlist=["fingerprint"]).fingerprint) as digest:
+            original = registry.active_version()
+            self.assertEqual(registry.active_version(), original)
+            self.assertEqual(digest.call_count, 1)
+            registry.register(Policy("LOCAL-TEST", 1, "Test policy", (), mandatory=False))
+            self.assertNotEqual(registry.active_version(), original)
+            self.assertEqual(digest.call_count, 2)
+            registry.deactivate("LOCAL-TEST")
+            self.assertEqual(registry.active_version(), original)
+            self.assertEqual(digest.call_count, 3)
+
     # ---------------------------------------------------------------- Art. 50 marking
     SPEC = {"language": {"system_id": "slai-language", "name": "SLAI Language Agent", "model": "m", "interacts_with_natural_persons": True,
                          "generates_synthetic_content": True}}
@@ -126,6 +184,16 @@ class GateUnitTests(GovernanceTestCase):
         gate = make_gate(self.core, mode="observe", marking_agents=self.SPEC)
         self.assertEqual(gate.after("language", {}, "plain string"), "plain string")
         self.assertEqual(gate.status()["stats"]["marking_unattached"], 1)
+
+    def test_explicit_context_enforces_marking_even_in_observe_mode(self):
+        gate = make_gate(self.core, mode="observe", marking_agents=self.SPEC)
+        input_data = {"governance_context": self.ctx()}
+        with mock.patch.object(self.core.transparency, "release", side_effect=RuntimeError("no key")):
+            with self.assertRaises(GovernanceDenied):
+                gate.after("language", input_data, {"a": 1})
+        with self.assertRaises(GovernanceDenied):
+            gate.after("language", input_data, "plain string")
+        self.assertEqual(gate.status()["stats"]["marking_errors"], 2)
 
     def test_unlisted_agents_are_not_marked(self):
         gate = make_gate(self.core, mode="observe", marking_agents=self.SPEC)
