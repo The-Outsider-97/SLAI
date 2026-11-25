@@ -181,9 +181,15 @@ class GovernanceCore:
             self.engine.restrictions = self._restrictions = restrictions
 
     # ------------------------------------------------------------------ decisions
-    def authorize(self, ctx: ProcessingContext) -> ProcessingDecision:
-        """Evaluate, record (metadata only) and consume any single-use approval on a positive outcome."""
+    def authorize(self, ctx: ProcessingContext, *, precondition_failure: Optional[tuple[str, str]] = None) -> ProcessingDecision:
+        """Evaluate and record the final decision; consume approval only after all preconditions pass.
+
+        A caller at a trusted execution boundary may supply a failed precondition
+        (rule id, reason). It can only make a decision more restrictive.
+        """
         decision = self.engine.evaluate(ctx)
+        if precondition_failure is not None:
+            decision = self._deny(ctx, decision, *precondition_failure)
         if decision.allowed:
             for control in decision.conditions:
                 if control.startswith("consume_approval:"):

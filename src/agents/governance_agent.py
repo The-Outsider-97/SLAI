@@ -74,8 +74,8 @@ class GovernanceAgent(BaseAgent):
             from .governance.utils.diagnostics import install_log_sanitizer
 
             install_log_sanitizer()
-        self._report_core_health("initialize")
-        logger.info("Governance Agent initialised | policy=%s | status=%s", self.core.policies.active_version(), self.core.health()["status"])
+        health = self._report_core_health("initialize")
+        logger.info("Governance Agent initialised | policy=%s | status=%s", health["policy_version"], health["status"])
 
     # ------------------------------------------------------------------ capability manifest
     def _register_agent_capabilities(self) -> None:
@@ -159,17 +159,18 @@ class GovernanceAgent(BaseAgent):
         return report
 
     # ------------------------------------------------------------------ readiness
-    def _report_core_health(self, operation: str) -> None:
+    def _report_core_health(self, operation: str) -> Dict[str, Any]:
         health = self.core.health()
         if health["ready"]:
             self._mark_runtime_recovered("governance_core", operation)
         else:
             self._mark_runtime_degraded("governance_core", operation, RuntimeError(",".join(health["problems"])))
+        return health
 
     def health(self) -> Dict[str, Any]:
         """Truthful health: includes runtime-contract status and the governance component checklist."""
-        self._report_core_health("health")
-        return {"agent": self.runtime_status(), "governance": self.core.health(), "gate": self.agent_gate.status(),
+        health = self._report_core_health("health")
+        return {"agent": self.runtime_status(), "governance": health, "gate": self.agent_gate.status(),
                 "delegation_audit": self.delegation_audit, "registration": self.runtime_registration}
 
     # ------------------------------------------------------------------ authority API

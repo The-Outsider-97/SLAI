@@ -73,6 +73,7 @@ class PolicyRegistry:
     def __init__(self, extra: Iterable[Policy] = ()):
         self._lock = RLock()
         self._policies: Dict[str, Policy] = {}
+        self._active_version: Optional[str] = None
         for policy in BUILTIN_POLICIES:
             self._policies[policy.policy_id] = policy
         for policy in extra:
@@ -89,6 +90,7 @@ class PolicyRegistry:
                         f"policy {policy.policy_id} v{policy.version} does not supersede v{existing.version}"
                     )
             self._policies[policy.policy_id] = policy
+            self._active_version = None
 
     def deactivate(self, policy_id: str) -> None:
         with self._lock:
@@ -98,6 +100,7 @@ class PolicyRegistry:
             if policy.mandatory:
                 raise MandatoryPolicyError(f"mandatory policy {policy_id} cannot be deactivated")
             del self._policies[policy_id]
+            self._active_version = None
 
     def get(self, policy_id: str) -> Optional[Policy]:
         return self._policies.get(policy_id)
@@ -108,8 +111,11 @@ class PolicyRegistry:
 
     def active_version(self) -> str:
         """Content digest over every active policy (id+version); changes whenever any policy does."""
-        digest = fingerprint([(p.policy_id, p.version, p.mandatory) for p in self.list()])
-        return f"slai-gov-{digest[:16]}"
+        with self._lock:
+            if self._active_version is None:
+                digest = fingerprint([(p.policy_id, p.version, p.mandatory) for p in self.list()])
+                self._active_version = f"slai-gov-{digest[:16]}"
+            return self._active_version
 
 
 @dataclass(frozen=True)

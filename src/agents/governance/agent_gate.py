@@ -21,7 +21,8 @@ Learning (AI Act Art. 10 / GDPR Art. 5(1)(b)): executions of ``learning_agents``
 
 Art. 50 marking: for agents in ``marking_agents`` a *Mapping* result is returned as a copy with ``ai_content_marking``
 (signed provenance manifest, disclosures). Results that are not mappings (e.g. plain strings) cannot carry a marking without
-changing their type, are returned unchanged and counted in ``marking_unattached`` - a documented limit.
+changing their type. In observe mode they are returned unchanged and counted in
+``marking_unattached``; when enforcement applies, they cannot be released unmarked.
 """
 from __future__ import annotations
 
@@ -113,11 +114,13 @@ class AgentGate:
         if ctx.operation is not Operation.LEARN:
             return None
         ids = input_data.get("dataset_ids") if isinstance(input_data, Mapping) else None
-        if not ids:
-            return "learning requires registered dataset_ids (lineage)"
+        if not isinstance(ids, (list, tuple)) or not ids:
+            return "learning requires a non-empty list of registered dataset_ids (lineage)"
+        if any(not isinstance(d, str) or not d.strip() for d in ids):
+            return "learning dataset_ids must contain non-empty strings"
         if not ctx.tenant_id:
             return "learning requires a tenant"
-        missing = [d for d in ids if not self.core.learning.dataset_registered(str(d), ctx.tenant_id)]
+        missing = [d for d in dict.fromkeys(ids) if not self.core.learning.dataset_registered(d, ctx.tenant_id)]
         return f"unregistered dataset(s) for tenant: {len(missing)}" if missing else None
 
     # ------------------------------------------------------------------ before execution
@@ -125,30 +128,50 @@ class AgentGate:
         agent = self.aliases.get(agent, agent)
         if agent in self.exempt:
             return None
-        enforce = self.mode == "enforce" or agent in self.enforce_agents
+        # Presence, not successful parsing, determines the enforcement boundary.
+        explicit = isinstance(input_data, Mapping) and CONTEXT_KEY in input_data
+        enforce = self.mode == "enforce" or agent in self.enforce_agents or explicit
         ctx: Optional[ProcessingContext] = None
         try:
-            ctx = self._explicit(input_data)
-            if ctx is not None:
-                enforce = True
+            if explicit:
                 self._bump("explicit_context")
+            ctx = self._explicit(input_data)
+            failure = None
+            if ctx is not None:
                 if ctx.agent_id is None:
                     ctx = dataclasses.replace(ctx, agent_id=agent)
-            elif self.mode == "off" and agent not in self.enforce_agents:
+                elif self.aliases.get(ctx.agent_id, ctx.agent_id) != agent:
+                    failure = ("GOV-CAP-13", "context_agent_does_not_match_execution_target")
+                if ctx.capability:
+                    capability = self.core.capabilities.get(ctx.capability)
+                    if capability is not None and capability.owner_agent != agent:
+                        failure = ("GOV-CAP-13", "capability_owner_does_not_match_execution_target")
+                if agent in self.learning_agents and isinstance(input_data, Mapping) and str(input_data.get("mode", "train")).lower() in self.learn_modes and ctx.operation is not Operation.LEARN:
+                    failure = ("GOV-GATE-LRN-01", "training_execution_requires_learn_operation")
+            elif not enforce and self.mode == "off":
                 return None
             else:
                 ctx = self._default_context(agent, input_data)
-            decision = self.core.authorize(ctx)
+            if ctx.operation is Operation.EXECUTE and not ctx.capability:
+                ctx = dataclasses.replace(ctx, capability=f"{agent}.execute")
+            lineage_failure = self._lineage_failure(ctx, input_data)
+            if lineage_failure and failure is None:
+                failure = ("GOV-GATE-LRN-01", lineage_failure)
+            # The final outcome is recorded once, before any single-use approval can
+            # be consumed for an operation that fails a boundary precondition.
+            decision = self.core.authorize(ctx, precondition_failure=failure)
             self._bump("evaluated")
-            failure = self._lineage_failure(ctx, input_data) if (enforce or self.mode != "off") else None
-            if failure:
-                decision = self.core._deny(ctx, decision, "GOV-GATE-LRN-01", failure)
         except Exception as exc:  # fail closed when enforcing; never break an agent while observing
             self._bump("gate_errors")
             logger.error("Governance gate error for agent '%s': %s", agent, type(exc).__name__)
             if enforce:
                 self._bump("blocked")
-                raise GovernanceDenied(self._error_decision(ctx, exc)) from exc
+                decision = self._error_decision(ctx, exc)
+                try:
+                    self.core._record(decision)
+                except Exception as record_error:
+                    logger.error("Governance gate denial could not be recorded: %s", type(record_error).__name__)
+                raise GovernanceDenied(decision) from exc
             return None
         if decision.decision.permits_execution:
             self._bump("allowed")
@@ -174,8 +197,14 @@ class AgentGate:
         spec = self.marking_agents.get(agent)
         if not spec:
             return result
+        enforce = self.mode == "enforce" or agent in self.enforce_agents or (
+            isinstance(input_data, Mapping) and CONTEXT_KEY in input_data
+        )
         if not isinstance(result, Mapping):
             self._bump("marking_unattached")
+            if enforce:
+                self._bump("marking_errors")
+                raise GovernanceDenied(self._error_decision(None, TypeError("marking requires a mapping result")))
             return result
         try:
             profile = AISystemProfile(
@@ -195,7 +224,7 @@ class AgentGate:
         except Exception as exc:
             self._bump("marking_errors")
             logger.error("Art. 50 marking failed for agent '%s': %s", agent, type(exc).__name__)
-            if self.mode == "enforce" or agent in self.enforce_agents:
+            if enforce:
                 raise GovernanceDenied(self._error_decision(None, exc)) from exc  # enforcing: an output that must be marked is not released unmarked
             return result  # observing: counted in marking_errors and visible in status()
 

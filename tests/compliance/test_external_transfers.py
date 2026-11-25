@@ -30,6 +30,18 @@ class TransferTests(GovernanceTestCase):
         self.reg([{"country": "US", "mechanism": "adequacy", "ref": "dpf", "dpf_certified": True}])
         self.assertEqual(self.core.authorize(self.req("US")).decision, Decision.ALLOW_WITH_CONTROLS)
 
+    def test_brazil_adequacy_is_recognised(self):
+        self.reg([{"country": "BR", "mechanism": "adequacy", "ref": "ec-brazil-2026"}])
+        self.assertEqual(self.core.authorize(self.req("BR")).decision, Decision.ALLOW_WITH_CONTROLS)
+
+    def test_canada_adequacy_requires_recipient_within_pipeda_scope(self):
+        self.reg([{"country": "CA", "mechanism": "adequacy", "ref": "ec-canada"}])
+        self.assertEqual(self.core.authorize(self.req("CA")).decision, Decision.BLOCK)
+        self.core.activities.update(make_activity("act-1", operations=(Operation.PROCESS, Operation.TRANSFER),
+            transfers=({"country": "CA", "mechanism": "adequacy", "ref": "ec-canada", "pipeda_covered": True},)),
+            expected_version=1, actor="dpo")
+        self.assertEqual(self.core.authorize(self.req("CA")).decision, Decision.ALLOW_WITH_CONTROLS)
+
     def test_scc_requires_transfer_impact_assessment(self):
         self.reg([{"country": "IN", "mechanism": "scc", "ref": "scc-2021"}])
         self.assertEqual(self.core.authorize(self.req("IN")).decision, Decision.BLOCK)
