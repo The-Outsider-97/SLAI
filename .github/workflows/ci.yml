@@ -5,11 +5,13 @@ on:
     branches:
       - SLAI-v.2.3
       - SLAI-v.2.4
+      - SLAI-v.2.5
 
   push:
     branches:
       - SLAI-v.2.3
       - SLAI-v.2.4
+      - SLAI-v.2.5
 
   workflow_dispatch:
 
