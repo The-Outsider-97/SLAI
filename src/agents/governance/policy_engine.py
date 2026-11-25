@@ -49,14 +49,16 @@ EEA = frozenset(
 class TransferPolicy:
     """Adequacy decisions change; this list is data, not law. Keep it under change control.
 
-    Last reviewed 2026-11-24 from the Commission's published list as remembered by the
-    implementer - **verify against the current Commission list before relying on it**.
-    US is only adequate for recipients certified under the EU-US Data Privacy Framework
-    (the activity's transfer entry must say ``dpf_certified: true``). Canada is adequate
-    for commercial organisations only.
+    Reviewed 2026-11-25 against the European Commission's published list:
+    https://commission.europa.eu/law/law-topic/data-protection/international-dimension-data-protection/adequacy-decisions_en
+    US adequacy requires a DPF-certified recipient; Canadian adequacy requires a
+    recipient within the scope of the commercial-organisation decision (PIPEDA).
+    The registered transfer entry must document the relevant scope. The European
+    Patent Organisation is an organisation, not a country code; this country-based
+    rule does not model its separate adequacy decision.
     """
 
-    adequate_countries: FrozenSet[str] = frozenset("AD AR CA FO GG IL IM JP JE NZ KR CH GB UY US".split())
+    adequate_countries: FrozenSet[str] = frozenset("AD AR BR CA FO GG IL IM JP JE NZ KR CH GB UY US".split())
     certified_only: FrozenSet[str] = frozenset({"US"})
 
 
@@ -332,6 +334,8 @@ class PolicyEngine:
             mech = t.get("mechanism")
             if mech == "adequacy" and dest in self.transfers.adequate_countries:
                 if dest in self.transfers.certified_only and t.get("dpf_certified") is not True:
+                    continue
+                if dest == "CA" and t.get("pipeda_covered") is not True:
                     continue
                 return [_r("GOV-TRF-09", Decision.ALLOW_WITH_CONTROLS, "adequacy_decision", "GDPR Art. 45", controls=("log_transfer",))]
             if mech in ("scc", "bcr") and t.get("tia_ref"):

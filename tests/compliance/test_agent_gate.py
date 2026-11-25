@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from src.agents.governance.agent_gate import AgentGate, install_gate, installed_gate
-from src.agents.governance.processing_context import DataClass, Decision, GovernanceDenied, Operation, ProcessingContext
+from src.agents.governance.processing_context import DataClass, Decision, GovernanceDenied, Operation, ProcessingContext, ProcessingDecision, RuleResult, fingerprint
 from src.agents.governance.policy_registry import Policy, PolicyRegistry
 
 from ._fixtures import GovernanceTestCase
@@ -116,7 +116,7 @@ class GateUnitTests(GovernanceTestCase):
                     self.assertEqual(self.core.decision_log(1)[0]["request_id"], cm.exception.decision.request_id)
 
     def test_lineage_failure_is_the_durable_final_decision(self):
-        self.register(purposes=("model_training",), operations=(Operation.LEARN,))
+        self.register(purposes=("model_training",), operations=(Operation.LEARN,), allows_learning=True)
         ctx = self.ctx(operation=Operation.LEARN, purpose="model_training")
         gate = make_gate(self.core, mode="enforce")
         with mock.patch.object(self.core.oversight, "consume", wraps=self.core.oversight.consume) as consume:
@@ -127,6 +127,18 @@ class GateUnitTests(GovernanceTestCase):
         self.assertEqual(row["request_id"], ctx.request_id)
         self.assertEqual(row["decision"], Decision.BLOCK.value)
         self.assertIn("GOV-GATE-LRN-01", row["rules"])
+
+    def test_failed_precondition_does_not_consume_an_approval_on_an_otherwise_allowed_decision(self):
+        ctx = self.ctx()
+        # Isolate the commit boundary from the independently tested policy/oversight evaluation.
+        candidate = ProcessingDecision(ctx.request_id, Decision.ALLOW_WITH_CONTROLS,
+            (RuleResult("GOV-HO-14", Decision.ALLOW_WITH_CONTROLS, "approved"),),
+            self.core.policies.active_version(), ctx.fingerprint(), conditions=("consume_approval:approval-1",))
+        with mock.patch.object(self.core.engine, "evaluate", return_value=candidate), mock.patch.object(self.core.oversight, "consume") as consume:
+            denied = self.core.authorize(ctx, precondition_failure=("GOV-GATE-LRN-01", "lineage missing"))
+            consume.assert_not_called()
+        self.assertEqual(denied.decision, Decision.BLOCK)
+        self.assertEqual(self.core.decision_log(1)[0]["decision"], Decision.BLOCK.value)
 
     def test_training_cannot_be_disguised_as_an_ordinary_processing_operation(self):
         self.register()
@@ -150,8 +162,7 @@ class GateUnitTests(GovernanceTestCase):
 
     def test_policy_version_reuses_digest_and_invalidates_on_mutation(self):
         registry = PolicyRegistry()
-        with mock.patch("src.agents.governance.policy_registry.fingerprint", wraps=__import__(
-                "src.agents.governance.processing_context", fromlist=["fingerprint"]).fingerprint) as digest:
+        with mock.patch("src.agents.governance.policy_registry.fingerprint", wraps=fingerprint) as digest:
             original = registry.active_version()
             self.assertEqual(registry.active_version(), original)
             self.assertEqual(digest.call_count, 1)
