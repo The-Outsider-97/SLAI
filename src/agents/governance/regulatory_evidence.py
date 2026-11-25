@@ -159,6 +159,11 @@ class EvidenceStore:
                 raise
         return EvidenceRecord(cur.lastrowid, control_id, evidence_type, producer, artifact_digest, artifact_ref, result, minimised, t, prev, entry_hash)
 
+    def close(self) -> None:
+        """Release the owned database connection."""
+        with self._lock:
+            self._db.close()
+
     def records(self, control_id: Optional[str] = None) -> List[EvidenceRecord]:
         q = "SELECT seq, control_id, evidence_type, producer, artifact_digest, artifact_ref, result, summary, created_at, prev_hash, entry_hash FROM evidence"
         args: Tuple[Any, ...] = ()

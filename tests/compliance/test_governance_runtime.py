@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -33,6 +34,46 @@ class MasterKeyTests(unittest.TestCase):
             fh.write("p" * 33 + "!\n")
         self.addCleanup(os.unlink, fh.name)
         self.assertEqual(load_master_key({"SLAI_GOVERNANCE_MASTER_KEY_FILE": fh.name}), ("p" * 33 + "!").encode())
+
+
+class DatabaseLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def connections(core):
+        return [core.activities._db, core.oversight._db, core.grants._db,
+                core.evidence._db, core.incidents._db, core.ledger._db,
+                core.learning._db, core.rights._db, core._decisions]
+
+    def assert_closed(self, connections):
+        for connection in connections:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
+    def test_close_releases_every_database_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            core = GovernanceCore(tmp, master_key=b"x" * 32)
+            try:
+                connections = self.connections(core)
+            finally:
+                core.close()
+            core.close()
+            self.assert_closed(connections)
+
+    def test_reset_shared_closes_connections_and_creates_fresh_core(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                core = GovernanceCore.shared(tmp, master_key=b"x" * 32)
+                self.assertIs(core, GovernanceCore.shared(tmp))
+                connections = self.connections(core)
+                GovernanceCore.reset_shared()
+                self.assert_closed(connections)
+                fresh = GovernanceCore.shared(tmp, master_key=b"x" * 32)
+                self.assertIsNot(core, fresh)
+                self.assertTrue(fresh.health()["ready"])
+                fresh.close()
+                self.assert_closed(self.connections(fresh))
+                self.assertIsNot(fresh, GovernanceCore.shared(tmp, master_key=b"x" * 32))
+            finally:
+                GovernanceCore.reset_shared()
 
 
 class RuntimeTests(unittest.TestCase):

@@ -299,6 +299,11 @@ class GrantAuthority:
                         "authorization_expiry": expiry, "issued_at": t}
         return self._seal(AuthorizationGrant._from_payload(child_fields))
 
+    def close(self) -> None:
+        """Release the owned database connection."""
+        with self._lock:
+            self._db.close()
+
     def revoke(self, grant_id: str, reason: str) -> int:
         if not reason.strip():
             raise ValueError("reason required")

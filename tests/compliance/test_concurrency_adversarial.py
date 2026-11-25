@@ -50,12 +50,24 @@ class LedgerConcurrency(unittest.TestCase):
 
     def test_concurrent_erasure_executions_end_completed_exactly_once(self):
         ledger = PrivacyLedger(":memory:", tombstone_salt=b"s" * 32)
-        ledger.register_adapter(Store())
+        self.addCleanup(ledger.close)
+        store = Store()
+        ledger.register_adapter(store)
         ledger.request_erasure("r1", "t1", "s1", verification=VER)
+        barrier = threading.Barrier(8)
+
+        def erase(_):
+            barrier.wait(timeout=10)
+            return ledger.execute_erasure("r1").status
+
         with ThreadPoolExecutor(8) as ex:
-            outcomes = list(ex.map(lambda _: ledger.execute_erasure("r1").status, range(8)))
+            outcomes = list(ex.map(erase, range(8)))
         self.assertEqual(set(outcomes), {"completed"})
+        self.assertEqual(store.deleted, 1)
         self.assertEqual(ledger._db.execute("SELECT COUNT(*) FROM tombstones").fetchone()[0], 1)
+        self.assertEqual(ledger._db.execute("SELECT COUNT(*) FROM ledger_events WHERE kind='erasure_completed'").fetchone()[0], 1)
+        self.assertEqual(ledger._db.execute("SELECT attempts FROM erasure_requests WHERE request_id='r1'").fetchone()[0], 1)
+        self.assertTrue(ledger.verify_chain())
 
     def test_duplicate_request_ids_are_rejected(self):
         ledger = PrivacyLedger(":memory:", tombstone_salt=b"s" * 32)

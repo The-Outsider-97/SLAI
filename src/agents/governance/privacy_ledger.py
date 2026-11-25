@@ -111,14 +111,15 @@ class PrivacyLedger:
             return int(cur.lastrowid)
 
     def verify_chain(self) -> bool:
-        prev = _GENESIS
-        for tenant, subject, kind, purpose, body, ts, p, h in self._db.execute(
-            "SELECT tenant_id,subject_id,kind,purpose,payload,ts,prev_hash,hash FROM ledger_events ORDER BY seq"
-        ):
-            if p != prev or h != _h(prev, tenant, subject, kind, purpose, body, repr(ts)):
-                return False
-            prev = h
-        return True
+        with self._lock:
+            prev = _GENESIS
+            for tenant, subject, kind, purpose, body, ts, p, h in self._db.execute(
+                "SELECT tenant_id,subject_id,kind,purpose,payload,ts,prev_hash,hash FROM ledger_events ORDER BY seq"
+            ):
+                if p != prev or h != _h(prev, tenant, subject, kind, purpose, body, repr(ts)):
+                    return False
+                prev = h
+            return True
 
     @staticmethod
     def _need(**values: str) -> None:
@@ -139,32 +140,35 @@ class PrivacyLedger:
         return self._append(tenant_id, subject_id, "consent_withdrawn", purpose, {"evidence_ref": evidence_ref})
 
     def consent_snapshot(self, tenant_id: str, subject_id: str, purpose: str) -> Dict[str, Any]:
-        row = self._db.execute(
-            "SELECT kind,payload FROM ledger_events WHERE tenant_id=? AND subject_id=? AND purpose=? "
-            "AND kind IN ('consent_granted','consent_withdrawn') ORDER BY seq DESC LIMIT 1", (tenant_id, subject_id, purpose)).fetchone()
-        if not row:
-            return {"active": False, "withdrawn": False}
-        payload = json.loads(row[1])
-        if row[0] == "consent_withdrawn":
-            return {"active": False, "withdrawn": True}
-        return {"active": True, "withdrawn": False, "explicit": payload["explicit"],
-                "parental_authorisation": bool(payload.get("parental_authorisation_ref")), "purposes": [purpose]}
+        with self._lock:
+            row = self._db.execute(
+                "SELECT kind,payload FROM ledger_events WHERE tenant_id=? AND subject_id=? AND purpose=? "
+                "AND kind IN ('consent_granted','consent_withdrawn') ORDER BY seq DESC LIMIT 1", (tenant_id, subject_id, purpose)).fetchone()
+            if not row:
+                return {"active": False, "withdrawn": False}
+            payload = json.loads(row[1])
+            if row[0] == "consent_withdrawn":
+                return {"active": False, "withdrawn": True}
+            return {"active": True, "withdrawn": False, "explicit": payload["explicit"],
+                    "parental_authorisation": bool(payload.get("parental_authorisation_ref")), "purposes": [purpose]}
 
     def list_consents(self, tenant_id: str, subject_id: str) -> List[Dict[str, Any]]:
         """Current consent state per purpose (latest event wins) - for subject-facing views."""
-        latest: Dict[str, Dict[str, Any]] = {}
-        for purpose, kind, payload, ts in self._db.execute(
-                "SELECT purpose,kind,payload,ts FROM ledger_events WHERE tenant_id=? AND subject_id=? "
-                "AND kind IN ('consent_granted','consent_withdrawn') ORDER BY seq", (tenant_id, subject_id)):
-            p = json.loads(payload)
-            latest[purpose] = {"purpose": purpose, "active": kind == "consent_granted", "since": ts,
-                               "notice_version": p.get("notice_version"), "explicit": p.get("explicit")}
-        return sorted(latest.values(), key=lambda r: r["purpose"])
+        with self._lock:
+            latest: Dict[str, Dict[str, Any]] = {}
+            for purpose, kind, payload, ts in self._db.execute(
+                    "SELECT purpose,kind,payload,ts FROM ledger_events WHERE tenant_id=? AND subject_id=? "
+                    "AND kind IN ('consent_granted','consent_withdrawn') ORDER BY seq", (tenant_id, subject_id)):
+                p = json.loads(payload)
+                latest[purpose] = {"purpose": purpose, "active": kind == "consent_granted", "since": ts,
+                                   "notice_version": p.get("notice_version"), "explicit": p.get("explicit")}
+            return sorted(latest.values(), key=lambda r: r["purpose"])
 
     def erasure_requests(self, tenant_id: str, subject_id: str) -> List[Dict[str, Any]]:
-        return [{"request_id": r, "status": s, "created_at": c, "completed_at": d} for r, s, c, d in self._db.execute(
-            "SELECT request_id,status,created_at,completed_at FROM erasure_requests WHERE tenant_id=? AND subject_id=? ORDER BY created_at",
-            (tenant_id, subject_id))]
+        with self._lock:
+            return [{"request_id": r, "status": s, "created_at": c, "completed_at": d} for r, s, c, d in self._db.execute(
+                "SELECT request_id,status,created_at,completed_at FROM erasure_requests WHERE tenant_id=? AND subject_id=? ORDER BY created_at",
+                (tenant_id, subject_id))]
 
     # ------------------------------------------------------------ restriction / objection (Art. 18, 21)
     def set_restriction(self, tenant_id: str, subject_id: str, restricted: bool, *, evidence_ref: str) -> int:
@@ -176,52 +180,59 @@ class PrivacyLedger:
         return self._append(tenant_id, subject_id, "objection", purpose, {"objected": bool(objected), "evidence_ref": evidence_ref})
 
     def subject_state(self, tenant_id: str, subject_id: str) -> Dict[str, Any]:
-        r = self._db.execute("SELECT payload FROM ledger_events WHERE tenant_id=? AND subject_id=? AND kind='restriction' ORDER BY seq DESC LIMIT 1",
-                             (tenant_id, subject_id)).fetchone()
-        restricted = bool(json.loads(r[0])["restricted"]) if r else False
-        objected = []
-        latest: Dict[str, bool] = {}
-        for purpose, payload in self._db.execute(
-                "SELECT purpose,payload FROM ledger_events WHERE tenant_id=? AND subject_id=? AND kind='objection' ORDER BY seq", (tenant_id, subject_id)):
-            latest[purpose] = bool(json.loads(payload)["objected"])
-        objected = sorted(p for p, v in latest.items() if v)
-        pending = self._db.execute(
-            "SELECT 1 FROM erasure_requests WHERE tenant_id=? AND subject_id=? AND status IN ('open','incomplete','held') LIMIT 1",
-            (tenant_id, subject_id)).fetchone() is not None
-        return {"restricted": restricted, "objected_purposes": objected, "erasure_pending": pending}
+        with self._lock:
+            r = self._db.execute("SELECT payload FROM ledger_events WHERE tenant_id=? AND subject_id=? AND kind='restriction' ORDER BY seq DESC LIMIT 1",
+                                 (tenant_id, subject_id)).fetchone()
+            restricted = bool(json.loads(r[0])["restricted"]) if r else False
+            objected = []
+            latest: Dict[str, bool] = {}
+            for purpose, payload in self._db.execute(
+                    "SELECT purpose,payload FROM ledger_events WHERE tenant_id=? AND subject_id=? AND kind='objection' ORDER BY seq", (tenant_id, subject_id)):
+                latest[purpose] = bool(json.loads(payload)["objected"])
+            objected = sorted(p for p, v in latest.items() if v)
+            pending = self._db.execute(
+                "SELECT 1 FROM erasure_requests WHERE tenant_id=? AND subject_id=? AND status IN ('open','incomplete','held') LIMIT 1",
+                (tenant_id, subject_id)).fetchone() is not None
+            return {"restricted": restricted, "objected_purposes": objected, "erasure_pending": pending}
 
     # ------------------------------------------------------------ legal holds (Art. 17(3))
     def place_hold(self, hold_id: str, tenant_id: str, subject_id: str, *, basis: str, placed_by: str) -> None:
-        self._need(hold_id=hold_id, tenant_id=tenant_id, subject_id=subject_id, basis=basis, placed_by=placed_by)
-        self._db.execute("INSERT INTO legal_holds(hold_id,tenant_id,subject_id,basis,placed_by,placed_at) VALUES(?,?,?,?,?,?)",
-                         (hold_id, tenant_id, subject_id, basis, placed_by, self._clock()))
-        self._append(tenant_id, subject_id, "legal_hold_placed", "", {"hold_id": hold_id, "basis": basis, "placed_by": placed_by})
+        with self._lock:
+            self._need(hold_id=hold_id, tenant_id=tenant_id, subject_id=subject_id, basis=basis, placed_by=placed_by)
+            self._db.execute("INSERT INTO legal_holds(hold_id,tenant_id,subject_id,basis,placed_by,placed_at) VALUES(?,?,?,?,?,?)",
+                             (hold_id, tenant_id, subject_id, basis, placed_by, self._clock()))
+            self._append(tenant_id, subject_id, "legal_hold_placed", "", {"hold_id": hold_id, "basis": basis, "placed_by": placed_by})
 
     def release_hold(self, hold_id: str, *, released_by: str) -> None:
-        self._need(hold_id=hold_id, released_by=released_by)
-        row = self._db.execute("SELECT tenant_id,subject_id FROM legal_holds WHERE hold_id=? AND released_at IS NULL", (hold_id,)).fetchone()
-        if not row:
-            raise LedgerError("unknown or already released hold")
-        self._db.execute("UPDATE legal_holds SET released_at=? WHERE hold_id=?", (self._clock(), hold_id))
-        self._append(row[0], row[1], "legal_hold_released", "", {"hold_id": hold_id, "released_by": released_by})
+        with self._lock:
+            self._need(hold_id=hold_id, released_by=released_by)
+            row = self._db.execute("SELECT tenant_id,subject_id FROM legal_holds WHERE hold_id=? AND released_at IS NULL", (hold_id,)).fetchone()
+            if not row:
+                raise LedgerError("unknown or already released hold")
+            self._db.execute("UPDATE legal_holds SET released_at=? WHERE hold_id=?", (self._clock(), hold_id))
+            self._append(row[0], row[1], "legal_hold_released", "", {"hold_id": hold_id, "released_by": released_by})
 
     def active_holds(self, tenant_id: str, subject_id: str) -> List[str]:
-        return [r[0] for r in self._db.execute(
-            "SELECT hold_id FROM legal_holds WHERE tenant_id=? AND subject_id=? AND released_at IS NULL", (tenant_id, subject_id))]
+        with self._lock:
+            return [r[0] for r in self._db.execute(
+                "SELECT hold_id FROM legal_holds WHERE tenant_id=? AND subject_id=? AND released_at IS NULL", (tenant_id, subject_id))]
 
     # ------------------------------------------------------------ deletion (Art. 17, 19)
     def adapter_names(self) -> List[str]:
-        return sorted(self._adapters)
+        with self._lock:
+            return sorted(self._adapters)
 
     def register_adapter(self, adapter: DeletionAdapter) -> None:
-        if not getattr(adapter, "name", None) or not callable(getattr(adapter, "delete", None)) or not callable(getattr(adapter, "verify_absent", None)):
-            raise LedgerError("adapter needs name, delete() and verify_absent()")
-        self._adapters[adapter.name] = adapter
+        with self._lock:
+            if not getattr(adapter, "name", None) or not callable(getattr(adapter, "delete", None)) or not callable(getattr(adapter, "verify_absent", None)):
+                raise LedgerError("adapter needs name, delete() and verify_absent()")
+            self._adapters[adapter.name] = adapter
 
     def register_recipient(self, tenant_id: str, recipient: str) -> None:
-        self._recipients.setdefault(tenant_id, [])
-        if recipient not in self._recipients[tenant_id]:
-            self._recipients[tenant_id].append(recipient)
+        with self._lock:
+            self._recipients.setdefault(tenant_id, [])
+            if recipient not in self._recipients[tenant_id]:
+                self._recipients[tenant_id].append(recipient)
 
     def _subject_digest(self, tenant_id: str, subject_id: str) -> str:
         return hmac.new(self._salt, f"{tenant_id}\x1f{subject_id}".encode(), hashlib.sha256).hexdigest()
@@ -229,20 +240,26 @@ class PrivacyLedger:
     def request_erasure(self, request_id: str, tenant_id: str, subject_id: str, *, verification: Mapping[str, Any],
                         ground: str = "unassessed") -> str:
         """Open an erasure request. NO reason text is required (Art. 12(2)); verification is."""
-        self._need(request_id=request_id, tenant_id=tenant_id, subject_id=subject_id)
-        v = verification or {}
-        if not (v.get("verified") is True and str(v.get("method") or "").strip() and str(v.get("verified_by") or "").strip()
-                and str(v.get("subject_id") or "") == subject_id and str(v.get("tenant_id") or "") == tenant_id):
-            raise LedgerError("identity verification (verified, method, verified_by, tenant_id, subject_id) is required")
-        if ground != "unassessed" and ground not in ERASURE_GROUNDS:
-            raise LedgerError("unknown Art. 17(1) ground")
-        now = self._clock()
-        self._db.execute("INSERT INTO erasure_requests(request_id,tenant_id,subject_id,status,ground,verification,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                         (request_id, tenant_id, subject_id, "open", ground, json.dumps({k: v[k] for k in ("method", "verified_by")}), now, now))
-        self._append(tenant_id, subject_id, "erasure_requested", "", {"request_id": request_id, "ground": ground})
-        return request_id
+        with self._lock:
+            self._need(request_id=request_id, tenant_id=tenant_id, subject_id=subject_id)
+            v = verification or {}
+            if not (v.get("verified") is True and str(v.get("method") or "").strip() and str(v.get("verified_by") or "").strip()
+                    and str(v.get("subject_id") or "") == subject_id and str(v.get("tenant_id") or "") == tenant_id):
+                raise LedgerError("identity verification (verified, method, verified_by, tenant_id, subject_id) is required")
+            if ground != "unassessed" and ground not in ERASURE_GROUNDS:
+                raise LedgerError("unknown Art. 17(1) ground")
+            now = self._clock()
+            self._db.execute("INSERT INTO erasure_requests(request_id,tenant_id,subject_id,status,ground,verification,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                             (request_id, tenant_id, subject_id, "open", ground, json.dumps({k: v[k] for k in ("method", "verified_by")}), now, now))
+            self._append(tenant_id, subject_id, "erasure_requested", "", {"request_id": request_id, "ground": ground})
+            return request_id
 
     def execute_erasure(self, request_id: str) -> ErasureOutcome:
+        """Serialize erasure attempts on this ledger, including the final audit event."""
+        with self._lock:
+            return self._execute_erasure_locked(request_id)
+
+    def _execute_erasure_locked(self, request_id: str) -> ErasureOutcome:
         row = self._db.execute("SELECT tenant_id,subject_id,status FROM erasure_requests WHERE request_id=?", (request_id,)).fetchone()
         if not row:
             raise LedgerError("unknown erasure request")
@@ -290,16 +307,19 @@ class PrivacyLedger:
                          (status, self._clock(), self._clock() if completed else None, request_id))
 
     def pending_recipient_notices(self, request_id: str) -> List[str]:
-        return [r[0] for r in self._db.execute("SELECT recipient FROM recipient_notices WHERE request_id=? AND status='pending'", (request_id,))]
+        with self._lock:
+            return [r[0] for r in self._db.execute("SELECT recipient FROM recipient_notices WHERE request_id=? AND status='pending'", (request_id,))]
 
     def confirm_recipient_notice(self, request_id: str, recipient: str) -> None:
-        self._db.execute("UPDATE recipient_notices SET status='notified', updated_at=? WHERE request_id=? AND recipient=?", (self._clock(), request_id, recipient))
+        with self._lock:
+            self._db.execute("UPDATE recipient_notices SET status='notified', updated_at=? WHERE request_id=? AND recipient=?", (self._clock(), request_id, recipient))
 
     # ------------------------------------------------------------ backup resurrection protection
     def must_reerase_after_restore(self, tenant_id: str, subject_id: str) -> bool:
         """After restoring a backup, call this per subject found in it: True means the subject was erased and must be re-erased."""
-        return self._db.execute("SELECT 1 FROM tombstones WHERE tenant_id=? AND subject_digest=?",
-                                (tenant_id, self._subject_digest(tenant_id, subject_id))).fetchone() is not None
+        with self._lock:
+            return self._db.execute("SELECT 1 FROM tombstones WHERE tenant_id=? AND subject_digest=?",
+                                    (tenant_id, self._subject_digest(tenant_id, subject_id))).fetchone() is not None
 
     # ------------------------------------------------------------ provider views
     def view(self, tenant_id: str) -> "TenantView":
@@ -310,7 +330,8 @@ class PrivacyLedger:
         return LedgerProvider(self)
 
     def close(self) -> None:
-        self._db.close()
+        with self._lock:
+            self._db.close()
 
 
 class TenantView:

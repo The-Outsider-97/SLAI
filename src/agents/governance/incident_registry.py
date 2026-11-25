@@ -87,6 +87,11 @@ class IncidentRegistry:
         self._db.executescript(_SCHEMA)
         self.authorised_roles = frozenset(authorised_roles)
 
+    def close(self) -> None:
+        """Release the owned database connection."""
+        with self._lock:
+            self._db.close()
+
     # ------------------------------------------------------------------ lifecycle
     def detect(
         self,

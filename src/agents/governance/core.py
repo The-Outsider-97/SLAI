@@ -89,7 +89,7 @@ class GovernanceCore:
     ):
         cfg = dict(config or {})
         self.config = cfg
-        self.state_dir = Path(state_dir)
+        self.state_dir = Path(state_dir).resolve()
         self._clock = clock
         key = master_key if master_key is not None else load_master_key()
         self.key_configured = bool(key and len(key) >= 32)
@@ -156,6 +156,7 @@ class GovernanceCore:
             "fingerprint TEXT NOT NULL, decision TEXT NOT NULL, rules TEXT NOT NULL, policy_version TEXT NOT NULL, at REAL NOT NULL)"
         )
         self._lock = RLock()
+        self._closed = False
 
     # ------------------------------------------------------------------ singleton access
     @classmethod
@@ -170,8 +171,16 @@ class GovernanceCore:
 
     @classmethod
     def reset_shared(cls) -> None:
+        """Close shared cores at shutdown/reset; callers must first quiesce their users."""
         with _instances_lock:
-            _instances.clear()
+            errors = []
+            for instance in list(_instances.values()):
+                try:
+                    instance.close()
+                except Exception as exc:
+                    errors.append(exc)
+            if errors:
+                raise RuntimeError("Failed to close one or more shared governance cores") from errors[0]
 
     # ------------------------------------------------------------------ providers (wired by the privacy ledger)
     def attach_providers(self, *, consent: Optional[ConsentProvider] = None, restrictions: Optional[RestrictionProvider] = None) -> None:
@@ -260,11 +269,27 @@ class GovernanceCore:
         }
 
     def close(self) -> None:
-        for part in (self.activities, self.oversight, self.incidents, self.evidence, self.ledger, self.learning, self.rights, self._decisions):
-            try:
-                part.close() if hasattr(part, "close") else None
-            except Exception:
-                pass
+        """Release every owned SQLite connection; safe to call again after a successful close.
+
+        Shutdown requires callers to stop in-flight governance work first.
+        Never silently swallow a database close failure.
+        """
+        with _instances_lock, self._lock:
+            if self._closed:
+                return
+            errors = []
+            for part in (self.rights, self.ledger, self.learning, self.incidents,
+                         self.evidence, self.grants, self.oversight, self.activities, self._decisions):
+                try:
+                    part.close()
+                except Exception as exc:
+                    errors.append(exc)
+            if errors:
+                raise RuntimeError("Failed to close one or more governance stores") from errors[0]
+            self._closed = True
+            key = str(self.state_dir)
+            if _instances.get(key) is self:
+                del _instances[key]
 
     # ------------------------------------------------------------------ internals
     def _deny(self, ctx, decision: ProcessingDecision, rule_id: str, reason: str) -> ProcessingDecision:
