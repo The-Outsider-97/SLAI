@@ -137,6 +137,48 @@ Reproducible performance evidence can be generated with
 from the repository root. Output is JSON (environment, timings, and peak traced
 allocations); no absolute performance promise is inferred from a single host.
 
+## Ellipses and splines — feature `sdrw-curves-v1`
+
+Two further SDRW entity kinds, added inside format 0.3.0 the way `sdrw-constraints-v1` was: a drawing that uses them lists
+`sdrw-curves-v1` in `requires` (a reader that does not know the feature refuses the file), a drawing that does not use them is
+written exactly as before and stays readable by older readers. Files declared 0.1.0 or 0.2.0 may not contain them, and their frozen
+schemas are unchanged.
+
+| kind | geometry | notes |
+| --- | --- | --- |
+| `ellipse` | `center`, `rx`, `ry`, `rotation` (radians, optional) | Full ellipse. `rx` is the semi-axis along `rotation`, `ry` the one at +90° from it; either may be the longer. Circumference by the arithmetic-geometric mean (machine precision), area `π·rx·ry`, analytic bounds. |
+| `spline` | `degree` (1..9), `control_points`, `knots` | Non-rational, **clamped** B-spline: `len(knots) = points + degree + 1`, the first and last `degree + 1` knots equal, no interior knot repeated more than `degree` times, non-empty domain. Starts and ends at the first and last control point. Piecewise cubic Béziers and Hermite chains are exactly expressible (`add_bezier_spline`). |
+
+```python
+d.add_ellipse((3, 2), 20, 6, rotation=0.5)
+d.add_spline([(0, 0), (10, 14), (22, -6), (35, 9), (48, 0)], degree=3)        # clamped, evenly spaced interior knots
+d.add_bezier_spline([((0, 30), (5, 40), (10, 40), (15, 30)), ((15, 30), (20, 20), (25, 20), (30, 30))])
+```
+
+`measure`, `length`, `area` (ellipse, and a spline whose end points coincide), `bounds`, `move`/`rotate`/`scale`/`transform`, blocks and inserts, and `convert_unit` all work on
+them. Spline length is integrated to about 1e-12 relative. Spline bounds are exact up to degree 3; above that they are the control
+polygon's box (contains the curve, can be loose). Reflections remain refused, as for circles and arcs.
+
+**Regions.** Ellipses and splines bound regions everywhere circles do:
+* Hatch loops: `{"kind": "ellipse", center, rx, ry, rotation}`, and a `path` loop may contain `{"kind": "spline", degree, control_points, knots}` segments next to
+  lines and arcs, in any order and direction (a reversed spline is the same curve walked the other way). A path of one spline segment is a closed loop when its end
+  points coincide. `add_hatch` also takes the id of an ellipse or a closed spline. The filled area is exact (ellipse: π·rx·ry; spline segments by Green's theorem,
+  integrated exactly because the integrand is a polynomial on each Bézier piece); bounds, even-odd nesting, transforms and unit conversion carry over.
+* Region modifiers (`sdrw.boolean`, region `sdrw.offset`) take an ellipse, a closed spline (end points coincide) or a hatch containing those loops. They are
+  flattened to a polygon whose distance from the curve is at most the evaluation policy's tolerance (guaranteed: convex-hull bound for splines of every degree);
+  the result is reported `approximate`. An open spline is not a region, but `sdrw.offset` offsets it as a curve (flattened within the tolerance, reported as
+  approximate, with `source_flatten_tolerance`). GEOS is the numerical backend, as for circles.
+* Region operations still produce polygon loops (GEOS returns polygons), so a boolean of two ellipses is a polygon-bounded hatch, not an ellipse arc.
+
+* **SVG**: `<ellipse>` (a rotation is written as `data-rotation` plus the matching `transform="rotate(deg cx cy)"`) and a cubic-Bézier `<path data-kind="spline">`
+  (degree above 3: SVG has no primitive for it, so a polyline `L` path within `svg_spline_tolerance`, a millionth of the spline's size, is drawn and the export
+  report says so) carrying the exact `data-degree`, `data-knots`, `data-points`. Coordinates are written in the same axes as every other
+  entity. Import reads those back exactly and refuses a file whose display path or transform disagrees with its exact parameters; a plain `<ellipse>` without
+  a transform is also read. A `transform` is accepted on `<ellipse>` only.
+* **DXF**: `ELLIPSE` (the major axis follows the longer semi-axis, ratio ≤ 1) and open clamped `SPLINE`, both ways; the same two as `HATCH` boundary edges
+  (a full `EllipseEdge`, a non-rational `SplineEdge`). A partial elliptical edge, or a rational or periodic spline edge, is still flattened to a polygon and reported. Import refuses, or with `skip_unsupported=True`
+  skips and reports: elliptical arcs, splines given by fit points only, rational (weighted), closed or periodic splines, and elevated/3D entities.
+
 ## Phase 1 — executable modeling, scope and accuracy
 
 Install the explicitly optional numerical geometry backends with
@@ -442,7 +484,7 @@ face. Mesh vertices, faces and UVs are stored in content-addressed `geometry/sha
   hatch patterns are approximated by lines.
 * **SVG** is an *export* format for the new kinds. Text becomes `<text>`, hatches become paths, dimensions become
   lines and text, inserts are expanded, and linetypes become `stroke-dasharray`. Such files cannot be imported back
-  (they are refused, not guessed); the original primitives still round-trip.
+  (they are refused, not guessed); the original primitives, ellipses and splines still round-trip.
 * **GLB**, SGEO to GLB and back, native codec (no `trimesh`): the scene graph becomes nodes, geometry is tessellated
   to triangles (analytic, NURBS and B-rep objects lose their exact definition, which the report states),
   materials, textures and UVs are written and read back, and object ids are kept in `extras.slai.id` so identity
