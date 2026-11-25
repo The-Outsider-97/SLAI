@@ -35,6 +35,8 @@ from .processing_context import (
     SPECIAL_DATA_CLASSES,
 )
 from .processing_registry import ProcessingActivity, ProcessingRegistry
+from .classification_evidence import ClassificationAuthority, Resolution
+from .policy_resolution import applicability_facts, resolve as resolve_decision
 from .risk_classification import PROHIBITED_PRACTICES, ProfileRegistry, RiskTier
 from .utils.identity import IdentityAuthority, IdentityVerificationError
 
@@ -95,7 +97,11 @@ class PolicyEngine:
         release_gate: Optional[Callable[[str], bool]] = None,
         extra_rules: Sequence[Rule] = (),
         clock: Callable[[], float] = time.time,
+        classification: Optional[ClassificationAuthority] = None,
+        conditions: Any = None,
     ):
+        self.classification = classification
+        self.conditions = conditions  # ConditionManager: tracks the obligations an ALLOW_WITH_CONTROLS carries
         self.policies = policies
         self.activities = activities
         self.capabilities = capabilities
@@ -122,9 +128,26 @@ class PolicyEngine:
             self._oversight_rule,
         ) + self._extra
 
+    def add_rule(self, rule: Rule) -> None:
+        """Register an additional rule (deployment- or jurisdiction-specific). Aggregation stays "most restrictive wins"."""
+        self._extra = tuple(self._extra) + (rule,)
+        self._rules = tuple(self._rules) + (rule,)
+
     # ------------------------------------------------------------------
-    def evaluate(self, ctx: ProcessingContext) -> ProcessingDecision:
+    def resolve(self, ctx: ProcessingContext) -> ProcessingContext:
+        """Replace caller assertions about the data class by what verified evidence supports (never by what was claimed)."""
+        if self.classification is not None:
+            res = self.classification.resolve(ctx, now=self._clock())
+        else:
+            base = DataClass.UNCLASSIFIED if ctx.data_class in (DataClass.NON_PERSONAL, DataClass.ANONYMISED) else ctx.data_class
+            res = Resolution(base, (base,), "declared_only" if ctx.classification_evidence is None else "evidence_rejected:unavailable")
+        return ctx.with_trusted_classification(res.primary, res.classes, res.status)
+
+    def evaluate(self, ctx: ProcessingContext, extra_results: Sequence[RuleResult] = ()) -> ProcessingDecision:
+        """``extra_results`` are verified specialist findings (see ``coordination``); they join the aggregation before
+        human override and conditions, so they can only restrict and are reviewed like any other result."""
         now = self._clock()
+        ctx = self.resolve(ctx)
         env = _Env(now, self._authenticate(ctx, now), self.activities.get(ctx.activity_id))
         results: List[RuleResult] = []
         for rule in self._rules:
@@ -132,9 +155,18 @@ class PolicyEngine:
                 results.extend(rule(ctx, env))
             except Exception as exc:  # fail closed, never leak payload content
                 results.append(_r("GOV-ERR-99", Decision.BLOCK, f"rule_error:{type(exc).__name__}", "GDPR Art. 25"))
+        results.extend(extra_results)
         results = self._apply_human_override(ctx, results, now)
+        results = self._apply_conditions(ctx, results, now)
         decision = max((r.decision for r in results), key=lambda d: d.severity, default=Decision.ALLOW)
         controls = tuple(dict.fromkeys(c for r in results for c in r.controls))
+        try:
+            resolved = resolve_decision(decision, results, applicability_facts(ctx))
+            if resolved.decision.severity > decision.severity:  # the resolver can only tighten (never expected)
+                decision = resolved.decision
+            resolution = resolved.to_dict()
+        except Exception as exc:  # explanation failure must not change the outcome, but must be visible
+            resolution = {"error": type(exc).__name__}
         return ProcessingDecision(
             request_id=ctx.request_id,
             decision=decision,
@@ -143,6 +175,10 @@ class PolicyEngine:
             context_fingerprint=ctx.fingerprint(),
             decided_at=now,
             conditions=controls,
+            classification_status=ctx.classification_status,
+            effective_data_class=ctx.effective_data_class.value,
+            classification_evidence_id=self.classification.evidence_id_in_use(ctx) if self.classification is not None else None,
+            resolution=resolution,
         )
 
     # ------------------------------------------------------------------ helpers
@@ -184,7 +220,11 @@ class PolicyEngine:
 
     def _classification(self, ctx, env):
         if ctx.effective_data_class is DataClass.UNCLASSIFIED:
-            return [_r("GOV-CLS-02", Decision.QUARANTINE, "unclassified_or_unverified_non_personal_claim", "GDPR Art. 4(1)")]
+            status = ctx.classification_status
+            reason = "unclassified_or_unverified_non_personal_claim"
+            if status.startswith("evidence_rejected:") or status.startswith("evidence_not_relaxing"):
+                reason = f"{reason}:{status}"
+            return [_r("GOV-CLS-02", Decision.QUARANTINE, reason, "GDPR Art. 4(1)")]
         return []
 
     def _prohibited(self, ctx, env):
@@ -204,6 +244,9 @@ class PolicyEngine:
             return []
         cls = self.profiles.classification(ctx.ai_system_id)
         if cls is None:
+            state = self.profiles.status(ctx.ai_system_id)
+            if state is not None:  # registered, but not currently usable: suspended / retired / failed its integrity check
+                return [_r("GOV-AIS-12", Decision.BLOCK, f"ai_system_profile_{state.value}", "AI Act Art. 6")]
             return [_r("GOV-AIS-12", Decision.QUARANTINE, "ai_system_has_no_registered_regulatory_profile", "AI Act Art. 6")]
         controls = [f"open_question:{q}" for q in cls.open_questions]
         if cls.tier is RiskTier.HIGH_RISK:
@@ -223,7 +266,7 @@ class PolicyEngine:
         if cap is None:
             return [_r("GOV-CAP-13", Decision.BLOCK, "capability_not_registered", "GDPR Art. 25")]
         out = []
-        if ctx.effective_data_class not in cap.allowed_data_classes:
+        if any(c not in cap.allowed_data_classes for c in ctx.effective_classes):
             out.append(_r("GOV-CAP-13", Decision.BLOCK, "data_class_exceeds_capability_scope", "GDPR Art. 25"))
         if cap.tenant_bound and not ctx.tenant_id:
             out.append(_r("GOV-CAP-13", Decision.BLOCK, "tenant_bound_capability_without_tenant", "GDPR Art. 32"))
@@ -239,15 +282,16 @@ class PolicyEngine:
             return [_r("GOV-LAW-04", Decision.BLOCK, "processing_activity_not_active", "GDPR Art. 6, 30")]
         out: List[RuleResult] = []
         cls = ctx.effective_data_class
+        classes = ctx.effective_classes
         if ctx.purpose not in a.purposes:
             out.append(_r("GOV-PUR-05", Decision.BLOCK, "purpose_not_in_activity", "GDPR Art. 5(1)(b)"))
         if ctx.operation not in a.operations and ctx.operation is not Operation.CLASSIFY:
             out.append(_r("GOV-PUR-05", Decision.BLOCK, "operation_not_in_activity", "GDPR Art. 5(1)(b)"))
-        if not self._covers(a, cls):
+        if any(not self._covers(a, c) for c in classes if c is not DataClass.UNCLASSIFIED):
             out.append(_r("GOV-PUR-05", Decision.BLOCK, "data_class_not_in_activity", "GDPR Art. 5(1)(c)"))
-        if cls in SPECIAL_DATA_CLASSES and a.art9_condition is None:
+        if any(c in SPECIAL_DATA_CLASSES for c in classes) and a.art9_condition is None:
             out.append(_r("GOV-SPC-06", Decision.BLOCK, "special_category_without_art9_condition", "GDPR Art. 9"))
-        if cls is DataClass.CRIMINAL_OFFENCE and a.art10_condition is None:
+        if DataClass.CRIMINAL_OFFENCE in classes and a.art10_condition is None:
             out.append(_r("GOV-SPC-06", Decision.BLOCK, "criminal_data_without_art10_condition", "GDPR Art. 10"))
         if ctx.operation is Operation.LEARN and not a.allows_learning:
             out.append(_r("GOV-LRN-11", Decision.BLOCK, "activity_does_not_authorise_learning", "GDPR Art. 5(1)(b), 6(4)"))
@@ -358,6 +402,20 @@ class PolicyEngine:
             return [_r("GOV-HO-14", Decision.ALLOW_WITH_CONTROLS, "oversight_notification", "AI Act Art. 14", controls=("notify_human_oversight",))]
         return [_r("GOV-HO-14", Decision.REVIEW_REQUIRED, f"human_{level.value}_required", "AI Act Art. 14; GDPR Art. 22(3)", overridable=True)]
 
+    # ------------------------------------------------------------------ conditional approval (GOV-P1-01)
+    def _apply_conditions(self, ctx, results: List[RuleResult], now: float) -> List[RuleResult]:
+        """ALLOW_WITH_CONTROLS is not unconditional: unknown controls block, unmet mandatory PRE conditions stop the request
+        here - before a single-use approval or evidence is consumed by the core. Refused requests create no obligations."""
+        if self.conditions is None or any(r.blocking for r in results):
+            return results
+        controls = tuple(dict.fromkeys(c for r in results for c in r.controls))
+        if not controls:
+            return results
+        try:
+            return results + self.conditions.assess(ctx, controls, now)
+        except Exception as exc:  # cannot assess => cannot allow
+            return results + [_r("GOV-ERR-99", Decision.BLOCK, f"condition_assessment_error:{type(exc).__name__}", "GDPR Art. 25")]
+
     # ------------------------------------------------------------------ human override
     def _apply_human_override(self, ctx, results: List[RuleResult], now: float) -> List[RuleResult]:
         if not any(r.decision is Decision.REVIEW_REQUIRED and r.overridable for r in results):
@@ -368,8 +426,9 @@ class PolicyEngine:
         out: List[RuleResult] = []
         for r in results:
             if r.decision is Decision.REVIEW_REQUIRED and r.overridable:
+                approved = tuple(f"approved_condition:{c}" for c in self.oversight.approved_conditions(ctx.approval_id))
                 out.append(_r(r.rule_id, Decision.ALLOW_WITH_CONTROLS, f"human_approved:{ctx.approval_id}", *r.legal_refs,
-                              controls=(f"consume_approval:{ctx.approval_id}",)))
+                              controls=(f"consume_approval:{ctx.approval_id}",) + approved))
             else:
                 out.append(r)
         return out

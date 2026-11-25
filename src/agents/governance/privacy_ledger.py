@@ -95,6 +95,8 @@ class PrivacyLedger:
         self._lock = RLock()
         self._adapters: Dict[str, DeletionAdapter] = {}
         self._recipients: Dict[str, List[str]] = {}
+        #: ``(kind, key, detail) -> None``: set by the core so rights events reach runtime reassessment.
+        self.on_change: Optional[Callable[[str, str, str], None]] = None
 
     # ------------------------------------------------------------ chain
     def _append(self, tenant: str, subject: str, kind: str, purpose: str, payload: Mapping[str, Any]) -> int:
@@ -108,7 +110,19 @@ class PrivacyLedger:
                 "INSERT INTO ledger_events(tenant_id,subject_id,kind,purpose,payload,ts,prev_hash,hash) VALUES(?,?,?,?,?,?,?,?)",
                 (tenant, subject, kind, purpose, body, ts, prev, digest),
             )
-            return int(cur.lastrowid)
+            seq = int(cur.lastrowid)
+        self._emit(tenant, subject, kind, purpose, payload)
+        return seq
+
+    def _emit(self, tenant: str, subject: str, kind: str, purpose: str, payload: Mapping[str, Any]) -> None:
+        """Only events that can make a running operation unlawful are published (granting consent never does)."""
+        cb = self.on_change
+        if cb is None:
+            return
+        if kind == "consent_withdrawn":
+            cb(kind, f"purpose:{tenant}:{subject}:{purpose}", "consent withdrawn")
+        elif (kind == "restriction" and payload.get("restricted")) or (kind == "objection" and payload.get("objected")) or kind.startswith("erasure_"):
+            cb(kind, f"subject:{tenant}:{subject}", kind)
 
     def verify_chain(self) -> bool:
         with self._lock:

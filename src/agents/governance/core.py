@@ -9,6 +9,7 @@ other agents) are unavailable - that is the "degraded but still enforcing" rule.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import os
 import time
@@ -17,11 +18,15 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Dict, List, Mapping, Optional, Union
 
+from .classification_evidence import ClassificationAuthority, ClassificationError
 from .compliance_engine import ComplianceEngine, DeploymentProfile
 from .human_oversight import OversightManager
 from .incident_registry import IncidentKind, IncidentRegistry
 from .lawful_basis import ConsentProvider, RestrictionProvider
-from .policy_engine import PolicyEngine, TransferPolicy
+from .effect_boundary import EffectBoundary
+from .policy_engine import EEA, PolicyEngine, TransferPolicy
+from .conditions import ConditionManager
+from .reassessment import ChangeBus, Lease, ReassessmentEngine, ReassessmentReport
 from .policy_registry import CapabilityRegistry, PolicyRegistry
 from .processing_context import (
     Decision,
@@ -40,7 +45,9 @@ from .subject_rights import SubjectRights
 from .transparency import TransparencyMarker
 from .regulatory_evidence import EvidenceStore
 from .regulatory_reporting import RegulatoryReporter
-from .risk_classification import ProfileRegistry
+from .adaptive import AdaptiveGovernance
+from .coordination import Coordinator
+from .risk_classification import ProfileRegistry, RiskTier
 from .utils.identity import IdentityAuthority
 from .utils.store import open_db
 
@@ -95,9 +102,20 @@ class GovernanceCore:
         self.key_configured = bool(key and len(key) >= 32)
 
         self.identity = IdentityAuthority(derive_key(key, "identity") if self.key_configured else None)
+        self.classification = ClassificationAuthority(
+            derive_key(key, "classification") if self.key_configured else None,
+            path=self.state_dir / "classification.db",
+            min_confidence=float(cfg.get("classification_min_confidence", 0.85)),
+            ttl=float(cfg.get("classification_ttl_seconds", 900.0)),
+            attestation_roles=cfg.get("classification_attestation_roles", ("dpo", "governance_admin", "classification_authority")),
+            clock=clock,
+        )
         self.policies = PolicyRegistry()
         self.capabilities = CapabilityRegistry()
-        self.profiles = ProfileRegistry()
+        self.profiles = ProfileRegistry(
+            path=self.state_dir / "profiles.db", key=derive_key(key, "profiles") if self.key_configured else None, authority=self.identity,
+            authorised_roles=cfg.get("profile_admin_roles", ("ai_governance_officer", "dpo", "governance_admin")),
+            require_authorization=True, clock=clock)
         self.activities = ProcessingRegistry(self.state_dir / "processing.db")
         self.oversight = OversightManager(
             self.state_dir / "oversight.db",
@@ -107,6 +125,10 @@ class GovernanceCore:
             max_approval_ttl=float(cfg.get("max_approval_ttl_seconds", 3600.0)),
             authority=self.identity,
         )
+        self.oversight.set_environment_binding(self._environment_binding)
+        # Approvals persisted under another binding version cannot be proven to match any request: revoke + log them.
+        self.migration_report = {"approvals_invalidated": self.oversight.invalidate_incompatible(now=clock()),
+                                 "profiles_recovered": dict(self.profiles.recovery)}
         self.grants = GrantAuthority(
             self.policies,
             master_key=key if self.key_configured else None,
@@ -123,11 +145,26 @@ class GovernanceCore:
             self.evidence, independent_producers=cfg.get("independent_evidence_producers", ("verification_agent", "ci_pipeline"))
         )
         self.reporter = RegulatoryReporter()
+        self.conditions = ConditionManager(
+            path=self.state_dir / "conditions.db", authority=self.identity, evidence=self.evidence, activities=self.activities,
+            clock=clock, terminate=lambda auth_id, reason: self.reassessment.terminate(auth_id, reason))
         self.engine = PolicyEngine(
             policies=self.policies, activities=self.activities, capabilities=self.capabilities, profiles=self.profiles,
             oversight=self.oversight, identity=self.identity, consent=consent, restrictions=restrictions,
-            transfers=TransferPolicy(), release_gate=release_gate, clock=clock,
+            transfers=TransferPolicy(), release_gate=release_gate, clock=clock, classification=self.classification,
+            conditions=self.conditions,
         )
+        self.coordinator = Coordinator(
+            epoch=lambda: self.changes.epoch, policy_version=self.policies.active_version,
+            high_risk=lambda c: bool((cl := self.profiles.classification(c.ai_system_id)) and cl.tier is RiskTier.HIGH_RISK), clock=clock)
+        acfg = dict(cfg.get("adaptive") or {})
+        self.adaptive = AdaptiveGovernance(
+            path=self.state_dir / "adaptive.db", key=derive_key(key, "adaptive") if self.key_configured else None, authority=self.identity,
+            mode=str(acfg.pop("mode", "shadow")), clock=clock,
+            bucket_of=None, **{k: v for k, v in acfg.items() if k in (
+                "min_samples", "min_sources", "max_per_source", "max_per_source_per_hour", "escalate_threshold", "min_validation",
+                "max_false_positive_rate", "max_escalation_rate", "drift_tolerance", "min_live_outcomes")})
+        self.engine.add_rule(self.adaptive.rule)  # advisory only: can emit REVIEW_REQUIRED, never relax anything
         self.ledger = PrivacyLedger(
             self.state_dir / "privacy.db",
             tombstone_salt=derive_key(key, "tombstone") if self.key_configured else b"unconfigured-" + b"x" * 19,
@@ -150,6 +187,17 @@ class GovernanceCore:
         self.engine.consent, self.engine.restrictions = consent, restrictions
         self._consent = consent
         self._restrictions = restrictions
+        # ---- runtime reassessment and side-effect boundary (one shared change bus; no second source of truth)
+        self.enforcement_mode = str(cfg.get("agent_gate", {}).get("mode", "observe")) if isinstance(cfg.get("agent_gate"), Mapping) else "observe"
+        self.changes = ChangeBus()
+        self.reassessment = ReassessmentEngine(
+            self.engine.evaluate, path=self.state_dir / "reassessment.db", backs_approval=self.oversight.backs,
+            lease_ttl=float(cfg.get("lease_ttl_seconds", 300.0)), max_leases=int(cfg.get("max_active_leases", 20000)), clock=clock)
+        self.changes.subscribe(self.reassessment.notify)
+        self.effects = EffectBoundary(self.reassessment, mode_provider=lambda: self.enforcement_mode, eea=EEA, conditions=self.conditions)
+        for source in (self.ledger, self.oversight, self.grants, self.policies, self.profiles, self.activities, self.classification, self.incidents,
+                       self.conditions):
+            source.on_change = self.changes.publish
         self._decisions = open_db(self.state_dir / "decisions.db")
         self._decisions.execute(
             "CREATE TABLE IF NOT EXISTS decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, "
@@ -157,6 +205,34 @@ class GovernanceCore:
         )
         self._lock = RLock()
         self._closed = False
+        # A ruleset change since the profiles were last classified is applied now, as a new recorded version (and a change event).
+        self.migration_report["profiles_reclassified"] = self.reclassify_profiles() if self.key_configured else []
+
+    def _system_admin(self) -> Any:
+        """Short-lived internal identity for actions governance itself performs (bootstrap, ruleset re-classification)."""
+        return self.identity.verify(self.identity.issue("governance:system", None, actor_type="service", roles=("governance_admin",), ttl_seconds=60.0))
+
+    def bootstrap_profiles(self, entries: Any) -> Dict[str, Any]:
+        """Seed regulatory profiles from deployment configuration. Idempotent: unchanged content creates no new version."""
+        from .risk_classification import _profile_from_json
+
+        admin, registered, errors = self._system_admin(), [], []
+        for entry in entries or ():
+            try:
+                profile = _profile_from_json(json.dumps(dict(entry)))
+                self.profiles.register(profile, admin, "configuration bootstrap")
+                registered.append(profile.system_id)
+            except Exception as exc:
+                errors.append(f"{(entry or {}).get('system_id', '?') if isinstance(entry, Mapping) else '?'}:{type(exc).__name__}")
+        return {"registered": registered, "errors": errors}
+
+    def reclassify_profiles(self) -> list:
+        """After a ruleset (RULESET_VERSION) change: re-run classification and record a new version where the outcome changed."""
+        return self.profiles.reclassify(self._system_admin(), "ruleset_change")
+
+    def _environment_binding(self, ctx: ProcessingContext) -> Dict[str, Any]:
+        """Regulatory facts an approval is conditional on: the policy set and the registered profile of the AI system."""
+        return {"policy_version": self.policies.active_version(), "profile": self.profiles.binding(ctx.ai_system_id)}
 
     # ------------------------------------------------------------------ singleton access
     @classmethod
@@ -190,15 +266,57 @@ class GovernanceCore:
             self.engine.restrictions = self._restrictions = restrictions
 
     # ------------------------------------------------------------------ decisions
-    def authorize(self, ctx: ProcessingContext, *, precondition_failure: Optional[tuple[str, str]] = None) -> ProcessingDecision:
+    def review_queue(self, *, now: Optional[float] = None) -> list:
+        """Open human reviews in priority order (advisory ordering only; see ``decision_intel``)."""
+        from .decision_intel import rank
+        t = self._clock() if now is None else now
+        return rank(self.oversight.pending(now=t), now=t)
+
+    def decision_analytics(self) -> Dict[str, Any]:
+        from .decision_intel import analytics
+        return analytics(self)
+
+    def record_outcome(self, ctx: ProcessingContext, label: str, recorder: Any, *, evidence_ref: str, requester: Optional[str] = None) -> bool:
+        """Record a verified post-hoc label for a request (did it warrant human review?). See ``adaptive``."""
+        return self.adaptive.record_outcome(self.engine.resolve(ctx), label, recorder, evidence_ref=evidence_ref, requester=requester)
+
+    def authorize_coordinated(self, ctx: ProcessingContext, invoke: Any, *, payload: Any = None, requester: Optional[str] = None) -> ProcessingDecision:
+        """Authorise ``ctx`` after consulting only the specialists whose findings could still change the outcome.
+
+        ``invoke(name, action, request) -> report`` is the governed call into the specialist agent. A preliminary
+        evaluation decides *whether* anyone needs to be asked (a refused request asks nobody); the findings then join
+        the real evaluation, where they can only restrict. The engine runs twice for coordinated requests by design.
+        """
+        resolved = self.engine.resolve(ctx)
+        preliminary = self.engine.evaluate(ctx)
+        try:
+            outcome = self.coordinator.coordinate(resolved, preliminary.decision, invoke, payload=payload, requester=requester)
+        except Exception as exc:  # coordination failure must never relax anything
+            return self.authorize(ctx, precondition_failure=("GOV-COORD-03", f"coordination_error:{type(exc).__name__}"))
+        return self.authorize(ctx, coordination=outcome)
+
+    def authorize(self, ctx: ProcessingContext, *, precondition_failure: Optional[tuple[str, str]] = None, coordination: Any = None) -> ProcessingDecision:
         """Evaluate and record the final decision; consume approval only after all preconditions pass.
 
         A caller at a trusted execution boundary may supply a failed precondition
         (rule id, reason). It can only make a decision more restrictive.
         """
-        decision = self.engine.evaluate(ctx)
+        extra: tuple = ()
+        if coordination is not None:
+            from .processing_context import RuleResult
+            if coordination.request_fingerprint != self.engine.resolve(ctx).fingerprint():
+                extra = (RuleResult("GOV-COORD-05", Decision.BLOCK, "coordination_evidence_not_bound_to_this_request", ("AI Act Art. 14",)),)
+            else:
+                extra = tuple(coordination.results)
+        decision = self.engine.evaluate(ctx, extra)
         if precondition_failure is not None:
             decision = self._deny(ctx, decision, *precondition_failure)
+        if decision.allowed:
+            # Single-use classification evidence is consumed only for an operation that can proceed, and atomically:
+            # a replayed token loses the race and the request is quarantined instead of silently reusing it.
+            evidence_id = decision.classification_evidence_id
+            if evidence_id and not self.classification.consume(evidence_id, now=self._clock()):
+                decision = self._deny(ctx, decision, "GOV-CLS-02", "classification_evidence_replayed_or_superseded", quarantine=True)
         if decision.allowed:
             for control in decision.conditions:
                 if control.startswith("consume_approval:"):
@@ -207,7 +325,21 @@ class GovernanceCore:
                     except Exception:
                         decision = self._deny(ctx, decision, "GOV-HO-14", "approval_consumption_failed")
         self._record(decision)
+        if decision.allowed:
+            consumed = next((c.split(":", 1)[1] for c in decision.conditions if c.startswith("consume_approval:")), None)
+            lease = self.reassessment.track(self.engine.resolve(ctx), decision, consumed_approval=consumed)
+            decision = dataclasses.replace(decision, authorization_id=lease.auth_id)
+            self.conditions.bind(ctx, decision, lease.auth_id, now=self._clock())
         return decision
+
+    def notify_change(self, kind: str, key: str, detail: str = "") -> ReassessmentReport:
+        """Announce a material change that no component announces by itself (key formats: see ``reassessment.dependency_keys``)."""
+        self.changes.epoch += 1
+        return self.reassessment.notify(kind, key, detail)
+
+    def authorization(self, decision: ProcessingDecision) -> Optional[Lease]:
+        """The live lease behind an allowed decision; call ``.check()`` immediately before the side effect."""
+        return self.reassessment.get(decision.authorization_id)
 
     def enforce(self, ctx: ProcessingContext, *, accept_modifications: bool = False) -> ProcessingDecision:
         decision = self.authorize(ctx)
@@ -219,15 +351,19 @@ class GovernanceCore:
         if ctx.identity is None:
             raise GrantError("identity_required")
         activity = self.activities.get(ctx.activity_id)
+        ctx = self.engine.resolve(ctx)
         return self.grants.issue(
             ctx, decision, principal_id=ctx.identity.principal_id,
             lawful_basis=activity.basis.value if activity else None,
             special_category_condition=(activity.art9_condition.value if activity and activity.art9_condition else None),
-            now=self._clock(), **kwargs,
+            environment_digest=fingerprint(self._environment_binding(ctx)), now=self._clock(), **kwargs,
         )
 
     def verify_grant(self, token: Optional[str], ctx: Optional[ProcessingContext] = None) -> AuthorizationGrant:
-        return self.grants.verify(token, ctx=ctx, now=self._clock())
+        grant = self.grants.verify(token, ctx=self.engine.resolve(ctx) if ctx is not None else None, now=self._clock())
+        if ctx is not None and grant.environment_digest != fingerprint(self._environment_binding(ctx)):
+            raise GrantError("environment_changed", "policy set or regulatory profile changed since issuance; re-authorise")
+        return grant
 
     # ------------------------------------------------------------------ health
     def health(self) -> Dict[str, Any]:
@@ -240,11 +376,15 @@ class GovernanceCore:
         components = {
             "identity_authority": self.identity.available,
             "grant_authority": self.grants.available,
+            "classification_authority": self.classification.available,
             "evidence_signing": self.evidence.available,
             "evidence_chain_intact": chain_ok,
             "consent_provider": self._consent is not None,
             "restriction_provider": self._restrictions is not None,
             "mandatory_policies": len(self.policies.list()),
+            "condition_log_intact": self.conditions.verify_log(),
+            "profile_registry_intact": self.profiles.verify(),
+            "adaptive_log_intact": self.adaptive.verify(),
         }
         problems = [k for k, v in components.items() if v is False]
         return {
@@ -254,6 +394,8 @@ class GovernanceCore:
             "problems": problems,
             "policy_version": self.policies.active_version(),
             "components": components,
+            "conditions": self.conditions.summary(),
+            "adaptive": self.adaptive.status(),
             "first_bad_evidence_seq": bad,
         }
 
@@ -278,8 +420,8 @@ class GovernanceCore:
             if self._closed:
                 return
             errors = []
-            for part in (self.rights, self.ledger, self.learning, self.incidents,
-                         self.evidence, self.grants, self.oversight, self.activities, self._decisions):
+            for part in (self.rights, self.ledger, self.learning, self.incidents, self.evidence, self.grants,
+                         self.oversight, self.activities, self.classification, self.reassessment, self.conditions, self.profiles, self.adaptive, self._decisions):
                 try:
                     part.close()
                 except Exception as exc:
@@ -292,10 +434,18 @@ class GovernanceCore:
                 del _instances[key]
 
     # ------------------------------------------------------------------ internals
-    def _deny(self, ctx, decision: ProcessingDecision, rule_id: str, reason: str) -> ProcessingDecision:
+    def _deny(self, ctx, decision: ProcessingDecision, rule_id: str, reason: str, *, quarantine: bool = False) -> ProcessingDecision:
         from .processing_context import RuleResult
-        results = decision.results + (RuleResult(rule_id, Decision.BLOCK, reason),)
-        return ProcessingDecision(decision.request_id, Decision.BLOCK, results, decision.policy_version, decision.context_fingerprint, self._clock())
+        outcome = Decision.QUARANTINE if quarantine else Decision.BLOCK
+        results = decision.results + (RuleResult(rule_id, outcome, reason),)
+        from .policy_resolution import resolve as resolve_decision
+        try:
+            resolution = resolve_decision(outcome, results).to_dict()
+        except Exception as exc:
+            resolution = {"error": type(exc).__name__}
+        return ProcessingDecision(decision.request_id, outcome, results, decision.policy_version, decision.context_fingerprint, self._clock(),
+                                  classification_status=decision.classification_status, effective_data_class=decision.effective_data_class,
+                                  classification_evidence_id=decision.classification_evidence_id, resolution=resolution)
 
     def _record(self, d: ProcessingDecision) -> None:
         with self._lock:

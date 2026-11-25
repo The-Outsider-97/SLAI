@@ -74,6 +74,7 @@ class PolicyRegistry:
         self._lock = RLock()
         self._policies: Dict[str, Policy] = {}
         self._active_version: Optional[str] = None
+        self.on_change = None  # ``(kind, key, detail)``: set by the core so policy changes reach runtime reassessment
         for policy in BUILTIN_POLICIES:
             self._policies[policy.policy_id] = policy
         for policy in extra:
@@ -91,6 +92,8 @@ class PolicyRegistry:
                     )
             self._policies[policy.policy_id] = policy
             self._active_version = None
+        if self.on_change:
+            self.on_change("policy_changed", "policy", policy.policy_id)
 
     def deactivate(self, policy_id: str) -> None:
         with self._lock:
@@ -101,6 +104,8 @@ class PolicyRegistry:
                 raise MandatoryPolicyError(f"mandatory policy {policy_id} cannot be deactivated")
             del self._policies[policy_id]
             self._active_version = None
+        if self.on_change:
+            self.on_change("policy_changed", "policy", policy_id)
 
     def get(self, policy_id: str) -> Optional[Policy]:
         return self._policies.get(policy_id)

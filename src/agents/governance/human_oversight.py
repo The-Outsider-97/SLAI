@@ -18,13 +18,14 @@ from __future__ import annotations
 import json
 import time
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import RLock
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 from pathlib import Path
 
-from .processing_context import IdentityContext, ProcessingContext, fingerprint, new_id
+from .processing_context import FINGERPRINT_VERSION, IdentityContext, ProcessingContext, fingerprint, new_id
 from .utils.identity import IdentityAuthority, IdentityVerificationError
 from .utils.store import open_db
 
@@ -149,8 +150,14 @@ class OversightManager:
         bias_window_seconds: float = 3600.0,
         bias_max_fast_approvals: int = 5,
         authority: Optional[IdentityAuthority] = None,
+        environment_binding: Optional[Callable[[ProcessingContext], Mapping[str, Any]]] = None,
     ):
         self._authority = authority
+        # Decision-relevant facts that are NOT part of the request itself (policy version, regulatory profile version, ...).
+        # The core supplies them so an approval dies when the regulatory ground it was given on moves.
+        self._environment = environment_binding
+        #: ``(kind, key, detail) -> None``: set by the core so revocations/emergencies reach runtime reassessment.
+        self.on_change: Optional[Callable[[str, str, str], None]] = None
         self._lock = RLock()
         self._db = open_db(path)
         self._db.executescript(_SCHEMA)
@@ -164,6 +171,53 @@ class OversightManager:
     def close(self) -> None:
         self._db.close()
 
+    # ------------------------------------------------------------------ binding
+    def set_environment_binding(self, provider: Optional[Callable[[ProcessingContext], Mapping[str, Any]]]) -> None:
+        self._environment = provider
+
+    def binding_for(self, ctx: ProcessingContext) -> Tuple[str, Dict[str, Any]]:
+        """(fingerprint, canonical binding) of the request *and* its regulatory environment. Deterministic and versioned."""
+        binding = {"request": ctx.canonical_binding(), "environment": dict(self._environment(ctx)) if self._environment else {}}
+        return fingerprint(binding), binding
+
+    @staticmethod
+    def _changed_fields(old: Mapping[str, Any], new: Mapping[str, Any]) -> List[str]:
+        """Names (never values: they may be personal data) of the binding fields that differ."""
+        changed: List[str] = []
+        for section in ("request", "environment"):
+            a, b = dict(old.get(section, {})), dict(new.get(section, {}))
+            changed.extend(f"{section}.{k}" for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k))
+        return changed
+
+    @contextmanager
+    def _tx(self) -> Iterator[None]:
+        """Serialised read-modify-write across threads AND connections/processes (BEGIN IMMEDIATE takes the write lock)."""
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+            else:
+                self._db.execute("COMMIT")
+
+    def invalidate_incompatible(self, *, now: Optional[float] = None) -> int:
+        """Migration: approvals created under another binding version can never be proven to match a request, so every
+        live one is revoked (and logged) instead of being silently accepted or silently dropped."""
+        t = time.time() if now is None else now
+        count = 0
+        with self._tx():
+            rows = self._db.execute("SELECT approval_id, status, record_json FROM approvals WHERE status IN ('pending','approved')").fetchall()
+            for approval_id, status, raw in rows:
+                rec = json.loads(raw)
+                if rec.get("binding_version") != FINGERPRINT_VERSION:
+                    rec["invalidated"] = {"reason": "binding_version_incompatible", "was": rec.get("binding_version"), "at": t}
+                    self._save(approval_id, ApprovalStatus.REVOKED, rec, t)
+                    self._log(approval_id, "invalidated", "system", {"reason": "binding_version_incompatible", "previous_status": status}, t)
+                    count += 1
+        return count
+
     # ------------------------------------------------------------------ requests
     def request_approval(
         self,
@@ -174,9 +228,18 @@ class OversightManager:
         level: OversightLevel = OversightLevel.APPROVAL,
         ttl: float = 900.0,
         single_use: bool = True,
+        max_uses: Optional[int] = None,
         now: Optional[float] = None,
+        triage: Optional[Mapping[str, Any]] = None,
     ) -> str:
+        """``triage`` (optional) is descriptive routing metadata for the review queue (see ``decision_intel``): it is stored beside
+        the approval but is NOT part of the binding, the dossier digest or any authorisation check.
+
+        ``single_use`` (default) approvals authorise exactly one execution. Reuse is possible only when the requester says
+        so explicitly: ``single_use=False`` with a bounded ``max_uses`` (and the binding still has to match every time)."""
         t = time.time() if now is None else now
+        if not single_use and (max_uses is None or int(max_uses) < 1):
+            raise OversightError("reuse_requires_explicit_max_uses", "a reusable approval must declare max_uses >= 1")
         if level is OversightLevel.NONE:
             raise OversightError("no_oversight_required")
         defects = dossier.defects()
@@ -185,9 +248,14 @@ class OversightManager:
         requester = self._authenticate(requester, t)
         ttl = min(float(ttl), self.max_approval_ttl)
         approval_id = new_id("appr")
+        fp, binding = self.binding_for(ctx)
         record = {
             "approval_id": approval_id,
-            "context_fingerprint": ctx.fingerprint(),
+            "binding_version": FINGERPRINT_VERSION,
+            "binding": binding,
+            "context_fingerprint": fp,
+            "max_uses": None if single_use else int(max_uses),
+            "uses": 0,
             "level": level.value,
             "dossier_digest": dossier.digest(),
             "requester": requester.principal_id,
@@ -197,6 +265,7 @@ class OversightManager:
             "presented_at": {},
             "approver": None,
             "decision": None,
+            "triage": {str(k): v for k, v in (triage or {}).items() if isinstance(v, (str, int, float, bool, list, tuple))},
         }
         self._save(approval_id, ApprovalStatus.PENDING, record, t)
         self._log(approval_id, "requested", requester.principal_id, {"level": level.value}, t)
@@ -205,7 +274,7 @@ class OversightManager:
     def mark_presented(self, approval_id: str, reviewer: IdentityContext, *, now: Optional[float] = None) -> None:
         """Record when the dossier was actually shown (for the minimum-review-time guard)."""
         t = time.time() if now is None else now
-        with self._lock:
+        with self._tx():
             status, rec = self._load(approval_id)
             rec["presented_at"][reviewer.principal_id] = t
             self._save(approval_id, status, rec, t)
@@ -219,10 +288,13 @@ class OversightManager:
         approve: bool,
         rationale: str,
         reviewed_dossier_digest: str,
+        conditions: Sequence[str] = (),
         now: Optional[float] = None,
     ) -> ApprovalStatus:
+        """``conditions`` are obligations the reviewer attaches to an approval; they become enforceable controls (see
+        ``approved_conditions`` and ``ConditionLedger``) and are part of what the approval means."""
         t = time.time() if now is None else now
-        with self._lock:
+        with self._tx():
             status, rec = self._load(approval_id)
             reviewer = self._require_human(reviewer, t)
             if status is not ApprovalStatus.PENDING:
@@ -247,7 +319,8 @@ class OversightManager:
                 if self._rubber_stamping(reviewer.principal_id, t):
                     raise OversightError("automation_bias_guard", "too many rapid approvals; escalate to another reviewer")
             rec["approver"] = reviewer.principal_id
-            rec["decision"] = {"approve": approve, "rationale": rationale.strip(), "at": t, "review_seconds": (t - shown) if shown else None}
+            rec["decision"] = {"approve": approve, "rationale": rationale.strip(), "at": t, "review_seconds": (t - shown) if shown else None,
+                               "conditions": sorted({str(c).strip() for c in conditions if str(c).strip()})}
             new = ApprovalStatus.APPROVED if approve else ApprovalStatus.REJECTED
             self._save(approval_id, new, rec, t)
             seconds = rec["decision"]["review_seconds"]
@@ -261,6 +334,20 @@ class OversightManager:
             )
             return new
 
+    def pending(self, *, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Open (PENDING, unexpired) approvals as plain dicts for queue management. Read-only; changes nothing."""
+        t = time.time() if now is None else now
+        out: List[Dict[str, Any]] = []
+        with self._lock:
+            rows = self._db.execute("SELECT approval_id, record_json FROM approvals WHERE status=?", (ApprovalStatus.PENDING.value,)).fetchall()
+        for approval_id, blob in rows:
+            rec = json.loads(blob)
+            if rec.get("expires_at", 0) <= t:
+                continue
+            out.append({"approval_id": approval_id, "level": rec.get("level"), "created_at": rec.get("created_at"), "expires_at": rec.get("expires_at"),
+                        "context_fingerprint": rec.get("context_fingerprint"), "requester": rec.get("requester"), "triage": dict(rec.get("triage") or {})})
+        return out
+
     def verify(self, approval_id: Optional[str], ctx: ProcessingContext, *, now: Optional[float] = None) -> Tuple[bool, str]:
         """Pure check; does not consume. Altered, expired, revoked or foreign approvals fail."""
         t = time.time() if now is None else now
@@ -272,47 +359,91 @@ class OversightManager:
             return False, "unknown_approval"
         if status is not ApprovalStatus.APPROVED:
             return False, f"approval_{status.value}"
+        if rec.get("binding_version") != FINGERPRINT_VERSION:
+            return False, "approval_binding_version_incompatible"
         if t >= rec["expires_at"]:
             return False, "approval_expired"
-        if rec["context_fingerprint"] != ctx.fingerprint():
-            return False, "material_change:approval_bound_to_different_request"
+        fp, binding = self.binding_for(ctx)
+        if rec["context_fingerprint"] != fp:
+            changed = self._changed_fields(rec.get("binding", {}), binding)
+            return False, "material_change:" + (",".join(changed[:8]) or "approval_bound_to_different_request")
         return True, "ok"
 
+    def backs(self, approval_id: Optional[str], ctx: ProcessingContext, now: Optional[float] = None) -> Tuple[bool, str]:
+        """Does this approval still stand behind an operation that is ALREADY RUNNING? Unlike ``verify`` it accepts a
+        consumed approval (spent by this very operation) and ignores expiry, but never a revoked/cancelled/rejected one or a
+        request that no longer matches the binding."""
+        if not approval_id:
+            return False, "no_approval"
+        try:
+            status, rec = self._load(approval_id)
+        except OversightError:
+            return False, "unknown_approval"
+        if status not in (ApprovalStatus.APPROVED, ApprovalStatus.CONSUMED):
+            return False, f"approval_{status.value}"
+        if rec.get("binding_version") != FINGERPRINT_VERSION:
+            return False, "approval_binding_version_incompatible"
+        fp, binding = self.binding_for(ctx)
+        if rec["context_fingerprint"] != fp:
+            return False, "material_change:" + (",".join(self._changed_fields(rec.get("binding", {}), binding)[:8]) or "binding")
+        return True, "ok"
+
+    def _emit(self, kind: str, key: str, detail: str = "") -> None:
+        if self.on_change is not None:
+            self.on_change(kind, key, detail)
+
+    def approved_conditions(self, approval_id: Optional[str]) -> Tuple[str, ...]:
+        """Conditions the human reviewer attached to this approval (empty when unknown/unapproved)."""
+        if not approval_id:
+            return ()
+        try:
+            _, rec = self._load(approval_id)
+        except OversightError:
+            return ()
+        return tuple((rec.get("decision") or {}).get("conditions", ()))
+
     def consume(self, approval_id: str, ctx: ProcessingContext, *, now: Optional[float] = None) -> None:
+        """Atomic: verification and the state transition happen in one write transaction, so two executors (threads, or
+        processes sharing the database) can never both spend a single-use approval."""
         t = time.time() if now is None else now
-        with self._lock:
+        with self._tx():
             ok, reason = self.verify(approval_id, ctx, now=t)
             if not ok:
                 raise OversightError("approval_invalid", reason)
             status, rec = self._load(approval_id)
-            if rec["single_use"]:
-                self._save(approval_id, ApprovalStatus.CONSUMED, rec, t)
-            self._log(approval_id, "consumed", ctx.identity.principal_id if ctx.identity else "unknown", {}, t)
+            rec["uses"] = int(rec.get("uses", 0)) + 1
+            exhausted = rec["single_use"] or (rec.get("max_uses") is not None and rec["uses"] >= int(rec["max_uses"]))
+            self._save(approval_id, ApprovalStatus.CONSUMED if exhausted else status, rec, t)
+            self._log(approval_id, "consumed", ctx.identity.principal_id if ctx.identity else "unknown", {"uses": rec["uses"]}, t)
 
     def revoke(self, approval_id: str, human: IdentityContext, reason: str, *, now: Optional[float] = None) -> None:
         t = time.time() if now is None else now
-        with self._lock:
+        with self._tx():
             human = self._require_human(human, t)
             status, rec = self._load(approval_id)
-            if status in (ApprovalStatus.REVOKED, ApprovalStatus.CONSUMED, ApprovalStatus.EXPIRED):
+            if status in (ApprovalStatus.REVOKED, ApprovalStatus.EXPIRED):
                 return
             if not reason.strip():
                 raise OversightError("reason_required")
+            # A consumed approval still stands behind the operation it started (see ``backs``): the reviewer must be able to
+            # withdraw it so that the running operation is reassessed and stopped (Art. 14(4)(d)-(e) AI Act: stop/override).
             self._save(approval_id, ApprovalStatus.REVOKED, rec, t)
-            self._log(approval_id, "revoked", human.principal_id, {"reason": reason}, t)
+            self._log(approval_id, "revoked", human.principal_id, {"reason": reason, "was": status.value}, t)
+        self._emit("approval_revoked", f"approval:{approval_id}", reason)
 
     def intervene(self, approval_id: str, human: IdentityContext, action: str, reason: str, *, now: Optional[float] = None) -> None:
         """Human override/cancellation of a pending or approved action."""
         if action not in ("override", "cancel"):
             raise ValueError("action must be 'override' or 'cancel'")
         t = time.time() if now is None else now
-        with self._lock:
+        with self._tx():
             human = self._require_human(human, t)
             if not (self.qualified_roles & set(human.roles)):
                 raise OversightError("reviewer_not_qualified")
             status, rec = self._load(approval_id)
             self._save(approval_id, ApprovalStatus.CANCELLED, rec, t)
             self._log(approval_id, f"intervention:{action}", human.principal_id, {"reason": reason}, t)
+        self._emit("human_intervention", f"approval:{approval_id}", action)
 
     def status(self, approval_id: str) -> ApprovalStatus:
         return self._load(approval_id)[0]
@@ -333,6 +464,7 @@ class OversightManager:
                 (scope, 1, human.principal_id, reason, t),
             )
             self._log(None, "emergency_activated", human.principal_id, {"scope": scope, "reason": reason}, t)
+        self._emit("emergency_termination", scope, reason)
 
     def release_emergency(self, scope: str, human: IdentityContext, reason: str, *, now: Optional[float] = None) -> None:
         t = time.time() if now is None else now

@@ -28,7 +28,7 @@ from threading import RLock
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, Union
 
 from .policy_registry import PolicyRegistry
-from .processing_context import Decision, ProcessingContext, ProcessingDecision, new_id
+from .processing_context import Decision, FINGERPRINT_VERSION, ProcessingContext, ProcessingDecision, evidence_id_of, new_id
 from .utils.store import open_db
 
 __all__ = ["AuthorizationGrant", "GrantAuthority", "GrantError", "GRANT_KEY_ENV", "derive_key"]
@@ -86,6 +86,15 @@ class AuthorizationGrant:
     delegation_depth: int
     parent_grant_id: Optional[str]
     issued_at: float
+    # Binding version 2 (GOV-P0-02): every decision-relevant attribute of the request the grant was issued for.
+    scope_version: int = FINGERPRINT_VERSION
+    operations: Tuple[str, ...] = ()
+    ai_system_id: Optional[str] = None
+    automated_decision: bool = False
+    significant_effect: bool = False
+    subject_is_child: bool = False
+    classification_evidence_id: Optional[str] = None
+    environment_digest: Optional[str] = None  # policy version + regulatory profile at issuance
 
     @property
     def authorization_expiry_iso(self) -> str:
@@ -138,6 +147,10 @@ class AuthorizationGrant:
             authorization_expiry=float(d["authorization_expiry"]), provenance_ref=d.get("provenance_ref"),
             capabilities=tup("capabilities"), delegation_depth=int(d.get("delegation_depth", 0)),
             parent_grant_id=d.get("parent_grant_id"), issued_at=float(d["issued_at"]),
+            scope_version=int(d.get("scope_version", 1)), operations=tup("operations"), ai_system_id=d.get("ai_system_id"),
+            automated_decision=bool(d.get("automated_decision", False)), significant_effect=bool(d.get("significant_effect", False)),
+            subject_is_child=bool(d.get("subject_is_child", False)), classification_evidence_id=d.get("classification_evidence_id"),
+            environment_digest=d.get("environment_digest"),
         )
 
 
@@ -171,6 +184,7 @@ class GrantAuthority:
         self._db.executescript(_SCHEMA)
         self.max_ttl = max_ttl
         self.max_delegation_depth = max_delegation_depth
+        self.on_change: Optional[Any] = None  # ``(kind, key, detail)``: set by the core
 
     @property
     def available(self) -> bool:
@@ -191,6 +205,7 @@ class GrantAuthority:
         oversight_requirement: str = "none",
         human_approval_ref: Optional[str] = None,
         ttl: Optional[float] = None,
+        environment_digest: Optional[str] = None,
         now: Optional[float] = None,
     ) -> str:
         if not self.available:
@@ -214,7 +229,10 @@ class GrantAuthority:
             human_approval_ref=human_approval_ref, policy_version=decision.policy_version,
             authorization_expiry=t + ttl, provenance_ref=ctx.provenance_ref,
             capabilities=(ctx.capability,) if ctx.capability else (), delegation_depth=self.max_delegation_depth,
-            parent_grant_id=None, issued_at=t,
+            parent_grant_id=None, issued_at=t, scope_version=FINGERPRINT_VERSION, operations=(ctx.operation.value,),
+            ai_system_id=ctx.ai_system_id, automated_decision=bool(ctx.automated_decision),
+            significant_effect=bool(ctx.significant_effect), subject_is_child=bool(ctx.subject_is_child),
+            classification_evidence_id=evidence_id_of(ctx.classification_evidence), environment_digest=environment_digest,
         )
         return self._seal(grant)
 
@@ -241,6 +259,8 @@ class GrantAuthority:
         except (ValueError, KeyError, TypeError) as exc:
             raise GrantError("malformed") from exc
         t = time.time() if now is None else now
+        if grant.scope_version != FINGERPRINT_VERSION:
+            raise GrantError("incompatible_grant_version", "grant predates the current context binding; re-authorise")
         if t >= grant.authorization_expiry:
             raise GrantError("expired")
         if grant.policy_version != self._policies.active_version():
@@ -266,6 +286,19 @@ class GrantAuthority:
             raise GrantError("activity_mismatch")
         if ctx.agent_id and g.agent_id and ctx.agent_id != g.agent_id:
             raise GrantError("agent_mismatch")
+        if g.operations and ctx.operation.value not in g.operations:
+            raise GrantError("operation_not_granted")
+        if ctx.application_id != g.application_id:
+            raise GrantError("application_mismatch")
+        if ctx.identity is not None and ctx.identity.principal_id != g.principal_id:
+            raise GrantError("principal_mismatch")
+        if (ctx.controller_id, ctx.processor_id) != (g.controller_id, g.processor_id):
+            raise GrantError("controller_processor_mismatch")
+        if ctx.ai_system_id != g.ai_system_id:
+            raise GrantError("ai_system_mismatch")
+        if (ctx.automated_decision and not g.automated_decision) or (ctx.significant_effect and not g.significant_effect) \
+                or (ctx.subject_is_child and not g.subject_is_child):
+            raise GrantError("decision_characteristics_exceed_grant")
         if g.capabilities and ctx.capability not in g.capabilities:
             raise GrantError("capability_not_granted")
         if ctx.effective_data_class.value not in g.data_classifications:
@@ -309,22 +342,30 @@ class GrantAuthority:
             raise ValueError("reason required")
         with self._lock:
             cur = self._db.execute("UPDATE grants SET revoked=1, revoke_reason=? WHERE grant_id=? AND revoked=0", (reason, grant_id))
-            return cur.rowcount
+        if cur.rowcount and self.on_change:
+            self.on_change("grant_revoked", f"grant:{grant_id}", reason)
+        return cur.rowcount
 
     def revoke_for_subject(self, subject_id: str, reason: str) -> int:
         """Consent withdrawal / objection / restriction propagation: kills every live grant naming the subject."""
         with self._lock:
-            rows = self._db.execute("SELECT grant_id, subjects FROM grants WHERE revoked=0").fetchall()
-            ids = [g for g, subj in rows if subject_id in json.loads(subj)]
-            for gid in ids:
+            rows = self._db.execute("SELECT grant_id, subjects, tenant_id FROM grants WHERE revoked=0").fetchall()
+            hits = [(g, t) for g, subj, t in rows if subject_id in json.loads(subj)]
+            for gid, _ in hits:
                 self._db.execute("UPDATE grants SET revoked=1, revoke_reason=? WHERE grant_id=?", (reason, gid))
-            return len(ids)
+        if self.on_change:
+            for gid, tenant in hits:
+                self.on_change("grant_revoked", f"grant:{gid}", reason)
+        return len(hits)
 
     def revoke_for_activity(self, activity_id: str, reason: str) -> int:
         with self._lock:
-            return self._db.execute(
+            count = self._db.execute(
                 "UPDATE grants SET revoked=1, revoke_reason=? WHERE activity=? AND revoked=0", (reason, activity_id)
             ).rowcount
+        if count and self.on_change:
+            self.on_change("grants_revoked_for_activity", f"activity:{activity_id}", reason)
+        return count
 
     # ------------------------------------------------------------------ internals
     def _seal(self, g: AuthorizationGrant) -> str:

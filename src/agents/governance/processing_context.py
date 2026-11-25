@@ -15,6 +15,7 @@ Design rules
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import time
@@ -40,7 +41,12 @@ __all__ = [
     "Art10Condition",
     "PERSONAL_DATA_CLASSES",
     "SPECIAL_DATA_CLASSES",
+    "FINGERPRINT_VERSION",
+    "VOLATILE_ATTRIBUTES",
+    "class_strictness",
+    "evidence_id_of",
     "fingerprint",
+    "most_restrictive_class",
     "new_id",
 ]
 
@@ -53,6 +59,31 @@ def fingerprint(value: Any) -> str:
     """Stable SHA-256 over a JSON-serialisable value (sorted keys, no secrets)."""
     blob = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+#: Version of the canonical binding produced by ``ProcessingContext.canonical_binding``. Anything persisted with another
+#: version (approvals, grants) is never silently accepted; see ``OversightManager.invalidate_incompatible``.
+FINGERPRINT_VERSION = 2
+
+#: Attribute keys that describe the *transport* of a request, not the decision (never part of the binding).
+VOLATILE_ATTRIBUTES = frozenset({"gate", "default_context", "trace_id", "span_id", "timestamp", "nonce", "correlation_id"})
+
+
+def evidence_id_of(token: Optional[str]) -> Optional[str]:
+    """Stable id of a signed classification-evidence token WITHOUT trusting it (binding only, never authorisation)."""
+    if not token:
+        return None
+    try:
+        import base64
+
+        body = token.split(".", 1)[0]
+        payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        eid = payload.get("eid")
+        if isinstance(eid, str) and eid:
+            return eid
+    except Exception:
+        pass
+    return "sha256:" + hashlib.sha256(str(token).encode("utf-8")).hexdigest()[:32]
 
 
 class DataClass(str, Enum):
@@ -87,6 +118,27 @@ PERSONAL_DATA_CLASSES = frozenset(
     }
 )
 SPECIAL_DATA_CLASSES = frozenset({DataClass.SPECIAL_CATEGORY, DataClass.BIOMETRIC})
+
+# Ascending regulatory strictness. UNCLASSIFIED is stricter than anything *proven* harmless and weaker than anything
+# *proven* personal, because it is only presumed personal until a trusted classifier says otherwise.
+_STRICTNESS = (
+    DataClass.NON_PERSONAL,
+    DataClass.ANONYMISED,
+    DataClass.UNCLASSIFIED,
+    DataClass.PSEUDONYMISED,
+    DataClass.PERSONAL,
+    DataClass.CRIMINAL_OFFENCE,
+    DataClass.SPECIAL_CATEGORY,
+    DataClass.BIOMETRIC,
+)
+
+
+def class_strictness(value: DataClass) -> int:
+    return _STRICTNESS.index(value)
+
+
+def most_restrictive_class(*values: DataClass) -> DataClass:
+    return max(values, key=class_strictness)
 
 
 class LawfulBasis(str, Enum):
@@ -223,7 +275,9 @@ class ProcessingContext:
     operation: Operation
     purpose: str
     data_class: DataClass = DataClass.UNCLASSIFIED
-    classification_verified: bool = False  # True only if set by a deterministic classifier
+    # DEPRECATED and IGNORED for authorisation: a caller-controlled boolean is not evidence. Trust comes only from a signed
+    # ``classification_evidence`` token verified by the ClassificationAuthority (see classification_evidence.py).
+    classification_verified: bool = False
     confidentiality: Confidentiality = Confidentiality.INTERNAL
     activity_id: Optional[str] = None  # registered ROPA activity (lawful-basis anchor)
     subject_ids: Tuple[str, ...] = ()
@@ -245,6 +299,8 @@ class ProcessingContext:
     processor_id: Optional[str] = None
     provenance_ref: Optional[str] = None
     grant_id: Optional[str] = None  # issued AuthorizationGrant presented by the caller
+    classification_evidence: Optional[str] = field(default=None, repr=False)  # signed token from the ClassificationAuthority
+    data_digest: Optional[str] = None  # keyed digest of the classified data (binds evidence to this exact data)
     request_id: str = field(default_factory=lambda: new_id("gov_req"))
     requested_at: float = field(default_factory=time.time)
     attributes: Mapping[str, Any] = field(default_factory=dict)
@@ -262,30 +318,92 @@ class ProcessingContext:
         object.__setattr__(self, "ai_practices", tuple(str(p).lower() for p in self.ai_practices))
         object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
 
+    # ------------------------------------------------------------------ trusted classification
+    def with_trusted_classification(self, primary: DataClass, classes: Tuple[DataClass, ...], status: str) -> "ProcessingContext":
+        """Return a copy carrying the classification resolved by the engine (never by a caller).
+
+        The resolved values live outside the dataclass fields: they are not constructor arguments, are lost by
+        ``dataclasses.replace`` and therefore always have to be re-derived from the signed evidence.
+        """
+        clone = dataclasses.replace(self)
+        object.__setattr__(clone, "_trusted", (primary, tuple(classes) or (primary,), status))
+        return clone
+
+    @property
+    def classification_status(self) -> str:
+        trusted = self.__dict__.get("_trusted")
+        return trusted[2] if trusted else "unresolved"
+
     @property
     def effective_data_class(self) -> DataClass:
-        """Unverified claims of non-personal data are treated as UNCLASSIFIED."""
-        if self.data_class in (DataClass.NON_PERSONAL, DataClass.ANONYMISED) and not self.classification_verified:
+        """The class governance acts on.
+
+        Only the engine can supply a trusted resolution (verified evidence). Without it, a claim of non-personal or
+        anonymised data is never honoured (UNCLASSIFIED => presumed personal); a claim of *more* sensitive data is, because
+        over-declaring can only make a decision stricter.
+        """
+        trusted = self.__dict__.get("_trusted")
+        if trusted:
+            return trusted[0]
+        if self.data_class in (DataClass.NON_PERSONAL, DataClass.ANONYMISED):
             return DataClass.UNCLASSIFIED
         return self.data_class
 
+    @property
+    def effective_classes(self) -> Tuple[DataClass, ...]:
+        """Every class a trusted classifier found (e.g. personal + special-category), most restrictive first."""
+        trusted = self.__dict__.get("_trusted")
+        classes = trusted[1] if trusted else (self.effective_data_class,)
+        return tuple(sorted(set(classes), key=class_strictness, reverse=True))
+
+    # ------------------------------------------------------------------ canonical, versioned binding
+    def canonical_binding(self) -> Dict[str, Any]:
+        """Deterministic, versioned description of everything that is material to the decision.
+
+        Excluded on purpose: request id, timestamps, tokens, the approval/grant being presented and transport-level
+        attributes (``VOLATILE_ATTRIBUTES``). Identity contributes principal, tenant, actor type and roles, never the
+        token or its expiry, so a renewed assertion of the same authority keeps its approvals.
+        """
+        ident = self.identity
+        attrs = {
+            str(k): v for k, v in self.attributes.items()
+            if str(k) not in VOLATILE_ATTRIBUTES and not str(k).startswith("_")
+        }
+        return {
+            "v": FINGERPRINT_VERSION,
+            "operation": self.operation.value,
+            "purpose": self.purpose,
+            "data_class": self.data_class.value,
+            "confidentiality": self.confidentiality.value,
+            "activity_id": self.activity_id,
+            "subjects": sorted(self.subject_ids),
+            "tenant_id": self.tenant_id,
+            "resource": self.resource,
+            "capability": self.capability,
+            "destination": (self.destination_country or "").strip().upper() or None,
+            "recipients": sorted(self.recipients),
+            "ai_system_id": self.ai_system_id,
+            "ai_practices": sorted(set(self.ai_practices)),
+            "automated_decision": bool(self.automated_decision),
+            "significant_effect": bool(self.significant_effect),
+            "subject_is_child": bool(self.subject_is_child),
+            "application_id": self.application_id,
+            "agent_id": self.agent_id,
+            "controller_id": self.controller_id,
+            "processor_id": self.processor_id,
+            "provenance_ref": self.provenance_ref,
+            "data_digest": self.data_digest,
+            "classification_evidence": evidence_id_of(self.classification_evidence),
+            "identity": (
+                {"principal": ident.principal_id, "tenant": ident.tenant_id, "actor_type": ident.actor_type, "roles": sorted(ident.roles)}
+                if ident is not None else None
+            ),
+            "attributes": attrs,
+        }
+
     def fingerprint(self) -> str:
-        """Binds approvals to exactly this request (excluding volatile ids/times)."""
-        return fingerprint(
-            {
-                "operation": self.operation.value,
-                "purpose": self.purpose,
-                "data_class": self.effective_data_class.value,
-                "activity_id": self.activity_id,
-                "subjects": sorted(self.subject_ids),
-                "tenant_id": self.tenant_id,
-                "resource": self.resource,
-                "capability": self.capability,
-                "destination": self.destination_country,
-                "recipients": sorted(self.recipients),
-                "ai_system_id": self.ai_system_id,
-            }
-        )
+        """Binds approvals and grants to exactly this request (see ``canonical_binding``)."""
+        return fingerprint(self.canonical_binding())
 
 
 @dataclass(frozen=True)
@@ -312,6 +430,11 @@ class ProcessingDecision:
     context_fingerprint: str
     decided_at: float = field(default_factory=time.time)
     conditions: Tuple[str, ...] = ()
+    classification_status: str = ""  # how the data class was established (declared_only | evidence_ok:<origin> | evidence_rejected:<code> ...)
+    effective_data_class: str = ""
+    classification_evidence_id: Optional[str] = None  # evidence that shaped the class (consumed on success if single-use)
+    authorization_id: Optional[str] = None  # lease tracking this authorisation at runtime (see reassessment.py)
+    resolution: Optional[Mapping[str, Any]] = None  # deterministic explanation (policy_resolution.ResolvedDecision.to_dict); never alters ``decision``
 
     @property
     def allowed(self) -> bool:
@@ -334,6 +457,10 @@ class ProcessingDecision:
             "context_fingerprint": self.context_fingerprint,
             "decided_at": self.decided_at,
             "conditions": list(self.conditions),
+            "classification_status": self.classification_status,
+            "effective_data_class": self.effective_data_class,
+            "authorization_id": self.authorization_id,
+            "resolution": dict(self.resolution) if self.resolution is not None else None,
             "rules": [
                 {
                     "rule_id": r.rule_id,

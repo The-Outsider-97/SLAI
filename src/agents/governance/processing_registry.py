@@ -206,6 +206,9 @@ def validate_activity(activity: ProcessingActivity) -> List[str]:
             d.extend(validate_art10_evidence(activity.art10_condition, activity.art10_evidence))
 
     for t in activity.transfers:
+        if not isinstance(t, Mapping):
+            d.append("transfer_entry_must_be_an_object")
+            continue
         if not str(t.get("country", "")).strip():
             d.append("transfer_country_required (Art. 30(1)(e))")
         if t.get("mechanism") not in TRANSFER_MECHANISMS:
@@ -242,6 +245,8 @@ CREATE TABLE IF NOT EXISTS activity_history (
 
 class ProcessingRegistry:
     """SQLite-backed Art. 30 register. ``path=':memory:'`` is allowed for tests only."""
+
+    on_change = None  # ``(kind, key, detail)``: set by the core so activity changes reach runtime reassessment
 
     def __init__(self, path: Union[str, Path] = ":memory:"):
         self._lock = RLock()
@@ -303,6 +308,8 @@ class ProcessingRegistry:
                 stored = _with(activity, version=expected_version + 1)
                 self._write(stored, "update", actor, now, insert=False)
                 self._db.execute("COMMIT")
+                if self.on_change:
+                    self.on_change("activity_changed", f"activity:{activity.activity_id}", stored.status.value)
                 return stored
             except BaseException:
                 self._db.execute("ROLLBACK")

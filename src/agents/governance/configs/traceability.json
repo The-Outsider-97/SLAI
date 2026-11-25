@@ -430,6 +430,155 @@
       ],
       "declared": "partial",
       "limitation": "Registry and gates implemented; training code paths in LearningAgent do not yet call it."
+    },
+    {
+      "article": "AI Act Art. 6, 9; GDPR Art. 5(1)(f), 25",
+      "requirement": "Trusted classification provenance (signed, payload-bound evidence)",
+      "applicability": "AI Act / GDPR",
+      "components": [
+        "governance/classification_evidence.py"
+      ],
+      "tests": [
+        "tests/compliance/test_governance_runtime.py"
+      ],
+      "controls": [
+        "GOV-CLS-01",
+        "GOV-CLS-02"
+      ],
+      "declared": "partial",
+      "limitation": "Signed by the governance key; a compromised key or a producer that mislabels data is not detected."
+    },
+    {
+      "article": "AI Act Art. 14; GDPR Art. 22",
+      "requirement": "Approval bound to the exact request (fingerprint v2)",
+      "applicability": "AI Act / GDPR",
+      "components": [
+        "governance/human_oversight.py",
+        "governance/processing_context.py"
+      ],
+      "tests": [
+        "tests/compliance/test_human_oversight.py"
+      ],
+      "controls": [
+        "GOV-OVS-01"
+      ],
+      "declared": "partial",
+      "limitation": "Binding is to the declared context; fields a caller omits cannot be bound."
+    },
+    {
+      "article": "AI Act Art. 9, 14, 15",
+      "requirement": "Runtime enforcement coverage (effect boundary, agent gate)",
+      "applicability": "AI Act",
+      "components": [
+        "governance/effect_boundary.py",
+        "governance/agent_gate.py"
+      ],
+      "tests": [
+        "tests/compliance/test_governance_runtime.py"
+      ],
+      "controls": [
+        "GOV-ENF-01"
+      ],
+      "declared": "partial",
+      "limitation": "Effects performed outside governed_execution / BaseAgent.execute are not intercepted."
+    },
+    {
+      "article": "AI Act Art. 14; GDPR Art. 5(1)(c), 25",
+      "requirement": "Conditional-approval lifecycle (conditions verified before release)",
+      "applicability": "AI Act / GDPR",
+      "components": [
+        "governance/conditions.py"
+      ],
+      "tests": [
+        "tests/compliance/test_conditions.py"
+      ],
+      "controls": [
+        "GOV-CND-01",
+        "GOV-CND-04"
+      ],
+      "declared": "partial",
+      "limitation": "Condition verifiers that are not independent evidence producers cannot satisfy independent conditions."
+    },
+    {
+      "article": "AI Act Art. 9, 14, 25",
+      "requirement": "Governance-aware inter-agent coordination",
+      "applicability": "AI Act",
+      "components": [
+        "governance/coordination.py"
+      ],
+      "tests": [
+        "tests/compliance/test_coordination.py"
+      ],
+      "controls": [
+        "GOV-COORD-01",
+        "GOV-COORD-05"
+      ],
+      "declared": "partial",
+      "limitation": "Specialist reports are not independently signed; adapters are tested against documented return shapes, not live agents."
+    },
+    {
+      "article": "AI Act Art. 2(7), 6, 49; GDPR Art. 5, 6",
+      "requirement": "Regulatory-profile registry (hash chain + HMAC, role-gated)",
+      "applicability": "AI Act / GDPR",
+      "components": [
+        "governance/risk_classification.py"
+      ],
+      "tests": [
+        "tests/compliance/test_risk_classification.py"
+      ],
+      "controls": [
+        "GOV-PRF-01"
+      ],
+      "declared": "partial",
+      "limitation": "Ruleset dates verified against EUR-Lex on 2026-11-25 only; counsel must confirm before reliance."
+    },
+    {
+      "article": "AI Act Art. 2(7); GDPR Art. 5-6, 22",
+      "requirement": "Policy applicability and deterministic conflict resolution",
+      "applicability": "AI Act / GDPR / UAVG",
+      "components": [
+        "governance/policy_resolution.py"
+      ],
+      "tests": [
+        "tests/compliance/test_policy_resolution.py"
+      ],
+      "controls": [
+        "GOV-RES-01"
+      ],
+      "declared": "partial",
+      "limitation": "Resolution can only tighten a decision; the instrument mapping is an engineering reading of the texts, not legal advice."
+    },
+    {
+      "article": "AI Act Art. 9(2), 72",
+      "requirement": "Controlled adaptive governance (advisory, gated, rollback)",
+      "applicability": "AI Act",
+      "components": [
+        "governance/adaptive.py"
+      ],
+      "tests": [
+        "tests/compliance/test_adaptive.py"
+      ],
+      "controls": [
+        "GOV-ADP-01"
+      ],
+      "declared": "partial",
+      "limitation": "Default shadow mode; a bounded poisoning flood can block adaptation (not weaken controls); synthetic evaluation only."
+    },
+    {
+      "article": "AI Act Art. 14; GDPR Art. 5(2)",
+      "requirement": "Decision intelligence and review-queue prioritisation",
+      "applicability": "AI Act / GDPR",
+      "components": [
+        "governance/decision_intel.py"
+      ],
+      "tests": [
+        "tests/compliance/test_decision_intel.py"
+      ],
+      "controls": [
+        "GOV-INT-01"
+      ],
+      "declared": "partial",
+      "limitation": "Ranking is additive and explainable; the triage benefit is a queueing simulation, not field evidence."
     }
   ]
 }

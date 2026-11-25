@@ -87,6 +87,8 @@ class IncidentRegistry:
         self._db.executescript(_SCHEMA)
         self.authorised_roles = frozenset(authorised_roles)
 
+    on_change = None  # ``(kind, key, detail)``: set by the core
+
     def close(self) -> None:
         """Release the owned database connection."""
         with self._lock:
@@ -120,6 +122,10 @@ class IncidentRegistry:
         with self._lock:
             self._db.execute("INSERT INTO incidents VALUES (?,?,?,?,?)", (iid, kind.value, IncidentState.DETECTED.value, json.dumps(rec), t))
             self._log(iid, "detected", reporter, {"kind": kind.value}, t)
+        if self.on_change:  # a security incident touching a system or agent puts the authorisations that rely on it back in question
+            for system in affected_systems:
+                self.on_change("security_incident", f"ai_system:{system}", iid)
+                self.on_change("security_incident", f"agent:{system}", iid)
         return iid
 
     def advance(self, incident_id: str, to: IncidentState, *, actor: str, detail: Optional[Mapping[str, Any]] = None, now: Optional[float] = None) -> None:

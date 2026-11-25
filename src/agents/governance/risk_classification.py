@@ -1,9 +1,11 @@
 """Legally versioned EU AI Act risk classification (Regulation (EU) 2024/1689).
 
 The ruleset reflects the Act as amended by the Digital Omnibus on AI, Regulation
-(EU) 2026/1744 (in force 27 July 2026) as reported by secondary sources on
-2026-11-24. ``RULESET_VERSION`` and ``RULESET_VERIFICATION`` state that plainly;
-the dates below MUST be re-verified against EUR-Lex before any compliance claim.
+(EU) 2026/1744 (OJ 24.7.2026, in force 27.7.2026). Application dates were checked
+on 2026-11-25 against EUR-Lex (Art. 113 as amended) and the Commission's AI Act
+Service Desk; ``RULESET_VERIFICATION`` records what was and was not confirmed.
+This is an engineering ruleset, not legal advice: counsel must confirm before any
+compliance claim.
 
 Principles
 ----------
@@ -26,8 +28,11 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 __all__ = [
     "AISystemProfile",
     "Obligation",
+    "PROHIBITED_APPLICABLE_FROM",
     "PROHIBITED_PRACTICES",
+    "ProfileError",
     "ProfileRegistry",
+    "ProfileStatus",
     "RISK_DATES",
     "RULESET_VERIFICATION",
     "RULESET_VERSION",
@@ -36,10 +41,14 @@ __all__ = [
     "RiskTier",
 ]
 
-RULESET_VERSION = "AIA-2024/1689+Omnibus-2026/1744@2026-11-24"
+RULESET_VERSION = "AIA-2024/1689+Omnibus-2026/1744@2026-11-25"
 RULESET_VERIFICATION = (
-    "EUR-Lex confirms Regulation (EU) 2026/1744 (OJ 24.7.2026, in force 27.7.2026). The application dates below come from several "
-    "law-firm summaries and are not yet confirmed against the consolidated text. Counsel must confirm before reliance."
+    "Verified 2026-11-25 against EUR-Lex (Reg. (EU) 2026/1744; Art. 113 as amended) and the Commission AI Act Service Desk: "
+    "prohibitions/AI literacy 2025-02-02, except new Art. 5(1)(ba),(bb),(1a),(1b) from 2026-12-02; GPAI obligations 2025-08-02 "
+    "(legacy models by 2027-08-02); general application, Art. 50 transparency and Commission GPAI enforcement 2026-08-02; "
+    "Annex III high-risk 2027-12-02; Annex I high-risk 2028-08-02. NOT independently confirmed from the consolidated text: "
+    "the 2026-12-02 date for Art. 50(2) on systems placed on the market before 2026-08-02, the Art. 6(3) derogation wording, "
+    "and the mapping of practice tags to article points. Counsel must confirm before reliance."
 )
 
 RISK_DATES: Dict[str, date] = {
@@ -51,6 +60,14 @@ RISK_DATES: Dict[str, date] = {
     "transparency_art50_2_preexisting_systems": date(2026, 12, 2),
     "high_risk_annex_iii": date(2027, 12, 2),
     "high_risk_annex_i": date(2028, 8, 2),
+    "new_prohibitions_art5_ba_bb": date(2026, 12, 2),  # Art. 113(a) as amended
+}
+
+# Practice tags that become legally applicable after the baseline Art. 5 date. They are
+# still treated as prohibited earlier (fail closed): the decision rationale states the
+# legal applicability date so the stricter-than-law behaviour is explicit and auditable.
+PROHIBITED_APPLICABLE_FROM: Dict[str, date] = {
+    "csam_ncii_generation": date(2026, 12, 2),
 }
 
 GPAI_SYSTEMIC_COMPUTE_FLOPS = 1e25  # Art. 51(2) presumption threshold
@@ -222,6 +239,11 @@ class RiskClassifier:
             if tag in PROHIBITED_PRACTICES and not self.exception_satisfied(p, tag):
                 prohibited.append(tag)
                 rationale.append(f"{PROHIBITED_PRACTICES[tag][0]}: prohibited practice '{tag}' without a complete exception")
+                legal_from = PROHIBITED_APPLICABLE_FROM.get(tag)
+                if legal_from is not None and date.today() < legal_from:
+                    rationale.append(
+                        f"'{tag}' is legally applicable from {legal_from.isoformat()}; blocked earlier by policy (fail closed)"
+                    )
         if prohibited:
             return RiskClassification(
                 p.system_id, RiskTier.PROHIBITED, ("prohibited",), (), tuple(questions), tuple(rationale), tuple(prohibited)
@@ -325,29 +347,358 @@ class RiskClassifier:
         return all(bool(details.get(k)) for k in required)
 
 
-class ProfileRegistry:
-    """In-process registry of regulatory profiles (persisted by the Governance Agent)."""
+class ProfileError(PermissionError):
+    """An unauthorised, conflicting or malformed change to the regulatory-profile registry."""
 
-    def __init__(self, classifier: Optional[RiskClassifier] = None):
+    def __init__(self, code: str, message: str = ""):
+        self.code = code
+        super().__init__(message or code)
+
+
+class ProfileStatus(str, Enum):
+    ACTIVE = "active"
+    SUSPENDED = "suspended"  # kept and versioned, but nothing may rely on it until restored
+    RETIRED = "retired"  # the system is withdrawn; history stays for audit
+    TAMPERED = "tampered"  # persisted record failed its integrity check: never trusted, never silently repaired
+
+
+_PROFILE_ROLES = ("ai_governance_officer", "dpo", "governance_admin")
+_GENESIS = "0" * 64
+_TUPLE_FIELDS = ("practices", "annex_iii_areas", "art6_3_exception_claims")
+
+_PROFILE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS profile_versions (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, system_id TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL,
+    profile TEXT NOT NULL, content_digest TEXT NOT NULL, tier TEXT NOT NULL, ruleset_version TEXT NOT NULL,
+    actor TEXT NOT NULL, reason TEXT NOT NULL, restored_from INTEGER, at REAL NOT NULL, prev_hash TEXT NOT NULL,
+    entry_hash TEXT NOT NULL, signature TEXT NOT NULL, UNIQUE(system_id, version));
+CREATE INDEX IF NOT EXISTS pv_system ON profile_versions(system_id, version);
+"""
+
+
+def _profile_to_json(profile: AISystemProfile) -> str:
+    import dataclasses
+    import json
+
+    return json.dumps(dataclasses.asdict(profile), sort_keys=True, default=str)
+
+
+def _profile_from_json(blob: str) -> AISystemProfile:
+    import json
+
+    data = json.loads(blob)
+    for name in _TUPLE_FIELDS:
+        data[name] = tuple(data.get(name) or ())
+    return AISystemProfile(**data)
+
+
+class ProfileRegistry:
+    """Durable, versioned, tamper-evident registry of regulatory profiles (GOV-P1-03).
+
+    * Every change appends a version (never an update in place); a hash chain plus an HMAC signature per version make removal,
+      reordering and edits detectable. A current version that fails verification is ``TAMPERED`` and is never relied upon.
+    * Changes need a verified identity holding a profile-administration role (``require_authorization``); suspend / retire /
+      restore need a documented reason. Concurrent writers are serialised and may pass ``expected_version``.
+    * A change to content, status or classification emits ``profile_changed`` for ``ai_system:<id>`` so running operations are
+      reassessed (GOV-P1-06) and approvals bound to the old profile stop matching (GOV-P0-02).
+    * ``reclassify`` re-runs the classifier after a ruleset change and records a new version where the outcome changed.
+
+    Without a ``path`` it is an in-memory registry (unit tests, embedding); with one it recovers its state on restart.
+    """
+
+    def __init__(self, classifier: Optional[RiskClassifier] = None, *, path: Any = ":memory:", key: Optional[bytes] = None,
+                 authority: Any = None, authorised_roles: Any = _PROFILE_ROLES, require_authorization: bool = False,
+                 clock: Any = None):
+        import threading
+        import time as _time
+
+        from .utils.store import open_db
+
         self._classifier = classifier or RiskClassifier()
+        self._lock = threading.RLock()
+        self._clock = clock or _time.time
+        self._key = key if key and len(key) >= 32 else None
+        self._authority = authority
+        self._roles = frozenset(authorised_roles)
+        self._require_auth = bool(require_authorization)
         self._profiles: Dict[str, AISystemProfile] = {}
         self._classes: Dict[str, RiskClassification] = {}
+        self._status: Dict[str, ProfileStatus] = {}
+        self._versions: Dict[str, int] = {}
+        self.on_change = None  # ``(kind, key, detail)``: set by the core so profile changes reach runtime reassessment
+        self._db = open_db(path)
+        self._db.executescript(_PROFILE_SCHEMA)
+        self.recovery = self._recover()
 
-    def register(self, profile: AISystemProfile) -> RiskClassification:
-        result = self._classifier.classify(profile)
-        self._profiles[profile.system_id] = profile
-        self._classes[profile.system_id] = result
-        return result
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
 
+    # ------------------------------------------------------------------ queries (public interface kept)
     def profile(self, system_id: Optional[str]) -> Optional[AISystemProfile]:
-        return self._profiles.get(system_id or "")
+        with self._lock:
+            return self._profiles.get(system_id or "") if self._status.get(system_id or "") is ProfileStatus.ACTIVE else None
 
     def classification(self, system_id: Optional[str]) -> Optional[RiskClassification]:
-        return self._classes.get(system_id or "")
+        with self._lock:
+            return self._classes.get(system_id or "") if self._status.get(system_id or "") is ProfileStatus.ACTIVE else None
+
+    def status(self, system_id: Optional[str]) -> Optional[ProfileStatus]:
+        with self._lock:
+            return self._status.get(system_id or "")
+
+    def version(self, system_id: Optional[str]) -> int:
+        with self._lock:
+            return self._versions.get(system_id or "", 0)
 
     def practice_permitted(self, system_id: Optional[str], tag: str) -> bool:
         profile = self.profile(system_id)
         return bool(profile) and RiskClassifier.exception_satisfied(profile, tag)  # type: ignore[arg-type]
 
     def all(self) -> List[RiskClassification]:
-        return list(self._classes.values())
+        with self._lock:
+            return [c for sid, c in self._classes.items() if self._status.get(sid) is ProfileStatus.ACTIVE]
+
+    def binding(self, system_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """What a decision about ``system_id`` depends on: the profile content, its classification and its lifecycle state.
+        A change to any of them (including suspension) changes this value, so approvals and grants stop matching."""
+        profile, cls = self.profile(system_id), self.classification(system_id)
+        if profile is None or cls is None:
+            st = self.status(system_id)
+            return {"system_id": system_id, "status": st.value} if st is not None else None
+        import hashlib
+        import json
+
+        blob = json.dumps({"profile": _profile_to_json(profile), "tier": cls.tier.value, "labels": list(cls.labels),
+                           "ruleset": cls.ruleset_version,
+                           "obligations": [(o.obligation_id, o.applies_from.isoformat()) for o in cls.obligations]},
+                          sort_keys=True, default=str)
+        return {"system_id": system_id, "tier": cls.tier.value, "digest": hashlib.sha256(blob.encode()).hexdigest()[:32]}
+
+    def history(self, system_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute("SELECT version,status,tier,ruleset_version,actor,reason,restored_from,at,content_digest FROM profile_versions "
+                                    "WHERE system_id=? ORDER BY version", (system_id,)).fetchall()
+        keys = ("version", "status", "tier", "ruleset_version", "actor", "reason", "restored_from", "at", "content_digest")
+        return [dict(zip(keys, r)) for r in rows]
+
+    def verify(self) -> bool:
+        """Recompute the whole chain and every signature. False means the persisted registry cannot be trusted as a whole."""
+        with self._lock:
+            return self._verify_all()[0]
+
+    # ------------------------------------------------------------------ changes
+    def register(self, profile: AISystemProfile, actor: Any = None, reason: str = "registration", *, expected_version: Optional[int] = None) -> RiskClassification:
+        """Register or update a profile. Identical content is a no-op (no new version). Returns the classification."""
+        who = self._authorise(actor)
+        result = self._classifier.classify(profile)
+        blob = _profile_to_json(profile)
+        digest = self._digest(blob, result)
+        changed = False
+        with self._lock:
+            self._begin()
+            try:
+                st = self._status.get(profile.system_id)
+                if st in (ProfileStatus.SUSPENDED, ProfileStatus.RETIRED, ProfileStatus.TAMPERED):
+                    raise ProfileError("invalid_state", f"profile {profile.system_id} is {st.value}: resume or restore it explicitly (with a reason)")
+                current = self._versions.get(profile.system_id, 0)
+                if expected_version is not None and expected_version != current:
+                    raise ProfileError("version_conflict", f"profile {profile.system_id} is at version {current}, not {expected_version}")
+                prior = self._latest_row(profile.system_id)
+                if prior is not None and prior[0] == digest and prior[1] == ProfileStatus.ACTIVE.value:
+                    self._db.execute("ROLLBACK")
+                    return self._classes[profile.system_id]
+                self._append(profile.system_id, current + 1, ProfileStatus.ACTIVE, blob, digest, result.tier.value, result.ruleset_version, who, reason, None)
+                self._db.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+            self._profiles[profile.system_id], self._classes[profile.system_id] = profile, result
+            self._status[profile.system_id], self._versions[profile.system_id] = ProfileStatus.ACTIVE, current + 1
+            changed = True
+        if changed:
+            self._emit("profile_changed", profile.system_id, result.tier.value)
+        return result
+
+    def suspend(self, system_id: str, actor: Any, reason: str) -> None:
+        self._transition(system_id, actor, reason, ProfileStatus.SUSPENDED, "profile_suspended", allowed_from=(ProfileStatus.ACTIVE,))
+
+    def retire(self, system_id: str, actor: Any, reason: str) -> None:
+        self._transition(system_id, actor, reason, ProfileStatus.RETIRED, "profile_retired",
+                         allowed_from=(ProfileStatus.ACTIVE, ProfileStatus.SUSPENDED))
+
+    def resume(self, system_id: str, actor: Any, reason: str) -> None:
+        """Lift a suspension: the (unchanged) profile becomes active again under a new version."""
+        self._transition(system_id, actor, reason, ProfileStatus.ACTIVE, "profile_resumed", allowed_from=(ProfileStatus.SUSPENDED,))
+
+    def restore(self, system_id: str, actor: Any, reason: str, version: int) -> RiskClassification:
+        """Re-instate an earlier version's content as a NEW version (history is never rewritten)."""
+        who = self._authorise(actor)
+        self._need_reason(reason)
+        with self._lock:
+            row = self._db.execute("SELECT profile,signature,entry_hash,system_id,version,status,content_digest,tier,ruleset_version,actor,reason,at,prev_hash FROM "
+                                   "profile_versions WHERE system_id=? AND version=?", (system_id, version)).fetchone()
+            if row is None:
+                raise ProfileError("unknown_version", f"no version {version} for {system_id}")
+            if not self._row_valid(row):
+                raise ProfileError("integrity", "the requested version failed its integrity check")
+            profile = _profile_from_json(row[0])
+        result = self._classifier.classify(profile)
+        blob = _profile_to_json(profile)
+        digest = self._digest(blob, result)
+        with self._lock:
+            self._begin()
+            try:
+                current = self._versions.get(system_id, 0)
+                self._append(system_id, current + 1, ProfileStatus.ACTIVE, blob, digest, result.tier.value, result.ruleset_version, who, reason, version)
+                self._db.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+            self._profiles[system_id], self._classes[system_id] = profile, result
+            self._status[system_id], self._versions[system_id] = ProfileStatus.ACTIVE, current + 1
+        self._emit("profile_changed", system_id, f"restored_from:{version}")
+        return result
+
+    def reclassify(self, actor: Any = None, reason: str = "ruleset_change") -> List[str]:
+        """Re-run the classifier over every active profile (after ``RULESET_VERSION`` changed). Returns the changed system ids."""
+        changed: List[str] = []
+        for sid in list(self._profiles):
+            if self.status(sid) is not ProfileStatus.ACTIVE:
+                continue
+            profile = self._profiles[sid]
+            before = self._classes[sid]
+            after = self._classifier.classify(profile)
+            if (after.tier, after.ruleset_version, after.labels) != (before.tier, before.ruleset_version, before.labels) or \
+                    [(o.obligation_id, o.applies_from) for o in after.obligations] != [(o.obligation_id, o.applies_from) for o in before.obligations]:
+                self.register(profile, actor, reason)
+                changed.append(sid)
+        return changed
+
+    # ------------------------------------------------------------------ internals
+    def _transition(self, system_id: str, actor: Any, reason: str, to: ProfileStatus, kind: str, *, allowed_from: Any) -> None:
+        who = self._authorise(actor)
+        self._need_reason(reason)
+        with self._lock:
+            self._begin()
+            try:
+                st = self._status.get(system_id)
+                if st is None:
+                    raise ProfileError("unknown_system", f"no profile for {system_id}")
+                if st not in allowed_from:
+                    raise ProfileError("invalid_transition", f"profile is {st.value}; cannot become {to.value}")
+                prior = self._latest_row(system_id)
+                profile = self._profiles[system_id]
+                cls = self._classes[system_id]
+                current = self._versions[system_id]
+                self._append(system_id, current + 1, to, _profile_to_json(profile), prior[0] if prior else "", cls.tier.value, cls.ruleset_version, who, reason, None)
+                self._db.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+            self._status[system_id], self._versions[system_id] = to, current + 1
+        self._emit(kind, system_id, reason[:80])
+
+    def _emit(self, kind: str, system_id: str, detail: str) -> None:
+        if self.on_change:
+            self.on_change("profile_changed", f"ai_system:{system_id}", f"{kind}:{detail}")
+
+    def _need_reason(self, reason: str) -> None:
+        if len((reason or "").strip()) < 10:
+            raise ProfileError("reason_required", "a documented reason (at least 10 characters) is required")
+
+    def _authorise(self, actor: Any) -> str:
+        if not self._require_auth:
+            return getattr(actor, "principal_id", None) or "unauthenticated"
+        if self._authority is None or actor is None:
+            raise ProfileError("not_authorised", "profile changes require a verified identity")
+        from .utils.identity import IdentityVerificationError
+
+        try:
+            verified = self._authority.verify(getattr(actor, "token", None), now=self._clock())
+        except IdentityVerificationError as exc:
+            raise ProfileError("not_authorised", f"identity invalid: {exc.code}") from exc
+        if not (self._roles & set(verified.roles)):
+            raise ProfileError("not_authorised", "no profile-administration role")
+        return verified.principal_id
+
+    def _digest(self, blob: str, cls: RiskClassification) -> str:
+        import hashlib
+        import json
+
+        return hashlib.sha256(json.dumps({"p": blob, "t": cls.tier.value, "l": list(cls.labels), "r": cls.ruleset_version,
+                                          "o": [(o.obligation_id, o.applies_from.isoformat()) for o in cls.obligations]}, sort_keys=True).encode()).hexdigest()
+
+    def _begin(self) -> None:
+        self._db.execute("BEGIN IMMEDIATE")
+
+    def _rollback(self) -> None:
+        try:
+            self._db.execute("ROLLBACK")
+        except Exception:
+            pass
+
+    def _latest_row(self, system_id: str) -> Optional[tuple]:
+        return self._db.execute("SELECT content_digest,status FROM profile_versions WHERE system_id=? ORDER BY version DESC LIMIT 1", (system_id,)).fetchone()
+
+    def _sign(self, entry_hash: str) -> str:
+        import hashlib
+        import hmac
+
+        if self._key is None:
+            return ""
+        return hmac.new(self._key, f"slai-gov-v1:profile:{entry_hash}".encode(), hashlib.sha256).hexdigest()
+
+    def _entry_hash(self, prev: str, fields: tuple) -> str:
+        import hashlib
+        import json
+
+        return hashlib.sha256((prev + json.dumps(list(fields), sort_keys=True, default=str)).encode()).hexdigest()
+
+    def _append(self, system_id: str, version: int, status: ProfileStatus, blob: str, digest: str, tier: str, ruleset: str, actor: str,
+                reason: str, restored_from: Optional[int]) -> None:
+        row = self._db.execute("SELECT entry_hash FROM profile_versions ORDER BY seq DESC LIMIT 1").fetchone()
+        prev = row[0] if row else _GENESIS
+        at = self._clock()
+        entry = self._entry_hash(prev, (system_id, version, status.value, blob, digest, tier, ruleset, actor, reason, restored_from, repr(at)))
+        self._db.execute(
+            "INSERT INTO profile_versions(system_id,version,status,profile,content_digest,tier,ruleset_version,actor,reason,restored_from,at,prev_hash,entry_hash,signature) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (system_id, version, status.value, blob, digest, tier, ruleset, actor, reason, restored_from, at, prev, entry, self._sign(entry)))
+
+    def _row_valid(self, row: tuple) -> bool:
+        profile, signature, entry_hash, system_id, version, status, digest, tier, ruleset, actor, reason, at, prev = row[:13]
+        restored = self._db.execute("SELECT restored_from FROM profile_versions WHERE system_id=? AND version=?", (system_id, version)).fetchone()[0]
+        import hmac
+
+        expected = self._entry_hash(prev, (system_id, version, status, profile, digest, tier, ruleset, actor, reason, restored, repr(at)))
+        return expected == entry_hash and (self._key is None or hmac.compare_digest(signature, self._sign(entry_hash)))
+
+    def _verify_all(self) -> tuple:
+        prev, bad = _GENESIS, []
+        for r in self._db.execute("SELECT profile,signature,entry_hash,system_id,version,status,content_digest,tier,ruleset_version,actor,reason,at,prev_hash "
+                                  "FROM profile_versions ORDER BY seq").fetchall():
+            if r[12] != prev or not self._row_valid(r):
+                bad.append((r[3], r[4]))
+            prev = r[2]
+        return (not bad), bad
+
+    def _recover(self) -> Dict[str, Any]:
+        """Rebuild the in-memory view from the durable log. A system whose current version fails verification is TAMPERED."""
+        with self._lock:
+            ok, bad = self._verify_all()
+            bad_systems = {sid for sid, _ in bad}
+            rows = self._db.execute("SELECT system_id,MAX(version) FROM profile_versions GROUP BY system_id").fetchall()
+            for sid, ver in rows:
+                self._versions[sid] = ver
+                if sid in bad_systems:
+                    self._status[sid] = ProfileStatus.TAMPERED
+                    continue
+                r = self._db.execute("SELECT profile,status FROM profile_versions WHERE system_id=? AND version=?", (sid, ver)).fetchone()
+                try:
+                    profile = _profile_from_json(r[0])
+                    self._profiles[sid], self._classes[sid] = profile, self._classifier.classify(profile)
+                    self._status[sid] = ProfileStatus(r[1])
+                except Exception:
+                    self._status[sid] = ProfileStatus.TAMPERED
+            return {"systems": len(rows), "chain_intact": ok, "tampered": sorted(sid for sid, st in self._status.items() if st is ProfileStatus.TAMPERED)}
