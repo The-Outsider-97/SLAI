@@ -20,6 +20,7 @@ from __future__ import annotations
 
 __version__ = "2.5.0"
 
+import threading
 import time
 
 from pathlib import Path
@@ -67,8 +68,13 @@ class GovernanceAgent(BaseAgent):
         state_dir = Path(self.governance_config.get("state_dir", self.DEFAULT_STATE_DIR))
         self.core = GovernanceCore.shared(state_dir, config=self.governance_config, **kwargs)
         self._register_agent_capabilities()
+        self.profile_bootstrap = self.core.bootstrap_profiles(self.governance_config.get("ai_system_profiles", ()))
+        if self.profile_bootstrap["errors"]:
+            logger.error("Governance: %d configured AI-system profile(s) could not be registered", len(self.profile_bootstrap["errors"]))
+        self._attach_privacy_classifier()
         self._install_delegation_authorizer()
         self.agent_gate = self._install_agent_gate()
+        self._install_effect_boundary()
         self.runtime_registration = self._register_runtime()
         if self.governance_config.get("sanitize_logs", True):
             from .governance.utils.diagnostics import install_log_sanitizer
@@ -89,11 +95,73 @@ class GovernanceAgent(BaseAgent):
         )
         logger.info("Governance: %d agents / %d capabilities registered", len(counts), sum(counts.values()))
 
-    def integration_report(self) -> Dict[str, Any]:
-        """Per-agent integration status (static analysis; see the report's own ``basis`` field)."""
-        from .governance.agent_manifest import integration_report
+    def _attach_privacy_classifier(self) -> None:
+        """Classification evidence comes from the Privacy Agent's ``DataID`` - the only sensitive-data detector in SLAI.
 
-        return integration_report(Path(__file__).resolve().parent, self.core.capabilities)
+        The detector is constructed lazily on first use so that importing governance never drags in the Privacy stack; when it
+        cannot be built, classification is *unavailable* and governance quarantines (it never guesses a class).
+        """
+        from .governance.classification_evidence import ClassifierUnavailable, PrivacyClassifierAdapter
+
+        if not self.governance_config.get("classification", {}).get("use_privacy_agent", True):
+            return
+        holder: Dict[str, Any] = {}
+        lock = threading.Lock()
+
+        def classifier(payload: Any, *, purpose: str):
+            adapter = holder.get("adapter")
+            if adapter is None:
+                with lock:
+                    adapter = holder.get("adapter")
+                    if adapter is None:
+                        try:
+                            from .privacy import DataID
+                            from .privacy_agent import PrivacyAgent
+
+                            adapter = PrivacyClassifierAdapter(DataID(), structural_check=PrivacyAgent._structurally_non_personal)
+                        except Exception as exc:
+                            raise ClassifierUnavailable(f"privacy classifier cannot be constructed: {type(exc).__name__}") from exc
+                        holder["adapter"] = adapter
+            return adapter(payload, purpose=purpose)
+
+        self.core.classification.attach_classifier(classifier)
+
+    def _install_effect_boundary(self) -> None:
+        """Make the side-effect boundary process-wide, following the agent gate's mode (observe by default)."""
+        from .governance.effect_boundary import install_effect_boundary
+
+        install_effect_boundary(self.core.effects)
+
+    def command_authority(self, inner: Any) -> Any:
+        """Wrap the deployment's own ``CommandGateway`` authority: the inner decision is final for denials; governance can
+        only restrict further (lease validity, destination, recipients)."""
+        from .governance.effect_boundary import GovernanceCommandAuthority
+
+        return GovernanceCommandAuthority(inner, self.core.effects)
+
+    def integration_report(self) -> Dict[str, Any]:
+        """Per-agent integration status. STATIC analysis (what is written) and RUNTIME observation (what ran) are reported
+        separately and never merged: each carries its own ``basis``."""
+        from .governance.agent_manifest import integration_report
+        from .governance.effect_boundary import scan_effect_sites
+
+        report = dict(integration_report(Path(__file__).resolve().parent, self.core.capabilities))
+        report["effect_sites_static"] = scan_effect_sites(Path(__file__).resolve().parent)
+        report["effect_boundary_runtime"] = self.core.effects.coverage()
+        report["gate_runtime"] = self.agent_gate.status()
+        report["coordination"] = dict(self.core.coordinator.stats)
+        return report
+
+    # ------------------------------------------------------------------ coordination
+    def authorize_with_specialists(self, ctx, *, payload=None, requester=None):
+        """Authorise ``ctx`` after consulting only the specialist agents whose findings could still change the outcome.
+
+        Specialists are called through the governed delegation guard; findings can only restrict (see ``governance.coordination``).
+        With no AgentFactory the required specialists cannot be reached and the request is QUARANTINED, never waved through.
+        """
+        from .governance.coordination import agent_invoker
+
+        return self.core.authorize_coordinated(ctx, agent_invoker(self.agent_factory, self.shared_memory), payload=payload, requester=requester)
 
     # ------------------------------------------------------------------ delegation
     def _install_delegation_authorizer(self) -> None:
@@ -108,8 +176,7 @@ class GovernanceAgent(BaseAgent):
         from .governance.delegation_guard import DelegationDenied, install_authorizer
 
         setting = self.governance_config.get("enforce_capability_registry", "audit")
-        self.delegation_audit = {"mode": "enforce" if setting is True else ("audit" if setting == "audit" else "off"),
-                                 "checked": 0, "would_deny": []}
+        self.delegation_audit = {"mode": "enforce" if setting is True else ("audit" if setting == "audit" else "off"), "checked": 0, "would_deny": []}
         if setting is not True and setting != "audit":
             install_authorizer(None)
             return
@@ -141,7 +208,7 @@ class GovernanceAgent(BaseAgent):
             default_purpose=str(gc.get("default_purpose", "agent_execution")), default_purposes=gc.get("default_purposes") or {},
             default_tenant_id=gc.get("default_tenant_id"), learning_agents=gc.get("learning_agents", ("learning",)),
             learn_modes=gc.get("learn_modes", ("train", "auto", "fine_tune", "finetune")), marking_agents=gc.get("marking_agents") or {},
-            aliases=aliases,
+            aliases=aliases, # type: ignore
         )
         install_gate(gate)
         logger.info("Governance: agent gate installed | mode=%s", gate.mode)
@@ -228,3 +295,35 @@ class GovernanceAgent(BaseAgent):
         if operation == "decision_log":
             return self.core.decision_log(int(task_data.get("limit", 50)))
         return getattr(self, operation)(**dict(task_data.get("params", {})))
+
+    def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Shutdown the agent and close the core's owned resources."""
+        logger.info("Governance Agent shutting down...")
+        del timeout  # GovernanceCore.close() has no thread/background-task timeout parameter.
+        self.core.close()
+        logger.info("Governance Agent shutdown complete.")
+
+    def __repr__(self) -> str:
+        return f"<GovernanceAgent | policy={self.core.policies.active_version()} | status={self.runtime_status()}>"
+
+    def __str__(self) -> str:
+        return f"GovernanceAgent | policy={self.core.policies.active_version()} | status={self.runtime_status()}"
+
+    def __enter__(self) -> GovernanceAgent:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.shutdown()
+        return None
+
+    def __del__(self) -> None:
+        try:
+            self.shutdown()
+        except Exception as exc:
+            logger.warning("Governance Agent shutdown failed in __del__: %s", exc)
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Pickle support: only the config is preserved, the core is re-initialised on unpickle."""
+        state = self.__dict__.copy()
+        state["core"] = None
+        return state

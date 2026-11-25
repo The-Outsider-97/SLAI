@@ -45,7 +45,7 @@ from .base.light_metric_store import LightMetricStore
 from .base.failure_taxonomy import DEFAULT_FAILURE_TAXONOMY, FailureTaxonomy
 from .base.success_taxonomy import DEFAULT_SUCCESS_TAXONOMY, SuccessTaxonomy
 from .collaborative.shared_memory import SharedMemory
-from .governance.agent_gate import gate_after, gate_before
+from .governance.agent_gate import gate_after, governed_execution
 from .governance.delegation_guard import check_delegable
 from .runtime_contracts import *
 from checkpointing.checkpoint_manager import CheckpointManager # pyright: ignore[reportMissingImports]
@@ -903,10 +903,14 @@ class BaseAgent(abc.ABC):
         ``input_data`` carries an explicit ``governance_context``, a non-permitting decision raises ``GovernanceDenied`` here.
         Marking runs after, outside the retry/recovery machinery, so a marking failure can never cause re-execution.
         """
-        if self._runtime_status.lifecycle in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
-            gate_before(self.name, input_data)
-        result = self._execute_governed(input_data)
-        return result if self._is_failure_result(result) else gate_after(self.name, input_data, result)
+        if self._runtime_status.lifecycle not in {RuntimeLifecycle.ACTIVE, RuntimeLifecycle.DEGRADED}:
+            return self._execute_governed(input_data)  # raises the lifecycle error; nothing is authorised for an inactive agent
+        # The authorisation scope stays open for the whole execution: side effects (subprocess, network, file, export) inherit
+        # it at the effect boundary instead of being evaluated again, and a revocation mid-run is seen at the next effect.
+        with governed_execution(self.name, input_data) as decision:
+            result = self._execute_governed(input_data)
+            # Marking and release conditions are enforced inside the scope: the authorisation is still live for them.
+            return result if self._is_failure_result(result) else gate_after(self.name, input_data, result, decision)
 
     def _execute_governed(self, input_data: Any) -> Any:
         """Execute with accurate outcomes and side-effect-safe retries."""
