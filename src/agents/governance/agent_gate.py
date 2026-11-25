@@ -28,15 +28,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import logging
+
 from threading import RLock
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 from .processing_context import (Confidentiality, DataClass, Decision, GovernanceDenied, Operation, ProcessingContext,
                                  ProcessingDecision)
 from .risk_classification import AISystemProfile
+from logs.logger import get_logger, PrettyPrinter # pyright: ignore[reportMissingImports]
 
-logger = logging.getLogger(__name__)
+logger = get_logger("Agent Gate")
 
 CONTEXT_KEY = "governance_context"
 _FIELDS = {f.name for f in dataclasses.fields(ProcessingContext)}
