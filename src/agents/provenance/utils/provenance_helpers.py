@@ -28,8 +28,37 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from data.utils.data_helpers import atomic_write_json as _atomic_write_json # type: ignore
-from data.utils.data_helpers import compute_file_hash # type: ignore
+try:
+    from data.utils.data_helpers import atomic_write_json as _atomic_write_json # type: ignore
+    from data.utils.data_helpers import compute_file_hash # type: ignore
+except ImportError:  # a lean runtime without the data/ stack's optional dependencies (pyarrow, pandas): same behaviour, standard library only
+    import os as _os
+    import tempfile as _tempfile
+
+    def _atomic_write_json(data: Any, dest: Any, *, indent: int = 2, encoding: str = "utf-8") -> Path:  # type: ignore[misc]
+        target = Path(dest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handle, temp = _tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp")
+        try:
+            with _os.fdopen(handle, "w", encoding=encoding) as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=indent, sort_keys=True)
+                stream.flush()
+                _os.fsync(stream.fileno())
+            _os.replace(temp, target)
+        except BaseException:
+            try:
+                _os.unlink(temp)
+            except OSError:
+                pass
+            raise
+        return target
+
+    def compute_file_hash(path: Any, algorithm: str = "sha256", *, chunk_size: int = 1 << 20) -> str:  # type: ignore[misc]
+        digest = hashlib.new(algorithm)
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(chunk_size), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 from .provenance_errors import ProvenanceStorageError, ProvenanceValidationError
 from logs.logger import PrettyPrinter, configure_logging, get_logger  # pyright: ignore[reportMissingImports]
 

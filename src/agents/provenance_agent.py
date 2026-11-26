@@ -17,18 +17,19 @@ checkpoint/custody reconstruction without introducing trust or quality scoring.
 """
 from __future__ import annotations
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from types import TracebackType
 from typing import Any, Optional, Type
 
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, Iterator
 from .base.utils.base_errors import BaseConfigurationError, BaseStateError
 from .base.utils.base_helpers import coerce_bool, coerce_int
 from .base.utils.main_config_loader import get_config_section
 from .runtime_contracts import RuntimeLifecycle
+from .provenance.provenance_audit import AuditLedger
 from .provenance.provenance_custody import ProvenanceCustody
 from .provenance.provenance_lineage import ProvenanceLineage
 from .provenance.provenance_memory import ProvenanceMemory
@@ -74,7 +75,7 @@ class ProvenanceAgent(BaseAgent):
 
         # One store instance is injected into every service so durable facts and
         # indexes share a single authority. No service is recreated per request.
-        self.provenance_store = ProvenanceStore()
+        self.provenance_store = ProvenanceStore(self.agent_config.get("store_path") or None)      # ``store_path`` lets a host application keep its lineage beside its own data
         self.provenance_memory = ProvenanceMemory(store=self.provenance_store, max_checkpoints=self.provenance_memory_max_checkpoints)
         self.provenance_lineage = ProvenanceLineage(store=self.provenance_store)
         self.provenance_custody = ProvenanceCustody(store=self.provenance_store)
@@ -570,6 +571,41 @@ class ProvenanceAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Normalized cross-agent event boundary
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Tamper-evident audit ledger (see provenance/provenance_audit.py)
+    # ------------------------------------------------------------------
+    def audit_ledger(self, path: Any, *, hmac_key: Optional[bytes] = None) -> AuditLedger:
+        """The one ``AuditLedger`` for ``path`` held by this agent (created on first use). Applications keep one ledger per project or per data set."""
+        self._ensure_enabled("audit_ledger")
+        key = str(path)
+        with self._lock:
+            ledgers = self.__dict__.setdefault("_audit_ledgers", {}) # type: ignore
+            if key not in ledgers:
+                ledgers[key] = AuditLedger(path, hmac_key=hmac_key)
+            return ledgers[key]
+
+    def record_audit_event(self, ledger: AuditLedger, *, event_id: str, kind: str, actor: Mapping[str, Any], subject: Optional[Mapping[str, Any]] = None,
+                           revision: Optional[Mapping[str, Any]] = None, causes: Optional[Iterable[str]] = None, payload: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+        """Append one event to the ledger (idempotent by ``event_id``) and mirror it into the provenance store as an entity derived from its causes, so lineage
+        queries (``get_ancestors``, ``get_lineage_graph``) answer for audit events too. The ledger is authoritative: if the store mirror fails the event is still
+        recorded and the result says ``mirrored: False`` with the reason; the ledger write failing raises."""
+        self._ensure_enabled("record_audit_event")
+        record = ledger.append(event_id=event_id, kind=kind, actor=actor, subject=subject, revision=revision, causes=list(causes or ()), payload=payload)
+        mirrored, reason = True, None
+        try:
+            self.register_artifact(f"audit:{record['event_id']}", artifact_type="audit-event", label=record["kind"], digest=record["hash"],
+                                   metadata={"seq": record["seq"], "actor": record["actor"], "revision": record["revision"]})
+            for cause in record["causes"]:
+                if self.provenance_store.get_entity(f"audit:{cause}", strict=False) is not None:
+                    self.record_derivation(f"audit:{record['event_id']}", parent_artifact_id=f"audit:{cause}", transformation=record["kind"])
+        except ProvenanceError as exc:
+            mirrored, reason = False, str(exc)[:200]
+        return {"record": record, "mirrored": mirrored, "mirror_error": reason}
+
+    def verify_audit(self, ledger: AuditLedger) -> dict[str, Any]:
+        self._ensure_enabled("verify_audit")
+        return ledger.verify()
+
     def record_event(self, event: Mapping[str, Any]) -> Any:
         """Normalize one generic provenance event into the typed subsystem API.
 
@@ -1062,6 +1098,29 @@ class ProvenanceAgent(BaseAgent):
 
     def __enter__(self) -> "ProvenanceAgent":
         return self
+
+
+class ProvinanceRecords:
+    """A simple container for provenance records, used for testing and demonstration."""
+
+    def __init__(self) -> None:
+        if not hasattr(self, "records"):
+            self.records: list[dict[str, Any]] = []
+            logger.debug("ProvinanceRecords initialized")
+        else:
+            logger.debug("ProvinanceRecords already initialized")
+
+    def add(self, record: dict[str, Any]) -> None:
+        self.records.append(record)
+
+    def clear(self) -> None:
+        self.records.clear()
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        return iter(self.records)
+
+    def __len__(self) -> int:
+        return len(self.records)
 
 
 __all__ = ["ProvenanceAgent"]
