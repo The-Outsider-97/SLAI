@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import os
 import re
+import stat
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,11 +55,51 @@ def require_trusted(package: Any, key_id: str) -> None:
         raise ValueError('SLDC signature is absent, invalid or untrusted')
 
 
+def _private_fd(path: Path, flags: int, mode: int = 0o600) -> int:
+    """Open a private regular file. POSIX checks apply to the opened inode.
+
+    Windows reparse-point checks are best effort; deployment must enforce NTFS
+    ACLs and prevent untrusted modification of the service directory.
+    """
+    if os.name == 'posix':
+        flags |= os.O_NOFOLLOW | os.O_NONBLOCK
+    else:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if not flags & os.O_CREAT:
+                raise
+        else:
+            if (not stat.S_ISREG(info.st_mode) or
+                    getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                raise PermissionError('Service file must be a regular, non-reparse file')
+    fd = os.open(path, flags | getattr(os, 'O_BINARY', 0), mode)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise PermissionError('Service file must be regular')
+        if os.name == 'posix' and (info.st_uid != os.geteuid() or
+                                    info.st_mode & 0o077 or info.st_nlink != 1):
+            raise PermissionError('Service file must be owner-only and not hard-linked')
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_private(path: Path, limit: int) -> bytes:
+    with os.fdopen(_private_fd(path, os.O_RDONLY), 'rb') as handle:
+        size = os.fstat(handle.fileno()).st_size
+        if size > limit:
+            raise ValueError('Service file exceeds size limit')
+        data = handle.read(size + 1)
+        if len(data) != size:
+            raise ValueError('Service file changed during read')
+        return data
+
+
 def read_encrypted(path: Path, **credentials: Any) -> Any:
-    with path.open('rb') as handle:
-        data = handle.read(sldc.MAX_PACKAGE_BYTES + 1)
-    if len(data) > sldc.MAX_PACKAGE_BYTES:
-        raise ValueError('SLDC exceeds size limit')
+    data = _read_private(path, sldc.MAX_PACKAGE_BYTES)
     if sldc.inspect_package(data)['container'] != 'encrypted':
         raise ValueError('Expected encrypted SLDC envelope')
     return sldc.loads_package(data, **credentials)
@@ -136,14 +177,14 @@ class KeyStore:
             raise ValueError('An independent root fingerprint is required')
         if not self.directory.is_dir():
             raise ValueError('Service directory does not exist')
-        if os.name == 'posix' and self.directory.stat().st_mode & 0o077:
-            raise PermissionError('Service directory must be OS-private')
+        if os.name == 'posix':
+            info = self.directory.stat()
+            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise PermissionError('Service directory must be owned by the service and OS-private')
         path = self.directory / 'service.env'
-        if os.name == 'posix' and path.stat().st_mode & 0o077:
-            raise PermissionError('Service credentials must be OS-private')
         expected = {'SLAI_COMM_ROOT_SEED', 'SLAI_COMM_STATE_PRIVATE', 'SLAI_COMM_STATE_PUBLIC'}
         values = {}
-        for line in path.read_text(encoding='ascii').splitlines():
+        for line in _read_private(path, 4096).decode('ascii').splitlines():
             key, sep, value = line.partition('=')
             if not sep or key not in expected or key in values:
                 raise ValueError('Invalid service credentials')
@@ -181,7 +222,7 @@ class KeyStore:
 
     @contextmanager
     def locked(self) -> Iterator[None]:
-        fd = os.open(self.directory / '.lock', os.O_CREAT | os.O_RDWR, 0o600)
+        fd = _private_fd(self.directory / '.lock', os.O_CREAT | os.O_RDWR)
         with os.fdopen(fd, 'r+b', buffering=0) as handle:
             if os.name == 'nt':
                 import msvcrt
@@ -265,8 +306,8 @@ class KeyStore:
                         _token_hash(decode_key(value['token'])), account['token_hash'])):
                 raise ValueError('Account credential mismatch')
             return validate_scope(account['scope'])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise PermissionError('Communication authentication failed') from exc
+        except (OSError, ValueError, KeyError, TypeError):
+            raise PermissionError('Communication authentication failed') from None
 
     def rotate(self, state: dict, *, revoke_current: bool = False) -> str:
         previous = state['epochs'][state['current_epoch']]
