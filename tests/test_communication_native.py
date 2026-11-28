@@ -1,4 +1,5 @@
 """Native SLDC release regressions; no cryptographic test doubles."""
+import multiprocessing
 import os
 import tempfile
 import unittest
@@ -9,6 +10,21 @@ from src.communication.communication_security import _read_private, read_encrypt
 from src.communication.communication_storage import CommunicationJournal
 from src.communication.communication_types import new_message
 from src.utils import sldc
+
+
+def _append_in_child(directory, pin, record, start, results):
+    """Spawn-safe worker: independent process and native SLDC journal."""
+    try:
+        journal = CommunicationJournal(Path(directory), pin)
+        if not start.wait(60):
+            raise TimeoutError('Writer start timed out')
+        journal.append(record)
+    except FileExistsError:
+        results.put('duplicate')
+    except Exception as exc:
+        results.put(type(exc).__name__)
+    else:
+        results.put('committed')
 
 
 class NativeCommunicationTests(unittest.TestCase):
@@ -113,6 +129,68 @@ class NativeCommunicationTests(unittest.TestCase):
         os.mkfifo(fifo, 0o600)
         with self.assertRaises(PermissionError):
             _read_private(fifo, 16)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX symlink and mode regression')
+    def test_managed_directory_substitution_rejected(self):
+        alias = self.directory.parent / 'alias'
+        alias.symlink_to(self.directory, target_is_directory=True)
+        with self.assertRaises(PermissionError):
+            CommunicationJournal(alias, self.pin)
+
+        accounts = self.directory / 'accounts'
+        moved = self.directory / 'accounts-old'
+        accounts.rename(moved)
+        accounts.symlink_to(moved, target_is_directory=True)
+        with self.assertRaises(PermissionError):
+            self.journal.view('reader', self.password)
+        accounts.unlink()
+        moved.rename(accounts)
+
+        record = self.record()
+        path = self.journal.append(record)
+        epoch_dir = path.parent
+        moved_epoch = epoch_dir.with_name('substituted')
+        epoch_dir.rename(moved_epoch)
+        epoch_dir.symlink_to(moved_epoch, target_is_directory=True)
+        with self.assertRaises(PermissionError):
+            self.journal.view('reader', self.password)
+        with self.assertRaises(PermissionError):
+            self.journal.append(self.record())
+        epoch_dir.unlink()
+        moved_epoch.rename(epoch_dir)
+        epoch_dir.chmod(0o755)
+        with self.assertRaises(PermissionError):
+            self.journal.view('reader', self.password)
+        epoch_dir.chmod(0o700)
+        self.assertEqual(self.journal.view('reader', self.password)['records'], [record])
+
+    def test_two_processes_cannot_commit_same_message(self):
+        ctx = multiprocessing.get_context('spawn')
+        start = ctx.Event()
+        results = ctx.Queue()
+        record = self.record()
+        writers = [ctx.Process(target=_append_in_child,
+                               args=(str(self.directory), self.pin, record, start, results))
+                   for _ in range(2)]
+        started = []
+        try:
+            for writer in writers:
+                writer.start()
+                started.append(writer)
+            start.set()
+            outcomes = [results.get(timeout=90) for _ in writers]
+            self.assertCountEqual(outcomes, ['committed', 'duplicate'])
+            for writer in started:
+                writer.join(15)
+                self.assertEqual(writer.exitcode, 0)
+            self.assertEqual(self.journal.view('reader', self.password)['records'], [record])
+        finally:
+            for writer in started:
+                if writer.is_alive():
+                    writer.terminate()
+                writer.join(15)
+            results.close()
+            results.join_thread()
 
 
 if __name__ == '__main__':

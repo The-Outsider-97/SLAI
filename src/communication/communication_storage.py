@@ -6,7 +6,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from src.utils import sldc
-from .communication_security import (KeyStore, decode_key, read_encrypted, require_trusted,
+from .communication_security import (KeyStore, _private_directory, decode_key, read_encrypted, require_trusted,
                                      scope_allows, username, utc, validate_scope, write_signed)
 from .communication_types import EXTENSION, KINDS, identifier, message_id, validate_message
 
@@ -31,9 +31,22 @@ class CommunicationJournal:
     def initialize(cls, directory: Path) -> str:
         return KeyStore.initialize(directory)
 
-    def _folder(self, area: str, epoch: str) -> Path:
-        path = self.directory / area / epoch
-        path.mkdir(mode=0o700, exist_ok=True)
+    def _folder(self, area: str, epoch: str, *, create: bool = True) -> Path:
+        if area not in ('journal', 'audit'):
+            raise ValueError('Invalid communication storage area')
+        message_id(epoch)
+        parent = self.directory / area
+        _private_directory(parent)
+        path = parent / epoch
+        if create:
+            path.mkdir(mode=0o700, exist_ok=True)
+        try:
+            _private_directory(path)
+        except FileNotFoundError:
+            if create:
+                raise
+            # Epoch directories are lazily created. Missing-history detection
+            # requires a separate integrity anchor; do not infer completeness.
         return path
 
     def _audit(self, state: dict, actor: str, action: str, status: str, *,
@@ -131,7 +144,7 @@ class CommunicationJournal:
         record = validate_message(record)
         with self.store.locked():
             state = self.store.load(); epoch = state['current_epoch']; entry = state['epochs'][epoch]
-            if any((self.directory / 'journal' / old / f"{record['id']}.sldc").exists()
+            if any((self._folder('journal', old, create=False) / f"{record['id']}.sldc").exists()
                    for old in state['epochs']):
                 raise FileExistsError('Duplicate communication ID')
             signer = sldc.Ed25519Signer.from_seed(decode_key(entry['signing_seed']))
@@ -194,7 +207,7 @@ class CommunicationJournal:
                 records = []; cursor = None; more = False; scope_filtered = 0; policy_filtered = 0
                 for epoch, entry in sorted(state['epochs'].items()):
                     if entry['status'] == 'revoked': continue
-                    for path in sorted((self.directory / 'journal' / epoch).glob('*.sldc')):
+                    for path in sorted(self._folder('journal', epoch, create=False).glob('*.sldc')):
                         position = f'{epoch}/{path.stem}'
                         if after is not None and position <= after: continue
                         record = self._read_record(path, epoch, entry)
@@ -237,7 +250,7 @@ class CommunicationJournal:
             state = self.store.load(); events = []; cursor = None; more = False
             try:
                 for epoch, entry in sorted(state['epochs'].items()):
-                    for path in sorted((self.directory / 'audit' / epoch).glob('*.sldc')):
+                    for path in sorted(self._folder('audit', epoch, create=False).glob('*.sldc')):
                         position = f'{epoch}/{path.stem}'
                         if after is not None and position <= after: continue
                         if len(events) == limit: more = True; break

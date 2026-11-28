@@ -55,6 +55,21 @@ def require_trusted(package: Any, key_id: str) -> None:
         raise ValueError('SLDC signature is absent, invalid or untrusted')
 
 
+def _private_directory(path: Path) -> None:
+    """Check a managed directory without following its final component.
+
+    This is defense in depth inside an OS-isolated service root, not a
+    substitute for protecting its ancestors or verifying Windows ACLs.
+    """
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or (
+            getattr(info, 'st_file_attributes', 0) &
+            getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
+        raise PermissionError('Service directory must not be a symlink or reparse point')
+    if os.name == 'posix' and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+        raise PermissionError('Service directory must be owned by the service and OS-private')
+
+
 def _private_fd(path: Path, flags: int, mode: int = 0o600) -> int:
     """Open a private regular file. POSIX checks apply to the opened inode.
 
@@ -172,15 +187,10 @@ class KeyStore:
     Root credentials remain in a protected machine file; deployment must isolate OS identities.
     """
     def __init__(self, directory: Path, trusted_root: str):
-        self.directory = Path(directory).resolve()
+        self.directory = Path(directory).absolute()
         if not isinstance(trusted_root, str) or not _HEX.fullmatch(trusted_root):
             raise ValueError('An independent root fingerprint is required')
-        if not self.directory.is_dir():
-            raise ValueError('Service directory does not exist')
-        if os.name == 'posix':
-            info = self.directory.stat()
-            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
-                raise PermissionError('Service directory must be owned by the service and OS-private')
+        self._validate_directories()
         path = self.directory / 'service.env'
         expected = {'SLAI_COMM_ROOT_SEED', 'SLAI_COMM_STATE_PRIVATE', 'SLAI_COMM_STATE_PUBLIC'}
         values = {}
@@ -198,9 +208,14 @@ class KeyStore:
         self._state_private = values['SLAI_COMM_STATE_PRIVATE']
         self._state_recipient = sldc.x25519_recipient(values['SLAI_COMM_STATE_PUBLIC'])
 
+    def _validate_directories(self) -> None:
+        _private_directory(self.directory)
+        for name in ('accounts', 'journal', 'audit'):
+            _private_directory(self.directory / name)
+
     @classmethod
     def initialize(cls, directory: Path) -> str:
-        directory = Path(directory).resolve()
+        directory = Path(directory).absolute()
         directory.mkdir(mode=0o700, parents=False, exist_ok=False)
         seed = os.urandom(32)
         private, public = sldc.x25519_generate()
@@ -222,6 +237,7 @@ class KeyStore:
 
     @contextmanager
     def locked(self) -> Iterator[None]:
+        self._validate_directories()
         fd = _private_fd(self.directory / '.lock', os.O_CREAT | os.O_RDWR)
         with os.fdopen(fd, 'r+b', buffering=0) as handle:
             if os.name == 'nt':
@@ -230,6 +246,7 @@ class KeyStore:
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
                 try:
+                    self._validate_directories()
                     yield
                 finally:
                     handle.seek(0)
@@ -238,6 +255,7 @@ class KeyStore:
                 import fcntl
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 try:
+                    self._validate_directories()
                     yield
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
