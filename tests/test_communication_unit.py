@@ -24,10 +24,19 @@ class CommunicationUnitTests(unittest.TestCase):
         self.journal.append.side_effect = lambda record: order.append(('append', record))
         self.deliver.side_effect = lambda recipient, record: order.append(('deliver', record))
         message_id = self.send()
-        self.assertEqual([x[0] for x in order], ['authorize', 'append', 'deliver'])
+        self.assertEqual([x[0] for x in order], ['authorize', 'append', 'authorize', 'deliver'])
         self.assertEqual(order[0][1], order[1][1])
         self.assertEqual(order[1][1], order[2][1])
+        self.assertEqual(order[2][1], order[3][1])
         self.assertEqual(order[0][1]['id'], message_id)
+
+    def test_revocation_between_append_and_delivery(self):
+        self.authorize.side_effect = [True, False]
+        with self.assertRaises(DeliveryError) as error:
+            self.send()
+        self.assertIsInstance(error.exception.__cause__, PermissionError)
+        self.assertEqual(error.exception.message_id, self.journal.append.call_args.args[0]['id'])
+        self.deliver.assert_not_called()
 
     def test_policy_denial_and_sanitizer_identity_mutation(self):
         self.authorize.return_value = False

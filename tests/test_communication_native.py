@@ -85,6 +85,79 @@ class NativeCommunicationTests(unittest.TestCase):
         events = self.journal.read_audit(limit=100)['events']
         self.assertFalse(any(e['action'] == 'view' and e['status'] == 'allowed' for e in events))
 
+    def test_explicit_filters_only_narrow_authorized_records(self):
+        record = self.record(task_id='task', correlation_id='correlation')
+        self.journal.append(record)
+        self.journal.append(self.record(task_id='other'))
+        view = lambda **filters: self.journal.view('reader', self.password, **filters)['records']
+        self.assertEqual(view(sender='sender', recipient='recipient', task='task',
+                              correlation='correlation', classification='internal',
+                              record_id=record['id']), [record])
+        self.assertEqual(view(sender='recipient'), [])
+        with self.assertRaises(PermissionError):
+            view(classification='restricted')
+
+    def test_admin_actor_bound_to_os(self):
+        from src.communication.communication_security import operator_principal
+        with self.assertRaises(PermissionError):
+            CommunicationJournal(self.directory, self.pin, operator_id='impersonated')
+        self.journal.rotate_keys()
+        events = self.journal.read_audit()['events']
+        self.assertEqual({e['actor'] for e in events if e['action'] == 'rotate_keys'},
+                         {operator_principal()})
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX directory sync')
+    def test_directory_sync_error_prevents_disclosure(self):
+        import stat
+        real_sync = os.fsync
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError('directory sync failed')
+            return real_sync(fd)
+        self.journal.append(self.record())
+        with patch('os.fsync', side_effect=fail_directory), self.assertRaises(OSError):
+            self.journal.view('reader', self.password)
+
+    @unittest.skipUnless(hasattr(__import__('socket'), 'SO_PEERCRED') and os.name == 'posix',
+                         'Linux Unix peer credentials')
+    def test_local_reader_policy_and_restart_backoff(self):
+        import json
+        import socket
+        from threading import Thread
+        from src.communication.communication_service import CommunicationReaderService
+
+        def request(policy, body, accounts=None):
+            journal = CommunicationJournal(self.directory, self.pin)
+            service = CommunicationReaderService(journal, {os.geteuid(): 'reader'} if accounts is None
+                                                 else accounts, policy)
+            client, server = socket.socketpair()
+            thread = Thread(target=service.serve_connection, args=(server,))
+            thread.start()
+            try:
+                with client, client.makefile('rb') as response:
+                    client.settimeout(10)
+                    client.sendall(json.dumps(body).encode() + bytes([10]))
+                    return json.loads(response.readline())
+            finally:
+                thread.join(10)
+                self.assertFalse(thread.is_alive())
+
+        record = self.record()
+        self.journal.append(record)
+        body = {'password': self.password}
+        allow = lambda user, message: user == 'reader'
+        self.assertEqual(request(allow, body)['records'], [record])
+        self.assertEqual(request(lambda user, message: False, body)['records'], [])
+        self.assertEqual(request(allow, body, accounts={}), {'ok': False})
+        self.assertEqual(request(allow, dict(body, user='admin')), {'ok': False})
+        with patch('src.communication.communication_security.time.time', return_value=2000000000):
+            self.assertEqual(request(allow, {'password': 'wrong-test-password'}), {'ok': False})
+            self.assertEqual(request(allow, body), {'ok': False})
+        with patch('src.communication.communication_security.time.time', return_value=2000000002):
+            self.assertEqual(request(allow, body)['records'], [record])
+        self.journal.revoke_user('reader')
+        self.assertEqual(request(allow, body), {'ok': False})
+
     def test_wrong_root_and_corrupt_archive(self):
         record = self.record()
         path = self.journal.append(record)

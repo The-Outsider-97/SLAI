@@ -16,6 +16,7 @@ src/communication/
   communication_manager.py    # runtime policy, sanitization and delivery callbacks
   communication_security.py   # account scopes, credentials, epochs, state lock
   communication_storage.py    # signed SLDC journal and trusted read/audit facade
+  communication_service.py    # host-provided Linux Unix socket, read-only protocol
   README.md                   # this document
 ```
 
@@ -25,21 +26,19 @@ No new runtime dependencies, custom cryptographic algorithms, parallel event bus
 
 **Only a trusted service/operator OS identity may read or write the service directory or obtain the `CommunicationJournal`/`KeyStore` objects.** Human users authenticate with username/password via a trusted adapter that exposes only `view()`. Account vaults contain an authentication token, not archive decryption keys. The token is checked against the protected state; no plaintext password is stored. The local CLI is for trusted operators and testing: running it directly as an untrusted OS user with access to `service.env` would bypass the security boundary. Do not distribute that file, the state file, or private service objects to readers. This package does not include an authenticated network server or GUI. A production adapter must authenticate requests, rate-limit, protect transport, avoid password/output logging and bind the actual SLAI identity and Governance policy. In-process Python code is not an isolation boundary.
 
-Admin methods are intentionally service-only, not granted to ordinary human reading accounts. The current CLI records the actor as `local-operator`. A trusted composition root can bind a verified named operator using `CommunicationJournal(..., operator_id=verified_identity)`; this parameter is not an authentication mechanism and must never be supplied by an untrusted client. Deployment must bind named administrator identities to the audited management interface or use OS accountability. No role is inferred from usernames (e.g. `board` or `auditor`).
+Admin methods are intentionally service-only, not granted to ordinary human reading accounts. The CLI records the effective POSIX UID or Windows domain-qualified account from the OS. The optional `operator_id` argument must equal that identity. Hosts that supplied an application-level name must omit it or supply the matching OS principal. A shared service identity cannot identify the individual administrator behind a request; step-up and approval integration remain outstanding. No role is inferred from usernames (e.g. `board` or `auditor`).
 
 Use a directory outside the Git checkout with restrictive NTFS ACLs (Windows) or owner-only mode (POSIX). POSIX permissions are checked for directory and service credential file; Windows ACLs are **not verified by the code**. Set and test them under the actual OS identities before use. Protect backups, terminal output, crash dumps and process environment. The root fingerprint is public but must be pinned independently. Root/state keys reside in OS-protected `service.env`; they are not human passwords. They need a secure OS key store or equivalent hardened service deployment for production.
 
 ## Installation and initial configuration (PowerShell)
 
-Extract the full package. Inspect the current repository branch/commit and compare with the baseline above. Activate the existing virtual environment, then:
+From a checkout of the target branch, use its existing Python environment with the repository cryptography dependency installed. Run the native suites before initializing service storage.
 
 ```powershell
-& 'C:\Downloads\SLAI_communication_enhanced\install_communication.ps1' -SLAIPath 'G:\GAIA\AI\SLAI'
-# If you already installed the previous source package, explicitly opt in:
-& 'C:\Downloads\SLAI_communication_enhanced\install_communication.ps1' -SLAIPath 'G:\GAIA\AI\SLAI' -Upgrade
+Set-Location 'G:\GAIA\AI\SLAI'
+python -m unittest discover -s tests -p 'test_communication*.py' -v
+python -m unittest discover -s tests -p 'test_sldc.py' -v
 ```
-
-The installer backs up the named source files/tests on `-Upgrade`, copies only packaged files, and runs isolated and native tests. It does not change repository branches, commit/push, migrate or delete runtime data. If a test fails, stop and inspect the source backup; it does not automatically roll back. PowerShell itself was not executable in the packaging environment.
 
 For a **new** service directory (parent must exist), use the same OS identity for setup and local tests:
 
@@ -82,6 +81,10 @@ python -m src.communication --service-dir "$Service" set-scope --user provenance
 # View with own credentials, subject to scope
 python -m src.communication --service-dir "$Service" view --user provenance_auditor --agent provenance_agent --limit 50
 ```
+
+The operator CLI accepts exact filters `--sender`, `--recipient`, `--task`, `--correlation`, `--classification` and `--record-id`. Filters intersect with current scope and the existing agent, kind and session filters. Authorization runs again after journal commit immediately before delivery. A policy change at that point raises `DeliveryError` with the archived message ID and suppresses dispatch. Host policies must support repeated checks.
+
+On POSIX, Communication propagates directory sync errors for journal, audit, state and credential writes. A sync failure after publication leaves the outcome uncertain. Reconcile the existing record or administrative intent before retrying. Windows power-loss durability and filesystem behavior require deployment testing.
 
 A password is requested interactively. `view` returns up to 1000 records per request (default 100). The `next_cursor` is a position, not a credential, and is rechecked against current permissions. Pass it to `--after` for the next page. Ordering is lexicographic by epoch and message UUID, **not chronological**. Pages are not a stable snapshot; concurrent additions before the cursor may be missed. Human reads omit revoked epochs, do not expose unauthorized counts, and never return audit/state/private credentials. The caller must not provide its own policy callback or be permitted to invoke arbitrary service methods.
 
@@ -140,7 +143,9 @@ message_id = client.send(
 
 `AgentCommunication` validates, sanitizes, authorizes, durably records, then invokes delivery. A `DeliveryError` means recorded but delivery failed or is uncertain; receiver acknowledgments and idempotent retry are host responsibilities. Use references for large/sensitive assets. Do not send raw credentials, hidden reasoning, or decrypted restricted payloads into uncontrolled SharedMemory broadcasts. Native Governance gate and identity APIs must be integrated and tested against the latest branch, not blindly mapped to these illustrative callbacks. Avoid invoking reentrant storage calls from policy callbacks while the journal lock is held.
 
-Human service adapter (illustrative, trusted process only): `journal.view(username, password, authorize_read=verified_governance_read_adapter, limit=100)`. The scope is always checked. The broker must never accept client-supplied policy, keys, paths, or arbitrary method names. No network service is provided; implement or connect to a real SLAI authenticated access surface before allowing untrusted clients.
+Linux service hosts can instantiate `CommunicationReaderService(journal, uid_to_account, authorize_read)` and pass an accepted stream to `serve_connection(connection)`. The host owns admission limits, the protected socket directory, worker pool, socket ACLs, authoritative policy and service identity. No listener starts on import. Each request is one UTF-8 JSON object ending in a newline, at most 8192 bytes, with `password` and optional query fields from `view`. The page size is at most 25. The service resolves the account from kernel peer credentials and a one-to-one UID mapping. It ignores environment usernames and rejects client-supplied account names, callbacks, paths and administrative actions. Every accepted query reauthenticates under the state lock. Scope and the host's mandatory per-record policy apply before disclosure. Successful replies carry `ok`, `records` and `next_cursor`. All rejected requests return only `{"ok":false}`. The service never logs the password. Hosts must restrict access to the socket, disable credential capture and avoid sharing reader UIDs.
+
+Failed passwords for mapped local readers trigger a persisted delay of 1–64 seconds. Attempts during the delay cannot extend it. State is shared by cooperating processes with the same journal and clock. A successful authentication clears the throttle. Direct operator calls are outside this broker. Deployment-wide abuse detection, failover across independent hosts, transport on Windows and authenticated export are still open.
 
 ## Upgrade from the previous package and legacy JSON
 
@@ -161,7 +166,7 @@ Remaining gates: native SLDC and Windows lock/ACL verification, actual Governanc
 
 ## Incremental filesystem hardening and verification
 
-The service now checks ownership, owner-only permissions, regular-file type and single-link status on opened POSIX service files, including the lock, account vaults, state and journals. Final-component symlinks are rejected at open and FIFOs do not block the reader. Reads are bounded by the opened file size and reject a size change. On Windows, final-component reparse checks are best effort and do not verify NTFS ACLs or prevent all path races. Parent-directory path traversal, trusted service deployment, credential storage, independent anchors and full OS-identity tests remain release blockers. Authentication errors suppress the underlying exception chain; timing protection and distributed rate limiting remain pending.
+The service now checks ownership, owner-only permissions, regular-file type and single-link status on opened POSIX service files, including the lock, account vaults, state and journals. Final-component symlinks are rejected at open and FIFOs do not block the reader. Reads are bounded by the opened file size and reject a size change. On Windows, final-component reparse checks are best effort and do not verify NTFS ACLs or prevent all path races. Parent-directory path traversal, trusted service deployment, credential storage, independent anchors and full OS-identity tests remain release blockers. Authentication errors suppress the underlying exception chain; cross-host throttling and timing protection remain pending.
 
 The repository now includes isolated facade regressions and native SLDC tests at the two documented test paths. Native execution and full repository regression verification remain mandatory; adding tests is not evidence that they passed. No production data or keys were migrated or rotated by this change.
 
@@ -171,3 +176,25 @@ The repository now includes isolated facade regressions and native SLDC tests at
 The service rejects a symlink/reparse point at the service root or any managed accounts, journal, audit or epoch directory. On POSIX these directories must also be owned by the effective service user and have no group/other permissions. Managed root and area checks run before and after acquiring the service lock; epoch checks run before journal/audit traversal and writes. These checks do not defend against an attacker able to replace ancestor directories or race the trusted service identity; deploy with a protected parent and an isolated service user. Missing lazy epoch directories still cannot be distinguished from deletion without an independent anchor. Windows reparse checks are not NTFS ACL verification.
 
 The native suite additionally covers directory substitution and a spawn-based two-process duplicate-message race against the actual SLDC engine. These tests are release evidence only once executed successfully. Full native, multi-process stress, Windows ACL, external anchor, governance, service and other architectural gates remain open.
+
+
+## Release evidence for the update based on 4a3cd33
+
+| Requirement | Evidence and remaining gate |
+| --- | --- |
+| P0.1 native reliability | Native archive rotation, revocation, duplicate-process race, failed audit and POSIX directory-sync tests. Physical power-cut recovery and Windows results outstanding. |
+| P0.2 runtime policy | Exact record checked before append and immediately before dispatch. Host identity, trusted classification, Privacy and effects integration across runtime paths outstanding. |
+| P0.3 human access | Linux socket-pair integration covers successful read, peer mapping, policy denial, malformed operation, backoff and revocation. Host deployment, export and Windows broker outstanding. |
+| P0.4 OS isolation | Private POSIX inode and directory tests pass. Separate-user deployment, NTFS DACL verification, backup and secret-store provisioning outstanding. |
+| P0.5 migration | Current ProvenanceStore uses its JSON adapter. No approved legacy cutover, signed migration manifest or rollback round trip. |
+| P1.1 root/state keys | Operational epochs tested. Independent root succession and recoverable state-key migration outstanding. |
+| P1.2 audit continuity | Signed events and durable append tested. No independent witness for deletion, truncation or state rollback. |
+| P1.3 administrators | Local audit binds to the effective OS principal. Named human delegation behind shared service accounts, step-up and dual control outstanding. |
+| P1.4 authentication | Durable bounded backoff per kernel-bound local reader. Cross-host protection, audit growth under abuse and operational recovery outstanding. |
+| P1.5 retention | Deployment policy, holds, erasure across backups and restore reconciliation outstanding. |
+| P1.6 agents and apps | BaseAgent.broadcast writes directly to Shared Memory. AgentFactory, Orchestrator, dynamic subagents and CADCon lack verified end-to-end Communication integration. |
+| P2.1 search | Exact filters and four-dimensional scope tested. Chronological snapshot pagination, date ranges and rebuildable protected index outstanding. |
+| P2.2 performance | See benchmarks/communication for both raw samples and reproduction script. Single Linux worker, 25 records, 25 reads of 10. Median append 2.38 to 2.24 ms and read 332.94 to 330.23 ms. No performance conclusion from one paired run. Sustained concurrency and resource profiling outstanding. |
+| P2.3 graphical inspection | No integrated graphical application verified. |
+
+Local verification used Python 3.12.14 and cryptography 50.0.0. All 17 Communication and 148 SLDC engine tests passed. No runtime dependency was added. To repeat the measurement from the repository root, set PYTHONPATH to the checkout under test and execute `python benchmarks/communication/bench_journal.py --records 25`. Baseline branch discovery found 18 heads and no advertised tags. This update targets the explicitly requested branch.

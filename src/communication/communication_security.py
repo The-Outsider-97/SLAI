@@ -11,6 +11,7 @@ import hmac
 import os
 import re
 import stat
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,28 @@ def require_trusted(package: Any, key_id: str) -> None:
     results = sldc.verify_package(package, trusted_keys=[key_id])
     if len(results) != 1 or results[0]['state'] != 'valid_trusted':
         raise ValueError('SLDC signature is absent, invalid or untrusted')
+
+
+def operator_principal() -> str:
+    """Resolve the effective OS identity without consulting environment usernames."""
+    if os.name == 'posix':
+        return f'uid:{os.geteuid()}'
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+
+        get_name = ctypes.WinDLL('secur32', use_last_error=True).GetUserNameExW
+        get_name.argtypes = (wintypes.INT, wintypes.LPWSTR, ctypes.POINTER(wintypes.ULONG))
+        get_name.restype = ctypes.c_ubyte
+        size = wintypes.ULONG(0)
+        get_name(2, None, ctypes.byref(size))  # NameSamCompatible (domain and user)
+        if not 1 <= size.value <= 32768:
+            raise PermissionError('Windows operator identity unavailable')
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not get_name(2, buffer, ctypes.byref(size)) or not buffer.value:
+            raise PermissionError('Windows operator identity unavailable')
+        return 'windows:' + buffer.value
+    raise PermissionError('Operator identity unavailable')
 
 
 def _private_directory(path: Path) -> None:
@@ -120,11 +143,23 @@ def read_encrypted(path: Path, **credentials: Any) -> Any:
     return sldc.loads_package(data, **credentials)
 
 
+def sync_directory(path: Path) -> None:
+    """Propagate POSIX directory durability errors to the protected operation."""
+    if os.name == 'posix':
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 def write_signed(path: Path, title: str, extension: str, value: dict, signer: Any,
                  recipient: Any, *, overwrite: bool = False) -> Path:
     package = sldc.new_package(title, extensions={extension: value})
     package = sldc.sign_package(package, signer, purpose='authorship')
-    return sldc.write_package(path, package, recipients=[recipient], overwrite=overwrite)
+    result = sldc.write_package(path, package, recipients=[recipient], overwrite=overwrite)
+    sync_directory(path.parent)
+    return result
 
 
 def validate_scope(scope: dict) -> dict:
@@ -233,6 +268,8 @@ class KeyStore:
         epoch, entry = _new_epoch()
         store.save(dict(schema='slai.communication-state.v2', revision=0,
                         current_epoch=epoch, epochs={epoch: entry}, accounts={}), initial=True)
+        sync_directory(directory)
+        sync_directory(directory.parent)
         return pin
 
     @contextmanager
@@ -326,6 +363,29 @@ class KeyStore:
             return validate_scope(account['scope'])
         except (OSError, ValueError, KeyError, TypeError):
             raise PermissionError('Communication authentication failed') from None
+
+    def authenticate_local_reader(self, state: dict, user: str, password: str) -> dict:
+        """Called under the state lock only after the broker has bound UID to account."""
+        account = state['accounts'].get(user)
+        if not account or account['status'] != 'active':
+            raise PermissionError('Communication authentication failed')
+        throttle = account.get('local_reader_throttle', {})
+        if time.time() < throttle.get('retry_at', 0):
+            raise PermissionError('Communication authentication failed')
+        try:
+            scope = self.authenticate(state, user, password)
+        except PermissionError:
+            failures = min(throttle.get('failures', 0) + 1, 7)
+            account['local_reader_throttle'] = dict(failures=failures,
+                                                    retry_at=time.time() + 2 ** (failures - 1))
+            state['revision'] += 1
+            self.save(state)
+            raise
+        if throttle:
+            del account['local_reader_throttle']
+            state['revision'] += 1
+            self.save(state)
+        return scope
 
     def rotate(self, state: dict, *, revoke_current: bool = False) -> str:
         previous = state['epochs'][state['current_epoch']]

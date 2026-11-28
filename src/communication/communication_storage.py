@@ -7,8 +7,8 @@ from uuid import uuid4
 
 from src.utils import sldc
 from .communication_security import (KeyStore, _private_directory, decode_key, read_encrypted, require_trusted,
-                                     scope_allows, username, utc, validate_scope, write_signed)
-from .communication_types import EXTENSION, KINDS, identifier, message_id, validate_message
+                                     operator_principal, scope_allows, sync_directory, username, utc, validate_scope, write_signed)
+from .communication_types import CLASSIFICATIONS, EXTENSION, KINDS, identifier, message_id, validate_message
 
 AUDIT_EXTENSION = 'slai.communication-audit'
 EPOCH_EXTENSION = 'slai.communication-epoch'
@@ -21,9 +21,10 @@ class CommunicationJournal:
     All operations share the KeyStore lock. An authenticated service adapter must expose only
     view() to human clients; administrative methods require trusted OS/operator identity.
     """
-    def __init__(self, directory: Path, trusted_root: str, *, operator_id: str = 'local-operator'):
-        # Trusted composition root may bind a verified named operator; never accept this from a human read request.
-        self._operator_id = identifier(operator_id)
+    def __init__(self, directory: Path, trusted_root: str, *, operator_id: str | None = None):
+        self._operator_id = operator_principal()
+        if operator_id is not None and operator_id != self._operator_id:
+            raise PermissionError('Operator must match the effective OS identity')
         self.store = KeyStore(directory, trusted_root)
         self.directory = self.store.directory
 
@@ -40,6 +41,7 @@ class CommunicationJournal:
         path = parent / epoch
         if create:
             path.mkdir(mode=0o700, exist_ok=True)
+            sync_directory(parent)
         try:
             _private_directory(path)
         except FileNotFoundError:
@@ -48,6 +50,14 @@ class CommunicationJournal:
             # Epoch directories are lazily created. Missing-history detection
             # requires a separate integrity anchor; do not infer completeness.
         return path
+
+    def _packages(self, area: str, epoch: str) -> list[Path]:
+        folder = self._folder(area, epoch, create=False)
+        try:
+            return sorted(path for path in folder.iterdir() if path.suffix == '.sldc')
+        except FileNotFoundError:
+            # Epoch folders are created on first write under the service lock.
+            return []
 
     def _audit(self, state: dict, actor: str, action: str, status: str, *,
                reason: str = '', details: dict | None = None, operation_id: str | None = None) -> None:
@@ -151,9 +161,11 @@ class CommunicationJournal:
             package = sldc.new_package('SLAI communication record', extensions={EXTENSION: record,
                                         EPOCH_EXTENSION: {'epoch': epoch}})
             package = sldc.sign_package(package, signer, purpose='authorship')
-            return sldc.write_package(self._folder('journal', epoch) / f"{record['id']}.sldc", package,
+            path = sldc.write_package(self._folder('journal', epoch) / f"{record['id']}.sldc", package,
                                       recipients=[sldc.x25519_recipient(decode_key(entry['public_key']))],
                                       overwrite=False)
+            sync_directory(path.parent)
+            return path
 
     def _read_record(self, path: Path, epoch: str, entry: dict) -> dict:
         message_id(path.stem)
@@ -169,7 +181,11 @@ class CommunicationJournal:
 
     def view(self, user: str, password: str, *, agent: str | None = None,
              session: str | None = None, kind: str | None = None,
+             sender: str | None = None, recipient: str | None = None,
+             task: str | None = None, correlation: str | None = None,
+             classification: str | None = None, record_id: str | None = None,
              limit: int = 100, after: str | None = None,
+             local_reader: bool = False,
              authorize_read: Callable[[str, dict], bool] | None = None) -> dict:
         """Authenticate on every request; scope AND query AND optional governance policy.
 
@@ -184,12 +200,22 @@ class CommunicationJournal:
             except ValueError:
                 actor = '<invalid>'
             try:
-                scope = self.store.authenticate(state, user, password)
+                authenticate = self.store.authenticate_local_reader if local_reader else self.store.authenticate
+                scope = authenticate(state, user, password)
             except PermissionError:
                 self._audit(state, actor, 'view', 'denied', reason='authentication_failed', operation_id=op)
                 raise
             self._audit(state, actor, 'view', 'authenticated', operation_id=op)
             try:
+                exact = dict(sender=sender, recipient=recipient, task_id=task,
+                             correlation_id=correlation, classification=classification, id=record_id)
+                filters = {key: value for key, value in exact.items() if value is not None}
+                for value in filters.values():
+                    identifier(value)
+                if record_id is not None:
+                    message_id(record_id)
+                if classification is not None and classification not in CLASSIFICATIONS:
+                    raise ValueError('Invalid classification')
                 if agent is not None: identifier(agent)
                 if session is not None: identifier(session)
                 if kind is not None and kind not in KINDS: raise ValueError('Invalid kind')
@@ -199,7 +225,8 @@ class CommunicationJournal:
                     if len(parts) != 2: raise ValueError('Invalid cursor')
                     message_id(parts[0]); message_id(parts[1])
                 # Disallow explicitly out-of-scope filters, even if the journal is empty.
-                for field, query in [('agents', agent), ('sessions', session), ('kinds', kind)]:
+                for field, query in [('agents', agent), ('sessions', session), ('kinds', kind),
+                                     ('classifications', classification)]:
                     if query is not None and scope[field] != ['*'] and query not in scope[field]:
                         raise PermissionError('Requested filter outside scope')
                 if any(not values for values in scope.values()):
@@ -207,7 +234,7 @@ class CommunicationJournal:
                 records = []; cursor = None; more = False; scope_filtered = 0; policy_filtered = 0
                 for epoch, entry in sorted(state['epochs'].items()):
                     if entry['status'] == 'revoked': continue
-                    for path in sorted(self._folder('journal', epoch, create=False).glob('*.sldc')):
+                    for path in self._packages('journal', epoch):
                         position = f'{epoch}/{path.stem}'
                         if after is not None and position <= after: continue
                         record = self._read_record(path, epoch, entry)
@@ -217,6 +244,7 @@ class CommunicationJournal:
                         if agent is not None and agent not in (record['sender'], record['recipient']): continue
                         if session is not None and record['session_id'] != session: continue
                         if kind is not None and record['kind'] != kind: continue
+                        if any(record[key] != value for key, value in filters.items()): continue
                         if authorize_read is not None:
                             from copy import deepcopy
                             if authorize_read(actor, deepcopy(record)) is not True:
@@ -250,7 +278,7 @@ class CommunicationJournal:
             state = self.store.load(); events = []; cursor = None; more = False
             try:
                 for epoch, entry in sorted(state['epochs'].items()):
-                    for path in sorted(self._folder('audit', epoch, create=False).glob('*.sldc')):
+                    for path in self._packages('audit', epoch):
                         position = f'{epoch}/{path.stem}'
                         if after is not None and position <= after: continue
                         if len(events) == limit: more = True; break

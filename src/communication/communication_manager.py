@@ -48,6 +48,8 @@ class AgentCommunication:
             raise PermissionError('Communication denied by runtime policy')
         self._journal.append(sanitized)
         try:
+            if self._authorize(deepcopy(sanitized)) is not True:
+                raise PermissionError('Delivery denied by current runtime policy')
             self._deliver(recipient, deepcopy(sanitized))
         except Exception as exc:
             raise DeliveryError(sanitized['id']) from exc

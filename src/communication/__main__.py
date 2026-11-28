@@ -38,7 +38,7 @@ def main() -> int:
     epoch = sub.add_parser('revoke-epoch'); epoch.add_argument('--epoch', required=True)
     sub.add_parser('status')
     view = sub.add_parser('view'); view.add_argument('--user', required=True)
-    for flag in ('agent', 'session', 'kind', 'after'): view.add_argument('--'+flag)
+    for flag in ('agent', 'session', 'kind', 'after', 'task', 'correlation', 'classification', 'record-id', 'sender', 'recipient'): view.add_argument('--'+flag)
     view.add_argument('--limit', type=int, default=100)
     audit = sub.add_parser('audit'); audit.add_argument('--limit', type=int, default=100); audit.add_argument('--after')
     args = parser.parse_args()
@@ -59,7 +59,9 @@ def main() -> int:
         elif args.command == 'status': print(json.dumps(journal.status(), indent=2, ensure_ascii=False))
         elif args.command == 'view':
             print(json.dumps(journal.view(args.user, getpass.getpass('Passphrase: '), agent=args.agent,
-                                          session=args.session, kind=args.kind, limit=args.limit, after=args.after), indent=2, ensure_ascii=False))
+                                          session=args.session, kind=args.kind, sender=args.sender, recipient=args.recipient,
+                                          classification=args.classification, task=args.task, correlation=args.correlation,
+                                          record_id=args.record_id, limit=args.limit, after=args.after), indent=2, ensure_ascii=False))
         elif args.command == 'audit': print(json.dumps(journal.read_audit(limit=args.limit, after=args.after), indent=2, ensure_ascii=False))
         return 0
     except (OSError, ValueError, KeyError, TypeError) as exc:
