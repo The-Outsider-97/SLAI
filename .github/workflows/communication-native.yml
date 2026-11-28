@@ -1,0 +1,57 @@
+name: Communication native regression
+
+on:
+  push:
+    branches: [SLAI-v.2.5]
+    paths:
+      - 'src/communication/**'
+      - 'src/utils/sldc.py'
+      - 'src/__init__.py'
+      - 'src/utils/__init__.py'
+      - 'tests/test_communication*.py'
+      - 'tests/test_sldc.py'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/communication-native.yml'
+  pull_request:
+    branches: [SLAI-v.2.5]
+    paths:
+      - 'src/communication/**'
+      - 'src/utils/sldc.py'
+      - 'src/__init__.py'
+      - 'src/utils/__init__.py'
+      - 'tests/test_communication*.py'
+      - 'tests/test_sldc.py'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/communication-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native SLDC and Communication (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install existing cryptography dependency
+        run: python -m pip install cryptography
+      - name: Verify native cryptography backend is available
+        run: python -c "from cryptography.hazmat.primitives.asymmetric import x25519, ed25519; x25519.X25519PrivateKey.generate(); ed25519.Ed25519PrivateKey.generate()"
+      - name: Communication unit regressions
+        run: python -m unittest discover -s tests -p test_communication_unit.py -v
+      - name: Communication native regressions
+        run: python -m unittest discover -s tests -p test_communication_native.py -v
+      - name: Native SLDC engine regression suite
+        run: python -m unittest discover -s tests -p test_sldc.py -v
